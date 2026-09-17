@@ -198,8 +198,8 @@ async function runWasmOwnershipTests() {
     const pgA = await polygrad.create({ core: 'wasm' })
     const pgB = await polygrad.create({ core: 'wasm' })
     try {
-      const a = await new pgA.Tensor(new Float32Array([1, 2, 3]), { shape: [3] }).realize()
-      const b = await new pgB.Tensor(new Float32Array([10, 20, 30]), { shape: [3] }).realize()
+      const a = await new pgA.Tensor(new Float32Array([1, 2, 3])).realize()
+      const b = await new pgB.Tensor(new Float32Array([10, 20, 30])).realize()
       assertClose(await a.add(1).toArray(), [2, 3, 4])
       assertClose(await b.add(1).toArray(), [11, 21, 31])
       await pgA.dispose()
@@ -212,7 +212,7 @@ async function runWasmOwnershipTests() {
 
     const pgC = await polygrad.create({ core: 'wasm' })
     try {
-      const c = await new pgC.Tensor(new Float32Array([4, 5, 6]), { shape: [3] }).realize()
+      const c = await new pgC.Tensor(new Float32Array([4, 5, 6])).realize()
       assertClose(await c.add(1).toArray(), [5, 6, 7])
     } finally {
       await pgC.dispose()

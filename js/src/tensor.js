@@ -428,6 +428,10 @@ function createBoundTensorClass(runtime) {
       throw new TypeError('Tensor does not accept requiresGrad; use is_param_ for optimizer selection')
     }
   }
+  const constructorOptions = new Set([
+    'dtype', 'device', 'logical', 'isParam', 'is_param',
+    '_ctx', '_uop', '_tensor', '_data', '_dtype', '_device', '_isParam'
+  ])
   const tensorCreateWithRoots = (ctx, logical, physical, role, device) =>
     ffi.poly_tensor_create_with_roots(
       ctx, rawUop(logical), physical ? rawUop(physical) : null, role, deviceId(device)
@@ -620,6 +624,13 @@ function createBoundTensorClass(runtime) {
         throw new Error('polygrad runtime has been disposed')
       }
       const options = opts ? { ...opts } : {}
+      rejectRequiresGrad(options)
+      // Validate before changing logical policy or acquiring C-owned storage.
+      for (const key of Object.keys(options)) {
+        if (!constructorOptions.has(key)) {
+          throw new TypeError(`unsupported Tensor constructor option: ${key}`)
+        }
+      }
       const policy = normalizeLogicalPolicy(options.logical)
       delete options.logical
       if (policy === null) {

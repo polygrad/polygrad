@@ -24,6 +24,25 @@ rt.collect()
 assert.deepEqual(Array.from(restored.forward({ x: new Float32Array([7]) }).prediction), [7])
 restored.dispose()
 const Tensor = rt.Tensor
+assert.throws(() => new Tensor(new Float32Array(4), {shape: [2, 2]}), /unsupported.*shape/)
+assert.deepEqual(new Tensor(new Float32Array(4)).reshape(2, 2).shape, [2, 2])
+for (const convert of (expected === 'native' ? [false, true] : [true])) {
+  const input = new Tensor([11, 22, 33, 44], {dtype: 'int32'})
+  const output = Tensor.empty(4, {dtype: 'float32'})
+  const result = output.customKernel(input, (out, value) => {
+    const i = rt.uop.range(4, 0)
+    const item = value.index(i)
+    return out.index(i).store(convert ? item.cast('float32') : item).end(i).sink(
+      new rt.uop.KernelInfo('package_store')
+    )
+  })[0]
+  try {
+    if (convert) assert.deepEqual(Array.from(result.toArray()), [11, 22, 33, 44])
+    else assert.throws(() => result.toArray())
+  } finally {
+    result.dispose(); output.dispose(); input.dispose()
+  }
+}
 const cell = new rt.nn.LSTMCell(2, 2, {bias: false})
 cell.weightIh = Tensor.zeros(8, 2)
 cell.weightHh = Tensor.zeros(8, 2)

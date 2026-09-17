@@ -9,6 +9,7 @@ from polygrad import Model, Tensor, _ffi
 from polygrad.models import Sequential
 from polygrad.helpers import Context
 from polygrad.nn import LSTMCell, optim
+from polygrad.uop.ops import KernelInfo, UOp
 
 
 prefix = Path(sys.prefix).resolve()
@@ -16,6 +17,26 @@ assert Path(polygrad.__file__).resolve().is_relative_to(prefix), polygrad.__file
 assert Path(_ffi.get_lib()._name).resolve().is_relative_to(prefix), _ffi.get_lib()._name
 assert Path(np.__file__).resolve().is_relative_to(prefix), np.__file__
 np.testing.assert_array_equal(Tensor([1, 2, 3]).mul(2).numpy(), [2, 4, 6])
+
+def store_kernel(out, value, *, convert):
+    i = UOp.range(out.ctx, 4, 0)
+    value = value[i]
+    if convert:
+        value = value.cast('float32')
+    return out[i].store(value).end(i).sink(arg=KernelInfo(name='package_store'))
+
+for convert in (False, True):
+    result = Tensor.empty(4).custom_kernel(
+        Tensor([11, 22, 33, 44]), fxn=lambda out, value: store_kernel(out, value, convert=convert)
+    )[0]
+    try:
+        values = result.numpy()
+    except RuntimeError:
+        assert not convert, 'explicit store cast must execute'
+    else:
+        assert convert, 'CPU vector STORE silently accepted mismatched dtypes'
+        np.testing.assert_array_equal(values, [11, 22, 33, 44])
+
 model = Sequential({'input': {'name': 'x', 'shape': [1], 'dtype': 'float32'},
                     'layers': [{'name': 'copy', 'type': 'identity'}], 'output': 'prediction'})
 data = model.save_bundle(include_optimizer=False)

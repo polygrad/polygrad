@@ -963,6 +963,37 @@ print('leaving_live_instance')
         out = c.custom_kernel(a, b, fxn=add_kernel)[0]
         np.testing.assert_allclose(out.numpy(), [11.0, 22.0, 33.0, 44.0])
 
+    def test_custom_kernel_explicit_store_cast_supports_mixed_dtypes(self):
+        def kernel(out, value):
+            i = UOp.range(out.ctx, 4, 0)
+            return out[i].store(value[i].cast(dtypes.float32)).end(i).sink(
+                arg=KernelInfo(name='mixed_store_cast')
+            )
+
+        result = Tensor.empty(4).custom_kernel(
+            Tensor([11, 22, 33, 44]), fxn=kernel
+        )[0]
+        np.testing.assert_array_equal(result.numpy(), [11, 22, 33, 44])
+
+    def test_custom_kernel_cpu_rejects_vector_store_dtype_mismatch(self):
+        import polygrad
+
+        def kernel(out, value):
+            i = UOp.range(out.ctx, 4, 0)
+            return out[i].store(value[i]).end(i).sink(
+                arg=KernelInfo(name='invalid_vector_store')
+            )
+
+        runtime = polygrad.create(device='cpu')
+        try:
+            result = runtime.Tensor.empty(4).custom_kernel(
+                runtime.Tensor([11, 22, 33, 44]), fxn=kernel
+            )[0]
+            with pytest.raises(RuntimeError):
+                result.numpy()
+        finally:
+            runtime.dispose()
+
     def test_custom_kernel_range_numeric_scalar_preserves_weakint(self):
         ctx = Tensor.empty((1,))._ctx
         index = UOp.range(ctx, 64, 0)

@@ -1259,16 +1259,31 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_STORE) {
       char *target = smap_get(&names, u->src[0]);
       char *val = smap_get(&names, u->src[1]);
-      int lanes = u->n_src >= 2 ? render_uop_lanes(ctx, u->src[1]) : 1;
+      int lanes = render_uop_lanes(ctx, u->src[0]);
+      /* CStyleLanguage.render_access uses the destination type/extent.
+       * Unlike tinygrad's ext_vector_type, Clang permits implicit bitcasts
+       * between our equal-size vector_size types. Require an explicit CAST
+       * rather than silently storing integer bits into floating storage.
+       * Scalar C assignments still perform ordinary numeric conversion. */
+      if ((lanes > 1 || render_uop_lanes(ctx, u->src[1]) > 1) &&
+          !poly_dtype_eq(u->src[0]->dtype, u->src[1]->dtype)) {
+        fprintf(
+            stderr,
+            "polygrad: vector STORE dtype mismatch; cast the value to the destination dtype\n"
+        );
+        goto fail;
+      }
       for (int d = 0; d < depth; d++)
         sb_puts(&body, "  ");
       /* Guard: STORE src[0] is always set by construction, but null-check
        * satisfies the analyzer's path-sensitive null-deref tracking. */
       if (u->src[0] && poly_program_memory_is(u->src[0], POLY_ADDR_LOCAL))
         sb_printf(&body, "%s = %s;\n", target, val);
-      else if (u->src[1] && lanes > 1 && poly_as_memory_slice(u->src[0])) {
+      else if (poly_as_memory_slice(u->src[0]) &&
+               (lanes > 1 || (u->src[0]->n_src > 0 &&
+                              !poly_dtype_eq(u->src[0]->dtype, u->src[0]->src[0]->dtype)))) {
         char dtype_s[128];
-        render_ctype(u->src[1]->dtype, lanes, dtype_s, sizeof(dtype_s));
+        render_ctype(u->src[0]->dtype, lanes, dtype_s, sizeof(dtype_s));
         sb_printf(&body, "*((%s*)(%s)) = %s;\n", dtype_s, target, val);
       } else
         sb_printf(&body, "*%s = %s;\n", target, val);

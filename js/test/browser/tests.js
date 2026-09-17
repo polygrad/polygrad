@@ -48,7 +48,7 @@
         }
         return count;
       }
-      async function runTensorTests(pg) {
+      async function runTensorTests(pg, createRuntime) {
         const Tensor = pg.Tensor;
         const caps = pg.caps || {};
         const testFilter = (() => {
@@ -64,6 +64,14 @@
         const supportsF16 = caps.f16 !== false;
         const supportsF64 = caps.f64 !== false;
         let passed = 0, failed = 0, skipped = 0;
+        const isolatedRuntime = (fn) => async () => {
+          const runtime = await createRuntime();
+          try {
+            await fn(runtime);
+          } finally {
+            await runtime.dispose();
+          }
+        };
         async function test(name, fn) {
           if (testFilter && !name.includes(testFilter)) return;
           try {
@@ -86,7 +94,579 @@
         }
         console.log(`Core: ${pg.core}, device: ${pg.device}
 `);
+        await test("device identity rejects unknown targets without AUTO fallback", async () => {
+          const source = new Tensor([1, 2, 3]);
+          const scalar = new Tensor(1);
+          const sourceDevice = source.uop.device;
+          try {
+            for (const device of ["bogus", "CUDA:1", "HIP:1"]) {
+              const requests = [
+                ["array", () => new Tensor([1, 2], { device })],
+                ["scalar", () => new Tensor(1, { device })],
+                ["empty", () => Tensor.empty([2], { device })],
+                ["clone", () => source.clone(device)],
+                ["to", () => source.to(device)],
+                ["scalar to", () => scalar.to(device)]
+              ];
+              for (const [name, request] of requests) {
+                let rejected = false;
+                let result;
+                try {
+                  result = request();
+                } catch (e) {
+                  rejected = /unsupported device/i.test(e.message);
+                }
+                if (result && result !== source && result !== scalar) result.dispose();
+                assert(rejected, `${name} accepted unsupported device ${device}`);
+              }
+            }
+            assertShape(source.shape, [3]);
+            assert(source.uop.device === sourceDevice, "failed request changed source placement");
+          } finally {
+            scalar.dispose();
+            source.dispose();
+          }
+        });
+        await test("device identity preserves DISK path case without executing it", async () => {
+          const source = new Tensor([1, 2, 3], { dtype: "float32" });
+          const first = source.to("DISK:temp/CaseSensitive.bin");
+          const second = first.to("DISK:temp/Different.bin");
+          assert(first.device === "DISK:temp/CaseSensitive.bin", `lost path: ${first.device}`);
+          assert(second.device === "DISK:temp/Different.bin", `lost path: ${second.device}`);
+          assert(first !== second, "distinct paths collapsed to one backend identity");
+          assert(first.to(first.device) === first, "same exact device should return self");
+          first.dispose();
+          second.dispose();
+          source.dispose();
+        });
+        await test("construction const preserves UOp dtype and bound value", async () => {
+          const value = new Tensor(1.5, { dtype: "float32" });
+          const out = Tensor.const(value.uop, "int8");
+          assert(out.dtype === "int8", "const did not cast its UOp");
+          assert(await out.item() === 1, "const returned the wrong cast value");
+          const variable = pg.uop.variable("construction_bound", 1, 10);
+          const bound = variable.bind(5);
+          const scalar = Tensor.const(bound, "int32");
+          assert(await scalar.item() === 5, "const lost its bound value");
+          scalar.dispose();
+          bound.dispose();
+          variable.dispose();
+          out.dispose();
+          value.dispose();
+        });
+        await test("construction empty preserves named disk storage without host I/O", async () => {
+          const out = Tensor.empty([4], { dtype: "float32", device: "disk:CaseSensitive.bin" });
+          assert(out.device === "DISK:CaseSensitive.bin", "empty lost the disk path");
+          assert(!out.uop.is_realized, "empty allocated storage during construction");
+          let rejected = false;
+          try {
+            pg._core.ffi.poly_tensor_empty_uop_name_by_id(pg._core.ctx, 0, [], 1, "disk:bad");
+          } catch (e) {
+            rejected = /shape length/.test(e.message);
+          }
+          assert(rejected, "FFI accepted a shape length mismatch");
+          out.dispose();
+        });
+        await test("construction empty preserves symbolic dimensions", async () => {
+          const n = pg.uop.variable("empty_batch", 1, 32), bound = n.bind(17);
+          const matrix = Tensor.empty([bound, 2]), vector = Tensor.empty(bound);
+          try {
+            assert(JSON.stringify(matrix.shape) === "[32,2]", "empty lost bounded capacity");
+            assert(JSON.stringify(vector.shape) === "[32]", "trailing UOp was parsed as options");
+            assert(matrix.uop.op === pg._core.ops.SHRINK, "empty must retain its symbolic view");
+            const weight = new Tensor([2, 3], { dtype: "float32" });
+            let mixed;
+            try {
+              mixed = matrix.mul(weight);
+              assertShape(mixed.shape, [32, 2]);
+            } finally {
+              if (mixed) mixed.dispose();
+              weight.dispose();
+            }
+            for (const bad of [NaN, Infinity, 1.5, -1]) {
+              let rejected = false;
+              try {
+                Tensor.empty([bad]);
+              } catch {
+                rejected = true;
+              }
+              assert(rejected, "invalid dimension was coerced into storage");
+            }
+          } finally {
+            matrix.dispose();
+            vector.dispose();
+            bound.dispose();
+            n.dispose();
+          }
+        });
+        await test("construction rejects a failed UOp cast instead of creating zero", async () => {
+          const source = pg.uop.constant(1.5, "float32");
+          source.cast = () => null;
+          let rejected = false, output;
+          try {
+            output = new Tensor(source, { dtype: "int8" });
+          } catch (e) {
+            rejected = /cast failed/.test(e.message);
+          } finally {
+            if (output) output.dispose();
+            source.dispose();
+          }
+          assert(rejected, "failed cast became a zero Tensor");
+        });
+        await test("execution scalar reductions and virtual oneHot", async () => {
+          for (const axis of [0, -1]) {
+            const x2 = new Tensor(2, { dtype: "float32" });
+            assertClose(await x2.sum(axis).toArray(), [2]);
+            assertClose(await x2.softmax(axis).toArray(), [1]);
+            assertClose(await x2.logSoftmax(axis).toArray(), [0]);
+          }
+          const x = new Tensor([1, 2, 4]).oneHot(6);
+          const before = x.uop.key;
+          await x.realizeAsync();
+          assert(x.uop.key === before, "virtual realization changed its graph");
+          assertClose(await x.toArray(), [0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+        });
+        await test("execution NOOPT policy restores and computes product", async () => {
+          const before = pg.noopt;
+          try {
+            for (const mode of [0, 1, 0]) {
+              pg.noopt = mode;
+              assert(pg.noopt === mode, "NOOPT core value disagrees");
+              assertClose(await new Tensor([1, 2, 3], { dtype: "float32" }).prod().toArray(), [6]);
+            }
+          } finally {
+            pg.noopt = before;
+          }
+        });
+        await test("execution IGNORE_BEAM_CACHE policy reaches core", async () => {
+          const old = pg.ignoreBeamCache;
+          try {
+            for (const mode of [1, 0, 1]) {
+              pg.ignoreBeamCache = mode;
+              assert(pg.ignoreBeamCache === mode, "IGNORE_BEAM_CACHE core value disagrees");
+              assert(pg._core.ffi.poly_get_ignore_beam_cache() === mode, "policy did not reach C");
+            }
+            let rejected = false;
+            try {
+              pg.ignoreBeamCache = 0.5;
+            } catch (e) {
+              rejected = /int32/.test(e.message);
+            }
+            assert(rejected && pg.ignoreBeamCache === 1, "invalid policy mutated C state");
+          } finally {
+            pg.ignoreBeamCache = old;
+          }
+        });
+        await test("execution BEAM policy reaches core and computes values", async () => {
+          const before = pg.beam;
+          const beforeCache = pg.ignoreBeamCache;
+          const module2 = pg._core.Module;
+          const state = module2 && module2.__polygradWebGpuState;
+          const device = state && state.device;
+          const createQuerySet = device && device.createQuerySet;
+          let timestamps = 0;
+          if (device && device.features.has("timestamp-query")) {
+            device.createQuerySet = function(descriptor) {
+              if (descriptor.type === "timestamp") timestamps++;
+              return createQuerySet.call(this, descriptor);
+            };
+          }
+          const x = new Tensor(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]));
+          try {
+            pg.ignoreBeamCache = 1;
+            for (const width of [1, 2, 0]) {
+              pg.beam = width;
+              assert(pg.beam === width, "BEAM core value disagrees");
+              assertClose(
+                await x.mul(2).add(width).toArray(),
+                [2, 4, 6, 8, 10, 12, 14, 16].map((v) => v + width)
+              );
+            }
+            let rejected = false;
+            try {
+              pg.beam = 0.5;
+            } catch (e) {
+              rejected = /int32/.test(e.message);
+            }
+            assert(rejected, "fractional BEAM width accepted");
+            if (device && device.features.has("timestamp-query")) {
+              assert(timestamps > 0, "BEAM returned values without timing a WebGPU candidate");
+            }
+          } finally {
+            if (device) device.createQuerySet = createQuerySet;
+            pg.beam = before;
+            pg.ignoreBeamCache = beforeCache;
+            x.dispose();
+          }
+        });
+        await test("execution einsum scalar ellipsis trace and accumulation", async () => {
+          const scalar = new Tensor(2, { dtype: "float32" });
+          assertClose(await Tensor.einsum("->", scalar).toArray(), [2]);
+          const a = Tensor.arange(12).cast("float32").reshape(2, 2, 3);
+          const b = Tensor.ones([2, 3, 2]);
+          assertClose(await Tensor.einsum("...ij,...jk->...ik", a, b).toArray(), [3, 3, 12, 12, 21, 21, 30, 30]);
+          const x = Tensor.arange(18).cast("float32").reshape(2, 3, 3);
+          assertClose(await Tensor.einsum("...ii->...", x).toArray(), [12, 39]);
+          const small = new Tensor(new Int8Array([100, 100, 100])).reshape(1, 3);
+          const sum = Tensor.einsum("ij->i", small);
+          assert(sum.dtype === "int32", `einsum accumulation dtype ${sum.dtype}`);
+          assertClose(await sum.toArray(), [300]);
+        });
         console.log("-- Creation --");
+        await test("default dtype policy reaches C and restores", async () => {
+          const before = [pg.defaultFloat, pg.defaultInt];
+          try {
+            pg.defaultFloat = "float16";
+            pg.defaultInt = "int16";
+            assert(new Tensor([1.25]).dtype === "float16", "floating list ignored default");
+            assert(new Tensor([1]).dtype === "int16", "integer list ignored default");
+            assert(new Tensor(new Float32Array([1.25])).dtype === "float32");
+            assert(Tensor.arange(3).dtype === "int16");
+            for (const x2 of [
+              Tensor.ones(2),
+              Tensor.empty(2),
+              Tensor.rand(2),
+              Tensor.randn(2),
+              Tensor.eye(2),
+              Tensor.linspace(0, 1, 3)
+            ]) assert(x2.dtype === "float16", `factory dtype ${x2.dtype}`);
+            const x = new Tensor([1], { dtype: "int32" }).exp();
+            assert(x.dtype === "float16", `C transcendental dtype ${x.dtype}`);
+            if (pg.canRun({ dtype: "float16" })) assertClose(await x.toArray(), [Math.E], 0.01);
+            const data = new Tensor([3, 1, 2], { dtype: "float32" });
+            assertClose(await data.argmax().toArray(), [0]);
+            assertClose(await data.sort()[1].toArray(), [1, 2, 0]);
+            let error;
+            try {
+              pg.defaultFloat = "not_a_dtype";
+            } catch (e) {
+              error = e;
+            }
+            assert(error && pg.defaultFloat === "float16", "failed dtype update changed policy");
+          } finally {
+            pg.defaultFloat = before[0];
+            pg.defaultInt = before[1];
+          }
+        });
+        await test("dtype admission rejects floating shifts and overflowing arange", async () => {
+          for (const fn of [
+            () => new Tensor([1.5]).lshift(1),
+            () => new Tensor([1.5]).rshift(1),
+            () => Tensor.arange(129, { dtype: "int8" })
+          ]) {
+            let error;
+            try {
+              fn();
+            } catch (e) {
+              error = e;
+            }
+            assert(error, "invalid operation accepted");
+          }
+          assert(Tensor.arange(2 ** 31, 2 ** 31 + 3).dtype === "int64");
+        });
+        await test("dtype admission random output casting and unknown options", async () => {
+          let error;
+          try {
+            Tensor.rand(2, { generator: "x" });
+          } catch (e) {
+            error = e;
+          }
+          assert(error instanceof TypeError, "rand silently ignored an unknown option");
+          for (const dtype of ["bool", "int8", "int32"]) {
+            Tensor.manual_seed(42);
+            const expected = await Tensor.randn(3).cast(dtype).toArray();
+            Tensor.manual_seed(42);
+            const out = Tensor.randn(3, { dtype });
+            assert(out.dtype === dtype);
+            assertClose(await out.toArray(), expected);
+          }
+        });
+        await test("indexing owner bound prefix reduction and flip", async () => {
+          const n = pg.uop.variable("indexing_extent", 2, 8);
+          const zero = pg.uop.constant(0);
+          for (const size of [2, 4, 7]) {
+            const source = new Tensor([1, 2, 3, 4, 5, 6, 7, 8], { dtype: "float32" });
+            const bound = n.bind(size);
+            const root = source.uopPhysical;
+            const raw = pg._core.ffi.poly_shrink_uop(root.ctx, root.raw, [zero.raw], [bound.raw], 1);
+            assert(raw, "symbolic prefix construction failed");
+            const view = pg.uop.wrap(raw);
+            const prefix = new Tensor(view);
+            const total = prefix.sum();
+            const flipped = prefix.flip(0);
+            const first = flipped.shrink([[0, 1]]).sum();
+            assertClose(await total.toArray(), [size * (size + 1) / 2], 0);
+            assertClose(await first.toArray(), [size], 0);
+            for (const value of [first, flipped, total, prefix, view, root, bound, source]) await value.dispose();
+          }
+          await zero.dispose();
+          await n.dispose();
+        });
+        await test("typed PARAM bounds preserve scalar values and ownership", async () => {
+          const cases = [
+            [0.25, 0.75, "float32"],
+            [-Infinity, Infinity, "float32"],
+            [2n ** 63n, 2n ** 64n - 1n, "uint64"],
+            [2n ** 130n, 2n ** 131n, "weakint"],
+            [0n, 10n ** 600n - 1n, "weakint"]
+          ];
+          for (const [lo, hi, dtype] of cases) {
+            const value = pg.uop.variable("typed_bound", lo, hi, dtype, 1, true);
+            assert(value, "variable construction failed");
+            const text = value.toString();
+            for (const endpoint of [lo, hi]) {
+              const expected = String(endpoint).replace("Infinity", "inf");
+              assert(text.includes(expected), `${expected} not preserved: ${text}`);
+            }
+            value.dispose();
+          }
+          const a = pg.uop.variable("key", 0, 1, "float32", 1, true);
+          const b = pg.uop.variable("key", 0n, 1n, "float32", 1, true);
+          assert(pg.uop.key(a) === pg.uop.key(b), "equal numeric bounds must CSE");
+          a.dispose();
+          b.dispose();
+          assert(pg.uop.variable("bad", NaN, 1, "float32", 1, true) === null);
+        });
+        await test("wide scalar bindings preserve BigInt and execute supported values", async () => {
+          const variable = pg.uop.variable("wide_binding", -(1n << 63n), (1n << 63n) - 1n, "int64");
+          for (const value of [
+            -(1n << 63n),
+            -(1n << 40n) - 1n,
+            (1n << 32n) + 7n,
+            (1n << 53n) + 1n,
+            (1n << 63n) - 1n
+          ]) {
+            const bound = variable.bind(value);
+            assert(bound && bound.op === pg._core.ops.AFTER);
+            const sources = bound.src;
+            const stored = sources[1].src;
+            assert(sources[1].op === pg._core.ops.STORE);
+            assert(stored[1].toString().includes(String(value)), `lost binding value ${value}: ${stored[1]}`);
+            if (pg.device !== "webgpu") {
+              const input = new Tensor(bound);
+              const output = input.contiguous();
+              const data = await output.toArray();
+              assert(data.length === 1 && BigInt(data[0]) === value, `binding execution changed ${value}`);
+              output.dispose();
+              input.dispose();
+            }
+            for (const item of [...sources, ...stored]) item.dispose();
+            bound.dispose();
+          }
+          for (const value of [-(1n << 63n) - 1n, 1n << 63n, 1n << 100n, 9007199254740992, 1.25]) {
+            let error;
+            try {
+              variable.bind(value);
+            } catch (e) {
+              error = e;
+            }
+            assert(error instanceof RangeError || error instanceof TypeError);
+          }
+          variable.dispose();
+          const small = pg.uop.variable("binding_exec", -8, 8, "int32");
+          for (const value of [-3n, 7n]) {
+            const bound = small.bind(value);
+            const input = new Tensor(bound);
+            const output = input.contiguous();
+            assertClose(await output.toArray(), [Number(value)]);
+            output.dispose();
+            input.dispose();
+            bound.dispose();
+          }
+          small.dispose();
+        });
+        await test("dtype API queries match pinned metadata", async () => {
+          const bytes = {
+            bool: 1,
+            int8: 1,
+            uint8: 1,
+            int16: 2,
+            uint16: 2,
+            int32: 4,
+            uint32: 4,
+            int64: 8,
+            uint64: 8,
+            float16: 2,
+            bfloat16: 2,
+            float32: 4,
+            float64: 8,
+            fp8e4m3: 1,
+            fp8e5m2: 1,
+            fp8e4m3fnuz: 1,
+            fp8e5m2fnuz: 1,
+            weakint: null,
+            weakfloat: null
+          };
+          for (const [dtype, size] of Object.entries(bytes)) {
+            const tensor = new Tensor(0, { dtype });
+            assert(tensor.isFloatingPoint() === /^(float|bfloat|fp8|weakfloat)/.test(dtype));
+            assert(pg.uop.dtype(tensor.uopPhysical) === dtype);
+            if (size === null) {
+              let error;
+              try {
+                tensor.elementSize();
+              } catch (e) {
+                error = e;
+              }
+              assert(error && /elementSize requires a concrete dtype/.test(error.message));
+            } else assert(tensor.elementSize() === size);
+          }
+        });
+        await test("device metadata preserves deviceless and placed roots", async () => {
+          const t = new Tensor(pg.uop.constant(2, "float32"));
+          assert(t.uop.device === null && t.device === null, "constant has no storage device");
+          const x = Tensor.empty([4]);
+          assert(typeof x.uop.device === "string", "BUFFER carries its exact device");
+          assert(x.add(1).uop.device === x.uop.device, "ALU inherits the physical source device");
+          const moved = x.to("interp");
+          assert(moved.uop.device === "INTERP" && moved.device === "INTERP");
+        });
+        await test("Runtime ownership: reject foreign realization before FFI", async () => {
+          const other = await createRuntime();
+          const x = new Tensor([1, 2], { dtype: "float32" });
+          const y = new other.Tensor([3, 4], { dtype: "float32" });
+          try {
+            let failure;
+            try {
+              await x.realizeAsync(y);
+            } catch (e) {
+              failure = e;
+            }
+            assert(failure && /another Runtime/.test(failure.message), "foreign Tensor reached realization");
+            assertClose(await x.toArrayAsync(), [1, 2]);
+            assertClose(await y.toArrayAsync(), [3, 4]);
+          } finally {
+            await x.dispose();
+            await y.dispose();
+            await other.dispose();
+          }
+        });
+        await testIf(pg.device !== "webgpu", "Runtime ownership: realized typed storage views", async () => {
+          const source = new Tensor(Array.from({ length: 100 }, (_, i) => i), { dtype: "uint8" });
+          await source.realizeAsync();
+          const views = [26, 65].map((n) => source.shrink([[n, n + 4]]).bitcast("uint16"));
+          try {
+            await views[0].realizeAsync(views[1]);
+            assertClose(await views[0].toArrayAsync(), [6938, 7452], 0);
+            assertClose(await views[1].toArrayAsync(), [16961, 17475], 0);
+          } finally {
+            for (const view of views) await view.dispose();
+            await source.dispose();
+          }
+        });
+        await test("device metadata admits deviceless assign and indexing", async () => {
+          const value = new Tensor(pg.uop.constant(1.25, "float32"), { device: "interp" });
+          const target = Tensor.empty([4]);
+          assert(value.device === null);
+          target.assign(value);
+          assertClose(await target.toArrayAsync(), [1.25, 1.25, 1.25, 1.25]);
+          const index = new Tensor([1, 0], { dtype: "int32" });
+          const source = Tensor.arange(2, { device: "interp" });
+          assert(source.device === null);
+          assertClose(await source.add(index).toArrayAsync(), [1, 1]);
+          assertClose(await source.gather(0, index).toArrayAsync(), [1, 0]);
+          assertClose(await source.getitem(index).toArrayAsync(), [1, 0]);
+          assertClose(await Tensor.zeros([2]).scatter(0, index, source.cast("float32")).toArrayAsync(), [1, 0]);
+        });
+        await test("UOp accessors preserve live wrapper identity", async () => {
+          const source = pg.uop.constant(2, "float32");
+          const t = new Tensor(source);
+          const root = t.uop;
+          assert(root === source, "constructor must preserve its supplied live UOp");
+          assert(t.uop === root, "unchanged root must reuse its live wrapper");
+          await t.realizeAsync();
+          assert(t.uop === root && t.uopPhysical === root);
+        });
+        await test("UOp accessors refresh disposed and replaced roots", async () => {
+          const t = Tensor.empty([4], { logical: "always" });
+          const root = t.uop;
+          await root.dispose();
+          const replacement = t.uop;
+          assert(replacement !== root && replacement.raw);
+          t.copyFrom(new Float32Array([1, 1, 1, 1]));
+          const result = t.add(1).contiguous();
+          result.preserveLogical();
+          const before = result.uop;
+          const logical = result.uopLogical;
+          await result.realizeAsync();
+          const after = result.uop;
+          assert(after !== before && after.key !== before.key);
+          assert(result.uop === after && result.uopLogical === logical);
+          assert(before.raw, "caller still owns the old graph");
+        });
+        await test("dtype API bound UOp constants retain their owner and type", async () => {
+          for (const [value, dtype] of [[true, "bool"], [1, "int32"], [1.75, "float32"]]) {
+            const uop = pg.uop.constant(value, dtype);
+            assert(uop.ctx === pg._core.ctx);
+            assert(uop.op === pg._core.ops.CONST && uop.src.length === 0);
+            assert(pg.uop.dtype(uop) === dtype);
+            const tensor = new Tensor(uop);
+            assert(tensor.dtype === dtype);
+            assertClose(await tensor.toArrayAsync(), [Number(value)]);
+          }
+        });
+        await test("constructor parity null is scalar zero", async () => {
+          for (const dtype of [void 0, "float32", "int32", "bool"]) {
+            const tensor = new Tensor(null, { dtype });
+            assertShape(tensor.shape, []);
+            assert(tensor.uopPhysical.op === pg._core.ops.CONST);
+            assert(tensor.uopPhysical.src.length === 0);
+            if (!dtype) assert(tensor.dtype === "weakfloat");
+            assertClose(await tensor.toArrayAsync(), [0]);
+          }
+        });
+        for (const dtype of ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"]) {
+          await test(`constructor parity integer storage ${dtype}`, async () => {
+            const bits = Number(dtype.match(/\d+/)[0]);
+            const values = [-(1n << 100n) - 3n, -3.5, -1, 0, 129, 256, (1n << 100n) + 5n];
+            const narrow = dtype.startsWith("uint") ? BigInt.asUintN : BigInt.asIntN;
+            const expected = values.map((v) => narrow(bits, typeof v === "bigint" ? v : BigInt(Math.trunc(v))));
+            const tensor = new Tensor(values, { dtype });
+            assertShape(tensor.shape, [7]);
+            const root = tensor.uopPhysical;
+            assert(root.op === pg._core.ops.COPY && root.src.length === 1);
+            assert(root.src[0].op === pg._core.ops.BUFFER && root.src[0].src.length === 1);
+            assert(tensor.dtype === dtype);
+            const got = Array.from(await tensor.toArrayAsync());
+            assert(got.length === expected.length);
+            assert(got.every((v, i) => BigInt(v) === expected[i]), `wrong ${dtype} storage values`);
+          });
+        }
+        await test("constructor parity rejects weak storage and ragged shapes before import", async () => {
+          for (const dtype of ["weakint", "weakfloat"]) {
+            for (const values of [[1], new Float32Array([1])]) {
+              let error;
+              try {
+                new Tensor(values, { dtype });
+              } catch (e) {
+                error = e;
+              }
+              assert(error && /cannot create storage for weak dtype/.test(error.message));
+            }
+          }
+          for (const data of [[[1], []], [[], [[]]], [[1, 2], [3], [4, 5, 6]]]) {
+            let error;
+            try {
+              new Tensor(data, { dtype: "int32" });
+            } catch (e) {
+              error = e;
+            }
+            assert(error && /inhomogeneous shape/.test(error.message));
+          }
+        });
+        await test("constructor parity integer lists reject nonfinite values", async () => {
+          for (const dtype of ["int32", "uint32", "int64", "uint64"]) {
+            for (const value of [NaN, Infinity, -Infinity]) {
+              let error;
+              try {
+                new Tensor([value], { dtype });
+              } catch (e) {
+                error = e;
+              }
+              assert(error instanceof RangeError, `${dtype} admitted ${value}`);
+            }
+          }
+        });
         await test("logical policy scope and tensor override", async () => {
           const current = new Tensor([0]).add(1);
           assert(current.logicalPolicy === "until_realize");
@@ -113,12 +693,81 @@
           assert(cloned.logicalState === "never_constructed");
           assert(cloned.uopLogical === null);
           assertClose(await cloned.toArray(), [5, 6]);
-          const gradSource = new Tensor([2], { logical: false, requiresGrad: true });
+          const gradSource = new Tensor([2], { dtype: "float32", logical: false });
           gradSource.mul(gradSource).sum().backward();
           assert(gradSource.grad.logicalPolicy === "never");
           assert(gradSource.grad.logicalState === "never_constructed");
           assert(gradSource.grad.uopLogical === null);
           assertClose(await gradSource.grad.toArray(), [4]);
+        });
+        for (const logical of ["never", "always", "until_realize"]) {
+          for (const realized of [false, true]) {
+            await test(`copyFrom host input ${logical} realized=${realized}`, async () => {
+              const x = new Tensor(new Float32Array([1, 2, 3]), { logical });
+              const retained = x.uopLogical;
+              if (realized) await x.realizeAsync();
+              const before = x.uopPhysical.key;
+              if (pg.device === "webgpu" && !realized) {
+                let error;
+                try {
+                  x.copyFrom([4, 5, 6]);
+                } catch (e) {
+                  error = e;
+                }
+                assert(error && String(error.message).includes("copyFromAsync"));
+                assert(x.uopPhysical.key === before);
+                await x.copyFromAsync([4, 5, 6]);
+              } else {
+                x.copyFrom([4, 5, 6]);
+              }
+              const current = x.uopPhysical;
+              assert(current.op === pg._core.ops.BUFFER && current.src.length === 1 && current.src[0].op === pg._core.ops.CONST);
+              if (realized) assert(current.key === before);
+              if (logical === "never") assert(x.uopLogical === null);
+              else if (logical === "always") assert(x.uopLogical.key === retained.key);
+              else assert(x.logicalState === "retired");
+              x.copyFrom([7, 8, 9]);
+              assert(x.uopPhysical.key === current.key);
+              assertClose(await x.toArrayAsync(), [7, 8, 9]);
+            });
+          }
+        }
+        await test("copyFrom validates before materialization and orders pending assign", async () => {
+          const x = new Tensor(new Float32Array([1, 2, 3]), { logical: "always" });
+          const before = x.uopPhysical.key;
+          for (const bad of [new Float32Array([9]), new Int32Array([9, 9, 9])]) {
+            let error;
+            try {
+              x.copyFrom(bad);
+            } catch (e) {
+              error = e;
+            }
+            assert(error && /size mismatch|dtype mismatch/.test(error.message));
+            assert(x.uopPhysical.key === before);
+          }
+          assertClose(await x.toArrayAsync(), [1, 2, 3]);
+          x.assign(new Tensor([10, 20, 30], { dtype: "float32" }));
+          if (pg.device === "webgpu") await x.copyFromAsync([4, 5, 6]);
+          else x.copyFrom([4, 5, 6]);
+          assertClose(await x.toArrayAsync(), [4, 5, 6]);
+        });
+        await test("copyFromAsync snapshots caller bytes before materialization", async () => {
+          const x = new Tensor(new Float32Array([1, 2, 3]));
+          const values = new Float32Array([4, 5, 6]);
+          const pending = x.copyFromAsync(values);
+          values.fill(99);
+          assert(await pending === x);
+          assertClose(await x.toArrayAsync(), [4, 5, 6]);
+          const current = x.uopPhysical.key;
+          let error;
+          try {
+            await x.copyFromAsync([0]);
+          } catch (e) {
+            error = e;
+          }
+          assert(error && String(error.message).includes("size mismatch"));
+          assert(x.uopPhysical.key === current);
+          assertClose(await x.toArrayAsync(), [4, 5, 6]);
         });
         await test("from vector", async () => {
           const t = new Tensor([1, 2, 3]);
@@ -126,70 +775,212 @@
           assert(t.dtype === "int32", `expected int32, got ${t.dtype}`);
           assertClose(await t.toArray(), [1, 2, 3]);
         });
-        await test("Tensor dispose retires its exact core owner", async () => {
-          const before = pg.stats().coreStats.tensorRecords;
-          const t = Tensor.empty([8], { dtype: "float32" });
+        for (const mode of ["single", "batch", "singleAsync", "batchAsync"]) {
+          await testIf(
+            pg.device !== "webgpu" || mode.endsWith("Async"),
+            `readback temporaries retire before return ${mode}`,
+            isolatedRuntime(async (pg2) => {
+              const halfSource = new pg2.Tensor(new Float32Array([3, 4]));
+              const inputs = [
+                new pg2.Tensor(new Float32Array([1, 2])),
+                halfSource.cast(pg2.device === "webgpu" ? "int32" : "float16")
+              ];
+              const read = async () => mode === "single" ? inputs.map((t) => t.toArray()) : mode === "batch" ? pg2.Tensor.toTypedArrays(inputs) : mode === "singleAsync" ? [await inputs[0].toArrayAsync(), await inputs[1].toArrayAsync()] : pg2.Tensor.toTypedArraysAsync(inputs);
+              await halfSource.realizeAsync();
+              for (const t of inputs) await t.realizeAsync();
+              pg2.collect();
+              const baseline = pg2.stats().coreStats.tensorRecords;
+              const checkOwners = () => assert(
+                pg2.stats().coreStats.tensorRecords === baseline,
+                `readback retained temporary owners: ${baseline} -> ${pg2.stats().coreStats.tensorRecords}`
+              );
+              const proto = pg2.Tensor.prototype;
+              const method = mode.endsWith("Async") ? "_readBufferBytesAsync" : "_readBufferBytes";
+              const original = proto[method];
+              let outputs;
+              try {
+                for (let i = 0; i < 3; i++) {
+                  outputs = await read();
+                  assertClose(outputs[0], [1, 2]);
+                  assertClose(outputs[1], [3, 4]);
+                  checkOwners();
+                }
+                proto[method] = () => {
+                  throw new Error("injected readback failure");
+                };
+                let error;
+                try {
+                  await read();
+                } catch (e) {
+                  error = e;
+                }
+                assert(error && /injected readback failure/.test(error.message));
+                checkOwners();
+                proto[method] = original;
+                if (mode.startsWith("batch")) {
+                  const prepare = inputs[1]._prepareReadback;
+                  inputs[1]._prepareReadback = () => {
+                    throw new Error("injected preparation failure");
+                  };
+                  try {
+                    error = null;
+                    try {
+                      await read();
+                    } catch (e) {
+                      error = e;
+                    }
+                    assert(error && /injected preparation failure/.test(error.message));
+                    checkOwners();
+                  } finally {
+                    inputs[1]._prepareReadback = prepare;
+                  }
+                }
+              } finally {
+                proto[method] = original;
+                for (const t of inputs) await t.dispose();
+                await halfSource.dispose();
+              }
+              pg2.collect();
+              assertClose(outputs[0], [1, 2]);
+              assertClose(outputs[1], [3, 4]);
+            })
+          );
+        }
+        await test("readback copy has no retained host shadow", isolatedRuntime(async (pg2) => {
+          const value = pg2.Tensor.arange(4).cast("float32").add(1).contiguous();
+          await value.realize();
+          const before = pg2.stats().coreStats.bufferOwnedSourceBytes;
+          for (let i = 0; i < 3; i++) {
+            const output2 = await value.toArrayAsync();
+            assertClose(output2, [1, 2, 3, 4]);
+            output2[0] = 99;
+            assert(
+              pg2.stats().coreStats.bufferOwnedSourceBytes === before,
+              "readback attached a persistent host mirror"
+            );
+          }
+          const output = await value.toArrayAsync();
+          await value.dispose();
+          pg2.collect();
+          await pg2.dispose();
+          assertClose(output, [1, 2, 3, 4]);
+        }));
+        await test("schedule cache clear preserves live Model and JIT", isolatedRuntime(async (rt) => {
+          const x = rt.Tensor.empty([3], { dtype: "float32" });
+          const model = await rt.Model.fromTensors({ inputs: { x }, outputs: { prediction: x.add(2) } });
+          const data = new Float32Array([1, 2, 3]);
+          const f = rt.jit((a) => a.add(1).realize());
+          try {
+            assertClose((await model.forward({ x: data })).prediction, [3, 4, 5]);
+            await x.copyFromAsync(data);
+            for (let i = 0; i < 3; i++) assertClose(await (await f(x)).toArrayAsync(), [2, 3, 4]);
+            const schedules = f.scheduleCount;
+            for (let i = 0; i < 3; i++) {
+              rt.clearScheduleCache();
+              rt.collect();
+              assertClose(await (await f(x)).toArrayAsync(), [2, 3, 4]);
+              assert(f.scheduleCount === schedules, "cache clear must not recapture live JIT");
+              assertClose((await model.forward({ x: data })).prediction, [3, 4, 5]);
+            }
+          } finally {
+            f.dispose();
+            await model.dispose();
+          }
+          await rt.dispose();
+          let rejected = false;
+          try {
+            rt.clearScheduleCache();
+          } catch (e) {
+            rejected = /disposed/.test(e.message);
+          }
+          assert(rejected, "disposed runtime accepted cache clear");
+        }));
+        await test("schedule cache clear rejects active async readback", isolatedRuntime(async (rt) => {
+          const x = await rt.Tensor.arange(4, { dtype: "float32" }).realize();
+          const pending = x.toArrayAsync();
+          let error;
+          try {
+            rt.clearScheduleCache();
+          } catch (e) {
+            error = e;
+          }
+          assertClose(await pending, [0, 1, 2, 3]);
+          if (rt.caps.core === "wasm" && rt.caps.device === "webgpu") {
+            assert(error && /active async work/.test(error.message), "suspended WebGPU accepted cache clear");
+          } else {
+            assert(!error, "synchronous backend rejected idle cache clear");
+          }
+          rt.clearScheduleCache();
+          rt.collect();
+          assertClose(await x.toArrayAsync(), [0, 1, 2, 3]);
+        }));
+        await test("Tensor dispose retires its exact core owner", isolatedRuntime(async (pg2) => {
+          const Tensor2 = pg2.Tensor;
+          const before = pg2.stats().coreStats.tensorRecords;
+          const t = Tensor2.empty([8], { dtype: "float32" });
           assert(
-            pg.stats().coreStats.tensorRecords === before + 1,
+            pg2.stats().coreStats.tensorRecords === before + 1,
             "Tensor construction should add one core owner"
           );
           await t.dispose();
           assert(
-            pg.stats().coreStats.tensorRecords === before,
-            "Tensor dispose should retire its exact core owner"
+            pg2.stats().coreStats.tensorRecords === before,
+            `Tensor dispose should retire its exact core owner: before=${before}, after=${pg2.stats().coreStats.tensorRecords}`
           );
           await t.dispose();
-        });
-        await test("raw UOp owns residency after Tensor dispose", async () => {
-          const before = pg.stats().coreStats;
-          const t = Tensor.empty([1024], { dtype: "float32" });
+        }));
+        await test("raw UOp owns residency after Tensor dispose", isolatedRuntime(async (pg2) => {
+          const Tensor2 = pg2.Tensor;
+          const before = pg2.stats().coreStats;
+          const t = Tensor2.empty([1024], { dtype: "float32" });
           t.copyFrom(new Float32Array(1024));
           const uop = t.uop;
           await t.dispose();
-          let stats = pg.stats().coreStats;
+          let stats = pg2.stats().coreStats;
           assert(
             stats.tensorRecords === before.tensorRecords,
             "raw UOp ownership should not retain the Tensor record"
           );
           assert(
             stats.memUsed === before.memUsed + 4096,
-            "raw physical UOp should retain its storage"
+            `raw physical UOp should retain its storage: before=${before.memUsed}, after=${stats.memUsed}`
           );
           await uop.dispose();
-          pg.collect();
-          stats = pg.stats().coreStats;
+          pg2.collect();
+          stats = pg2.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed,
             "raw UOp dispose should retire its storage"
           );
-        });
-        await test("downstream core graph owns disposed input residency", async () => {
-          const before = pg.stats().coreStats;
-          const input = Tensor.empty([1024], { dtype: "float32" });
+        }));
+        await test("downstream core graph owns disposed input residency", isolatedRuntime(async (pg2) => {
+          const Tensor2 = pg2.Tensor;
+          const before = pg2.stats().coreStats;
+          const input = Tensor2.empty([1024], { dtype: "float32" });
           input.copyFrom(new Float32Array(1024));
-          const one = new Tensor(1, { dtype: "float32" });
+          const one = new Tensor2(1, { dtype: "float32" });
           const out = input.add(one);
           await input.dispose();
           await one.dispose();
-          let stats = pg.stats().coreStats;
+          let stats = pg2.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed + 4096,
             "downstream physical UOp graph should retain input storage"
           );
           await out.realize();
-          stats = pg.stats().coreStats;
+          stats = pg2.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed + 4096,
             "realized output should replace obsolete input storage"
           );
           await out.dispose();
-          pg.collect();
-          stats = pg.stats().coreStats;
+          pg2.collect();
+          stats = pg2.stats().coreStats;
           assert(
             stats.memUsed === before.memUsed,
             "last downstream owner should retire output storage"
           );
-        });
+        }));
         await test("array and TypedArray dtype inference matches tinygrad", async () => {
           assert(new Tensor([[1, 2], [3, 4]]).dtype === "int32", "nested integers should infer int32");
           assert(new Tensor([true, false]).dtype === "bool", "booleans should infer bool");
@@ -338,14 +1129,13 @@
           assertClose(await flattened.toArray(), Array.from({ length: 32 }, (_, i) => i));
         });
         await test("clone is lazy separate and preserves state", async () => {
-          const source = Tensor.empty([4], { dtype: "float32", requiresGrad: true }).is_param_(false);
+          const source = Tensor.empty([4], { dtype: "float32" }).is_param_(false);
           source.copyFrom(new Float32Array([1, 2, 3, 4]));
           await source.sum().backward();
           const cloned = source.clone(pg.device);
           assert(cloned.uopLogical && cloned.uopLogical.src.length === 2, "clone should be AFTER");
           assert(cloned.uopLogical.src[1].src.length === 2, "clone effect should be STORE");
           assert(cloned.uopLogical.src[0].buffer.key !== source.uop.buffer.key, "clone needs a separate buffer");
-          assert(cloned.requiresGrad === true, "clone should preserve requiresGrad");
           assert(cloned.isParam === false, "clone should preserve isParam");
           assert(cloned.grad && cloned.grad.uopLogical.src.length === 2, "clone should recursively clone grad");
           assert(
@@ -370,12 +1160,12 @@
           assertClose(await tensors[2].toArray(), [3]);
         });
         await test("detach is a lazy graph boundary", async () => {
-          const source = new Tensor([[1, 2], [3, 4]], { dtype: "float32", requiresGrad: true });
+          const source = new Tensor([[1, 2], [3, 4]], { dtype: "float32" });
           const detached = source.detach();
           assertShape(detached.shape, source.shape);
           assert(detached.dtype === source.dtype, "detach should preserve dtype");
           assert(detached.device === source.device, "detach should preserve device");
-          assert(detached.requiresGrad === false, "detach should clear requiresGrad");
+          assert(detached.isParam === true, "ordinary Tensor operations should default to isParam=true");
           assert(detached.uopLogical.op === pg._core.ops.DETACH, "detach should create a DETACH UOp");
           assert(detached.uopLogical.src.length === 1, "detach should retain a unary graph node");
           assert(
@@ -392,8 +1182,15 @@
           await detached.sum().backward();
           assertClose(await source.grad.toArray(), [0, 0, 0, 0]);
         });
+        await test("gradient owner detached self retains seed", async () => {
+          const source = Tensor.full([], 2, { dtype: "float32" });
+          const detached = source.detach();
+          await detached.backward();
+          assertClose(await detached.grad.toArray(), [1]);
+          assertClose(await source.grad.toArray(), [0]);
+        });
         await test("contiguousBackward has exact gradient barrier", async () => {
-          const source = new Tensor([1, -2, 3], { dtype: "float32", requiresGrad: true });
+          const source = new Tensor([1, -2, 3], { dtype: "float32" });
           const result = source.mul(2).contiguousBackward();
           assert(
             result.uopLogical.op === pg._core.ops.CONTIGUOUS_BACKWARD,
@@ -415,7 +1212,7 @@
           assertClose(await source.grad.toArray(), [8, -16, 24]);
         });
         await test("backward clones deviceless grad and accumulates in place", async () => {
-          const x = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
+          const x = Tensor.empty([4], { dtype: "float32" });
           const loss = x.sum();
           await loss.backward();
           const firstGrad = x.grad;
@@ -430,7 +1227,7 @@
           assertClose(await x.grad.toArray(), [2, 2, 2, 2]);
         });
         await test("backward through clone reaches source", async () => {
-          const source = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
+          const source = Tensor.empty([4], { dtype: "float32" });
           source.copyFrom(new Float32Array([1, 2, 3, 4]));
           const cloned = source.clone();
           await cloned.sum().backward();
@@ -438,8 +1235,8 @@
           assertClose(await cloned.grad.toArray(), [1, 1, 1, 1]);
         });
         await test("backward retains distinct wrappers sharing one UOp", async () => {
-          const x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
-          const y = new Tensor(x.uop, { requiresGrad: true });
+          const x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
+          const y = new Tensor(x.uop, {});
           assert(x !== y, "expected distinct Tensor wrappers");
           assert(x.uop.key === y.uop.key, "expected one shared current UOp");
           await x.sum().backward();
@@ -481,6 +1278,58 @@
           assert(pg.uop.hasBufferIdentity(t.uop), "realized host tensor should have buffer identity");
           assert(pg.uop.buffer(t.uop), "pg.uop.buffer should return a UOp");
         });
+        await test("constructor rejects unsupported options", async () => {
+          for (const key of ["shape", "dytpe", "_unknown"]) {
+            let error = null;
+            try {
+              new Tensor(new Float32Array([1, 2, 3, 4]), { [key]: [2, 2] });
+            } catch (e) {
+              error = e;
+            }
+            assert(error instanceof TypeError && error.message.includes(key), `expected option error for ${key}`);
+          }
+          const tensor = new Tensor(new Float32Array([1, 2, 3, 4])).reshape(2, 2);
+          assertShape(tensor.shape, [2, 2]);
+          assertClose(await tensor.toArray(), [1, 2, 3, 4]);
+          tensor.dispose();
+        });
+        await test("customKernel explicit store cast supports mixed dtypes", async () => {
+          const input = new Tensor([11, 22, 33, 44], { dtype: "int32" });
+          const output = Tensor.empty(4, { dtype: "float32" });
+          const result = output.customKernel(input, (out, value) => {
+            const i = pg.uop.range(4, 0);
+            return out.index(i).store(value.index(i).cast("float32")).end(i).sink(
+              new pg.uop.KernelInfo("mixed_store_cast")
+            );
+          })[0];
+          assertClose(await result.toArray(), [11, 22, 33, 44]);
+          result.dispose();
+          output.dispose();
+          input.dispose();
+        });
+        if (pg.core === "native" && pg.device === "cpu") {
+          await test("customKernel CPU rejects vector store dtype mismatch", async () => {
+            const input = new Tensor([11, 22, 33, 44], { dtype: "int32" });
+            const output = Tensor.empty(4, { dtype: "float32" });
+            let result = null, error = null;
+            try {
+              result = output.customKernel(input, (out, value) => {
+                const i = pg.uop.range(4, 0);
+                return out.index(i).store(value.index(i)).end(i).sink(
+                  new pg.uop.KernelInfo("invalid_vector_store")
+                );
+              })[0];
+              await result.toArray();
+            } catch (e) {
+              error = e;
+            } finally {
+              if (result) result.dispose();
+              output.dispose();
+              input.dispose();
+            }
+            assert(error instanceof Error, "mismatched vector STORE must not return reinterpreted bits");
+          });
+        }
         await test("customKernel executes UOp CALL body", async () => {
           function addKernel(c2, a2, b2) {
             c2 = c2.flatten();
@@ -563,11 +1412,11 @@
             1.7,
             -0.6
           ];
-          const aRef = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4);
-          const bRef = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4);
+          const aRef = new Tensor(aVals, {}).reshape(4, 4);
+          const bRef = new Tensor(bVals, {}).reshape(4, 4);
           await aRef.add(bRef).sum().add(aRef.mul(bRef).sum()).backward();
-          const a = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4);
-          const b = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4);
+          const a = new Tensor(aVals, {}).reshape(4, 4);
+          const b = new Tensor(bVals, {}).reshape(4, 4);
           await a.realize(b);
           const aPhysical = a.uopPhysical.key;
           const bPhysical = b.uopPhysical.key;
@@ -593,7 +1442,7 @@
             assert(call.src.length === 2, "expected one-argument custom CALL in backward");
             return [null];
           }
-          const x = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
+          const x = Tensor.empty([4], { dtype: "float32" });
           x.copyFrom(new Float32Array([1, 2, 3, 4]));
           const y = x.customKernel({ fxn: identityKernel, gradFxn: backwardIdentity })[0];
           assert(y.uopLogical && y.uopLogical.src.length === 2, "expected logical AFTER");
@@ -614,8 +1463,8 @@
             assert(call.src.length === 3, "expected output and input custom CALL arguments");
             return [null, grad];
           }
-          const out = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
-          const x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          const out = Tensor.empty([4], { dtype: "float32" });
+          const x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
           const y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0];
           await y.sum().backward();
           assertClose(await out.grad.toArray(), [1, 1, 1, 1]);
@@ -637,7 +1486,7 @@
             return [null, null, args[0]];
           }
           const out = Tensor.empty([4], { dtype: "float32" });
-          const x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          const x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
           const [y0, y1] = out.customKernel(out, x, { fxn: identityKernel, gradFxn: backwardIdentity });
           assert(y0.uop.key === y1.uop.key, "duplicate output aliases should share one AFTER");
           await y0.sum().add(y1.sum()).backward();
@@ -652,7 +1501,7 @@
             return out2.index(i).store(x2.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo("missing_grad_fxn") });
           }
           const out = Tensor.empty([4], { dtype: "float32" });
-          const x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          const x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
           const y = out.customKernel(x, identityKernel)[0];
           let threw = false;
           try {
@@ -671,8 +1520,8 @@
             const i = pg.uop.range(out2.numel(), 0);
             return out2.index(i).store(x2.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo("stopped_custom_grad") });
           }
-          let out = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
-          let x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          let out = Tensor.empty([4], { dtype: "float32" });
+          let x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
           let y = out.customKernel(x, identityKernel)[0];
           await y.detach().sum().backward();
           assertClose(await x.grad.toArray(), [0, 0, 0, 0]);
@@ -682,8 +1531,8 @@
             calls.push(grad.op);
             return [null, new Tensor(grad).add(7).uop];
           }
-          out = Tensor.empty([4], { dtype: "float32", requiresGrad: true });
-          x = new Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          out = Tensor.empty([4], { dtype: "float32" });
+          x = new Tensor([1, 2, 3, 4], { dtype: "float32" });
           y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0];
           await y.lt(0).cast("float32").sum().backward();
           assert(calls.length === 0, "stop-gradient ops must not invoke custom callbacks");
@@ -865,6 +1714,65 @@
             termKernel
           )[0];
           assertClose(await got.toArray(), expected, 1e-4);
+        });
+        await test("jit correctness protects output fed back as input", async () => {
+          const f = pg.jitAsync((buf, frame) => {
+            const joined = buf.shrink([[1, 3]]).cat(frame);
+            return [joined.contiguous(), joined.shrink([[0, 1]]).contiguous()];
+          });
+          try {
+            let buf = new Tensor(new Float32Array([0, 1, 2])).contiguous();
+            for (let i = 0; i < 6; i++) {
+              const expected = Array.from(await buf.toArrayAsync()).slice(1).concat(10 + i);
+              const outputs = await f(buf, new Tensor(new Float32Array([10 + i])).contiguous());
+              buf = outputs[0];
+              assertClose(await buf.toArrayAsync(), expected);
+              assertClose(await outputs[1].toArrayAsync(), expected.slice(0, 1));
+            }
+          } finally {
+            await f.dispose();
+          }
+        });
+        await test("jit correctness protects overlapping single-output replay", async () => {
+          const n = 8192;
+          const f = pg.jitAsync((buf, frame) => buf.shrink([[n / 2, n]]).cat(frame).contiguous());
+          try {
+            let buf = new Tensor(new Float32Array(n)).contiguous();
+            for (let i = 0; i < 5; i++) {
+              buf = await f(buf, new Tensor(new Float32Array(n / 2).fill(i + 1)).contiguous());
+              const expected = new Float32Array(n).fill(i);
+              expected.fill(i + 1, n / 2);
+              assertClose(await buf.toArrayAsync(), expected);
+            }
+          } finally {
+            await f.dispose();
+          }
+        });
+        for (const read of ["array", "batch"]) await test(`jit correctness rejects capture ${read} reads and recovers`, async () => {
+          const f = pg.jitAsync(async (x2) => {
+            if (read === "batch") await Tensor.toTypedArraysAsync(x2);
+            else await x2.toArrayAsync();
+            return x2.add(1);
+          });
+          const x = new Tensor(new Float32Array([1, 2]));
+          try {
+            assertClose(await (await f(x)).toArrayAsync(), [2, 3]);
+            let error;
+            try {
+              await f(x);
+            } catch (e) {
+              error = e;
+            }
+            assert(error && /cannot access tensor data during JIT capture/.test(error.message), "capture read must fail explicitly");
+          } finally {
+            await f.dispose();
+          }
+          const other = pg.jitAsync((x2) => x2.add(2));
+          try {
+            for (let i = 0; i < 3; i++) assertClose(await (await other(x)).toArrayAsync(), [3, 4]);
+          } finally {
+            await other.dispose();
+          }
         });
         await test("jit captures customKernel and replays after input update", async () => {
           function addKernel(c, a2, b2) {
@@ -1062,6 +1970,9 @@
           assert(before.memUsed === liveMem, "resetCounters should preserve live memory");
           const x = Tensor.empty([3], { dtype: "float32" });
           x.copyFrom(new Float32Array([1, 2, 3]));
+          const written = pg.stats().coreStats;
+          assert(written.bufferWriteCount === before.bufferWriteCount + 1, "host write should count exactly once");
+          assert(written.bufferWriteBytes === before.bufferWriteBytes + 12, "host write should count exactly 12 bytes");
           const t = await x.add(1).realize();
           assertClose(await t.toArray(), [2, 3, 4]);
           const after = pg.stats().coreStats;
@@ -1073,6 +1984,11 @@
           assert(after.globalOps === expectedOps, `expected ${expectedOps} global ops, got ${after.globalOps}`);
           assert(after.globalMem === expectedMem, `expected ${expectedMem} global memory bytes, got ${after.globalMem}`);
           assert(after.kernelCount === 1, `expected one tracked call, got ${after.kernelCount}`);
+          x.copyFrom(new Float32Array([4, 5, 6]));
+          const rewritten = pg.stats().coreStats;
+          assert(rewritten.bufferWriteCount === after.bufferWriteCount + 1, "warm write should count exactly once");
+          assert(rewritten.bufferWriteBytes === after.bufferWriteBytes + 12, "warm write should count exactly 12 bytes");
+          assertClose(await x.toArray(), [4, 5, 6]);
           assert(pg.canRun({ dtype: "float32" }), "float32 should be supported by every current runtime");
           if (pg.caps.f64 === false) {
             assert(!pg.canRun({ dtype: "float64" }), "canRun should reject f64 when caps.f64 is false");
@@ -1093,6 +2009,18 @@
             threw = String(e.message || e).includes("require an op");
           }
           assert(threw, "shape-only canRun queries should fail explicitly");
+        });
+        await test("runtime capability probe reports construction budgets", async () => {
+          const x = new Tensor([1, 2]);
+          assertClose(await x.add(1).toArray(), [2, 3]);
+          assert(pg.canRun({ op: "add", dtype: "float32", shape: [2] }), "add should compile");
+          let budgetError;
+          try {
+            pg.canRun({ op: "qr", dtype: "float32", shape: [17, 17] });
+          } catch (e) {
+            budgetError = e;
+          }
+          assert(budgetError && /cannot prove/.test(budgetError.message), "probe budget is not unsupported");
         });
         await test("runtime compile wrapper warms capture and replays", async () => {
           assert(typeof pg.compile === "function", "runtime should expose pg.compile");
@@ -1417,7 +2345,7 @@
           assert(constant.uop.op === pg._core.ops.EXPAND, "constLike should remain a CONST graph");
           assertClose(await constant.toArray(), values.map(() => 1));
           for (const method of ["ceil", "floor"]) {
-            const gradInput = new Tensor(values, { requiresGrad: true });
+            const gradInput = new Tensor(values, {});
             await gradInput[method]().sum().backward();
             assertClose(await gradInput.grad.toArray(), values.map(() => 0));
           }
@@ -1612,6 +2540,71 @@
           );
         });
         console.log("\n-- Movement --");
+        await test("movement helpers maximum shape", async () => {
+          const t = Tensor.empty(2, 3);
+          const before = t.uop.key;
+          assertShape(t.maxShape, [2, 3]);
+          assert(t.maxNumel() === 6 && t.uop.key === before);
+          assertShape(new Tensor(3).maxShape, []);
+          assert(new Tensor(3).maxNumel() === 1);
+          assert(Tensor.empty(0, 3).maxNumel() === 0);
+        });
+        await test("movement helpers optional shrink and exact graph", async () => {
+          const t = new Tensor([[0, 1, 2], [3, 4, 5]]);
+          const y = t.shrink([null, [1, 3]]);
+          assert(y.uop.key === t.shrink([[0, 2], [1, 3]]).uop.key);
+          assert(y.uop.src.length === 3);
+          assertShape(y.shape, [2, 2]);
+          assertClose(await y.toArrayAsync(), [1, 2, 4, 5]);
+          const empty = t.shrink([[1, 1], null]);
+          assertShape(empty.shape, [0, 3]);
+          assertClose(await empty.toArrayAsync(), []);
+        });
+        await test("movement helpers noops preserve tensor identity", async () => {
+          const t = new Tensor([[0, 1, 2], [3, 4, 5]]);
+          for (const run of [
+            (t2) => t2.shrink([[0, 2], [0, 3]]),
+            (t2) => t2.shrink([null, null]),
+            (t2) => t2.shrinkTo(null, 3),
+            (t2) => t2.padTo(null, 3, { value: 5 }),
+            (t2) => t2.flip([]),
+            (t2) => t2.getitem(),
+            (t2) => t2.getitem({ step: 1 })
+          ]) assert(run(t) === t);
+          assertClose(await t.toArrayAsync(), [0, 1, 2, 3, 4, 5]);
+        });
+        await test("movement helpers pad shrink to values and graphs", async () => {
+          const t = new Tensor([[0, 1, 2], [3, 4, 5]]);
+          for (const value of [0, -1, true, 1.5]) {
+            const y = t.padTo([3, 5], { value });
+            const expected = t.pad([[0, 1], [0, 2]], "constant", value);
+            assert(y.uop.key === expected.uop.key);
+            assertClose(await y.toArrayAsync(), await expected.toArrayAsync());
+          }
+          assertClose(await t.shrinkTo(null, 2).toArrayAsync(), [0, 1, 3, 4]);
+          assertClose(await t.shrinkTo([1, 2]).toArrayAsync(), [0, 1]);
+          assertClose(await Tensor.empty(0, 3).padTo(2, 3, { value: 7 }).toArrayAsync(), [7, 7, 7, 7, 7, 7]);
+        });
+        await test("movement helpers reject invalid dimensions", async () => {
+          const t = Tensor.empty(2, 3);
+          for (const run of [
+            (t2) => t2.shrink([null]),
+            (t2) => t2.shrink([null, null, null]),
+            (t2) => t2.shrinkTo(1),
+            (t2) => t2.shrinkTo(1, 2, 3),
+            (t2) => t2.padTo(3),
+            (t2) => t2.padTo(3, 4, 5),
+            (t2) => t2.padTo(1, 3)
+          ]) {
+            let error;
+            try {
+              run(t);
+            } catch (e) {
+              error = e;
+            }
+            assert(error instanceof Error, "invalid shape must reject");
+          }
+        });
         await test("reshape", async () => {
           const t = new Tensor([1, 2, 3, 4, 5, 6]).reshape(2, 3);
           assertShape(t.shape, [2, 3]);
@@ -1789,6 +2782,62 @@
           }
           assert(threw, "expected invalid scatterReduce reduction to throw");
         });
+        await test("scatterReduce preserves missing lanes and duplicate indices on both axes", async () => {
+          for (const n of [3, 5, 9]) {
+            const m = 2 * (n - 1);
+            for (const axis of [0, 1]) {
+              const at = (c, i, width) => axis === 0 ? i * 2 + c : c * width + i;
+              const baseData = new Array(2 * n);
+              const indexData = new Int32Array(2 * m);
+              const sourceData = new Array(2 * m);
+              for (let c = 0; c < 2; c++) {
+                for (let i = 0; i < n; i++) baseData[at(c, i, n)] = c === 0 ? i + 1 : -i - 1;
+                for (let j = 0; j < m; j++) {
+                  indexData[at(c, j, m)] = Math.floor(j / 2);
+                  sourceData[at(c, j, m)] = (j % 2 === 0 ? -2 : 3) + c;
+                }
+              }
+              const base = new Tensor(baseData, { dtype: "float32" }).reshape(axis === 0 ? [n, 2] : [2, n]);
+              const idx = new Tensor(indexData, { dtype: "int32" }).reshape(axis === 0 ? [m, 2] : [2, m]);
+              const src = new Tensor(sourceData, { dtype: "float32" }).reshape(axis === 0 ? [m, 2] : [2, m]);
+              for (const includeSelf of [false, true]) {
+                for (const reduction of ["sum", "prod", "mean", "amax", "amin"]) {
+                  const expected = baseData.slice();
+                  for (let c = 0; c < 2; c++) {
+                    for (let i = 0; i < n - 1; i++) {
+                      const values = [-2 + c, 3 + c];
+                      if (includeSelf) values.unshift(baseData[at(c, i, n)]);
+                      expected[at(c, i, n)] = reduction === "prod" ? values.reduce((a, b) => a * b, 1) : reduction === "amax" ? Math.max(...values) : reduction === "amin" ? Math.min(...values) : values.reduce((a, b) => a + b, 0) / (reduction === "mean" ? values.length : 1);
+                    }
+                  }
+                  const result = base.scatterReduce(axis, idx, src, reduction, includeSelf);
+                  try {
+                    assertClose(await result.toArray(), expected);
+                  } catch (err) {
+                    throw new Error(`n=${n} axis=${axis} ${reduction} includeSelf=${includeSelf}: ${err.message}`);
+                  } finally {
+                    result.dispose();
+                  }
+                }
+              }
+              base.dispose();
+              idx.dispose();
+              src.dispose();
+            }
+          }
+        });
+        await test("packed storage reductions preserve small integer and bool values", async () => {
+          for (const n of [257, 1024]) {
+            for (const dtype of ["bool", "int8", "uint8", "int16", "uint16", "float32"]) {
+              const values = Array.from({ length: n }, (_, i) => dtype === "bool" ? i % 2 : dtype === "int8" ? i % 121 - 60 : dtype === "uint8" ? i % 251 : dtype === "int16" ? i * 173 % 60001 - 3e4 : dtype === "uint16" ? i * 173 % 65536 : i % 121 - 60);
+              const input = new Tensor(values, { dtype });
+              const hi = input.max();
+              assertClose(await hi.toArray(), [Math.max(...values)]);
+              hi.dispose();
+              input.dispose();
+            }
+          }
+        });
         await test("scatter construction bypasses frontend substitution", async () => {
           assert(
             Tensor.prototype._physicalizeResult === void 0,
@@ -1866,9 +2915,15 @@
           assertClose(arr, [1.5, 2.5, 3.5]);
         });
         await test("cast no-op same dtype", async () => {
-          const t = new Tensor([1, 2, 3]);
+          const t = new Tensor([1, 2, 3], { dtype: "float32" });
           const r = t.cast("float32");
+          assert(r === t, "same dtype should return self");
           assertClose(await r.toArray(), [1, 2, 3]);
+        });
+        await test("owned identity C return survives JS adoption", async () => {
+          const t = new Tensor([1, 2], { dtype: "float32", device: "cpu" });
+          t._adoptCoreTensor(t._coreToDevice("cpu"));
+          assertClose(await t.toArray(), [1, 2]);
         });
         await test("cast and bitcast store exact physical roots", async () => {
           const source = Tensor.arange(4, { dtype: "uint32" });
@@ -1911,17 +2966,55 @@
             "weak bitcast must fail at the Tensor API boundary"
           );
         });
-        await test("bitcast view assign matches current tinygrad", async () => {
-          const a = new Tensor([1, 2, 3, 4], { dtype: "float32" });
-          await a.realize();
-          const view = a.bitcast("uint32");
-          view.assign(new Tensor(
-            [1082130432, 1077936128, 1073741824, 1065353216],
-            { dtype: "uint32" }
-          ));
-          await view.realize();
-          assertClose(await a.toArray(), [4, 3, 2, 1], 0);
-        });
+        for (const mode of ["plain", "reshape", "shrink", "aligned-shrink", "detach", "nested", "repeated"]) {
+          const unsupportedOffset = mode === "shrink" && pg.device === "webgpu";
+          const name = unsupportedOffset ? "bitcast view assign rejects unsupported WebGPU offset" : `bitcast view assign matches current tinygrad: ${mode}`;
+          await test(name, async () => {
+            const initial = mode === "aligned-shrink" ? Array(64).fill(1).concat([2, 3, 4]) : [1, 2, 3, 4];
+            const a = new Tensor(initial, { dtype: "float32" });
+            await a.realize();
+            let view = a.bitcast("uint32");
+            let values = new Uint32Array([1082130432, 1077936128, 1073741824, 1065353216]);
+            let expected = [4, 3, 2, 1];
+            if (mode === "reshape") view = view.reshape(2, 2);
+            if (mode === "shrink") {
+              view = a.shrink([[1, 3]]).bitcast("uint32");
+              values = values.slice(1, 3);
+              expected = [1, 3, 2, 4];
+            }
+            if (mode === "aligned-shrink") {
+              view = a.shrink([[64, 66]]).bitcast("uint32");
+              values = values.slice(1, 3);
+              expected = Array(64).fill(1).concat([3, 2, 4]);
+            }
+            if (mode === "detach") view = view.detach();
+            if (mode === "nested") {
+              view = view.bitcast("int32");
+              values = new Int32Array(values.buffer);
+            }
+            const originalStorage = a.uop;
+            view.assign(new Tensor(values).reshape(view.shape));
+            if (unsupportedOffset) {
+              let error;
+              try {
+                await view.realize();
+              } catch (e) {
+                error = e;
+              }
+              assert(error && /poly_realize_tensors failed/.test(error.message), "unaligned view must reject");
+              assertClose(await new Tensor(originalStorage).toArray(), initial, 0);
+              return;
+            }
+            await view.realize();
+            assertClose(await a.toArray(), expected, 0);
+            if (mode === "repeated") {
+              view = a.bitcast("uint32");
+              view.assign(new Tensor(new Uint32Array(4).fill(1073741824)));
+              await view.realize();
+              assertClose(await a.toArray(), [2, 2, 2, 2], 0);
+            }
+          });
+        }
         await testIf(supportsF16, "half and double convenience", async () => {
           const t = new Tensor([1, 2, 3]);
           const h = t.half();
@@ -2053,6 +3146,62 @@
             366 / 77 + 0.75
           ]);
         });
+        await test("attention shared C dropout and rank-five GQA", async () => {
+          const q = Tensor.arange(48).cast("float32").reshape(1, 2, 4, 2, 3).div(37);
+          const k = Tensor.arange(36).cast("float32").reshape(1, 2, 2, 3, 3).div(29);
+          const v = Tensor.arange(12).cast("float32").reshape(1, 2, 1, 3, 2).div(17);
+          const oldTraining = Tensor.training;
+          try {
+            let invalid = false;
+            try {
+              q.scaledDotProductAttention(k, v, { dropout_p: NaN });
+            } catch (err) {
+              invalid = /out of range/.test(String(err));
+            }
+            assert(invalid, "snake-case dropout probability must reject NaN");
+            const empty = Tensor.zeros(2, 0).scaledDotProductAttention(Tensor.zeros(3, 0), Tensor.ones(3, 4));
+            assertShape(empty.shape, [2, 4]);
+            assertClose(await empty.toArray(), Array(8).fill(NaN));
+            empty.dispose();
+            const active = q._rt._activeAsync;
+            q._rt._activeAsync++;
+            Tensor.training = true;
+            try {
+              for (const call of [() => q.dropout(0.25), () => q.scaledDotProductAttention(k, v)]) {
+                let rejected = false;
+                try {
+                  call();
+                } catch (err) {
+                  rejected = /active async work/.test(String(err));
+                }
+                assert(rejected, "attention/dropout must not enter a suspended core");
+              }
+            } finally {
+              q._rt._activeAsync = active;
+            }
+            for (const [training, p] of [[false, 0.25], [true, 0.25], [true, 1]]) {
+              Tensor.training = training;
+              Tensor.manual_seed(11);
+              const actual = q.scaledDotProductAttention(k, v, { enableGqa: true, dropoutP: p });
+              const nextActual = Tensor.rand(4);
+              Tensor.manual_seed(11);
+              const scores = q.matmul(k.repeatInterleave(2, -3).transpose(-2, -1), false, "float32").div(Math.sqrt(3));
+              let weights = scores.cast(q.dtype).softmax(-1);
+              if (training) {
+                weights = p === 1 ? weights.constLike(0) : Tensor.randLike(weights, { dtype: "float32", contiguous: false }).ge(p).contiguous().where(weights, 0).div(1 - p);
+              }
+              const expected = weights.matmul(v.repeatInterleave(4, -3));
+              const nextExpected = Tensor.rand(4);
+              assertShape(actual.shape, [1, 2, 4, 2, 2]);
+              assertClose(await actual.toArray(), await expected.toArray());
+              assertClose(await nextActual.toArray(), await nextExpected.toArray(), 0);
+              for (const t of [actual, expected, nextActual, nextExpected]) t.dispose();
+            }
+          } finally {
+            Tensor.training = oldTraining;
+            for (const t of [q, k, v]) t.dispose();
+          }
+        });
         await test("attention primitives match pinned compositions", async () => {
           const x = new Tensor([[1, 2], [3, 4]], { dtype: "float32" });
           const repeated = x.repeatInterleave(2, 1);
@@ -2080,7 +3229,7 @@
           const v = new Tensor(Float32Array.from({ length: 16 }, (_, i) => (i + 1) / 17)).reshape(1, 2, 2, 4);
           const causal = q.scaledDotProductAttention(k, v, { isCausal: true });
           const qk = q.matmul(k.transpose(-2, -1), false, "float32").div(Math.sqrt(3));
-          const mask = qk.constLike(1).cast("bool").tril().where(0, -Infinity);
+          const mask = qk.cast("bool").constLike(true).tril().where(0, -Infinity);
           const expectedCausal = qk.add(mask).cast(q.dtype).softmax(-1).matmul(v);
           assert(causal.uop.key === expectedCausal.uop.key, "causal attention graph differs");
           assertClose(await causal.toArray(), await expectedCausal.toArray());
@@ -2893,8 +4042,26 @@
           assert(ok, "expected crossEntropy to fail on shape mismatch");
         });
         console.log("\n-- Autograd --");
+        await test("current autograd API has no requiresGrad constructor flag", async () => {
+          let rejected = false;
+          try {
+            new Tensor([1], { dtype: "float32", requiresGrad: true });
+          } catch (e) {
+            rejected = e instanceof TypeError && e.message.includes("requiresGrad");
+          }
+          assert(rejected, "requiresGrad must be rejected like current tinygrad requires_grad");
+        });
+        await test("backward targets every live reachable floating Tensor", async () => {
+          const x = new Tensor([2], { dtype: "float32" });
+          const y = x.square();
+          const loss = y.sum();
+          await loss.backward();
+          assertClose(await x.grad.toArray(), [4]);
+          assertClose(await y.grad.toArray(), [1]);
+          assertClose(await loss.grad.toArray(), [1]);
+        });
         await test("grad: mul sum", async () => {
-          const a = new Tensor([1, 2, 3], { dtype: "float32", requiresGrad: true });
+          const a = new Tensor([1, 2, 3], { dtype: "float32" });
           const b = new Tensor([4, 5, 6]);
           const loss = a.mul(b).sum();
           await loss.backward();
@@ -2902,14 +4069,14 @@
           assertClose(await a.grad.toArray(), [4, 5, 6]);
         });
         await test("grad: neg sum", async () => {
-          const a = new Tensor([1, 2, 3], { dtype: "float32", requiresGrad: true });
+          const a = new Tensor([1, 2, 3], { dtype: "float32" });
           const loss = a.neg().sum();
           await loss.backward();
           assert(a.grad, "grad is null");
           assertClose(await a.grad.toArray(), [-1, -1, -1]);
         });
         await test("grad: matmul backward", async () => {
-          const W = new Tensor([[1, 2], [3, 4]], { dtype: "float32", requiresGrad: true });
+          const W = new Tensor([[1, 2], [3, 4]], { dtype: "float32" });
           const x = new Tensor([[1, 0]]);
           const loss = x.dot(W).sum();
           await loss.backward();
@@ -2917,14 +4084,14 @@
           assertClose(await W.grad.toArray(), [1, 1, 0, 0]);
         });
         await test("grad: relu backward", async () => {
-          const a = new Tensor([-1, 2, -3, 4], { dtype: "float32", requiresGrad: true });
+          const a = new Tensor([-1, 2, -3, 4], { dtype: "float32" });
           const loss = a.relu().sum();
           await loss.backward();
           assert(a.grad, "grad is null");
           assertClose(await a.grad.toArray(), [0, 1, 0, 1]);
         });
         await test("grad: chain backward", async () => {
-          const a = new Tensor([1, 2, 3], { dtype: "float32", requiresGrad: true });
+          const a = new Tensor([1, 2, 3], { dtype: "float32" });
           const loss = a.mul(a).sum();
           await loss.backward();
           assert(a.grad, "grad is null");
@@ -2936,7 +4103,6 @@
         await test("grad: backward uses current physical value after copyFrom", async () => {
           const weight = new Tensor([1], { dtype: "float32" }).mul(2);
           await weight.realize();
-          weight.requiresGrad = true;
           const physicalBuffer = weight.uopPhysical.buffer.raw;
           pg._core.ffi.poly_buffer_ensure_device_allocated(
             weight._ctx,
@@ -3080,7 +4246,7 @@
           assert(source.uop.hasBufferIdentity(), "realized source should have buffer identity");
           const out = source.contiguous();
           assert(out !== source, "contiguous should return a new Tensor object");
-          assert(out.uopLogical.op === pg._core.ops.CONTIGUOUS, "logical result should retain CONTIGUOUS");
+          assert(out.uopLogical.key === sourceLogical, "device-free logical result should fold contiguous");
           assert(
             out.uopPhysical && out.uopPhysical.key === sourceCurrent,
             "physical result should reuse the exact current buffer"
@@ -3294,6 +4460,13 @@
             assert(a[i] === expected[i], `Pinned RNG mismatch at [${i}]: ${a[i]} vs ${expected[i]}`);
           }
         });
+        await test("rand concatenation keeps vector gated-load alternatives executable", async () => {
+          Tensor.manual_seed(201);
+          const first = Tensor.rand(8), second = Tensor.rand(8);
+          const joined = await first.cat(second).toArrayAsync();
+          const expected = [...await first.toArrayAsync(), ...await second.toArrayAsync()];
+          assertClose(joined, expected, 0);
+        });
         console.log("\n-- Float64 --");
         await testIf(supportsF64, "f64: creation", async () => {
           const t = new Tensor([1.5, 2.5, 3.5], { dtype: "float64" });
@@ -3328,7 +4501,7 @@
           assert(Math.abs(v - 6) < 1e-10, `Expected 6, got ${v}`);
         });
         await testIf(supportsF64, "f64: backward", async () => {
-          const a = new Tensor([1, 2, 3], { dtype: "float64", requiresGrad: true });
+          const a = new Tensor([1, 2, 3], { dtype: "float64" });
           const b = new Tensor([4, 5, 6], { dtype: "float64" });
           const loss = a.mul(b).sum();
           await loss.backward();
@@ -3489,6 +4662,211 @@
           const r = t.pow(0.5);
           assertClose(await r.toArray(), [2, 3, 4]);
         });
+        await test("movement minimum owners: shrink bounds", async () => {
+          const x = new Tensor([1, 2, 3, 4]);
+          for (const bounds of [[2, 5], [0, 5], [5, 5], [-1, 3], [2, 1]]) {
+            let rejected = false;
+            try {
+              x.shrink([bounds]);
+            } catch (_) {
+              rejected = true;
+            }
+            assert(rejected, `shrink must reject ${bounds}`);
+          }
+          assertClose(await x.shrink([[1, 3]]).toArray(), [2, 3], 0);
+          assertShape(x.shrink([[4, 4]]).shape, [0]);
+          assertClose(await x.pad([[2, 1]]).toArray(), [0, 0, 1, 2, 3, 4, 0], 0);
+        });
+        await test("movement minimum owners: boolean binary XOR and unary CMPNE", async () => {
+          const x = new Tensor([false, false, true, true], { dtype: "bool" });
+          const y = new Tensor([false, true, false, true], { dtype: "bool" });
+          const out = x.minimum(y);
+          for (const root of [out.uopLogical, out.uopPhysical]) {
+            assert(root.op === pg._core.ops.XOR, "minimum inverse must use XOR");
+            const maximum = root.src[0];
+            assert(maximum.op === pg._core.ops.MAX);
+            assert(maximum.src.every((s) => s.op === pg._core.ops.XOR));
+          }
+          assertClose(await out.toArray(), [0, 0, 0, 1], 0);
+          assert(x.min().uopPhysical.op === pg._core.ops.CMPNE);
+          assertClose(await x.minimum(true).toArray(), [0, 0, 1, 1], 0);
+        });
+        for (const op of ["all", "any", "cumsum", "cumprod", "cummax", "cummin"]) {
+          await test(`scan owners: ${op} values and dtype`, async () => {
+            const x = new Tensor([-3, -1, -2, -1], { dtype: "int8" });
+            const result = x[op](0);
+            const expected = {
+              all: [1],
+              any: [1],
+              cumsum: [-3, -4, -6, -7],
+              cumprod: [-3, 3, -6, 6],
+              cummax: [-3, -1, -1, -1],
+              cummin: [-3, -3, -3, -3]
+            };
+            const pair = op === "cummax" || op === "cummin";
+            const values = pair ? result[0] : result;
+            if (pair) {
+              assertClose(await result[1].toArray(), op === "cummax" ? [0, 1, 1, 1] : [0, 0, 0, 0], 0);
+              assert(result[1].dtype === "int32");
+            }
+            assertClose(await values.toArray(), expected[op], 0);
+            assert(values.dtype === (op === "all" || op === "any" ? "bool" : op === "cumsum" ? "int32" : "int8"));
+          });
+        }
+        await test("scan owners: boolean axes and empty identities", async () => {
+          const x = new Tensor([0, 2.5, -2, 1, 0, 3]).reshape(2, 3);
+          for (const op of ["all", "any"]) {
+            assertClose(await x[op](0).toArray(), op === "all" ? [0, 0, 1] : [1, 1, 1], 0);
+            assertClose(await x[op](-1, true).toArray(), op === "all" ? [0, 0] : [1, 1], 0);
+            assertShape(x[op]({ axis: [0, 1], keepdim: true }).shape, [1, 1]);
+            assertClose(await x[op]([]).toArray(), [0, 1, 1, 1, 0, 1], 0);
+            for (const shape of [[], [0], [2, 0], [0, 2]]) {
+              const t = Tensor.ones(shape, { dtype: "int8" });
+              for (const axis of [0, -1]) {
+                const out = t[op](axis);
+                const expected = new Array(out.shape.reduce((a, b) => a * b, 1)).fill(shape.length && shape[axis < 0 ? shape.length - 1 : axis] === 0 ? Number(op === "all") : 1);
+                assertClose(await out.toArray(), expected, 0);
+              }
+            }
+          }
+        });
+        await testIf(pg.device !== "webgpu", "scan owners: NaN truthiness (outside WGSL finite math)", async () => {
+          const x = new Tensor([0, NaN, -2, 1, 0, 3], { dtype: "float32" }).reshape(2, 3);
+          assertClose(await x.any(0).toArray(), [1, 1, 1], 0);
+          assertClose(await x.all([]).toArray(), [0, 1, 1, 1, 0, 1], 0);
+        });
+        await test("scan owners: empty scalar and invalid axes", async () => {
+          for (const op of ["cumsum", "cumprod", "cummax", "cummin"]) {
+            for (const shape of [[], [0], [2, 0], [0, 2]]) {
+              const x = Tensor.ones(shape, { dtype: "int8" });
+              for (const axis of [0, -1]) {
+                const result = x[op](axis);
+                const pair = Array.isArray(result);
+                const values = pair ? result[0] : result;
+                assertShape(values.shape, shape);
+                assert(values.dtype === (op === "cumsum" ? "int32" : "int8"));
+                assertClose(await values.toArray(), shape.length ? [] : [1], 0);
+                if (pair) {
+                  assertShape(result[1].shape, shape);
+                  assertClose(await result[1].toArray(), shape.length ? [] : [0], 0);
+                }
+              }
+              for (const axis of [Math.max(1, shape.length), -Math.max(1, shape.length) - 1]) {
+                let threw = false;
+                try {
+                  x[op](axis);
+                } catch {
+                  threw = true;
+                }
+                assert(threw, `${op} admitted axis ${axis}`);
+              }
+            }
+          }
+        });
+        await test("scan owners: uint8 promotion and boolean indices", async () => {
+          const x = new Tensor([250, 10, 3, 2], { dtype: "uint8" });
+          assert(x.cumsum().dtype === "uint32");
+          assertClose(await x.cumsum().toArray(), [250, 260, 263, 265], 0);
+          assert(x.cumprod(0).dtype === "uint8");
+          assertClose(await x.cumprod(0).toArray(), [250, 196, 76, 152], 0);
+          const y = new Tensor([true, false, true, true], { dtype: "bool" });
+          const [max, maxidx] = y.cummax(), [min, minidx] = y.cummin();
+          assertClose(await max.toArray(), [1, 1, 1, 1], 0);
+          assertClose(await maxidx.toArray(), [0, 0, 0, 0], 0);
+          assertClose(await min.toArray(), [1, 0, 0, 0], 0);
+          assertClose(await minidx.toArray(), [0, 1, 1, 1], 0);
+        });
+        for (const dtype of ["uint64", "int64", "float16"]) {
+          await testIf(pg.canRun({ dtype }), `scan owners: ${dtype} exact extrema`, async () => {
+            const data = dtype === "uint64" ? [18446744073709551615n, 0n, 18446744073709551614n, 0n] : dtype === "int64" ? [-9223372036854775808n, 0n, -9223372036854775807n, 0n] : [3, 1, 2, 1];
+            const x = new Tensor(data, { dtype });
+            for (const op of ["cummax", "cummin"]) {
+              const [values, indices] = x[op]();
+              const expected = [], positions = [];
+              let at = 0;
+              for (let i = 0; i < data.length; i++) {
+                if (op === "cummax" ? data[i] > data[at] : data[i] < data[at]) at = i;
+                expected.push(data[at]);
+                positions.push(at);
+              }
+              const actual = await values.toArray();
+              assert(Array.from(actual).every((v, i) => v === expected[i]), `${dtype} ${op} lost exact values`);
+              assertClose(await indices.toArray(), positions, 0);
+            }
+          });
+        }
+        await test("scan owners: split boundary values and gradient", async () => {
+          for (const n of [512, 513, 1025]) {
+            const data = new Float32Array(n * 2).fill(1);
+            data[0] = 2;
+            data[1] = 3;
+            const x = new Tensor(data).reshape(n, 2);
+            const sum = x.cumsum(0), prod = x.cumprod(0);
+            const expected = Array.from({ length: n * 2 }, (_, i) => Math.floor(i / 2) + 2 + i % 2);
+            assertClose(await sum.toArray(), expected, 0);
+            assertClose(await prod.toArray(), Array.from({ length: n * 2 }, (_, i) => 2 + i % 2), 0);
+            await x.cumsum(0).sum().backward();
+            assertClose(await x.grad.toArray(), Array.from({ length: n * 2 }, (_, i) => n - Math.floor(i / 2)), 0);
+          }
+        });
+        await test("scan owners: product gradients with zeros", async () => {
+          for (const [data, expected] of [[[2, 3, 4], [16, 10, 6]], [[2, 0, 4], [1, 10, 0]], [[0, 3, 0], [4, 0, 0]]]) {
+            const x = new Tensor(data, { dtype: "float32" });
+            await x.cumprod(0).sum().backward();
+            assertClose(await x.grad.toArray(), expected, 0);
+          }
+        });
+        await test("numeric owners: min inverse matches pinned", async () => {
+          const cases = [
+            ["uint8", [0, 1, 255, 7, 3, 2]],
+            ["int8", [-128, -1, 127, 7, 3, 2]],
+            ["uint16", [0, 1, 65535, 7, 3, 2]],
+            ["int16", [-32768, -1, 32767, 7, 3, 2]],
+            ["uint32", [0, 1, 2 ** 32 - 1, 7, 3, 2]],
+            ["int32", [-(2 ** 31), -1, 2 ** 31 - 1, 7, 3, 2]],
+            ["bool", [false, true, true, true, true, true]],
+            ["float32", [-3, -1, 127, 7, 3, 2]]
+          ];
+          for (const [dtype, values] of cases) {
+            const x = new Tensor(values, { dtype }).reshape(2, 3);
+            for (const [axis, keepdim] of [[null, false], [0, false], [-1, true], [[0, 1], true], [[], false]]) {
+              const out = x.min({ axis, keepdim });
+              const inverseOp = pg._core.ops[dtype === "float32" ? "MUL" : dtype === "bool" ? "CMPNE" : "XOR"];
+              assert(out.uopPhysical.op === inverseOp, `${dtype} min inverse`);
+              if (axis === null) {
+                const reduced = out.uopPhysical.src[0];
+                assert(reduced.op === pg._core.ops.REDUCE, `${dtype} min reduction`);
+                assert(reduced.src[0].op === inverseOp, `${dtype} min input inverse`);
+              }
+              assert(out.dtype === dtype, `${dtype} min dtype`);
+              const numbers = values.map(Number);
+              const expected = axis === 0 ? numbers.slice(0, 3).map((v, i) => Math.min(v, numbers[i + 3])) : axis === -1 ? [Math.min(...numbers.slice(0, 3)), Math.min(...numbers.slice(3))] : Array.isArray(axis) && !axis.length ? numbers : [Math.min(...numbers)];
+              assertClose(await out.toArray(), expected, 0);
+            }
+            assertClose(await x.min().toArray(), [Number(values[0])], 0);
+            assertShape(x.min(-1, true).shape, [2, 1]);
+            assertClose(await x.min(0).toArray(), values.slice(0, 3).map((v, i) => Math.min(Number(v), Number(values[i + 3]))), 0);
+          }
+        });
+        await test("numeric owners: pow negative fraction constant matches buffer", async () => {
+          for (const power of [0.2, 1.2, -0.2]) {
+            for (const value of [-28, [-28]]) {
+              const result = new Tensor(value, { dtype: "float32" }).pow(power);
+              assert(result.uopPhysical.op === pg._core.ops.POW, "pow must start with raw POW");
+              assertClose(await result.toArray(), [NaN]);
+            }
+          }
+        });
+        for (const dtype of ["int64", "uint64"]) {
+          await testIf(pg.canRun({ dtype }), `numeric owners: min ${dtype} exact storage`, async () => {
+            const values = dtype === "int64" ? [-(1n << 63n), -1n, (1n << 63n) - 1n] : [0n, (1n << 63n) + 1n, (1n << 64n) - 1n];
+            const x = new Tensor(values, { dtype });
+            const result = x.min();
+            assert(result.dtype === dtype);
+            const actual = await result.toArray();
+            assert(actual.length === 1 && BigInt(actual[0]) === values[0]);
+          });
+        }
         await test("pow scalar promotion and validation match tinygrad", async () => {
           const t = new Tensor([2, 3], { dtype: "int32" });
           const exponent = new Tensor(2, { dtype: "weakfloat" });
@@ -3628,6 +5006,216 @@
           );
           assertClose(await bn.toArray(), bnExpected, 1e-5);
         });
+        await test("nn empty input readback after normalization", async () => {
+          const x = Tensor.empty(2, 4);
+          await new pg.nn.LayerNorm(4).call(x).realize();
+          assert((await x.toArray()).length === 8, "uninitialized input remains readable");
+        });
+        await test("nn multidimensional LayerNorm matches all trailing axes", async () => {
+          const layer = new pg.nn.LayerNorm([2, 2], { elementwiseAffine: false });
+          const x = new Tensor([1, 2, 3, 4]).reshape(1, 2, 2);
+          assertClose(await layer.call(x).toArray(), [-1.34163547, -0.44721183, 0.44721183, 1.34163547], 1e-5);
+          let rejected = false;
+          try {
+            layer.call(Tensor.ones(1, 3, 2));
+          } catch (e) {
+            rejected = /must match/.test(e.message);
+          }
+          assert(rejected, "LayerNorm must validate the entire normalized shape");
+        });
+        await test("nn Conv2d accepts one spatial dimension", async () => {
+          const layer = new pg.nn.Conv2d(2, 3, [3], { bias: false });
+          assertShape(layer.weight.shape, [3, 2, 3]);
+          assertShape(layer.call(Tensor.ones(1, 2, 5)).shape, [1, 3, 3]);
+        });
+        await test("nn convolution factories InstanceNorm and LSTMCell", async () => {
+          const conv = new pg.nn.Conv1d(1, 1, 2, { bias: false });
+          conv.weight = Tensor.ones(1, 1, 2);
+          const x = new Tensor([1, 2, 3], { dtype: "float32" }).reshape(1, 1, 3);
+          assertClose(await conv.call(x).toArray(), [3, 5]);
+          const transposed = new pg.nn.ConvTranspose1d(1, 1, 2, { stride: 2, bias: false });
+          transposed.weight = Tensor.ones(1, 1, 2);
+          assertClose(await transposed.call(x).toArray(), [1, 1, 2, 2, 3, 3]);
+          const norm = new pg.nn.InstanceNorm(2);
+          norm.weight = new Tensor([2, 3], { dtype: "float32" });
+          norm.bias = new Tensor([4, 5], { dtype: "float32" });
+          assertClose(await norm.call(new Tensor([1, 3, 10, 14], { dtype: "float32" }).reshape(1, 2, 2)).toArray(), [2, 6, 2, 8], 2e-5);
+          const cell = new pg.nn.LSTMCell(2, 2, { bias: false });
+          cell.weightIh = Tensor.zeros(8, 2);
+          cell.weightHh = Tensor.zeros(8, 2);
+          const [zeroH, zeroC] = cell.call(Tensor.ones(1, 2));
+          assertClose(await zeroH.toArray(), [0, 0]);
+          assertClose(await zeroC.toArray(), [0, 0]);
+          const [h, c] = cell.call(Tensor.ones(1, 2), [Tensor.zeros(1, 2), Tensor.ones(1, 2)]);
+          assertClose(await c.toArray(), [0.5, 0.5]);
+          assertClose(await h.toArray(), [0.23105858, 0.23105858], 1e-6);
+          h.sum().backward();
+          assert(cell.weightIh.grad !== null);
+          assert((await cell.weightIh.grad.toArray()).every(Number.isFinite));
+        });
+        await test("nn RMSNorm and Embedding match Python module contracts", async () => {
+          const norm = new pg.nn.RMSNorm(2, { elementwiseAffine: false });
+          const x = new Tensor([1, 2, 3, 4], { dtype: "float32" }).reshape(2, 2);
+          assertClose(await norm.call(x).toArray(), [0.6324554, 1.2649108, 0.8485281, 1.1313708], 1e-5);
+          const embedding = new pg.nn.Embedding(3, 2);
+          embedding.weight = new Tensor([1, 2, 3, 4, 5, 6], { dtype: "float32" }).reshape(3, 2);
+          const out = embedding.call(new Tensor([2, 0], { dtype: "int32" }));
+          assertClose(await out.toArray(), [5, 6, 1, 2]);
+          let rejected = false;
+          try {
+            embedding.call(new Tensor([1.5]));
+          } catch (e) {
+            rejected = /integer/.test(e.message);
+          }
+          assert(rejected, "embedding must reject floating indices");
+          out.sum().backward();
+          assert(embedding.weight.grad !== null, "embedding weight gradient missing");
+        });
+        await test("nn Dropout delegates Tensor training and endpoint behavior", async () => {
+          const previous = Tensor.training;
+          const x = new Tensor([1, 2, 3]);
+          try {
+            Tensor.training = false;
+            assert(new pg.nn.Dropout(0.5).call(x) === x, "eval dropout must be identity");
+            Tensor.training = true;
+            assertClose(await new pg.nn.Dropout(1).call(x).toArray(), [0, 0, 0]);
+            let rejected = false;
+            try {
+              new pg.nn.Dropout(1.1).call(x);
+            } catch (e) {
+              rejected = /out of range/.test(e.message);
+            }
+            assert(rejected, "dropout must validate probability");
+          } finally {
+            Tensor.training = previous;
+          }
+        });
+        await test("nn BatchNorm training state and eval share one module", async () => {
+          const previous = Tensor.training;
+          try {
+            assert(pg.nn.BatchNorm === pg.nn.BatchNorm2d && pg.nn.BatchNorm === pg.nn.BatchNorm3d, "BatchNorm aliases");
+            const layer = new pg.nn.BatchNorm(2, { affine: false, momentum: 0.5 });
+            const x = new Tensor([1, 2, 3, 4]).reshape(2, 2);
+            Tensor.training = true;
+            assertClose(await layer.call(x).toArray(), [-0.999995, -0.999995, 0.999995, 0.999995], 1e-5);
+            assertClose(await layer.runningMean.toArray(), [1, 1.5]);
+            assertClose(await layer.runningVar.toArray(), [1.5, 1.5]);
+            assertClose(Array.from(await layer.numBatchesTracked.toArray(), Number), [1]);
+            Tensor.training = false;
+            assertClose(await layer.call(x).toArray(), [0, 0.4082469, 1.6329877, 2.0412346], 1e-5);
+          } finally {
+            Tensor.training = previous;
+          }
+        });
+        await test("nn LSTM Model recurrent state and training checkpoint", isolatedRuntime(async (rt) => {
+          const T = rt.Tensor;
+          const x = T.empty(1, 2), h = T.empty(1, 2), c = T.empty(1, 2);
+          const cell = new rt.nn.LSTMCell(2, 2, { bias: false });
+          cell.weightIh = T.full([8, 2], 0.25);
+          cell.weightHh = T.full([8, 2], 0.125);
+          const [hidden, state] = cell.call(x, [h, c]);
+          const authored = await rt.Model.fromTensors({
+            inputs: { x, h, c },
+            params: { wi: cell.weightIh, wh: cell.weightHh },
+            outputs: { hidden, cell: state },
+            losses: { loss: hidden.square().mean() }
+          });
+          const bundle = await authored.saveBundleAsync({ includeOptimizer: false });
+          await authored.dispose();
+          const model = await rt.Model.fromBundle(bundle);
+          let restored = null;
+          try {
+            const inputs = { x: new Float32Array([1, 2]), h: new Float32Array(2), c: new Float32Array(2) };
+            const first = await model.forward(inputs);
+            const second = await model.forward({ x: inputs.x, h: first.hidden, c: first.cell });
+            assert(second.cell.every((v, i) => v > first.cell[i]), "explicit recurrent state must advance");
+            model.setOptimizer(rt.OPTIM_ADAM, 0.01);
+            await model.trainStepAsync(inputs);
+            restored = await rt.Model.fromBundle(await model.saveBundleAsync());
+            restored.setOptimizer(rt.OPTIM_ADAM, 0.01);
+            assertClose([await model.trainStepAsync(inputs)], [await restored.trainStepAsync(inputs)], 1e-5);
+            assertClose(await model.readBufferAsync("wi"), await restored.readBufferAsync("wi"), 1e-5);
+            assert((await model.readBufferAsync("wi")).some((v) => Math.abs(v - 0.25) > 1e-5), "model weights must update");
+          } finally {
+            if (restored) await restored.dispose();
+            await model.dispose();
+          }
+        }));
+        await test("nn state discovery includes underscore and root tensor paths", async () => {
+          const x = new Tensor([1]);
+          assert(pg.nn.getStateDict({ _weight: x })._weight === x, "underscore is a valid state name");
+          assert(pg.nn.getStateDict(x)[""] === x, "root tensor path is empty");
+          assert(pg.nn.getStateDict({ weight: x }, "net.")["net.weight"] === x, "state prefix lost");
+          const shared = { weight: x };
+          const obj = { a: shared, b: shared };
+          obj.self = obj;
+          assert(Object.keys(pg.nn.getStateDict(obj)).length === 2, "aliases must survive cycle protection");
+        });
+        await test("nn state loading preserves target handles and consumes named sources", async () => {
+          const model = { weight: new Tensor([1, 2], { dtype: "float32" }), scalar: new Tensor(0) };
+          const target = model.weight;
+          const state = { weight: new Tensor([3, 4], { dtype: "float32" }), scalar: new Tensor([5], { dtype: "float32" }) };
+          const loaded = await pg.nn.loadStateDictAsync(model, state, { consume: true });
+          assert(loaded.length === 2 && model.weight === target, "load must preserve target Tensor handles");
+          assert(Object.keys(state).length === 0, "consumed keys remain");
+          assertClose(await target.toArray(), [3, 4]);
+          assertClose(await model.scalar.toArray(), [5]);
+          let rejected = false;
+          try {
+            pg.nn.loadStateDict(model, { weight: new Tensor([1]) }, { realize: false });
+          } catch (e) {
+            rejected = /Shape mismatch/.test(e.message);
+          }
+          assert(rejected, "state shape mismatch must reject");
+          assert(pg.nn.loadStateDict(model, {}, { strict: false }).length === 0, "nonstrict missing keys must skip");
+        });
+        await test("nn LARS LAMB and Muon use shared optimizer graphs", async () => {
+          const previous = Tensor.training;
+          try {
+            Tensor.training = true;
+            for (const [name, opts, expected] of [
+              ["LAMB", { weightDecay: 0.01 }, [0.438561946, 2.54476404, 2.4274404, 4.53364801]],
+              ["LARS", { momentum: 0.9 }, [0.999709964, 2.00057888, 2.99913001, 4.00115776]],
+              ["Muon", { nsSteps: 2 }, [1.03743243, 2.11009645, 2.77558279, 4.05183554]]
+            ]) {
+              const p = new Tensor([1, 2, 3, 4], { dtype: "float32" }).reshape(2, 2);
+              const opt = new pg.nn.optim[name]([p], { lr: 0.1, ...opts });
+              for (let i = 0; i < 2; i++) {
+                p._grad = new Tensor([0.1, -0.2, 0.3, -0.4]).reshape(2, 2);
+                await opt.stepAsync();
+              }
+              assertClose(await p.toArray(), expected, 2e-5);
+            }
+          } finally {
+            Tensor.training = previous;
+          }
+        });
+        await test("nn optimizer rejects eval and preserves supplied learning rate Tensor", async () => {
+          const previous = Tensor.training;
+          const p = new Tensor([1], { dtype: "float32" });
+          p._grad = new Tensor([2], { dtype: "float32" });
+          const lr = new Tensor([0.1]);
+          try {
+            const opt = new pg.nn.optim.SGD([p], { lr });
+            assert(opt.lr === lr, "learning rate Tensor must not be coerced to a number");
+            Tensor.training = false;
+            let rejected = false;
+            try {
+              opt.scheduleStep();
+            } catch (e) {
+              rejected = /TRAINING/.test(e.message);
+            }
+            assert(rejected, "optimizer must reject eval before publishing effects");
+            Tensor.training = true;
+            const scheduled = opt.scheduleStep();
+            lr.assign([0.2]);
+            await lr.realizeAsync();
+            await scheduled[0].realizeAsync(...scheduled.slice(1));
+            assertClose(await p.toArray(), [0.6]);
+          } finally {
+            Tensor.training = previous;
+          }
+        });
         await test("nn Conv2d backward populates parameters", async () => {
           const mod = new pg.nn.Conv2d(3, 2, 3, { padding: 1 });
           const loss = mod.call(Tensor.randn(1, 3, 4, 4)).relu().mean();
@@ -3678,6 +5266,272 @@
           const mean0 = row0.reduce((a, b) => a + b) / 3;
           assert(Math.abs(mean0) < 1e-4, `Row 0 mean should be ~0, got ${mean0}`);
         });
+        const pointwiseReferences = {
+          log10: Math.log10,
+          atanh: Math.atanh,
+          asinh: Math.asinh,
+          acosh: Math.acosh,
+          asin: Math.asin,
+          acos: Math.acos,
+          atan: Math.atan,
+          celu: (x) => x,
+          selu: (x) => 1.0507 * x,
+          logsigmoid: (x) => -Math.log1p(Math.exp(-x)),
+          sinh: Math.sinh,
+          cosh: Math.cosh,
+          erf: null,
+          softsign: (x) => x / (1 + Math.abs(x))
+        };
+        for (const [op, fn] of Object.entries(pointwiseReferences)) {
+          await test(`pointwise owners: ${op} values and gradient`, async () => {
+            const data = op === "acosh" ? [1.2, 1.5, 2] : [0.15, 0.4, 0.7];
+            const x = new Tensor(data);
+            const out = x[op]();
+            assert(out.dtype === "float32");
+            assertClose(await out.toArray(), fn ? data.map(fn) : [0.1679959, 0.42839235, 0.67780113], 5e-6);
+            await out.sum().backward();
+            const expected = data.map((v) => {
+              if (op === "erf") return 2 / Math.sqrt(Math.PI) * Math.exp(-v * v);
+              const h = 1e-5;
+              return (fn(v + h) - fn(v - h)) / (2 * h);
+            });
+            assertClose(await x.grad.toArray(), expected, 4e-5);
+          });
+        }
+        await test("pointwise owners: parameterized activations and finite comparisons", async () => {
+          const x = new Tensor([-2, -0.5, 0, 2]);
+          assertClose(await x.celu(2).toArray(), [-1.2642411, -0.4423984, 0, 2], 3e-6);
+          assertClose(await x.selu(2, 3).toArray(), [-5.1879883, -2.360816, 0, 6], 3e-6);
+          assertClose(await x.isfinite().toArray(), [1, 1, 1, 1]);
+          assertClose(await x.isclose(0, { atol: 0.5, rtol: 0 }).toArray(), [0, 1, 1, 0]);
+        });
+        await testIf(pg.device !== "webgpu", "pointwise owners: IEEE NaN infinity and signed zero", async () => {
+          const a = new Tensor([1, 2, Infinity, -Infinity, NaN]);
+          const b = new Tensor([1.000005, 2.1, Infinity, Infinity, NaN]);
+          assertClose(await a.isfinite().toArray(), [1, 1, 0, 0, 0]);
+          for (const equalNan of [false, true]) {
+            assertClose(await a.isclose(b, { equalNan }).toArray(), [1, 0, 1, 0, Number(equalNan)]);
+          }
+          assertClose(await new Tensor([2, -3]).copysign(new Tensor(new Float32Array([-0, 0]))).toArray(), [-2, 3]);
+        });
+        await test("pointwise owners: copysign lerp and uint8 weight provenance", async () => {
+          assertClose(await new Tensor([2, -3]).copysign(new Tensor([-1, 1])).toArray(), [-2, 3]);
+          assertClose(await new Tensor([2, -3]).lerp(new Tensor([0, 1]), 0.25).toArray(), [1.5, -2]);
+          const a = new Tensor([250, 10], { dtype: "uint8" }), b = new Tensor([10, 250], { dtype: "uint8" });
+          assertClose(await a.lerp(b, new Tensor([0.5, 0.5])).toArray(), [2, 2]);
+          assertClose(await a.lerp(b, 0.5).toArray(), pg.core === "wasm" || ["interp", "webgpu", "x86"].includes(pg.device) ? [258, 130] : [130, 130]);
+        });
+        await test("pointwise owners: narrow integer casts survive widening", async () => {
+          const input = new Tensor(new Int32Array([128, -240, 65535, -65537]));
+          for (const [dtype, expected] of [
+            ["int8", [-128, 16, -1, -1]],
+            ["uint8", [128, 16, 255, 255]],
+            ["int16", [128, -240, -1, -1]],
+            ["uint16", [128, 65296, 65535, 65535]]
+          ]) {
+            assertClose(await input.cast(dtype).cast("int32").toArray(), expected);
+            if (["interp", "wasm", "webgpu"].includes(pg.device)) {
+              const floats = new Tensor(new Float32Array([128.75, -240.5, 65535, -65537]));
+              assertClose(await floats.cast(dtype).cast("int32").toArray(), expected);
+            }
+          }
+          if (["interp", "wasm", "webgpu"].includes(pg.device)) {
+            for (const [dtype, input2, expected] of [
+              ["int8", 127, -128],
+              ["uint8", 255, 0],
+              ["int16", 32767, -32768],
+              ["uint16", 65535, 0]
+            ]) assertClose(await new Tensor([input2], { dtype }).add(1).cast("int32").toArray(), [expected]);
+          }
+        });
+        for (const reduction of ["none", "sum", "mean"]) {
+          await test(`pointwise owners: weighted losses ${reduction}`, async () => {
+            const x = new Tensor([[-2, 0, 2], [1, -1, 0.5]]);
+            const y = new Tensor([[0, 1, 1], [1, 0, 1]]), w = new Tensor([2, 3, 4]);
+            const loss = x.binaryCrossEntropyLogits(y, { reduction, posWeight: w });
+            const values = [
+              Math.log1p(Math.exp(-2)),
+              3 * Math.log(2),
+              4 * Math.log1p(Math.exp(-2)),
+              2 * Math.log1p(Math.exp(-1)),
+              Math.log1p(Math.exp(-1)),
+              4 * Math.log1p(Math.exp(-0.5))
+            ];
+            const sum = values.reduce((a, b) => a + b, 0);
+            assertClose(await loss.toArray(), reduction === "none" ? values : [sum / (reduction === "mean" ? 6 : 1)], 4e-6);
+            await loss.sum().backward();
+            assertClose(await x.grad.toArray(), [
+              1 / (1 + Math.exp(2)),
+              -1.5,
+              -4 / (1 + Math.exp(2)),
+              -2 / (1 + Math.exp(1)),
+              1 / (1 + Math.exp(1)),
+              -4 / (1 + Math.exp(0.5))
+            ].map((v) => v / (reduction === "mean" ? 6 : 1)), 4e-6);
+            const scores = new Tensor([[-2, 0, 2], [1, -1, 0.5]]);
+            const nll = scores.nllLoss(new Tensor([2, 1], { dtype: "int32" }), {
+              weight: new Tensor([1, 2, 3]),
+              ignoreIndex: 1,
+              reduction
+            });
+            assertClose(await nll.toArray(), reduction === "none" ? [-6, 0] : [reduction === "mean" ? -2 : -6]);
+            await nll.sum().backward();
+            assertClose(await scores.grad.toArray(), [0, 0, reduction === "mean" ? -1 : -3, 0, 0, 0]);
+          });
+        }
+        await test("pointwise owners: loss admission and spatial targets", async () => {
+          const x = new Tensor([[[1, 2], [3, 4], [5, 6]]]);
+          const y = new Tensor([[0, 2]], { dtype: "int32" });
+          assertClose(await x.nllLoss(y, { reduction: "none" }).toArray(), [-1, -6]);
+          assertClose(await x.nllLoss(y).toArray(), [-3.5]);
+          for (const method of ["nllLoss", "binaryCrossEntropyLogits"]) {
+            let rejected = false;
+            try {
+              x[method](y, { reduction: "typo" });
+            } catch (e) {
+              rejected = /reduction/.test(e.message);
+            }
+            assert(rejected, "invalid reduction must fail before graph publication");
+          }
+        });
+        await test("indexed owners: paired and separated advanced reads", async () => {
+          const x = Tensor.arange(12).reshape(3, 4);
+          assertClose(await x.getitem(new Tensor([0, 2]), new Tensor([1, 3])).toArray(), [1, 11]);
+          const out = Tensor.arange(24).reshape(2, 3, 4).getitem(
+            new Tensor([[0], [1]]),
+            { step: 1 },
+            new Tensor([[0, 2]])
+          );
+          assertShape(out.shape, [2, 2, 3]);
+          assertClose(await out.toArray(), [0, 4, 8, 2, 6, 10, 12, 16, 20, 14, 18, 22]);
+        });
+        await test("indexed owners: scalar Tensor index", async () => {
+          assertClose(await Tensor.arange(6).reshape(2, 3).getitem(new Tensor(1)).toArray(), [3, 4, 5]);
+        });
+        await test("indexed inplace: unrealized assignment and realized forward", async () => {
+          const expected = {
+            add: [11, 22, 3, 4],
+            sub: [-9, -18, 3, 4],
+            mul: [10, 40, 3, 4],
+            div: [0.1, 0.1, 3, 4]
+          };
+          for (const logical of ["always", "until_realize", "never"]) {
+            for (const realized of [false, true]) for (const op of ["add", "sub", "mul", "div"]) {
+              const z = new Tensor([1, 2, 3, 4], { dtype: "float32", logical });
+              const x = new Tensor([10, 20], { dtype: "float32", logical });
+              if (realized) await z.realize();
+              const view = z.getitem({ start: 0, stop: 2 });
+              const computed = view[op](x);
+              view.assign(computed);
+              await computed.dispose();
+              z.setitem({ start: 0, stop: 2 }, view);
+              assertClose(await z.toArray(), expected[op]);
+              await view.dispose();
+              await x.dispose();
+              await z.dispose();
+            }
+          }
+        });
+        await test("chained assignment: Tinygrad read-order semantics", async () => {
+          const cases = [
+            ["wvz", { w: [16], v: [16, 22], z: [16, 22, 3, 4] }],
+            ["wzv", { w: [16], z: [16, 22, 3, 4], v: [16, 22] }],
+            ["vwz", { v: [11, 22], w: [16], z: [16, 22, 3, 4] }],
+            ["vzw", { v: [11, 22], z: [11, 22, 3, 4], w: [16] }],
+            ["zwv", { z: [1, 2, 3, 4], w: [16], v: [16, 22] }],
+            ["zvw", { z: [1, 2, 3, 4], v: [11, 22], w: [16] }]
+          ];
+          for (const logical of ["always", "until_realize", "never"]) {
+            for (const dtype of ["float32", "int32"]) for (const [order, expected] of cases) {
+              const z = new Tensor([1, 2, 3, 4], { dtype, logical });
+              const x = new Tensor([10, 20], { dtype, logical });
+              const v = z.getitem({ start: 0, stop: 2 }), vx = v.add(x);
+              v.assign(vx);
+              await vx.dispose();
+              const w = v.getitem({ start: 0, stop: 1 }), w5 = w.add(5);
+              w.assign(w5);
+              await w5.dispose();
+              const tensors = { z, v, w };
+              for (const name of order) assertClose(Array.from(await tensors[name].toArray()), expected[name]);
+              await w.dispose();
+              await v.dispose();
+              await x.dispose();
+              await z.dispose();
+            }
+          }
+        });
+        await test("indexed owners: detached write and identity read", async () => {
+          const x = Tensor.zeros(4);
+          await x.realize();
+          x.detach().setitem(1, 5);
+          assertClose(await x.toArray(), [0, 5, 0, 0]);
+          assert(x.getitem() === x && x.getitem({ step: 1 }) === x, "no-op reads retain object identity");
+        });
+        await test("indexed owners: weak RHS admission", async () => {
+          const x = Tensor.zeros(4);
+          x.setitem(1, new Tensor(5));
+          assertClose(await x.toArray(), [0, 5, 0, 0]);
+          const y = Tensor.zeros(4, { dtype: "int32" });
+          let rejected = false;
+          try {
+            y.setitem(1, new Tensor(1.5));
+          } catch (e) {
+            rejected = /dtype mismatch/.test(e.message);
+          }
+          assert(rejected, "weak float must not silently truncate to integer storage");
+        });
+        await test("indexed owners: int64 dimensions retain high word", async () => {
+          for (const dim of [2147483649, 4294967297, 6442450945]) {
+            assertShape(Tensor.empty(0, dim).shape, [0, dim]);
+          }
+        });
+        await test("indexed owners: int64 positive and negative strides", async () => {
+          const x = Tensor.arange(3);
+          assertClose(await x.getitem({ step: 4294967297 }).toArray(), [0]);
+          assertClose(await x.getitem({ step: -4294967297 }).toArray(), [2]);
+        });
+        for (const realized of [false, true]) {
+          await test(`indexed owners: strided write realized=${realized}`, async () => {
+            const x = Tensor.arange(8).cast("float32");
+            if (realized) await x.realize();
+            x.setitem({ start: 1, stop: 7, step: 2 }, new Tensor([10, 20, 30], { dtype: "float32" }));
+            assertClose(await x.toArray(), [0, 10, 2, 20, 4, 30, 6, 7]);
+          });
+        }
+        await test("indexed owners: last duplicate write and live use rejection", async () => {
+          const x = new Tensor([0, 1, 2, 3]);
+          x.setitem(new Tensor([1, 1, 3]), new Tensor([7, 8, 9]));
+          assertClose(await x.toArray(), [0, 8, 2, 9]);
+          const y = new Tensor([1, 2]), other = y.add(1);
+          let rejected = false;
+          try {
+            y.setitem(0, 4);
+          } catch (e) {
+            rejected = /other uses/.test(e.message);
+          }
+          assert(rejected, "setitem must reject a live dependent computation");
+          assertClose(await other.toArray(), [2, 3]);
+        });
+        await test("indexed owners: gradient assignment and reset", async () => {
+          const x = new Tensor([1, 2], { dtype: "float32" }), g = new Tensor([10, 20], { dtype: "float32" });
+          x.grad = g;
+          assert(x.grad === g, "grad assignment must retain the same Tensor object");
+          await x.mul(x).sum().backward();
+          assertClose(await x.grad.toArray(), [12, 24]);
+          x.grad = null;
+          await x.mul(3).sum().backward();
+          assertClose(await x.grad.toArray(), [3, 3]);
+        });
+        for (const reduction of ["none", "sum", "mean"]) {
+          await test(`indexed owners: ordinary BCE ${reduction}`, async () => {
+            const x = new Tensor([0.2, 0.7]), y = new Tensor([0, 1]);
+            const out = x.binaryCrossEntropy(y, reduction);
+            const terms = [-Math.log(0.8), -Math.log(0.7)];
+            assertClose(await out.toArray(), reduction === "none" ? terms : [terms.reduce((a, b) => a + b) / (reduction === "mean" ? 2 : 1)]);
+            await out.sum().backward();
+            assertClose(await x.grad.toArray(), [1 / 0.8, -1 / 0.7].map((v) => v / (reduction === "mean" ? 2 : 1)));
+          });
+        }
         await test("binaryCrossEntropy", async () => {
           const pred = new Tensor([0.9, 0.1, 0.8]);
           const target = new Tensor([1, 0, 1]);
@@ -3770,6 +5624,187 @@
             4
           ]);
         });
+        await test("spatial owners average pooling padding and gradient", async () => {
+          for (const ceilMode of [false, true]) for (const countIncludePad of [false, true]) {
+            const x = new Tensor([[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]], { dtype: "float32" });
+            const y = x.avgPool2d([2, 2], { stride: 2, padding: [1, 0, 0, 1], ceilMode, countIncludePad });
+            y.sum().backward();
+            assertClose(await y.toArray(), countIncludePad ? [1.25, 4, 1.75, 4.25] : [2.5, 4, 7, 8.5]);
+            assertClose(await x.grad.toArray(), countIncludePad ? Array(9).fill(0.25) : [0.5, 0.25, 0.25, 0.5, 0.25, 0.25, 1, 0.5, 0.5]);
+          }
+        });
+        await test("spatial owners max pooling ceil and indices", async () => {
+          const x = new Tensor([[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]], { dtype: "float32" });
+          const [values, indices] = x.maxPool2d([2, 2], { ceilMode: true, returnIndices: true });
+          assertClose(await values.toArray(), [5, 6, 8, 9]);
+          assertClose(await indices.toArray(), [4, 5, 7, 8]);
+          assertClose(await x.avgPool2d([2, 2], { ceilMode: true }).toArray(), [3, 4.5, 7.5, 9]);
+        });
+        await test("spatial owners interpolation values and gradients", async () => {
+          for (const [mode, alignCorners, expected, grad] of [
+            ["linear", false, [1, 1.8, 3, 5.4, 7], [1.6, 1.8, 1.6]],
+            ["linear", true, [1, 2, 3, 5, 7], [1.5, 2, 1.5]],
+            ["nearest", false, [1, 1, 3, 3, 7], [2, 2, 1]],
+            ["nearest-exact", false, [1, 1, 3, 7, 7], [2, 1, 2]]
+          ]) {
+            const x = new Tensor([[[1, 3, 7]]], { dtype: "float32" });
+            const y = x.interpolate([5], { mode, alignCorners });
+            y.sum().backward();
+            assertClose(await y.toArray(), expected);
+            assertClose(await x.grad.toArray(), grad);
+          }
+        });
+        await test("spatial owners transpose convolution groups and gradient", async () => {
+          const x = new Tensor([[[1, 2, 3], [4, 5, 6]]], { dtype: "float32" });
+          const w = new Tensor([[[1, 2]], [[3, 4]]], { dtype: "float32" });
+          const y = x.convTranspose2d(w, null, { groups: 2, stride: 2, dilation: 2, padding: 1, outputPadding: 1 });
+          y.sum().backward();
+          assertClose(await y.toArray(), [0, 4, 0, 7, 0, 6, 0, 31, 0, 38, 0, 24]);
+          assertClose(await x.grad.toArray(), [2, 3, 3, 4, 7, 7]);
+        });
+        await test("spatial owners invalid storage disjoint writes", async () => {
+          const x = Tensor.invalids([6], { dtype: "int32" });
+          await x.realize();
+          x.setitem([{ start: 1, stop: 3 }], 7);
+          x.setitem([{ start: 4, stop: 5 }], 9);
+          assertClose(await x.getitem({ start: 1, stop: 3 }).toArray(), [7, 7]);
+          assertClose(await x.getitem({ start: 4, stop: 5 }).toArray(), [9]);
+        });
+        await test("spatial owners interpolation empty and singleton", async () => {
+          const x = new Tensor([1, 3, 7], { dtype: "float32" });
+          const singleton = await x.interpolate([1], { alignCorners: true }).toArray();
+          assert(Number.isNaN(singleton[0]));
+          for (const alignCorners of [false, true]) {
+            const out = x.interpolate([0], { alignCorners });
+            assertShape(out.shape, [0]);
+            assert((await out.toArray()).length === 0);
+          }
+        });
+        await test("spatial owners unpool negative infinity and output size", async () => {
+          const x = new Tensor([[[[-Infinity, 2], [3, 4]]]], { dtype: "float32" });
+          const idx = new Tensor([[[[0, 1], [2, 3]]]], { dtype: "int32" });
+          const got = await x.maxUnpool2d(idx, [1, 1]).toArray();
+          assert(got[0] === -Infinity);
+          assertClose(got.slice(1), [2, 3, 4]);
+          const y = new Tensor([[[[1, 2], [3, 4]]]], { dtype: "float32" });
+          const [value, index] = y.maxPool2d([2, 2], { returnIndices: true });
+          assertClose(await value.maxUnpool2d(index).toArray(), [0, 0, 0, 4]);
+          assertShape(value.maxUnpool2d(index, [2, 2], { outputSize: [1, 1, 3, 3] }).shape, [1, 1, 3, 3]);
+        });
+        await test("spatial owners reject malformed dimension arrays", async () => {
+          const x = Tensor.ones([1, 1, 3, 3]);
+          for (const make of [
+            () => x.avgPool2d([2, 2], { stride: [1] }),
+            () => x.maxPool2d([2, 2], { dilation: [1] })
+          ]) {
+            let error;
+            try {
+              make();
+            } catch (e) {
+              error = e;
+            }
+            assert(error && /stride\/dilation mismatch/.test(error.message));
+          }
+        });
+        await test("spatial owners transpose dimension array admission", async () => {
+          const x = Tensor.ones([1, 1, 3, 3]), w = Tensor.ones([1, 1, 2, 2]);
+          for (const [opts, pattern] of [
+            [{ dilation: [1] }, /stride\/dilation mismatch/],
+            [{ stride: [2] }, /stride/],
+            [{ outputPadding: [] }, /output_padding/]
+          ]) {
+            let error;
+            try {
+              x.convTranspose2d(w, null, opts);
+            } catch (e) {
+              error = e;
+            }
+            assert(error && pattern.test(error.message));
+          }
+          assertShape(x.convTranspose2d(w, null, { stride: [] }).shape, [1, 1, 4, 4]);
+          assertShape(x.convTranspose2d(w, null, { outputPadding: [1] }).shape, [1, 1, 4, 6]);
+          assertShape(x.convTranspose2d(w, null, { outputPadding: [1, 1, 1] }).shape, [1, 1, 5, 5]);
+        });
+        await test("surface owners factories and integer operations", async () => {
+          const x = new Tensor([-7, -1, 1, 7], { dtype: "int16" });
+          assertClose(await x.fullLike(7).toArray(), [7, 7, 7, 7]);
+          assert(x.onesLike().dtype === x.dtype);
+          assertClose(await x.zerosLike().toArray(), [0, 0, 0, 0]);
+          assertClose(await x.bitwiseNot().toArray(), [6, 0, -2, -8]);
+          assertClose(await x.mod(3).toArray(), [2, 2, 1, 1]);
+          assertClose(await x.fmod(3).toArray(), [-1, -1, 1, 1]);
+          assertClose(await x.floorDiv(3).toArray(), [-3, -1, 0, 2]);
+          assertClose(await Tensor.normal([2, 3], { mean: 2, std: 0 }).toArray(), Array(6).fill(2));
+          assertShape(Tensor.kaimingNormal([2, 3], { a: 0.2 }).shape, [2, 3]);
+        });
+        await test("surface owners reductions and stable scans", async () => {
+          const x = new Tensor([[1, 2, 3], [4, 5, 6]], { dtype: "float32" });
+          assertClose(await x.prod(1).toArray(), [6, 120]);
+          assertClose(await x.argmin(1).toArray(), [0, 0]);
+          assertClose(await x.logsumexp(1).toArray(), [3.407606, 6.407606]);
+          assertClose(await x.logcumsumexp(1).toArray(), [1, 2.313262, 3.407606, 4, 5.313262, 6.407606]);
+          assertClose(await x.normalize({ dim: 1 }).toArray(), [1 / Math.sqrt(14), 2 / Math.sqrt(14), 3 / Math.sqrt(14), 4 / Math.sqrt(77), 5 / Math.sqrt(77), 6 / Math.sqrt(77)]);
+          assertClose(await x.softmin(1).toArray(), await x.neg().softmax(1).toArray());
+          const [std, mean] = x.stdMean(1, false, 0);
+          assertClose(await std.toArray(), [Math.sqrt(2 / 3), Math.sqrt(2 / 3)]);
+          assertClose(await mean.toArray(), [2, 5]);
+          assertClose(await new Tensor([1e3, 1001, 1002], { dtype: "float32" }).logcumsumexp().toArray(), [1e3, 1001.313262, 1002.407606], 1e-3);
+        });
+        await test("surface owners promoted division and stack gradients", async () => {
+          for (const value of [3, 3.5]) {
+            const copy = new Tensor(value).add(value).clone();
+            assert(copy.dtype === (Number.isInteger(value) ? "int32" : "float32"));
+            assertClose(await copy.toArray(), [2 * value]);
+          }
+          const x = new Tensor([-4, 7, 5], { dtype: "int32" }), y = new Tensor([2, -3, 8], { dtype: "float32" });
+          assertClose(await x.div(y, "trunc").toArray(), [-2, -2, 0]);
+          assertClose(await x.fmod(y).toArray(), [0, 1, 5]);
+          assertClose(await x.mod(y).toArray(), [0, -2, 5]);
+          const a = new Tensor([1, 2], { dtype: "float32" }), b = new Tensor([3, 4], { dtype: "float32" });
+          Tensor.stack(a, b, a).mul(new Tensor([[1, 1], [2, 2], [3, 3]], { dtype: "float32" })).sum().backward();
+          assertClose(await a.grad.toArray(), [4, 4]);
+          assertClose(await b.grad.toArray(), [2, 2]);
+        });
+        await test("surface owners uint64 scalar and full literals", async () => {
+          const value = (1n << 64n) - 1n;
+          const x = new Tensor(value, { dtype: "uint64" });
+          const got = await x.div(1n, "trunc").toArray();
+          assert(BigInt(got[0]) === value);
+          const full = await x.fullLike(value).toArray();
+          assert(BigInt(full[0]) === value);
+        });
+        await test("surface owners shape helpers and padding", async () => {
+          const x = new Tensor([1, 2, 3], { dtype: "float32" });
+          assertClose(await x.diag().toArray(), [1, 0, 0, 0, 2, 0, 0, 0, 3]);
+          assertClose(await x.unfold(0, 2, 1).toArray(), [1, 2, 2, 3]);
+          assertClose(await x.unfold(0, 2, 2 ** 32).toArray(), [1, 2]);
+          for (const offset of [2 ** 32, -(2 ** 32)]) {
+            let error;
+            try {
+              x.reshape([1, 3]).diagonal(offset);
+            } catch (e) {
+              error = e;
+            }
+            assert(error, "wide offset must be rejected, not truncated to zero");
+          }
+          assertClose(await x.maskedFill(x.gt(1), -4).toArray(), [1, -4, -4]);
+          assertClose(await new Tensor([[1, 2, 3], [4, 5, 6]]).diagonal(1).toArray(), [2, 6]);
+          const [a, b] = Tensor.meshgrid(new Tensor([1, 2]), new Tensor([3, 4, 5]), { indexing: "xy" });
+          assertClose(await a.toArray(), [1, 2, 1, 2, 1, 2]);
+          assertClose(await b.toArray(), [3, 3, 4, 4, 5, 5]);
+          for (const [mode, expected] of [["circular", [3, 1, 2, 3, 1]], ["reflect", [2, 1, 2, 3, 2]], ["replicate", [1, 1, 2, 3, 3]]]) {
+            assertClose(await x.pad([1, 1], mode).toArray(), expected);
+          }
+          const empty = Tensor.empty([0, 3]);
+          assert(empty.roll(1, 0) === empty);
+        });
+        await test("surface owners GELU and sparse loss options", async () => {
+          const x = new Tensor([-1, 0, 1], { dtype: "float32" });
+          assertClose(await x.gelu("none").toArray(), [-0.158655, 0, 0.841345], 1e-5);
+          const logits = new Tensor([[1, 2, 3], [3, 2, 1]], { dtype: "float32" });
+          const labels = new Tensor([2, 99], { dtype: "int32" });
+          assertClose(await logits.sparseCategoricalCrossentropy(labels, { ignoreIndex: 99, labelSmoothing: 0.2, reduction: "none" }).toArray(), [0.60760596, 0]);
+        });
         console.log(`
 Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`);
         return { passed, failed, skipped };
@@ -3788,10 +5823,1637 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
     }
   });
 
-  // test/test_instance.js
-  var require_test_instance = __commonJS({
-    "test/test_instance.js"(exports, module) {
+  // ../test/fixtures/llama.json
+  var require_llama = __commonJS({
+    "../test/fixtures/llama.json"(exports, module) {
+      module.exports = {
+        reference: "Transformers 5.3.0 LlamaForCausalLM, Torch 2.10.0; unscaled cases cross-checked against Tinygrad v0.14.0 6f87158d77f66a36d5f8bbe915170b24e2acabe8; test/generate_llama_fixture.py",
+        cases: [
+          {
+            version: "2",
+            config: {
+              model_type: "llama",
+              hidden_size: 8,
+              intermediate_size: 12,
+              num_attention_heads: 2,
+              num_key_value_heads: 1,
+              num_hidden_layers: 2,
+              vocab_size: 11,
+              rms_norm_eps: 1e-5,
+              rope_theta: 1e4,
+              max_position_embeddings: 16,
+              batch_size: 1,
+              max_seq_len: 3,
+              tie_word_embeddings: false
+            },
+            tokens: [
+              [
+                1,
+                4,
+                2
+              ]
+            ],
+            weights: {
+              "model.embed_tokens.weight": [
+                11,
+                8
+              ],
+              "model.layers.0.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.self_attn.k_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.0.self_attn.v_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.0.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.layers.1.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.self_attn.k_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.1.self_attn.v_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.1.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.norm.weight": [
+                8
+              ],
+              "lm_head.weight": [
+                11,
+                8
+              ]
+            },
+            logits: [
+              -0.08373266458511353,
+              0.2123628556728363,
+              0.40279674530029297,
+              0.2580987513065338,
+              -0.1411241590976715,
+              -0.07445239275693893,
+              -0.5254123210906982,
+              -0.0989779531955719,
+              -0.37538909912109375,
+              0.3875514566898346,
+              0.24285343289375305,
+              -0.2758362293243408,
+              -0.399817556142807,
+              0.06484386324882507,
+              -0.33821916580200195,
+              0.8110876679420471,
+              -0.3126642405986786,
+              0.09696711599826813,
+              -0.2963690161705017,
+              -0.17400763928890228,
+              0.04431106895208359,
+              -0.35875195264816284,
+              -0.13071969151496887,
+              -0.48286890983581543,
+              0.19611120223999023,
+              -0.4180883765220642,
+              0.5790441632270813,
+              -0.24215082824230194,
+              -0.004503313452005386,
+              -0.1523132026195526,
+              -0.24975328147411346,
+              0.1745176911354065,
+              -0.43968188762664795
+            ],
+            freqs_cos: [
+              1,
+              1,
+              0.5403023362159729,
+              0.9999499917030334,
+              -0.416146844625473,
+              0.9998000264167786
+            ],
+            freqs_sin: [
+              0,
+              0,
+              0.8414709568023682,
+              0.009999833069741726,
+              0.9092974066734314,
+              0.019998665899038315
+            ]
+          },
+          {
+            version: "2",
+            config: {
+              model_type: "llama",
+              hidden_size: 8,
+              intermediate_size: 12,
+              num_attention_heads: 2,
+              num_key_value_heads: 2,
+              num_hidden_layers: 2,
+              vocab_size: 11,
+              rms_norm_eps: 1e-5,
+              rope_theta: 1e4,
+              max_position_embeddings: 16,
+              batch_size: 1,
+              max_seq_len: 3,
+              tie_word_embeddings: false
+            },
+            tokens: [
+              [
+                1,
+                4,
+                2
+              ]
+            ],
+            weights: {
+              "model.embed_tokens.weight": [
+                11,
+                8
+              ],
+              "model.layers.0.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.self_attn.k_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.self_attn.v_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.layers.1.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.self_attn.k_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.self_attn.v_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.norm.weight": [
+                8
+              ],
+              "lm_head.weight": [
+                11,
+                8
+              ]
+            },
+            logits: [
+              -0.07643559575080872,
+              0.20543313026428223,
+              -0.19305849075317383,
+              0.22550560534000397,
+              -0.0670381486415863,
+              -0.058988794684410095,
+              -0.4904012382030487,
+              -0.08312639594078064,
+              0.09775981307029724,
+              -0.19974926114082336,
+              0.21881479024887085,
+              -0.32808613777160645,
+              -0.24772416055202484,
+              -0.04583235830068588,
+              -0.2104089856147766,
+              0.8113012909889221,
+              -0.3779626786708832,
+              0.06057564914226532,
+              -0.3405245244503021,
+              -0.06800717115402222,
+              -0.05827075242996216,
+              -0.2228473722934723,
+              -0.3212721645832062,
+              -0.1643604338169098,
+              0.23591576516628265,
+              -0.1650802493095398,
+              0.4286355674266815,
+              -0.37274041771888733,
+              0.03325618803501129,
+              -0.32103222608566284,
+              -0.188359797000885,
+              0.23615577816963196,
+              -0.16484034061431885
+            ],
+            freqs_cos: [
+              1,
+              1,
+              0.5403023362159729,
+              0.9999499917030334,
+              -0.416146844625473,
+              0.9998000264167786
+            ],
+            freqs_sin: [
+              0,
+              0,
+              0.8414709568023682,
+              0.009999833069741726,
+              0.9092974066734314,
+              0.019998665899038315
+            ]
+          },
+          {
+            version: "3",
+            config: {
+              model_type: "llama",
+              hidden_size: 8,
+              intermediate_size: 12,
+              num_attention_heads: 2,
+              num_key_value_heads: 1,
+              num_hidden_layers: 2,
+              vocab_size: 11,
+              rms_norm_eps: 1e-5,
+              rope_theta: 5e5,
+              max_position_embeddings: 16,
+              batch_size: 1,
+              max_seq_len: 3,
+              tie_word_embeddings: false
+            },
+            tokens: [
+              [
+                1,
+                4,
+                2
+              ]
+            ],
+            weights: {
+              "model.embed_tokens.weight": [
+                11,
+                8
+              ],
+              "model.layers.0.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.0.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.self_attn.k_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.0.self_attn.v_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.0.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.0.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.0.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.layers.1.input_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.post_attention_layernorm.weight": [
+                8
+              ],
+              "model.layers.1.self_attn.q_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.self_attn.k_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.1.self_attn.v_proj.weight": [
+                4,
+                8
+              ],
+              "model.layers.1.self_attn.o_proj.weight": [
+                8,
+                8
+              ],
+              "model.layers.1.mlp.gate_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.up_proj.weight": [
+                12,
+                8
+              ],
+              "model.layers.1.mlp.down_proj.weight": [
+                8,
+                12
+              ],
+              "model.norm.weight": [
+                8
+              ],
+              "lm_head.weight": [
+                11,
+                8
+              ]
+            },
+            logits: [
+              -0.08373266458511353,
+              0.2123628556728363,
+              0.40279674530029297,
+              0.2580987513065338,
+              -0.1411241590976715,
+              -0.07445239275693893,
+              -0.5254123210906982,
+              -0.0989779531955719,
+              -0.37538909912109375,
+              0.3875514566898346,
+              0.24285343289375305,
+              -0.2758150100708008,
+              -0.39993587136268616,
+              0.06468798965215683,
+              -0.338351845741272,
+              0.8112592697143555,
+              -0.3126344084739685,
+              0.09720116853713989,
+              -0.29634302854537964,
+              -0.17398260533809662,
+              0.04415999352931976,
+              -0.35887986421585083,
+              -0.1312912106513977,
+              -0.4825049042701721,
+              0.19624802470207214,
+              -0.4178074300289154,
+              0.5791915059089661,
+              -0.24188901484012604,
+              -0.004148326814174652,
+              -0.1528570055961609,
+              -0.2501845955848694,
+              0.17468221485614777,
+              -0.439373254776001
+            ],
+            freqs_cos: [
+              1,
+              1,
+              0.5403023362159729,
+              0.9999989867210388,
+              -0.416146844625473,
+              0.9999960064888
+            ],
+            freqs_sin: [
+              0,
+              0,
+              0.8414709568023682,
+              0.0014142129803076386,
+              0.9092974066734314,
+              0.0028284231666475534
+            ]
+          },
+          {
+            version: "3.2",
+            config: {
+              model_type: "llama",
+              hidden_size: 16,
+              intermediate_size: 24,
+              num_attention_heads: 2,
+              num_key_value_heads: 1,
+              num_hidden_layers: 2,
+              vocab_size: 11,
+              rms_norm_eps: 1e-5,
+              rope_theta: 5e5,
+              max_position_embeddings: 16,
+              batch_size: 1,
+              max_seq_len: 3,
+              tie_word_embeddings: true,
+              rope_scaling: {
+                rope_type: "llama3",
+                factor: 32,
+                low_freq_factor: 1,
+                high_freq_factor: 4,
+                original_max_position_embeddings: 8192,
+                rope_theta: 5e5
+              }
+            },
+            tokens: [
+              [
+                1,
+                4,
+                2
+              ]
+            ],
+            weights: {
+              "model.embed_tokens.weight": [
+                11,
+                16
+              ],
+              "model.layers.0.input_layernorm.weight": [
+                16
+              ],
+              "model.layers.0.post_attention_layernorm.weight": [
+                16
+              ],
+              "model.layers.0.self_attn.q_proj.weight": [
+                16,
+                16
+              ],
+              "model.layers.0.self_attn.k_proj.weight": [
+                8,
+                16
+              ],
+              "model.layers.0.self_attn.v_proj.weight": [
+                8,
+                16
+              ],
+              "model.layers.0.self_attn.o_proj.weight": [
+                16,
+                16
+              ],
+              "model.layers.0.mlp.gate_proj.weight": [
+                24,
+                16
+              ],
+              "model.layers.0.mlp.up_proj.weight": [
+                24,
+                16
+              ],
+              "model.layers.0.mlp.down_proj.weight": [
+                16,
+                24
+              ],
+              "model.layers.1.input_layernorm.weight": [
+                16
+              ],
+              "model.layers.1.post_attention_layernorm.weight": [
+                16
+              ],
+              "model.layers.1.self_attn.q_proj.weight": [
+                16,
+                16
+              ],
+              "model.layers.1.self_attn.k_proj.weight": [
+                8,
+                16
+              ],
+              "model.layers.1.self_attn.v_proj.weight": [
+                8,
+                16
+              ],
+              "model.layers.1.self_attn.o_proj.weight": [
+                16,
+                16
+              ],
+              "model.layers.1.mlp.gate_proj.weight": [
+                24,
+                16
+              ],
+              "model.layers.1.mlp.up_proj.weight": [
+                24,
+                16
+              ],
+              "model.layers.1.mlp.down_proj.weight": [
+                16,
+                24
+              ],
+              "model.norm.weight": [
+                16
+              ]
+            },
+            logits: [
+              0.2713891267776489,
+              0.9291383624076843,
+              6756186485290527e-19,
+              0.20870482921600342,
+              -0.09061503410339355,
+              -0.919259786605835,
+              -0.18096023797988892,
+              0.28555113077163696,
+              0.28547197580337524,
+              0.13032814860343933,
+              0.08401966094970703,
+              -0.1375708281993866,
+              -0.7450186014175415,
+              -0.6900337934494019,
+              0.19840417802333832,
+              1.279048204421997,
+              0.43855059146881104,
+              -0.2694587707519531,
+              0.11852874606847763,
+              -0.1626301407814026,
+              -0.797093391418457,
+              -0.4763565957546234,
+              0.1928788125514984,
+              0.5480930209159851,
+              0.997273325920105,
+              0.25748005509376526,
+              -0.10457956790924072,
+              -0.1515563428401947,
+              -0.8919546604156494,
+              -0.0967339277267456,
+              0.21408119797706604,
+              0.6117810606956482,
+              0.07914119958877563
+            ],
+            freqs_cos: [
+              1,
+              1,
+              1,
+              1,
+              0.5403023362159729,
+              0.9992929697036743,
+              0.9999999403953552,
+              1,
+              -0.416146844625473,
+              0.9971728920936584,
+              0.9999996423721313,
+              1
+            ],
+            freqs_sin: [
+              0,
+              0,
+              0,
+              0,
+              0.8414709568023682,
+              0.0375971682369709,
+              429556705057621e-18,
+              16619674170215148e-22,
+              0.9092974066734314,
+              0.07514116913080215,
+              8591132936999202e-19,
+              33239348340430297e-22
+            ]
+          }
+        ]
+      };
+    }
+  });
+
+  // ../test/fixtures/model_definition.json
+  var require_model_definition = __commonJS({
+    "../test/fixtures/model_definition.json"(exports, module) {
+      module.exports = {
+        format: "poly.modeldef@1",
+        type: "graph",
+        seed: 42,
+        inputs: { x: { shape: [1, 2], dtype: "float32" } },
+        modules: { shared: { type: "linear", out_features: 2, bias: false } },
+        nodes: [
+          { name: "a", call: "shared", inputs: ["x"] },
+          { name: "b", call: "shared", inputs: ["a"] },
+          { name: "residual", type: "add", inputs: ["x", "b"] },
+          { name: "total", type: "sum", inputs: ["residual"] }
+        ],
+        outputs: { prediction: "residual", cost: "total" },
+        entrypoints: [
+          { name: "forward", inputs: ["x"], outputs: ["prediction"] },
+          { name: "loss", inputs: ["x"], outputs: ["cost"], objective: "cost" }
+        ]
+      };
+    }
+  });
+
+  // ../test/fixtures/gguf_quantized_blocks.json
+  var require_gguf_quantized_blocks = __commonJS({
+    "../test/fixtures/gguf_quantized_blocks.json"(exports, module) {
+      module.exports = {
+        reference: "a9069c177a9da9cca18593edf55acd2e6073cca6",
+        cases: [
+          { type: 2, bytes: [0, 60, 240, 225, 210, 195, 180, 165, 150, 135, 120, 105, 90, 75, 60, 45, 30, 15], values: [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6, -7, -8] },
+          { type: 3, bytes: [0, 60, 0, 64, 240, 225, 210, 195, 180, 165, 150, 135, 120, 105, 90, 75, 60, 45, 30, 15], values: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2] },
+          { type: 14, bytes: [7, 20, 33, 46, 59, 72, 85, 98, 111, 124, 137, 150, 163, 176, 189, 202, 215, 228, 241, 254, 11, 24, 37, 50, 63, 76, 89, 102, 115, 128, 141, 154, 167, 180, 193, 206, 219, 232, 245, 2, 15, 28, 41, 54, 67, 80, 93, 106, 119, 132, 145, 158, 171, 184, 197, 210, 223, 236, 249, 6, 19, 32, 45, 58, 71, 84, 97, 110, 123, 136, 149, 162, 175, 188, 201, 214, 227, 240, 253, 10, 23, 36, 49, 62, 75, 88, 101, 114, 127, 140, 153, 166, 179, 192, 205, 218, 231, 244, 1, 14, 27, 40, 53, 66, 79, 92, 105, 118, 131, 144, 157, 170, 183, 196, 209, 222, 235, 248, 5, 18, 31, 44, 57, 70, 83, 96, 109, 122, 3, 10, 17, 24, 31, 38, 45, 52, 59, 66, 73, 80, 87, 94, 101, 108, 115, 122, 129, 136, 143, 150, 157, 164, 171, 178, 185, 192, 199, 206, 213, 220, 227, 234, 241, 248, 255, 6, 13, 20, 27, 34, 41, 48, 55, 62, 69, 76, 83, 90, 97, 104, 111, 118, 125, 132, 139, 146, 153, 160, 167, 174, 181, 188, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 60], values: [23, 4, -15, -18, 27, 8, -11, -30, 31, 12, -7, -26, 19, 0, -3, -22, 46, 8, -30, -36, 54, 16, -22, -60, 62, 24, -14, -52, 38, 0, -6, -44, -75, 12, -93, 42, 81, -24, 63, -42, 45, -60, 27, -78, -39, 48, -9, 78, -100, 16, -124, 56, 108, -32, 84, -56, 60, -80, 36, -104, -52, 64, -12, 104, -160, -155, -70, -70, -65, 20, 25, 110, 110, -125, -120, -35, -30, -25, 55, 60, 174, 180, -102, -102, -192, -90, -84, 18, 18, 120, 126, -156, -150, -144, -48, -42, -154, -147, -140, -140, -133, -126, -119, -224, -224, -105, -98, -91, -84, -77, -77, -70, -72, -64, 72, 72, 80, 88, 96, 104, 104, 112, 120, 128, 136, 144, 144, 152, 207, 36, -135, -162, 243, 72, -99, -270, 279, 108, -63, -234, 171, 0, -27, -198, 230, 40, -150, -180, 270, 80, -110, -300, 310, 120, -70, -260, 190, 0, -30, -220, -275, 44, -341, 154, 297, -88, 231, -154, 165, -220, 99, -286, -143, 176, -33, 286, -300, 48, -372, 168, 324, -96, 252, -168, 180, -240, 108, -312, -156, 192, -36, 312, 52, 65, 286, 286, 299, -312, -299, -78, -78, 143, 156, 377, 390, 403, -221, -416, -210, -196, 42, 42, 56, 294, 308, -350, -350, -112, -98, 140, 154, 168, 392, 406, 450, 465, 240, 240, 255, -450, -435, -420, -420, -405, -390, -375, -360, -345, -105, -90, -80, -64, -48, -48, -32, -16, -256, 16, 16, 32, 48, 64, 80, 96, 96, 112] }
+        ]
+      };
+    }
+  });
+
+  // test/test_model_runtime.js
+  var require_test_model_runtime = __commonJS({
+    "test/test_model_runtime.js"(exports, module) {
       "use strict";
+      var llamaFixture = require_llama();
+      async function checkLlamaFamily(pg) {
+        const gpu = pg.device === "webgpu";
+        for (const item of llamaFixture.cases) {
+          const model = gpu ? await pg.models.LlamaAsync(item.config) : pg.models.Llama(item.config);
+          let restored, imported;
+          try {
+            const header = {}, parts = [];
+            let offsetBytes = 0;
+            for (const [name2, shape] of Object.entries(item.weights)) {
+              const offset = Array.from(name2).reduce((s, c) => s + c.charCodeAt(0), 0);
+              const values = Float32Array.from({ length: shape.reduce((a, b) => a * b, 1) }, (_, i) => (shape.length === 1 ? 1 : 0) + ((i * 7 + offset) % 23 - 11) * 0.017);
+              await model.writeBufferAsync(name2, values);
+              header[name2] = { dtype: "F32", shape, data_offsets: [offsetBytes, offsetBytes + values.byteLength] };
+              parts.push(new Uint8Array(values.buffer));
+              offsetBytes += values.byteLength;
+            }
+            if (item.config.tie_word_embeddings) {
+              header["lm_head.weight"] = header["model.embed_tokens.weight"];
+              delete header["model.embed_tokens.weight"];
+            }
+            const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+            const checkpoint = new Uint8Array(8 + headerBytes.length + offsetBytes);
+            new DataView(checkpoint.buffer).setBigUint64(0, BigInt(headerBytes.length), true);
+            checkpoint.set(headerBytes, 8);
+            offsetBytes = 8 + headerBytes.length;
+            for (const part of parts) {
+              checkpoint.set(part, offsetBytes);
+              offsetBytes += part.length;
+            }
+            imported = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(item.config)), [checkpoint], { maxSeqLen: 3 });
+            assertClose(await model.readBufferAsync("freqs_cos"), item.freqs_cos, 2e-6);
+            assertClose(await model.readBufferAsync("freqs_sin"), item.freqs_sin, 2e-6);
+            const tokens = new Int32Array([1, 4, 2]);
+            const first = (await model.forwardAsync({ tokens })).logits;
+            assertClose(first, item.logits, 2e-5);
+            assertClose((await imported.forwardAsync({ tokens })).logits, item.logits, 2e-5);
+            const changed = (await model.forwardAsync({ tokens: new Int32Array([1, 4, 7]) })).logits;
+            assertClose(changed.slice(0, 22), first.slice(0, 22), 2e-6);
+            restored = pg.Model.load(await model.saveAsync({ includeOptimizer: false }));
+            assertClose((await restored.forwardAsync({ tokens })).logits, item.logits, 2e-5);
+            const name = "model.embed_tokens.weight", before = await model.readBufferAsync(name);
+            await restored.writeBufferAsync(name, new Float32Array(before.length));
+            assertClose(await model.readBufferAsync(name), before, 0);
+            if (item.config.tie_word_embeddings)
+              assertClose(await restored.readBufferAsync("lm_head.weight"), new Float32Array(before.length), 0);
+          } finally {
+            if (restored) await restored.dispose();
+            if (imported) await imported.dispose();
+            await model.dispose();
+          }
+        }
+      }
+      var compositionFixture = require_model_definition();
+      var quantizedFixture = require_gguf_quantized_blocks();
+      async function checkModelCheckpointReplacement(pg) {
+        const model = pg.models.MLP({ layers: [2, 1], loss: "none", seed: 3 });
+        try {
+          const name = "layers.0.weight";
+          const original = await model.readBufferAsync(name);
+          const weights = await model.exportWeightsAsync();
+          await model.writeBufferAsync(name, new Float32Array(original.length));
+          if (pg.device === "webgpu") {
+            let rejected2 = false;
+            try {
+              model.importWeights(weights);
+            } catch (e) {
+              rejected2 = /Async/.test(e.message);
+            }
+            assert(rejected2, "synchronous GPU replacement must reject before entering Wasm");
+          }
+          const pending = model.importWeightsAsync(weights);
+          weights.fill(0);
+          await pending;
+          assertClose(await model.readBufferAsync(name), original, 0);
+          let rejected = false;
+          try {
+            await model.importWeightsAsync(new Uint8Array([1, 2, 3]));
+          } catch (_) {
+            rejected = true;
+          }
+          assert(rejected, "malformed checkpoint must reject");
+          assertClose(await model.readBufferAsync(name), original, 0);
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkModelStatefulCapture(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const net = { bn: new pg.nn.BatchNorm(2), forward({ x }) {
+          return { prediction: this.bn.call(x) };
+        } };
+        const mode = pg.Tensor.training;
+        const opts = {
+          inputs: { x: pg.Tensor.empty([2, 2]) },
+          targets: { y: pg.Tensor.empty([2, 2]) },
+          loss: (out, { y }) => out.prediction.sub(y).square().mean()
+        };
+        const model = gpu ? await pg.Model.fromCallableAsync(net, opts) : new pg.Model(net, opts);
+        let restored;
+        try {
+          assert(pg.Tensor.training === mode, "capture changed authoring mode");
+          assertClose(await model.readBufferAsync("bn.runningMean"), [0, 0], 0);
+          assert(Number((await model.readBufferAsync("bn.numBatchesTracked"))[0]) === 0);
+          model.setOptimizer("sgd", 0.01);
+          const x = new Float32Array([1, 2, 3, 6]), y = new Float32Array(4);
+          await model.trainStepAsync({ x, y });
+          assertClose(await model.readBufferAsync("bn.runningMean"), [0.2, 0.4], 1e-6);
+          assertClose(await model.readBufferAsync("bn.runningVar"), [1.1, 1.7], 1e-6);
+          assert(Number((await model.readBufferAsync("bn.numBatchesTracked"))[0]) === 1);
+          assertClose(await net.bn.runningMean.toArrayAsync(), [0, 0], 0);
+          const weight = await model.readBufferAsync("bn.weight"), bias = await model.readBufferAsync("bn.bias");
+          const expected = Array.from(x, (v, i) => (v - [0.2, 0.4][i % 2]) / Math.sqrt([1.1, 1.7][i % 2] + 1e-5) * weight[i % 2] + bias[i % 2]);
+          assertClose((await model.forwardAsync({ x })).prediction, expected, 1e-5);
+          assert(Number((await model.readBufferAsync("bn.numBatchesTracked"))[0]) === 1);
+          restored = pg.Model.load(await model.saveAsync());
+          restored.setOptimizer("sgd", 0.01);
+          const a = await model.trainStepAsync({ x, y: x }), b = await restored.trainStepAsync({ x, y: x });
+          assert(Math.abs(a - b) < 1e-5, "restored training diverged");
+          assert(Number((await restored.readBufferAsync("bn.numBatchesTracked"))[0]) === 2);
+        } finally {
+          if (restored) await restored.dispose();
+          await model.dispose();
+          for (const tensor of Object.values(net.bn)) if (tensor && tensor.dispose) await tensor.dispose();
+          for (const tensor of [...Object.values(opts.inputs), ...Object.values(opts.targets)]) await tensor.dispose();
+        }
+      }
+      async function checkModelCaptureRng(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        pg.Tensor.manual_seed(123);
+        const controlTensor = pg.Tensor.rand(16);
+        const control = await controlTensor.toArrayAsync();
+        await controlTensor.dispose();
+        pg.Tensor.manual_seed(123);
+        const weight = new pg.Tensor([1], { dtype: "float32" }), input = pg.Tensor.empty(16), target = pg.Tensor.empty(16);
+        const opts = { inputs: { x: input }, targets: { y: target }, params: { weight, alias: weight }, loss: (out, { y }) => out.sub(y).square().mean() };
+        const author = ({ x }) => x.mul(weight).dropout(0.5);
+        const model = gpu ? await pg.Model.fromCallableAsync(author, opts) : new pg.Model(author, opts);
+        let restored, sibling, roundtripped;
+        try {
+          const after = pg.Tensor.rand(16);
+          try {
+            assertClose(await after.toArrayAsync(), control, 0);
+          } finally {
+            await after.dispose();
+          }
+          const counters = Array.from({ length: model.bufCount }, (_, i) => model.bufName(i)).filter((name) => name.startsWith("__rng.") && name.endsWith(".counter"));
+          assert(counters.length === 1, "capture must own one RNG counter");
+          const counter = counters[0];
+          assertClose(await model.readBufferAsync(counter), [0, 0], 0);
+          model.setOptimizer("sgd", 0.01);
+          const x = new Float32Array(16).fill(1), y = new Float32Array(16);
+          await model.trainStepAsync({ x, y });
+          const state = await model.readBufferAsync(counter);
+          assert(state.some((v) => v !== 0), "training did not advance RNG");
+          await model.forwardAsync({ x });
+          assertClose(await model.readBufferAsync(counter), state, 0);
+          const bytes = await model.saveAsync();
+          restored = pg.Model.load(bytes);
+          sibling = pg.Model.load(bytes);
+          roundtripped = pg.Model.load(await restored.saveAsync());
+          const siblingWeight = await sibling.readBufferAsync("weight");
+          for (const copy of [restored, roundtripped]) copy.setOptimizer("sgd", 0.01);
+          for (let i = 0; i < 2; i++) {
+            const a = await model.trainStepAsync({ x, y });
+            for (const copy of [restored, roundtripped]) {
+              const b = await copy.trainStepAsync({ x, y });
+              assert(Math.abs(a - b) < 1e-5, "checkpoint changed RNG continuation");
+              assertClose(await model.readBufferAsync(counter), await copy.readBufferAsync(counter), 0);
+              assertClose(await model.readBufferAsync("weight"), await copy.readBufferAsync("weight"), 0);
+              assertClose(await copy.readBufferAsync("alias"), await copy.readBufferAsync("weight"), 0);
+            }
+            assertClose(await sibling.readBufferAsync(counter), state, 0);
+            assertClose(await sibling.readBufferAsync("weight"), siblingWeight, 0);
+          }
+          await restored.writeBufferAsync("alias", new Float32Array([71]));
+          assertClose(await restored.readBufferAsync("weight"), [71], 0);
+          assertClose(await sibling.readBufferAsync("weight"), siblingWeight, 0);
+          await restored.dispose();
+          pg.clearScheduleCache();
+          pg.collect();
+          assertClose(await sibling.readBufferAsync(counter), state, 0);
+          assertClose((await sibling.forwardAsync({ x })).output, Array(16).fill(siblingWeight[0]), 0);
+        } finally {
+          if (roundtripped) await roundtripped.dispose();
+          if (sibling) await sibling.dispose();
+          if (restored) await restored.dispose();
+          await model.dispose();
+          for (const tensor of [weight, input, target]) await tensor.dispose();
+        }
+      }
+      async function checkModelCaptureFailure(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const x = pg.Tensor.empty(1), state = new pg.Tensor([0]).is_param_(false);
+        const options = { inputs: { x }, params: { state } };
+        const mode = pg.Tensor.training;
+        const attempt = async (author) => {
+          let model;
+          try {
+            model = gpu ? await pg.Model.fromCallableAsync(author, options) : new pg.Model(author, options);
+            return false;
+          } catch {
+            return true;
+          } finally {
+            if (model) await model.dispose();
+          }
+        };
+        try {
+          assert(await attempt(({ x: x2 }) => {
+            state.assign(state.add(1));
+            throw new Error("author failed");
+          }));
+          assert(pg.Tensor.training === mode);
+          assertClose(await state.toArrayAsync(), [0], 0);
+          state.is_param_(true);
+          assert(await attempt(({ x: x2 }) => {
+            state.assign(state.add(1));
+            return x2;
+          }), "parameter assignment escaped capture");
+          assertClose(await state.toArrayAsync(), [0], 0);
+          state.is_param_(false);
+          let pending;
+          const rejected = await attempt(({ x: x2 }) => {
+            pending = state.toArrayAsync().catch(() => {
+            });
+            return x2;
+          });
+          await pending;
+          assert(rejected, "capture allowed asynchronous execution to escape its scope");
+        } finally {
+          await x.dispose();
+          await state.dispose();
+        }
+      }
+      async function checkModelVariableShapes(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const n = pg.uop.variable("model_batch", 1, 32), bound = n.bind(17);
+        const x = pg.Tensor.empty([bound, 2]), y = pg.Tensor.empty([bound, 2]);
+        const options = { inputs: { x, y } };
+        const author = ({ x: x2, y: y2 }) => ({ prediction: x2.mul(2).add(y2) });
+        const model = gpu ? await pg.Model.fromCallableAsync(author, options) : new pg.Model(author, options);
+        let restored, first;
+        const a = Float32Array.from({ length: 34 }, (_, i) => i);
+        const input = new pg.Tensor(a).reshape(17, 2);
+        try {
+          const pending = model.forwardAsync({ x: input, y: { data: a, shape: [17, 2] } });
+          if (gpu) {
+            for (const query of [() => model.bufCurrentShape(0), () => model.bufShapeBounds(0)]) {
+              let rejected2 = false;
+              try {
+                query();
+              } catch (e) {
+                rejected2 = /active async work/.test(e.message);
+              }
+              assert(rejected2, "metadata query entered suspended Wasm");
+            }
+          }
+          first = (await pending).prediction;
+          assert(JSON.stringify(first.shape) === "[17,2]", "result shape must be concrete");
+          assertClose(await first.toArrayAsync(), Array.from(a, (v) => v * 3), 0);
+          const small = a.slice(0, 6);
+          const result = await model.forwardAsync({ x: small, y: { data: small, shape: [3, 2] } });
+          assertClose(result.prediction, Array.from(small, (v) => v * 3), 0);
+          assert(JSON.stringify(model.bufCurrentShape(model.findBuf("prediction"))) === "[3,2]");
+          assert(JSON.stringify(model.bufShapeBounds(model.findBuf("x"))) === "[[1,32],[2,2]]");
+          const before = await model.readBufferAsync("x");
+          let rejected = false;
+          try {
+            await model.forwardAsync({ x: a, y: small });
+          } catch {
+            rejected = true;
+          }
+          assert(rejected, "shared shape variable must reject inconsistent inputs");
+          assertClose(await model.readBufferAsync("x"), before, 0);
+          const bytes = await model.saveAsync({ includeOptimizer: false });
+          restored = pg.Model.load(bytes);
+          const roundtripped = pg.Model.load(await restored.saveAsync({ includeOptimizer: false }));
+          try {
+            for (const copy of [restored, roundtripped]) {
+              assert(JSON.stringify(copy.bufShapeBounds(copy.findBuf("x"))) === "[[1,32],[2,2]]");
+              for (const size of [17, 3, 11]) {
+                const values = Float32Array.from({ length: size * 2 }, (_, i) => i);
+                assertClose((await copy.forwardAsync({ x: values, y: values })).prediction, Array.from(values, (v) => v * 3), 0);
+              }
+            }
+          } finally {
+            await roundtripped.dispose();
+          }
+          await model.dispose();
+          pg.clearScheduleCache();
+          pg.collect();
+          assertClose(await first.toArrayAsync(), Array.from(a, (v) => v * 3), 0);
+          const w = new pg.Tensor([0], { dtype: "float32" });
+          const trainingOptions = {
+            inputs: { x: pg.Tensor.empty([bound, 1]) },
+            targets: { y: pg.Tensor.empty([bound, 1]) },
+            params: { w },
+            loss: (out, { y: y2 }) => out.sub(y2).square().mean()
+          };
+          const trainAuthor = ({ x: x2 }) => x2.mul(w);
+          const training = gpu ? await pg.Model.fromCallableAsync(trainAuthor, trainingOptions) : new pg.Model(trainAuthor, trainingOptions);
+          try {
+            training.setOptimizer("sgd", 0.01);
+            let expected = 0;
+            for (const size of [17, 3, 11]) {
+              const values = Float32Array.from({ length: size }, (_, i) => i + 1);
+              const meanSquare = values.reduce((sum, v) => sum + v * v, 0) / size;
+              const loss = await training.trainStepAsync({ x: values, y: values.map((v) => v * 2) });
+              const wanted = (expected - 2) ** 2 * meanSquare;
+              assert(Math.abs(loss - wanted) <= 1e-5 * Math.max(1, wanted), "loss used a stale batch extent");
+              expected -= 0.02 * (expected - 2) * meanSquare;
+              assertClose(await training.readBufferAsync("w"), [expected], 1e-4);
+            }
+          } finally {
+            await training.dispose();
+            await w.dispose();
+          }
+        } finally {
+          if (restored) await restored.dispose();
+          if (first) await first.dispose();
+          await input.dispose();
+          await model.dispose();
+          await x.dispose();
+          await y.dispose();
+          bound.dispose();
+          n.dispose();
+        }
+      }
+      async function checkModelEmptyInputAdmission(pg) {
+        const n = pg.uop.variable("empty_model_batch", 0, 4), bound = n.bind(3);
+        const offset = pg.Tensor.empty([1]), x = pg.Tensor.empty([bound, 2]);
+        const model = await pg.Model.fromCallableAsync(({ offset: offset2, x: x2 }) => x2.add(offset2), { inputs: { offset, x } });
+        try {
+          await model.forwardAsync({ offset: new Float32Array([7]), x: new Float32Array(6).fill(1) });
+          const before = await model.readBufferAsync("offset");
+          let rejected = false;
+          try {
+            await model.forwardAsync({ offset: new Float32Array([99]), x: new Float32Array(0) });
+          } catch {
+            rejected = true;
+          }
+          assert(rejected, "unsupported empty Model binding must reject");
+          assertClose(await model.readBufferAsync("offset"), before, 0);
+        } finally {
+          await model.dispose();
+          await offset.dispose();
+          await x.dispose();
+          bound.dispose();
+          n.dispose();
+        }
+      }
+      async function checkModelTensorIO(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const author = ({ x, y }) => ({ prediction: x.mul(2).add(y) });
+        const options = { inputs: { x: pg.Tensor.empty([2, 2]), y: pg.Tensor.empty([2, 2]) } };
+        const model = gpu ? await pg.Model.fromCallableAsync(author, options) : new pg.Model(author, options);
+        const owned = [];
+        try {
+          const input = new pg.Tensor([[1, 2], [3, 4]], { dtype: "float32" }).transpose();
+          owned.push(input);
+          const pending = model.forwardAsync({ x: input, y: new Float32Array([1, 1, 1, 1]) });
+          const disposing = input.dispose();
+          const first = (await pending).prediction;
+          await disposing;
+          owned.push(first);
+          assert(first instanceof pg.Tensor, "Tensor input must select Tensor outputs");
+          assert(JSON.stringify(first.shape) === "[2,2]", "result lost concrete shape");
+          const zero = pg.Tensor.zeros([2, 2]);
+          owned.push(zero);
+          const second = (await model.forwardAsync({ x: first, y: zero })).prediction;
+          owned.push(second);
+          assertClose(await first.toArrayAsync(), [3, 7, 5, 9], 0);
+          assertClose(await second.toArrayAsync(), [6, 14, 10, 18], 0);
+          const before = await model.readBufferAsync("x");
+          let shapeRejected = false;
+          try {
+            await model.forwardAsync({
+              x: new Float32Array([9, 9, 9, 9]),
+              y: { data: new Float32Array([0, 0, 0, 0]), shape: [1, 4] }
+            });
+          } catch {
+            shapeRejected = true;
+          }
+          assert(shapeRejected, "equal bytes must not admit a wrong explicit host shape");
+          assertClose(await model.readBufferAsync("x"), before, 0);
+          const shaped = await model.forwardAsync({
+            x: { data: new Float32Array([1, 2, 3, 4]), shape: [2, 2] },
+            y: new Float32Array([0, 0, 0, 0])
+          });
+          assertClose(shaped.prediction, [2, 4, 6, 8], 0);
+          const afterShape = await model.readBufferAsync("x");
+          for (const bad of [pg.Tensor.zeros([4]), pg.Tensor.zeros([2, 2], { dtype: "int32" })]) {
+            owned.push(bad);
+            let rejected = false;
+            try {
+              await model.forwardAsync({ x: zero, y: bad });
+            } catch {
+              rejected = true;
+            }
+            assert(rejected, "Tensor signature mismatch must reject");
+            assertClose(await model.readBufferAsync("x"), afterShape, 0);
+          }
+          const effect = pg.Tensor.ones([2, 2]).contiguous();
+          owned.push(effect);
+          await effect.realizeAsync();
+          effect.assign(effect.add(1));
+          for (let i = 0; i < 2; i++) {
+            const result = (await model.forwardAsync({ x: effect, y: zero })).prediction;
+            owned.push(result);
+            assertClose(await result.toArrayAsync(), [4, 4, 4, 4], 0);
+          }
+          assertClose(await effect.toArrayAsync(), [2, 2, 2, 2], 0);
+          const finishing = model.forwardAsync({ x: second, y: zero });
+          const closing = model.dispose();
+          const last = (await finishing).prediction;
+          owned.push(last);
+          await closing;
+          pg.clearScheduleCache();
+          pg.collect();
+          assertClose(await first.toArrayAsync(), [3, 7, 5, 9], 0);
+          assertClose(await last.toArrayAsync(), [12, 28, 20, 36], 0);
+          const chained = second.add(1);
+          owned.push(chained);
+          assertClose(await chained.toArrayAsync(), [7, 15, 11, 19], 0);
+        } finally {
+          await model.dispose();
+          for (const tensor of owned) await tensor.dispose();
+        }
+      }
+      async function checkModelBoundedMinibatches(pg) {
+        const n = pg.uop.variable("fit_batch", 1, 8), bound = n.bind(4);
+        const owned = [], models = [];
+        const build = async () => {
+          const w = new pg.Tensor([0], { dtype: "float32" }), x = pg.Tensor.empty([bound, 2]), y = pg.Tensor.empty([bound, 2]);
+          owned.push(w, x, y);
+          const model = await pg.Model.fromCallableAsync(({ x: x2 }) => x2.mul(w), {
+            inputs: { x },
+            targets: { y },
+            params: { w },
+            loss: (out, { y: y2 }) => out.sub(y2).square().mean()
+          });
+          models.push(model);
+          return model;
+        };
+        try {
+          const x = Float32Array.from({ length: 14 }, (_, i) => i / 10), y = x.map((v) => v * 2);
+          const tx = new pg.Tensor(
+            [Array.from(x.filter((_, i) => i % 2 === 0)), Array.from(x.filter((_, i) => i % 2 === 1))],
+            { dtype: "float32" }
+          ).transpose(), ty = new pg.Tensor(y).reshape(7, 2);
+          owned.push(tx, ty);
+          const control = await build();
+          control.setOptimizer("sgd", 0.01);
+          const expected = [];
+          for (let epoch = 0; epoch < 2; epoch++) for (let i = 0; i < 7; i += 3)
+            expected.push(await control.trainStepAsync({ x: x.subarray(i * 2, (i + 3) * 2), y: y.subarray(i * 2, (i + 3) * 2) }));
+          for (const data of [{ x, y }, { x: tx, y: ty }, { x: tx, y }]) {
+            const model2 = await build();
+            const losses = await model2.fitAsync(data, { batchSize: 3, remainder: "keep", epochs: 2, optimizer: "sgd", lr: 0.01 });
+            assertClose(losses, expected, 1e-5);
+            assertClose(await model2.readBufferAsync("w"), await control.readBufferAsync("w"), 1e-5);
+            const before = await model2.readBufferAsync("w");
+            for (const opts of [{ batchSize: 9, remainder: "keep" }, { batchSize: 3, remainder: "error" }]) {
+              let rejected = false;
+              try {
+                await model2.fitAsync(data, { ...opts, optimizer: "adam" });
+              } catch {
+                rejected = true;
+              }
+              assert(rejected, "invalid batch must reject before any update");
+              assertClose(await model2.readBufferAsync("w"), before, 0);
+            }
+          }
+          assertClose(await tx.toArrayAsync(), x, 0);
+          const model = await build(), small = new pg.Tensor(x.subarray(0, 4)).reshape(2, 2);
+          owned.push(small);
+          assert((await model.fitAsync({ x: small, y: y.subarray(0, 4) }, { batchSize: 3, remainder: "keep", optimizer: "sgd" })).length === 1);
+          assertClose(await small.toArrayAsync(), x.subarray(0, 4), 0);
+          const ffi = pg._core.ffi, shrink = ffi.poly_tensor_shrink, release = ffi.poly_tensor_release;
+          const train = pg._core.model.trainStep;
+          for (const failure of ["shrink", "train"]) {
+            let allocated = [], calls = 0, rejected = false;
+            const injectedShrink = (...args) => {
+              if (++calls === 2 && failure === "shrink") return null;
+              const handle = shrink(...args);
+              allocated.push(handle);
+              return handle;
+            };
+            const injectedRelease = (handle) => {
+              const index = allocated.indexOf(handle);
+              if (index >= 0) allocated.splice(index, 1);
+              return release(handle);
+            };
+            pg._core.ffi = Object.create(ffi, {
+              poly_tensor_shrink: { value: injectedShrink },
+              poly_tensor_release: { value: injectedRelease }
+            });
+            pg._core.model.trainStep = (...args) => {
+              if (failure === "train") throw new Error("train sentinel");
+              return train(...args);
+            };
+            try {
+              await model.fitAsync({ x: tx, y: ty }, { batchSize: 3, remainder: "keep" });
+            } catch (e) {
+              rejected = /shrink failed|train sentinel/.test(e.message);
+            } finally {
+              pg._core.ffi = ffi;
+              pg._core.model.trainStep = train;
+            }
+            assert(rejected, "injected batch failure must propagate");
+            assert(allocated.length === 0, "batch failure leaked Tensor slice owners");
+          }
+          let failed = false;
+          try {
+            await model.fitAsync({ x: tx, y: ty }, { batchSize: 3, remainder: "keep", onStep: () => {
+              throw new Error("batch callback");
+            } });
+          } catch (e) {
+            failed = /batch callback/.test(e.message);
+          }
+          assert(failed, "callback exception must clean up Tensor slices");
+          const pending = model.fitAsync({ x: tx, y: ty }, { batchSize: 3, remainder: "keep" });
+          const releases = [tx.dispose(), ty.dispose(), model.dispose()];
+          assert((await pending).length === 3, "queued dataset must survive caller disposal");
+          await Promise.all(releases);
+        } finally {
+          for (const model of models) await model.dispose();
+          for (const tensor of owned) await tensor.dispose();
+          bound.dispose();
+          n.dispose();
+        }
+      }
+      async function checkModelMinibatches(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const build = async () => {
+          const w = new pg.Tensor([0], { dtype: "float32" });
+          const opts = {
+            inputs: { x: pg.Tensor.empty([2, 1]) },
+            targets: { y: pg.Tensor.empty([2, 1]) },
+            params: { w },
+            loss: (out, { y }) => out.sub(y).square().mean()
+          };
+          return gpu ? pg.Model.fromCallableAsync(({ x }) => x.mul(w), opts) : new pg.Model(({ x }) => x.mul(w), opts);
+        };
+        const model = await build(), control = await build();
+        try {
+          const x = new Float32Array([1, 2, 3, 4, 5, 6]), y = new Float32Array([2, 4, 6, 8, 10, 12]);
+          const seen = [];
+          const losses = await model.fitAsync({ x: { data: x, shape: [6, 1] }, y }, {
+            batchSize: 2,
+            epochs: 2,
+            optimizer: "sgd",
+            lr: 0.01,
+            onStep: (step) => seen.push(step)
+          });
+          control.setOptimizer("sgd", 0.01);
+          const expected = [];
+          for (let epoch = 0; epoch < 2; epoch++) for (let i = 0; i < 6; i += 2)
+            expected.push(await control.trainStepAsync({ x: x.subarray(i, i + 2), y: y.subarray(i, i + 2) }));
+          assertClose(losses, expected, 1e-5);
+          assertClose(await model.readBufferAsync("w"), await control.readBufferAsync("w"), 1e-5);
+          assert(JSON.stringify(seen) === "[0,1,2,3,4,5]", "callback step numbers must span epochs");
+          const before = await model.readBufferAsync("w");
+          let rejected = false;
+          try {
+            await model.fitAsync({ x: x.subarray(0, 5), y: y.subarray(0, 5) }, { batchSize: 2, optimizer: "adam" });
+          } catch (e) {
+            rejected = /remainder/.test(e.message);
+          }
+          assert(rejected, "incomplete batch must reject before any update");
+          assertClose(await model.readBufferAsync("w"), before, 0);
+          rejected = false;
+          try {
+            await model.fitAsync({ x: x.subarray(0, 5), y: y.subarray(0, 5) }, { batchSize: 2, remainder: "keep", optimizer: "adam" });
+          } catch (e) {
+            rejected = /remainder/.test(e.message);
+          }
+          assert(rejected, "keep cannot admit an extent outside the fixed signature");
+          assertClose(await model.readBufferAsync("w"), before, 0);
+          for (const bad of [
+            { x, y: y.subarray(0, 4) },
+            { x, y: new Int32Array(y) },
+            { x: { data: x, shape: [3, 2] }, y }
+          ]) {
+            let invalid = false;
+            try {
+              await model.fitAsync(bad, { batchSize: 2, optimizer: "adam" });
+            } catch {
+              invalid = true;
+            }
+            assert(invalid, "invalid dataset must fail preflight");
+            assertClose(await model.readBufferAsync("w"), before, 0);
+          }
+          const dropped = await model.fitAsync({ x: x.subarray(0, 5), y: y.subarray(0, 5) }, { batchSize: 2, remainder: "drop" });
+          assert(dropped.length === 2, "drop must process only explicitly selected complete batches");
+          let callbackFailed = false;
+          try {
+            await model.fitAsync({ x, y }, { batchSize: 2, onStep: () => {
+              throw new Error("callback sentinel");
+            } });
+          } catch (e) {
+            callbackFailed = /callback sentinel/.test(e.message);
+          }
+          assert(callbackFailed, "callback failure must propagate without poisoning the queue");
+          const finishing = model.fitAsync({ x, y }, { batchSize: 2 });
+          const closing = model.dispose();
+          assert((await finishing).length === 3, "admitted fit must survive immediate Model disposal");
+          await closing;
+        } finally {
+          await model.dispose();
+          await control.dispose();
+        }
+      }
+      async function checkQuantizedModelWeights(pg) {
+        for (const c of quantizedFixture.cases) {
+          const bytes = [];
+          const u32 = (n) => {
+            for (let i = 0; i < 4; i++) bytes.push(n >>> 8 * i & 255);
+          };
+          const u64 = (n) => {
+            u32(n);
+            u32(0);
+          };
+          const str = (s) => {
+            const b = new TextEncoder().encode(s);
+            u64(b.length);
+            bytes.push(...b);
+          };
+          bytes.push(71, 71, 85, 70);
+          u32(3);
+          u64(1);
+          u64(5);
+          str("general.architecture");
+          u32(8);
+          str("gpt2");
+          for (const [key, value] of [["embedding_length", 32], ["attention.head_count", 2], ["block_count", 1], ["context_length", 2]]) {
+            str(`gpt2.${key}`);
+            u32(4);
+            u32(value);
+          }
+          str("token_embd.weight");
+          u32(2);
+          u64(32);
+          u64(8);
+          u32(c.type);
+          u64(0);
+          while (bytes.length % 32) bytes.push(0);
+          const expected = [];
+          for (let i = 0; i < 256 / c.values.length; i++) {
+            bytes.push(...c.bytes);
+            expected.push(...c.values);
+          }
+          const model = pg.Model.fromGGUF(new Uint8Array(bytes), { maxBatch: 1, maxSeqLen: 2 });
+          try {
+            assertClose(await model.readBufferAsync("wte.weight"), expected, 0);
+          } finally {
+            await model.dispose();
+          }
+        }
+      }
+      function checkModelCodecRejection(pg) {
+        const invalidHeads = new TextEncoder().encode(JSON.stringify({
+          model_type: "gpt2",
+          n_embd: 4,
+          n_head: 0,
+          n_layer: 1,
+          vocab_size: 8,
+          n_positions: 2
+        }));
+        let invalidRejected = false;
+        try {
+          pg.Model.fromHF(invalidHeads, []).dispose();
+        } catch (e) {
+          invalidRejected = /fromHF failed/.test(e.message);
+        }
+        assert(invalidRejected, "zero attention heads must fail before division");
+        const config = new TextEncoder().encode(JSON.stringify({
+          model_type: "gpt2",
+          n_embd: 8,
+          n_head: 2,
+          n_layer: 1,
+          vocab_size: 4,
+          n_positions: 4
+        }));
+        const badShard = new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 123]);
+        let error;
+        try {
+          pg.Model.fromHF(config, [badShard]).dispose();
+        } catch (e) {
+          error = e;
+        }
+        assert(
+          error && /failed to decode weight file/.test(error.message),
+          "Model import must reject a malformed shard before construction"
+        );
+        const header = new TextEncoder().encode(JSON.stringify({ "transformer.wte.weight": {
+          dtype: "F32",
+          shape: [1],
+          data_offsets: [0, 4]
+        } }));
+        const wrongShape = new Uint8Array(8 + header.length + 4);
+        new DataView(wrongShape.buffer).setUint32(0, header.length, true);
+        wrongShape.set(header, 8);
+        error = null;
+        try {
+          pg.Model.fromHF(config, [wrongShape]).dispose();
+        } catch (e) {
+          error = e;
+        }
+        assert(error && /numel mismatch/.test(error.message), "Model import must propagate weight-copy failure");
+        const badGguf = new Uint8Array(64);
+        badGguf.set([71, 71, 85, 70, 3]);
+        badGguf[16] = 1;
+        badGguf.fill(255, 24, 32);
+        error = null;
+        try {
+          pg.Model.fromGGUF(badGguf).dispose();
+        } catch (e) {
+          error = e;
+        }
+        assert(error && /GGUF/.test(error.message), "Model import must reject an invalid GGUF length");
+        for (const [type, numel, nbytes, valid] of [
+          [24, 1, 1, true],
+          [25, 1, 2, true],
+          [26, 1, 4, true],
+          [18, 1, 4, false],
+          [8, 1, 34, false],
+          [8, 32, 34, true]
+        ]) {
+          const bytes = new Uint8Array(64 + nbytes);
+          bytes.set([71, 71, 85, 70, 3]);
+          const view = new DataView(bytes.buffer);
+          view.setUint32(8, 1, true);
+          view.setUint32(24, 1, true);
+          bytes[32] = 120;
+          view.setUint32(33, 1, true);
+          view.setUint32(37, numel, true);
+          view.setUint32(45, type, true);
+          error = null;
+          try {
+            pg.Model.fromGGUF(bytes).dispose();
+          } catch (e) {
+            error = e;
+          }
+          assert(
+            error && (valid ? /unsupported GGUF architecture/ : /invalid or unallocatable GGUF/).test(error.message),
+            `GGUF type ${type}, numel ${numel}: wrong decoder admission`
+          );
+        }
+      }
+      async function checkCompositionFactories(pg) {
+        const { Model, models } = pg;
+        const webgpu = String(pg.device).toLowerCase() === "webgpu";
+        const spec = JSON.parse(JSON.stringify(compositionFixture));
+        delete spec.type;
+        delete spec.format;
+        assert(!Model.fromDefinition, "construction families must not be Model methods");
+        if (webgpu) {
+          let rejected = false;
+          try {
+            models.Graph(spec);
+          } catch (err) {
+            rejected = err.name === "PolyAsyncRequired";
+          }
+          assert(rejected, "WebGPU construction requires explicit async admission");
+        }
+        const model = await models.GraphAsync(spec);
+        let restored = null;
+        try {
+          assert(model.paramCount === 1, "shared calls must have one parameter");
+          await model.writeBufferAsync("modules.shared.weight", new Float32Array([1, 2, 3, 4]));
+          const io = { x: new Float32Array([1, 2]) };
+          assertClose((await model.forward(io)).prediction, [28, 61]);
+          model.setOptimizer(pg.OPTIM_SGD, 0.1);
+          const loss = await model.trainStepAsync(io);
+          assert(Math.abs(loss - 89) < 1e-4, `wrong objective: ${loss}`);
+          assertClose(await model.readBufferAsync("modules.shared.weight"), [0.1, 0.1, 1.9, 1.7]);
+          const blob = await model.saveBundleAsync({ includeOptimizer: false });
+          restored = Model.fromBundle(blob);
+          assertClose((await restored.forward(io)).prediction, (await model.forward(io)).prediction);
+        } finally {
+          if (restored) await restored.dispose();
+          await model.dispose();
+        }
+        const sequential = {
+          input: { name: "x", shape: [1, 2], dtype: "float32" },
+          layers: [{
+            name: "stack",
+            type: "repeat",
+            count: 2,
+            body: { type: "linear", out_features: 2, activation: "relu" }
+          }],
+          output: "prediction",
+          seed: 42
+        };
+        const a = await models.SequentialAsync(sequential);
+        const b = await models.SequentialAsync(JSON.stringify(sequential));
+        try {
+          assert(a.paramCount === 4, "Repeat must create fresh weights and biases");
+          for (const binding of a.bindings().filter((v) => v.trainable)) {
+            assertClose(await a.readBufferAsync(binding.name), await b.readBufferAsync(binding.name), 0);
+          }
+          await a.writeBufferAsync("layers.stack.0.bias", new Float32Array([7, 8]));
+          assertClose(await a.readBufferAsync("layers.stack.1.bias"), [0, 0], 0);
+          assertClose(await b.readBufferAsync("layers.stack.0.bias"), [0, 0], 0);
+          const io = { x: new Float32Array([1, 2]) };
+          const result = (await a.forward(io)).prediction;
+          assert(result.length === 2 && Array.from(result).every(Number.isFinite), "Repeat output");
+        } finally {
+          await a.dispose();
+          await b.dispose();
+        }
+        for (const [bad, error] of [
+          ['{"type":"graph","type":"sequential"}', /duplicate/],
+          [{ ...spec, type: "sequential" }, /type must match/],
+          [{ ...spec, format: "poly.modeldef@99" }, /format/],
+          [{ ...spec, nodes: [{ name: "bad", type: "add", inputs: ["later", "x"] }] }, /forward value/]
+        ]) {
+          let caught = null;
+          try {
+            await models.GraphAsync(bad);
+          } catch (err) {
+            caught = err;
+          }
+          assert(caught && error.test(caught.message), `missing validation: ${caught && caught.message}`);
+        }
+      }
+      async function checkCompositionCatalogue(pg) {
+        const unary = {
+          relu: (x) => Math.max(0, x),
+          sigmoid: (x) => 1 / (1 + Math.exp(-x)),
+          tanh: Math.tanh,
+          silu: (x) => x / (1 + Math.exp(-x)),
+          gelu: (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3))),
+          identity: (x) => x,
+          square: (x) => x * x,
+          exp: Math.exp,
+          log: Math.log
+        };
+        for (const type of [...Object.keys(unary), "sum", "mean", "reshape"]) {
+          const data = type === "log" ? [1, 2] : [-1, 2];
+          const layer = { name: "op", type };
+          if (type === "reshape") layer.shape = [2, 1];
+          const model2 = await pg.models.SequentialAsync({
+            input: { name: "x", shape: [1, 2], dtype: "float32" },
+            layers: [layer],
+            output: "prediction"
+          });
+          try {
+            const expected = type === "sum" ? [1] : type === "mean" ? [0.5] : type === "reshape" ? data : data.map(unary[type]);
+            assertClose((await model2.forward({ x: new Float32Array(data) })).prediction, expected, 2e-5);
+          } finally {
+            await model2.dispose();
+          }
+        }
+        for (const [type, expected] of [
+          ["add", [2, 4, 4, 6]],
+          ["sub", [0, 0, 2, 2]],
+          ["mul", [1, 4, 3, 8]],
+          ["div", [1, 1, 3, 2]]
+        ]) {
+          const model2 = await pg.models.GraphAsync({
+            inputs: { x: { shape: [2, 2], dtype: "float32" }, y: { shape: [2], dtype: "float32" } },
+            nodes: [{ name: "op", type, inputs: ["x", "y"] }],
+            outputs: { prediction: "op" }
+          });
+          try {
+            assertClose((await model2.forward({ x: new Float32Array([1, 2, 3, 4]), y: new Float32Array([1, 2]) })).prediction, expected);
+          } finally {
+            await model2.dispose();
+          }
+        }
+        const model = await pg.models.GraphAsync({
+          inputs: { x: { shape: [2, 1], dtype: "float32" }, y: { shape: [2, 1], dtype: "float32", role: "target" } },
+          nodes: [
+            { name: "pred", type: "linear", out_features: 1, bias: false, inputs: ["x"] },
+            { name: "error", type: "sub", inputs: ["pred", "y"] },
+            { name: "sq", type: "square", inputs: ["error"] },
+            { name: "avg", type: "mean", inputs: ["sq"] }
+          ],
+          outputs: { prediction: "pred", cost: "avg" },
+          entrypoints: [
+            { name: "forward", inputs: ["x"], outputs: ["prediction"] },
+            { name: "loss", inputs: ["x", "y"], outputs: ["cost"], objective: "cost" }
+          ]
+        });
+        try {
+          const x = new Float32Array([1, 2]);
+          await model.writeBufferAsync("nodes.pred.weight", new Float32Array([2]));
+          assertClose((await model.forward({ x })).prediction, [2, 4], 0);
+          model.setOptimizer(pg.OPTIM_SGD, 0.1);
+          assertClose([await model.trainStepAsync({ x, y: x })], [2.5], 1e-6);
+          assertClose(await model.readBufferAsync("nodes.pred.weight"), [1.5], 1e-6);
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkTiedAdamCheckpoint(pg) {
+        const w = new pg.Tensor([1], { dtype: "float32" });
+        const model = await pg.Model.fromTensors({
+          params: { w, tied: w },
+          losses: { cost: w.add(w).square().sum() }
+        });
+        let restored = null;
+        try {
+          await model.placeAsync(pg.device);
+          model.setTrainable("tied", false);
+          assert(!model.bufTrainable(model.findBuf("w")), "placed alias did not freeze");
+          model.setTrainable("w", true);
+          assert(model.bufTrainable(model.findBuf("tied")), "placed alias did not unfreeze");
+          model.setOptimizer(pg.OPTIM_ADAM, 0.1);
+          assertClose([await model.trainStepAsync({})], [4], 0);
+          assertClose(await model.readBufferAsync("w"), [0.9], 1e-6);
+          const names = ["optim.adam.b1_t", "optim.adam.b2_t", "optim.adam.m.w", "optim.adam.v.w"];
+          const weights = await model.exportWeightsAsync();
+          const optimizerNames = (bytes) => [...safetensorNames(bytes)].filter((n) => n.startsWith("optim.")).sort().join(",");
+          assert(optimizerNames(weights) === [...names].sort().join(","), "duplicated tied optimizer state");
+          restored = pg.Model.fromIR(model.exportIR(), weights);
+          await restored.placeAsync(pg.device);
+          restored.setTrainable("w", false);
+          assert(!restored.bufTrainable(restored.findBuf("tied")), "restored alias did not freeze");
+          restored.setTrainable("tied", true);
+          restored.setOptimizer(pg.OPTIM_ADAM, 0.1);
+          const expectedLoss = await model.trainStepAsync({});
+          assertClose([await restored.trainStepAsync({})], [expectedLoss], 0);
+          for (const name of [...names, "w", "tied"]) {
+            assertClose(await restored.readBufferAsync(name), await model.readBufferAsync(name), 0);
+          }
+          assert(optimizerNames(await restored.exportWeightsAsync()) === [...names].sort().join(","), "restored alias state duplicated");
+        } finally {
+          if (restored) await restored.dispose();
+          await model.dispose();
+        }
+      }
       function assert(cond, msg) {
         if (!cond) throw new Error(msg || "assertion failed");
       }
@@ -3829,10 +7491,10 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
         }
         return "";
       }
-      async function checkTypedIntegerInput(pg, Instance) {
+      async function checkTypedIntegerInput(pg, Model) {
         const x = pg.Tensor.empty([3], { dtype: "int32" });
         const outTensor = x.cast("float32");
-        const inst = await Instance.fromTensors({
+        const inst = await Model.fromTensors({
           inputs: { typed_x: x },
           outputs: { typed_out: outTensor }
         });
@@ -3845,15 +7507,15 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           } catch (e) {
             rejected = /call\('forward'\) failed/.test(String(e && e.message));
           }
-          assert(rejected, "float32 bytes must not bind to an int32 Instance input");
+          assert(rejected, "float32 bytes must not bind to an int32 Model input");
         } finally {
           inst.dispose();
         }
       }
-      async function checkCallSignatureAndSelectedOutputs(pg, Instance) {
+      async function checkCallSignatureAndSelectedOutputs(pg, Model) {
         const x = pg.Tensor.empty([2]);
         const y = pg.Tensor.empty([2]);
-        const inst = await Instance.fromTensors({
+        const inst = await Model.fromTensors({
           inputs: { x, y },
           outputs: { plus: x.add(y), minus: x.sub(y) },
           entrypoints: [
@@ -3880,14 +7542,14 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           } catch (err) {
             rejected = /call\('plus_ep'\) failed/.test(String(err && err.message));
           }
-          assert(rejected, "missing required input must not reuse stale Instance bytes");
+          assert(rejected, "missing required input must not reuse stale Model bytes");
         } finally {
           if (webgpu) await inst.dispose();
           else inst.dispose();
         }
         let invalidParamRejected = false;
         try {
-          const unexpected = await Instance.fromTensors({
+          const unexpected = await Model.fromTensors({
             inputs: { x },
             outputs: { output: x.add(1) },
             params: { bad: {} }
@@ -3898,15 +7560,15 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
         }
         assert(invalidParamRejected, "invalid parameter must not be silently filtered");
       }
-      async function checkModuleDeviceMap(pg, Instance) {
+      async function checkModuleDeviceMap(pg, Model) {
         const Tensor = pg.Tensor;
         const x = Tensor.empty([2]);
         const webgpu = String(pg.device).toLowerCase() === "webgpu";
-        const w0 = webgpu ? null : new Tensor([3, 4], { dtype: "float32", requiresGrad: true });
-        const w1 = webgpu ? null : new Tensor([2, 3], { dtype: "float32", requiresGrad: true });
+        const w0 = webgpu ? null : new Tensor([3, 4], { dtype: "float32" });
+        const w1 = webgpu ? null : new Tensor([2, 3], { dtype: "float32" });
         const hidden = webgpu ? x.add(3) : x.add(w0);
         const output = webgpu ? hidden.mul(2) : hidden.mul(w1);
-        const inst = await Instance.fromTensors({
+        const inst = await Model.fromTensors({
           inputs: { x },
           outputs: { output },
           params: webgpu ? null : { "layers.0.weight": w0, "layers.1.weight": w1 },
@@ -3953,7 +7615,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const weightsAfter = await inst.exportWeights();
           assertClose(irAfter, irBefore, 0);
           assertOptionalBytesEqual(weightsAfter, weightsBefore, "replacement weight export");
-          const restored = Instance.fromIR(irAfter, weightsAfter);
+          const restored = Model.fromIR(irAfter, weightsAfter);
           try {
             const restoredResult = webgpu ? await restored.forwardAsync({ x: new Float32Array([1, 2]) }) : await restored.forward({ x: new Float32Array([1, 2]) });
             assertClose(present(restoredResult.output, "restored output"), expected);
@@ -3966,15 +7628,406 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           else inst.dispose();
         }
       }
-      async function runInstanceTests(pg) {
-        const Instance = pg.Instance;
+      async function checkModelStorageObjectives(pg, Model) {
+        const w = new pg.Tensor([2], { dtype: "float32" });
+        const a = w.mul(w).sum(), b = w.mul(w).mul(w).sum();
+        const model = await Model.fromTensors({ params: { w, tied: w }, losses: { a, b }, entrypoints: [
+          { name: "a_ep", outputs: ["a"], objective: "a" },
+          { name: "b_ep", outputs: ["a", "b"], objective: "b" }
+        ] });
+        try {
+          const copied = await model.readBufferAsync("w");
+          copied[0] = 100;
+          assertClose(await model.readBufferAsync("w"), [2], 0);
+          let rejected = false;
+          try {
+            await model.writeBufferAsync("w", new Int32Array([3]));
+          } catch (_) {
+            rejected = true;
+          }
+          assert(rejected, "write accepted a different dtype");
+          const written = new Float32Array([2]);
+          const pendingWrite = model.writeBufferAsync("w", written);
+          written[0] = 9;
+          await pendingWrite;
+          assertClose(await model.readBufferAsync("w"), [2], 0);
+          model.setTrainable("tied", false);
+          model.setTrainable("w", true);
+          model.setOptimizer(pg.OPTIM_SGD, 0.1, 0, 0, 0, 0);
+          rejected = false;
+          try {
+            await model.trainStepAsync({});
+          } catch (_) {
+            rejected = true;
+          }
+          assert(rejected, "ambiguous objective silently selected");
+          assertClose([await model.trainStepAsync({}, "b_ep")], [8], 1e-6);
+          assertClose(await model.readBufferAsync("w"), [0.8], 1e-6);
+          assertClose(await model.readBufferAsync("b"), [8], 0);
+          await model.placeAsync(pg.device);
+          assertClose(await model.readBufferAsync("w"), [0.8], 1e-6);
+          await model.dispose();
+          assertClose(copied, [100], 0);
+          rejected = false;
+          try {
+            await model.readBufferAsync("w");
+          } catch (_) {
+            rejected = true;
+          }
+          assert(rejected, "disposed Model accepted a state read");
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkModelTrace(pg, Model) {
+        const x = pg.Tensor.empty([1]), y = pg.Tensor.empty([1]);
+        const w = new pg.Tensor([1], { dtype: "float32" }).add(1);
+        const offset = new pg.Tensor([1], { dtype: "float32" }).is_param_(false);
+        let calls = 0;
+        const trace = String(pg.device).toLowerCase() === "webgpu" ? Model.fromCallableAsync.bind(Model) : Model.fromCallable.bind(Model);
+        const model = await trace(({ x: x2 }) => {
+          calls++;
+          return x2.mul(w).add(offset);
+        }, {
+          inputs: { x },
+          targets: { y },
+          params: { w, offset },
+          loss: (out, { y: y2 }) => ({ mse: out.sub(y2).square().mean() })
+        });
+        try {
+          assert(calls === 2, "loss capture must construct evaluation and training forwards");
+          model.setOptimizer(pg.OPTIM_SGD, 0.1, 0, 0, 0, 0);
+          assertClose([await model.trainStepAsync({
+            x: new pg.Tensor([1], { dtype: "float32" }),
+            y: new pg.Tensor([0], { dtype: "float32" })
+          })], [9], 1e-6);
+          assertClose(await model.readBufferAsync("w"), [1.4], 1e-6);
+          assertClose(await model.readBufferAsync("offset"), [1], 0);
+          assert(model.bindings().some((row) => row.name === "offset" && row.role === 4), "AUX role lost");
+          const saved = await model.exportWeightsAsync({ includeOptimizer: false });
+          assert(safetensorNames(saved).has("offset"), "model-only export lost persistent AUX");
+          assert(calls === 2, "training re-invoked authoring code after train/eval capture");
+          const objective = model.entrypoints().find((row) => row.name === "loss");
+          assert(objective.objective === "mse" && objective.inputs.join(",") === "x,y", "objective signature lost");
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkModelConstructor(pg, Model) {
+        class Net {
+          constructor() {
+            this.weight = new pg.Tensor([2], { dtype: "float32" });
+            this.alias = this.weight;
+            this.offset = new pg.Tensor([1], { dtype: "float32" }).is_param_(false);
+          }
+          forward({ x }) {
+            return x.mul(this.weight).add(this.offset);
+          }
+        }
+        const net = new Net();
+        const options = {
+          inputs: { x: pg.Tensor.empty([1]) },
+          targets: { y: pg.Tensor.empty([1]) },
+          loss: (out, { y }) => out.sub(y).square().mean()
+        };
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const model = gpu ? await Model.fromCallableAsync(net, options) : new Model(net, options);
+        try {
+          const roles = Object.fromEntries(model.bindings().map((b) => [b.name, b.role]));
+          assert(roles.weight === 0 && roles.alias === 0 && roles.offset === 4, "constructor state roles");
+          model.setOptimizer("sgd", 0.1);
+          assertClose([await model.trainStepAsync({ x: [1], y: [0] })], [9], 1e-6);
+          assertClose(await model.readBufferAsync("weight"), [1.4], 1e-6);
+          assertClose(await net.weight.toArrayAsync(), [2], 0);
+          const bytes = gpu ? await model.saveAsync({ includeOptimizer: false }) : model.save({ includeOptimizer: false });
+          assert(bytes instanceof Uint8Array && bytes.length > 0, "bundle save");
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkModelDispatch(pg, Model) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        for (const config of [compositionFixture, {
+          format: "poly.modeldef@1",
+          type: "sequential",
+          seed: 42,
+          input: { name: "x", shape: [1, 2], dtype: "float32" },
+          layers: [{ name: "dense", type: "linear", out_features: 2 }],
+          output: "prediction"
+        }]) {
+          const factory = config.type === "graph" ? "Graph" : "Sequential";
+          let automatic, explicit;
+          try {
+            if (gpu) {
+              let rejected2 = false;
+              try {
+                new Model(config);
+              } catch (e) {
+                rejected2 = /Async/.test(e.message);
+              }
+              assert(rejected2, "WebGPU constructor must identify the explicit async factory");
+              automatic = await pg.models[factory + "Async"](config);
+            } else automatic = new Model(config);
+            explicit = await pg.models[factory + (gpu ? "Async" : "")](config);
+            assert(JSON.stringify(automatic.bindings()) === JSON.stringify(explicit.bindings()), "configuration bindings differ");
+            const a = await automatic.forwardAsync({ x: new Float32Array([1, 2]) });
+            const b = await explicit.forwardAsync({ x: new Float32Array([1, 2]) });
+            for (const key of Object.keys(a)) assertClose(a[key], b[key], 0);
+          } finally {
+            if (automatic) await automatic.dispose();
+            if (explicit) await explicit.dispose();
+          }
+        }
+        const x = pg.Tensor.empty([1]);
+        const source = { forward: ({ x: x2 }) => x2.add(99), selected: ({ x: x2 }) => x2.mul(2) };
+        const model = gpu ? await Model.fromCallableAsync(source.selected, { inputs: { x }, params: {} }) : Model.fromCallable(source.selected, { inputs: { x }, params: {} });
+        try {
+          assertClose((await model.forwardAsync({ x: [3] })).output, [6], 0);
+        } finally {
+          await model.dispose();
+        }
+        for (const invalid of [
+          { layers: [1, 2] },
+          { nodes: [] },
+          { format: "poly.modeldef@2", type: "graph" },
+          { format: "poly.modeldef@1", type: "unknown" }
+        ]) {
+          let rejected2 = false;
+          try {
+            new Model(invalid);
+          } catch (_) {
+            rejected2 = true;
+          }
+          assert(rejected2, "constructor guessed an untagged/unknown configuration");
+        }
+        let rejected = false;
+        try {
+          new Model(compositionFixture, { outputs: x });
+        } catch (e) {
+          rejected = /combined/.test(e.message);
+        }
+        assert(rejected, "configuration accepted conflicting Tensor bindings");
+        class LazyNet {
+          forward({ x: x2 }) {
+            this.weight = new pg.Tensor([2], { dtype: "float32" });
+            return x2.mul(this.weight);
+          }
+        }
+        const lazy = gpu ? await Model.fromCallableAsync(new LazyNet(), { inputs: { x } }) : new Model(new LazyNet(), { inputs: { x } });
+        try {
+          assert(lazy.bindings().some((b) => b.name === "weight" && b.role === 0), "lazy parameter not collected");
+        } finally {
+          await lazy.dispose();
+        }
+      }
+      async function checkModelUsability(pg, Model) {
+        const x = pg.Tensor.empty([1]);
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const create = (fn, options) => gpu ? Model.fromCallableAsync(fn, options) : Model.fromCallable(fn, options);
+        const model = await create(({ x: x2 }) => ({ prediction: x2.mul(2) }), { inputs: { x } });
+        try {
+          const text = model.summary();
+          assert(text.includes("prediction") && text.includes("float32[1]") && text.includes("forward"), "missing model metadata");
+          if (gpu) {
+            const bytes = await model.saveAsync();
+            const running = model.forwardAsync({ x: [3] });
+            let rejected2 = false;
+            try {
+              Model.load(bytes);
+            } catch (e) {
+              rejected2 = /async/.test(e.message);
+            }
+            await running;
+            assert(rejected2, "bundle load entered suspended Wasm");
+          }
+          let called = false;
+          for (const [fn, loss] of [
+            [async ({ x: x2 }) => {
+              called = true;
+              return x2;
+            }, void 0],
+            [({ x: x2 }) => {
+              called = true;
+              return x2;
+            }, async (out) => out.mean()]
+          ]) {
+            let rejected2 = false;
+            try {
+              await create(fn, { inputs: { x }, loss });
+            } catch (e) {
+              rejected2 = /synchronous/.test(e.message);
+            }
+            assert(rejected2 && !called, "async author/loss was invoked");
+          }
+          const policy = x.logicalPolicy;
+          let rejected = false;
+          try {
+            await create(() => {
+              throw new Error("author failed");
+            }, { inputs: { x } });
+          } catch (e) {
+            rejected = /author failed/.test(e.message);
+          }
+          assert(rejected && pg.Tensor.empty([1]).logicalPolicy === policy, "failed capture changed logical policy");
+          if (typeof process === "undefined" || !process.versions || !process.versions.node) {
+            rejected = false;
+            try {
+              model.save("model.pgb");
+            } catch (e) {
+              rejected = /Node/.test(e.message);
+            }
+            assert(rejected, "browser save accepted a filesystem path");
+          }
+        } finally {
+          await model.dispose();
+        }
+      }
+      async function checkRuntimeImports(pg, Model, createRuntime) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const x = pg.Tensor.empty([1]), w = new pg.Tensor([2], { dtype: "float32" });
+        const live = new pg.Tensor([19], { dtype: "float32" });
+        const options = { inputs: { x }, params: { w, alias: w }, entrypoints: [
+          { name: "forward", inputs: ["x"], outputs: ["output"] },
+          { name: "double", inputs: ["x"], outputs: ["twice"] }
+        ] };
+        const author = ({ x: x2 }) => ({ output: x2.mul(w), twice: x2.mul(w).mul(2) });
+        const source = gpu ? await Model.fromCallableAsync(author, options) : Model.fromCallable(author, options);
+        const models = [source];
+        const read = (m) => gpu ? m.readBufferAsync("w") : m.readBuffer("w");
+        const forward = (m) => gpu ? m.forwardAsync({ x: [3] }) : m.forward({ x: [3] });
+        try {
+          const bytes = gpu ? await source.saveAsync() : source.save();
+          const a = Model.load(bytes), b = Model.fromBundle(bytes);
+          models.push(a, b);
+          if (gpu) await a.writeBufferAsync("alias", new Float32Array([7]));
+          else a.writeBuffer("alias", new Float32Array([7]));
+          assertClose(await read(a), [7], 0);
+          assertClose((await forward(b)).output, [6], 0);
+          assertClose((await forward(source)).output, [6], 0);
+          const c = Model.load(await b.saveAsync());
+          models.push(c);
+          assertClose((await c.callAsync("double", { x: [3] })).twice, [12], 0);
+          await b.writeBufferAsync("alias", new Float32Array([11]));
+          assertClose((await c.callAsync("double", { x: [3] })).twice, [12], 0);
+          assertClose((await c.forwardAsync({ x: [3] })).output, [6], 0);
+          for (const n of [0, 31, Math.floor(bytes.length / 2), bytes.length - 1]) {
+            let rejected = false;
+            try {
+              Model.load(bytes.slice(0, n));
+            } catch {
+              rejected = true;
+            }
+            assert(rejected, "truncated import accepted");
+          }
+          await a.dispose();
+          pg.collect();
+          assertClose((await forward(b)).output, [33], 0);
+          assertClose((await c.callAsync("double", { x: [3] })).twice, [12], 0);
+          assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0);
+          const runtime = await createRuntime();
+          const held = new runtime.Tensor([19], { dtype: "float32" });
+          try {
+            await held.realizeAsync();
+            runtime.clearScheduleCache();
+            runtime.collect();
+            const fields = ["bufferOwnedBytes", "bufferEntries", "tensorRecords"];
+            const baseline = runtime.stats().coreStats;
+            assert(baseline.tensorRecords === 1, "baseline must contain only the held Tensor");
+            for (let i = 0; i < 8; i++) {
+              const loaded = runtime.Model.load(bytes);
+              try {
+                assertClose((await loaded.forwardAsync({ x: [3] })).output, [6], 0);
+                await loaded.writeBufferAsync("alias", new Float32Array([7]));
+                assertClose(await loaded.readBufferAsync("w"), [7], 0);
+              } finally {
+                await loaded.dispose();
+              }
+              runtime.clearScheduleCache();
+              runtime.collect();
+              const current = runtime.stats().coreStats;
+              for (const field of fields)
+                assert(
+                  current[field] === baseline[field],
+                  `import/dispose retained ${field}: ${baseline[field]} -> ${current[field]}`
+                );
+            }
+            assertClose(await held.toArrayAsync(), [19], 0);
+          } finally {
+            held.dispose();
+            await runtime.dispose();
+          }
+        } finally {
+          for (const model of models) await model.dispose();
+          x.dispose();
+          w.dispose();
+          live.dispose();
+        }
+      }
+      async function checkFamilyRuntimeOwnership(pg) {
+        const gpu = String(pg.device).toLowerCase() === "webgpu";
+        const live = new pg.Tensor([19], { dtype: "float32" });
+        const specs = [
+          ["MLP", { layers: [2, 3, 1] }],
+          ["TabM", { layers: [2, 3, 1], n_ensemble: 2 }],
+          ["NAM", { n_features: 2, hidden_sizes: [3], n_outputs: 1 }]
+        ];
+        try {
+          for (const [name, spec] of specs) {
+            const beforeStats = pg.stats().coreStats;
+            const a = pg.models[name](spec), b = pg.models[name](spec);
+            try {
+              assert(
+                pg.stats().coreStats.tensorRecords === beforeStats.tensorRecords,
+                "family retained construction Tensor wrappers"
+              );
+              const parameter = a.paramName(0);
+              const before = await b.readBufferAsync(parameter);
+              await a.writeBufferAsync(parameter, new Float32Array(before.length).fill(7));
+              assertClose(await b.readBufferAsync(parameter), before, 0);
+              const expected = await b.forwardAsync({ x: [1, 2] });
+              const input = new pg.Tensor([[1, 2]], { dtype: "float32" });
+              let tensorOutputs;
+              try {
+                tensorOutputs = await b.forwardAsync({ x: input });
+                assertClose(await tensorOutputs.output.toArrayAsync(), expected.output, 0);
+              } finally {
+                if (tensorOutputs) for (const output of Object.values(tensorOutputs)) output.dispose();
+                input.dispose();
+              }
+              await a.dispose();
+              pg.collect();
+              assertClose((await b.forwardAsync({ x: [1, 2] })).output, expected.output, 0);
+              assertClose(gpu ? await live.toArrayAsync() : live.toArray(), [19], 0);
+              pg._activeAsync++;
+              try {
+                let rejected = false;
+                try {
+                  pg.models[name](spec);
+                } catch (e) {
+                  rejected = /idle/.test(e.message);
+                }
+                assert(rejected, "factory entered a busy Runtime");
+              } finally {
+                pg._activeAsync--;
+              }
+            } finally {
+              await a.dispose();
+              await b.dispose();
+            }
+          }
+        } finally {
+          live.dispose();
+        }
+      }
+      async function runModelRuntimeTests(pg, createRuntime) {
+        const Model = pg.Model;
         const { MLP, TabM, NAM } = pg.models;
         const testFilter = testFilterFor(pg);
         let passed = 0;
         let failed = 0;
-        if (!pg.supportsInstance) {
-          console.log("\n== Instance ==");
-          console.log("  [SKIP] core does not expose PolyInstance runtime yet");
+        if (!pg.supportsModel) {
+          console.log("\n== Model ==");
+          console.log("  [SKIP] core does not expose PolyModel runtime yet");
           return { passed: 0, failed: 0 };
         }
         async function test(name, fn) {
@@ -3988,21 +8041,43 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             failed++;
           }
         }
-        console.log("\n== Instance ==");
+        console.log("\n== Model ==");
+        await test("Model checkpoint replacement uses queued readback", () => checkModelCheckpointReplacement(pg));
+        await test("Model stateful capture shares train eval state", () => checkModelStatefulCapture(pg));
+        await test("Model stateful capture owns resumable RNG", () => checkModelCaptureRng(pg));
+        await test("Model stateful capture restores failures and rejects async execution", () => checkModelCaptureFailure(pg));
+        await test("Model copied storage exact writes and objective selection", () => checkModelStorageObjectives(pg, Model));
+        await test("Model codecs reject malformed bytes before publication", () => checkModelCodecRejection(pg));
+        await test("Model quantized weights match pinned GGUF bit planes", () => checkQuantizedModelWeights(pg));
+        await test("Model composition factories share C construction", () => checkCompositionFactories(pg));
+        await test("Model composition catalogue and named target objective", () => checkCompositionCatalogue(pg));
+        await test("Model tied Adam placement freeze and checkpoint", () => checkTiedAdamCheckpoint(pg));
+        await test("Model constructor collects object state", () => checkModelConstructor(pg, Model));
+        await test("Model constructor dispatch and explicit factories", () => checkModelDispatch(pg, Model));
+        await test("Model usability summary and capture failures", () => checkModelUsability(pg, Model));
+        await test("Model runtime imports isolation and failure", () => checkRuntimeImports(pg, Model, createRuntime));
+        await test("Model family runtime ownership", () => checkFamilyRuntimeOwnership(pg));
+        await test("Llama family reference and shared import", () => checkLlamaFamily(pg));
+        await test("Model Tensor I/O owns device results", () => checkModelTensorIO(pg));
+        await test("Model variable shapes preserve results and portable signatures", () => checkModelVariableShapes(pg));
+        await test("Model empty bindings reject before input writes", () => checkModelEmptyInputAdmission(pg));
+        await test("Model minibatches match explicit training steps", () => checkModelMinibatches(pg));
+        await test("Model bounded minibatches and Tensor datasets", () => checkModelBoundedMinibatches(pg));
+        await test("Model trace seals independent state with named loss", () => checkModelTrace(pg, Model));
         await test("generic call validates signature and returns selected outputs", async () => {
-          await checkCallSignatureAndSelectedOutputs(pg, Instance);
+          await checkCallSignatureAndSelectedOutputs(pg, Model);
         });
         await test("scalar rank8 and shared multi-output round trip", async () => {
           const scalarX = pg.Tensor.empty([]);
-          const scalarW = pg.Tensor.full([], 3, { dtype: "float32", requiresGrad: true });
-          const scalar = await Instance.fromTensors({
+          const scalarW = pg.Tensor.full([], 3, { dtype: "float32" });
+          const scalar = await Model.fromTensors({
             inputs: { x: scalarX },
             outputs: { output: scalarX.mul(scalarW) },
             params: { w: scalarW }
           });
           let scalarRestored = null;
           try {
-            scalarRestored = Instance.fromIR(scalar.exportIR(), await scalar.exportWeights());
+            scalarRestored = Model.fromIR(scalar.exportIR(), await scalar.exportWeights());
             const result = await scalarRestored.forward({ x: new Float32Array([2]) });
             assertClose(result.output, [6], 0);
             assert(
@@ -4015,16 +8090,16 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
           const shape = [1, 1, 1, 1, 1, 1, 1, 1];
           const x = pg.Tensor.empty(shape);
-          const w = pg.Tensor.ones(shape, { requiresGrad: true });
+          const w = pg.Tensor.ones(shape, {});
           const shared = x.add(w);
-          const source = await Instance.fromTensors({
+          const source = await Model.fromTensors({
             inputs: { x },
             outputs: { plus: shared.add(1), minus: shared.sub(1) },
             params: { w }
           });
           let restored = null;
           try {
-            restored = Instance.fromIR(source.exportIR(), await source.exportWeights());
+            restored = Model.fromIR(source.exportIR(), await source.exportWeights());
             const result = await restored.forward({ x: new Float32Array([2]) });
             assertClose(result.plus, [4], 0);
             assertClose(result.minus, [2], 0);
@@ -4041,7 +8116,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const x = pg.Tensor.empty([2]);
           let error = null;
           try {
-            const unexpected = await Instance.fromTensors({
+            const unexpected = await Model.fromTensors({
               inputs: { a: x, b: x },
               outputs: { output: x.add(x) }
             });
@@ -4055,7 +8130,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const x = pg.Tensor.empty([2]);
           let error = null;
           try {
-            const unexpected = await Instance.fromTensors({
+            const unexpected = await Model.fromTensors({
               inputs: { x },
               outputs: { output: x.add(x) },
               params: { w: x }
@@ -4068,10 +8143,10 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
         });
         await test("output alias of dynamic input round trips", async () => {
           const x = pg.Tensor.empty([2]);
-          const source = await Instance.fromTensors({ inputs: { x }, outputs: { output: x } });
+          const source = await Model.fromTensors({ inputs: { x }, outputs: { output: x } });
           let restored = null;
           try {
-            restored = Instance.fromIR(source.exportIR());
+            restored = Model.fromIR(source.exportIR());
             const value = new Float32Array([3, 4]);
             assertClose((await source.forward({ x: value })).output, value, 0);
             assertClose((await restored.forward({ x: value })).output, value, 0);
@@ -4081,12 +8156,12 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("named partial view state fails closed", async () => {
-          const base = new pg.Tensor([1, 2, 3, 4], { dtype: "float32", requiresGrad: true });
+          const base = new pg.Tensor([1, 2, 3, 4], { dtype: "float32" });
           const view = base.shrink([[1, 3]]);
           const x = pg.Tensor.empty([2]);
           let error = null;
           try {
-            const unexpected = await Instance.fromTensors({
+            const unexpected = await Model.fromTensors({
               inputs: { x },
               outputs: { output: x.add(view) },
               params: { base, view }
@@ -4103,7 +8178,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const output = w.assign(w.add(x));
           let error = null;
           try {
-            const unexpected = await Instance.fromTensors({
+            const unexpected = await Model.fromTensors({
               inputs: { x },
               outputs: { output },
               params: { w }
@@ -4119,7 +8194,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const x = pg.Tensor.empty([2]);
           let error = null;
           try {
-            const unexpected = await Instance.fromTensors({
+            const unexpected = await Model.fromTensors({
               inputs: { x },
               outputs: { output: x.add(pg.Tensor.rand(2)) }
             });
@@ -4143,10 +8218,10 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           assert(params.length === 2, `unexpected parameter count: ${params.length}`);
           assert(params[0] === shared && params[1] === shared, "parameter aliases must match state paths");
         });
-        await test("float16 Instance state preserves exact storage bits", async () => {
-          const w = new pg.Tensor([1.5, -2], { dtype: "float16", requiresGrad: true });
+        await test("float16 Model state preserves exact storage bits", async () => {
+          const w = new pg.Tensor([1.5, -2], { dtype: "float16" });
           const x = pg.Tensor.empty([2], { dtype: "float16" });
-          const inst = await Instance.fromTensors({
+          const inst = await Model.fromTensors({
             inputs: { x },
             outputs: { output: x.add(w) },
             params: { w }
@@ -4159,7 +8234,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
               raw.length === 2 && raw[0] === 15872 && raw[1] === 49152,
               `unexpected float16 bits: ${Array.from(raw)}`
             );
-            const restored = Instance.fromIR(inst.exportIR(), await inst.exportWeights());
+            const restored = Model.fromIR(inst.exportIR(), await inst.exportWeights());
             try {
               assert(restored.paramDtype(0) === "float16", "restored dtype must remain float16");
               const restoredRaw = await restored.paramData(0);
@@ -4178,7 +8253,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             inst.dispose();
           }
         });
-        await test("typed Instance state round trips exact storage bytes", async () => {
+        await test("typed Model state round trips exact storage bytes", async () => {
           const cases = [
             ["float64", [1.25, -2.5], Float64Array],
             ["int32", [1, -2], Int32Array],
@@ -4189,13 +8264,13 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           for (const [dtype, values, ArrayType] of cases) {
             const w = new pg.Tensor(values, { dtype });
             const x = pg.Tensor.empty([2], { dtype });
-            const source = await Instance.fromTensors({
+            const source = await Model.fromTensors({
               inputs: { x },
               outputs: { output: x },
               params: { w }
             });
             try {
-              const restored = Instance.fromIR(source.exportIR(), await source.exportWeights());
+              const restored = Model.fromIR(source.exportIR(), await source.exportWeights());
               try {
                 const before = await source.paramData(0);
                 const after = await restored.paramData(0);
@@ -4219,13 +8294,13 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("typed integer input preserves bytes and rejects float binding", async () => {
-          await checkTypedIntegerInput(pg, Instance);
+          await checkTypedIntegerInput(pg, Model);
         });
         await test("module device map places exact Tensor cuts atomically", async () => {
-          await checkModuleDeviceMap(pg, Instance);
+          await checkModuleDeviceMap(pg, Model);
         });
-        await test("model-family constructors are not Instance methods", async () => {
-          assert(typeof Instance.mlp === "undefined", "Instance.mlp should not exist");
+        await test("model-family constructors are not Model methods", async () => {
+          assert(typeof Model.mlp === "undefined", "Model.mlp should not exist");
           assert(typeof MLP === "function", "pg.models.MLP should exist");
         });
         await test("mlp create + param enumeration", async () => {
@@ -4290,7 +8365,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           });
           try {
             inst1.setParamTrainable(0, false);
-            const inst2 = Instance.fromIR(inst1.exportIR(), await inst1.exportWeights());
+            const inst2 = Model.fromIR(inst1.exportIR(), await inst1.exportWeights());
             try {
               assert(inst2.paramTrainable(0) === false, "frozen flag should round trip");
               assert(inst2.paramTrainable(1) === true, "unfrozen flag should round trip");
@@ -4389,7 +8464,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             source.setOptimizer(pg.OPTIM_ADAM, 0.05);
             const io = { x: new Float32Array([1, 2]), y: new Float32Array([3]) };
             for (let i = 0; i < 3; i++) await source.trainStep(io);
-            restored = Instance.fromIR(source.exportIR(), await source.exportWeights());
+            restored = Model.fromIR(source.exportIR(), await source.exportWeights());
             restored.setOptimizer(pg.OPTIM_ADAM, 0.05);
             const sourceLoss = await source.trainStep(io);
             const restoredLoss = await restored.trainStep(io);
@@ -4420,9 +8495,9 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
         });
         await test("stochastic named state requires checkpoint for portable activation", async () => {
           pg.Tensor.manual_seed(11);
-          const w = pg.Tensor.rand(2, { requiresGrad: true });
+          const w = pg.Tensor.rand(2, {});
           const x = pg.Tensor.empty([2]);
-          const source = await Instance.fromTensors({
+          const source = await Model.fromTensors({
             inputs: { x },
             outputs: { output: x.mul(w) },
             params: { w }
@@ -4433,13 +8508,13 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             const weights = await source.exportWeights();
             let rejected = false;
             try {
-              const unexpected = Instance.fromIR(ir);
+              const unexpected = Model.fromIR(ir);
               unexpected.dispose();
             } catch (err) {
               rejected = true;
             }
             assert(rejected, "fresh stochastic activation must fail without checkpoint bytes");
-            restored = Instance.fromIR(ir, weights);
+            restored = Model.fromIR(ir, weights);
             const input = new Float32Array([2, 3]);
             const sourceOut = await source.forward({ x: input });
             const restoredOut = await restored.forward({ x: input });
@@ -4461,7 +8536,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           try {
             const ir = inst1.exportIR();
             const weights = await inst1.exportWeights();
-            const inst2 = Instance.fromIR(ir, weights);
+            const inst2 = Model.fromIR(ir, weights);
             try {
               const out1 = (await inst1.forward({ x: new Float32Array([1, 2]) })).output;
               const out2 = (await inst2.forward({ x: new Float32Array([1, 2]) })).output;
@@ -4492,19 +8567,19 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             );
             let missingWeightsRejected = false;
             try {
-              const unexpected = Instance.fromProgram(program);
+              const unexpected = Model.fromProgram(program);
               await unexpected.dispose();
             } catch (err) {
               missingWeightsRejected = true;
             }
             assert(missingWeightsRejected, "bound state must require separate weights");
-            inst2 = Instance.fromProgram(program, weights);
+            inst2 = Model.fromProgram(program, weights);
             const input = new Float32Array([1.25, -0.5]);
             const out1 = (await inst1.forward({ x: input })).output;
             const out2 = (await inst2.forward({ x: input })).output;
             assertClose(out2, out1, 0);
             const portable = inst2.exportIR();
-            assert(!portable || portable.length === 0, "program-only Instance exposed portable IR");
+            assert(!portable || portable.length === 0, "program-only Model exposed portable IR");
             const program2 = await inst2.exportProgramAsync();
             assertClose(program2, program, 0);
           } finally {
@@ -4699,18 +8774,18 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         console.log(`
-Instance tests: ${passed} passed, ${failed} failed`);
+Model tests: ${passed} passed, ${failed} failed`);
         return { passed, failed };
       }
-      async function runInstanceSmokeTests(pg) {
-        const Instance = pg.Instance;
+      async function runModelSmokeTests(pg, createRuntime) {
+        const Model = pg.Model;
         const { MLP, TabM, NAM } = pg.models;
         const testFilter = testFilterFor(pg);
         let passed = 0;
         let failed = 0;
-        if (!pg.supportsInstance) {
-          console.log("\n== Instance ==");
-          console.log("  [SKIP] core does not expose PolyInstance runtime yet");
+        if (!pg.supportsModel) {
+          console.log("\n== Model ==");
+          console.log("  [SKIP] core does not expose PolyModel runtime yet");
           return { passed: 0, failed: 0 };
         }
         async function test(name, fn) {
@@ -4724,15 +8799,37 @@ Instance tests: ${passed} passed, ${failed} failed`);
             failed++;
           }
         }
-        console.log("\n== Instance ==");
+        console.log("\n== Model ==");
+        await test("Model stateful capture shares train eval state", () => checkModelStatefulCapture(pg));
+        await test("Model stateful capture owns resumable RNG", () => checkModelCaptureRng(pg));
+        await test("Model stateful capture restores failures and rejects async execution", () => checkModelCaptureFailure(pg));
+        await test("Model composition factories share C construction", () => checkCompositionFactories(pg));
+        await test("Model checkpoint replacement uses queued readback", () => checkModelCheckpointReplacement(pg));
+        await test("Model composition catalogue and named target objective", () => checkCompositionCatalogue(pg));
+        await test("Model tied Adam placement freeze and checkpoint", () => checkTiedAdamCheckpoint(pg));
+        await test("Model constructor collects object state", () => checkModelConstructor(pg, Model));
+        await test("Model constructor dispatch and explicit factories", () => checkModelDispatch(pg, Model));
+        await test("Model usability summary and capture failures", () => checkModelUsability(pg, Model));
+        await test("Model runtime imports isolation and failure", () => checkRuntimeImports(pg, Model, createRuntime));
+        await test("Model family runtime ownership", () => checkFamilyRuntimeOwnership(pg));
+        await test("Llama family reference and shared import", () => checkLlamaFamily(pg));
+        await test("Model Tensor I/O owns device results", () => checkModelTensorIO(pg));
+        await test("Model variable shapes preserve results and portable signatures", () => checkModelVariableShapes(pg));
+        await test("Model empty bindings reject before input writes", () => checkModelEmptyInputAdmission(pg));
+        await test("Model minibatches match explicit training steps", () => checkModelMinibatches(pg));
+        await test("Model bounded minibatches and Tensor datasets", () => checkModelBoundedMinibatches(pg));
+        await test("Model trace seals independent state with named loss", () => checkModelTrace(pg, Model));
+        await test("Model copied storage exact writes and objective selection", () => checkModelStorageObjectives(pg, Model));
+        await test("Model codecs reject malformed bytes before publication", () => checkModelCodecRejection(pg));
+        await test("Model quantized weights match pinned GGUF bit planes", () => checkQuantizedModelWeights(pg));
         await test("typed integer input preserves bytes and rejects float binding", async () => {
-          await checkTypedIntegerInput(pg, Instance);
+          await checkTypedIntegerInput(pg, Model);
         });
         await test("generic call validates signature and returns selected outputs", async () => {
-          await checkCallSignatureAndSelectedOutputs(pg, Instance);
+          await checkCallSignatureAndSelectedOutputs(pg, Model);
         });
         await test("webgpu module device map places exact Tensor cuts atomically", async () => {
-          await checkModuleDeviceMap(pg, Instance);
+          await checkModuleDeviceMap(pg, Model);
         });
         await test("webgpu mlp forward smoke", async () => {
           const inst = MLP({
@@ -4753,10 +8850,10 @@ Instance tests: ${passed} passed, ${failed} failed`);
           }
         });
         console.log(`
-Instance smoke tests: ${passed} passed, ${failed} failed`);
+Model smoke tests: ${passed} passed, ${failed} failed`);
         return { passed, failed };
       }
-      module.exports = { runInstanceTests, runInstanceSmokeTests };
+      module.exports = { runModelRuntimeTests, runModelSmokeTests };
     }
   });
 
@@ -4764,10 +8861,10 @@ Instance smoke tests: ${passed} passed, ${failed} failed`);
   var require_test_browser_entry = __commonJS({
     "test/browser/test_browser_entry.js"() {
       var { runTensorTests } = require_test_tensor();
-      var { runInstanceTests, runInstanceSmokeTests } = require_test_instance();
+      var { runModelRuntimeTests, runModelSmokeTests } = require_test_model_runtime();
       window.__runTensorTests = runTensorTests;
-      window.__runInstanceTests = runInstanceTests;
-      window.__runInstanceSmokeTests = runInstanceSmokeTests;
+      window.__runModelRuntimeTests = runModelRuntimeTests;
+      window.__runModelSmokeTests = runModelSmokeTests;
     }
   });
   require_test_browser_entry();

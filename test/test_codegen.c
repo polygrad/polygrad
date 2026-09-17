@@ -5783,6 +5783,54 @@ TEST(codegen, partial_reshape_index_matches_tinygrad_mop) {
   PASS();
 }
 
+TEST(codegen, c_vector_store_requires_destination_type) {
+  /* Pinned CStyleLanguage.render_access types the lvalue from the memory
+   * destination. A raw int vector cannot be stored as float bits; CAST is
+   * required. Scalar C assignment still permits numeric conversion. */
+  bool correct = true;
+  for (int lanes = 1; lanes <= 4; lanes *= 4) {
+    for (int convert = 0; convert <= 1; convert++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_GLOBAL);
+      PolyUOp *address = poly_uop3(
+          ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, poly_const_int(ctx, 0),
+          poly_const_int(ctx, lanes), poly_arg_none()
+      );
+      PolyUOp *items[4];
+      for (int i = 0; i < lanes; i++)
+        items[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(11 + i));
+      PolyUOp *value = lanes == 1 ? items[0] : poly_uop_stack(ctx, items, lanes);
+      if (convert) value = poly_cast(ctx, value, POLY_FLOAT32);
+      PolyUOp *store = poly_uop_store(ctx, address, value);
+      PolyUOp *sink = poly_uop_sink(ctx, &store, 1);
+      int n = 0;
+      PolyUOp **linear = poly_toposort(ctx, sink, &n);
+      char *source = poly_render_c(ctx, linear, n, "typed_store");
+      if (lanes > 1 && !convert) {
+        correct &= source == NULL;
+      } else {
+        correct &= source != NULL;
+        if (source) {
+          PolyProgram *program = poly_compile_c(source, "typed_store");
+          correct &= program != NULL;
+          if (program) {
+            float result[4] = {0};
+            void *args[] = {result};
+            poly_program_call(program, args, 1);
+            for (int i = 0; i < lanes; i++)
+              correct &= result[i] == 11.0f + i;
+            poly_program_destroy(program);
+          }
+        }
+      }
+      free(source);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, wgsl_narrow_cast_and_alu_results) {
   /* PG-DIV-008: WGSL's i32/u32 registers must preserve the UOp's 8/16-bit
    * value before a later widening. Pinned PythonProgram truncates here;

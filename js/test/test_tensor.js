@@ -1192,6 +1192,54 @@ async function runTensorTests(pg, createRuntime) {
     assert(pg.uop.buffer(t.uop), 'pg.uop.buffer should return a UOp')
   })
 
+  await test('constructor rejects unsupported options', async () => {
+    for (const key of ['shape', 'dytpe', '_unknown']) {
+      let error = null
+      try { new Tensor(new Float32Array([1, 2, 3, 4]), { [key]: [2, 2] }) }
+      catch (e) { error = e }
+      assert(error instanceof TypeError && error.message.includes(key), `expected option error for ${key}`)
+    }
+    const tensor = new Tensor(new Float32Array([1, 2, 3, 4])).reshape(2, 2)
+    assertShape(tensor.shape, [2, 2])
+    assertClose(await tensor.toArray(), [1, 2, 3, 4])
+    tensor.dispose()
+  })
+
+  await test('customKernel explicit store cast supports mixed dtypes', async () => {
+    const input = new Tensor([11, 22, 33, 44], { dtype: 'int32' })
+    const output = Tensor.empty(4, { dtype: 'float32' })
+    const result = output.customKernel(input, (out, value) => {
+      const i = pg.uop.range(4, 0)
+      return out.index(i).store(value.index(i).cast('float32')).end(i).sink(
+        new pg.uop.KernelInfo('mixed_store_cast')
+      )
+    })[0]
+    assertClose(await result.toArray(), [11, 22, 33, 44])
+    result.dispose(); output.dispose(); input.dispose()
+  })
+
+  if (pg.core === 'native' && pg.device === 'cpu') {
+    await test('customKernel CPU rejects vector store dtype mismatch', async () => {
+      const input = new Tensor([11, 22, 33, 44], { dtype: 'int32' })
+      const output = Tensor.empty(4, { dtype: 'float32' })
+      let result = null, error = null
+      try {
+        result = output.customKernel(input, (out, value) => {
+          const i = pg.uop.range(4, 0)
+          return out.index(i).store(value.index(i)).end(i).sink(
+            new pg.uop.KernelInfo('invalid_vector_store')
+          )
+        })[0]
+        await result.toArray()
+      } catch (e) { error = e }
+      finally {
+        if (result) result.dispose()
+        output.dispose(); input.dispose()
+      }
+      assert(error instanceof Error, 'mismatched vector STORE must not return reinterpreted bits')
+    })
+  }
+
   await test('customKernel executes UOp CALL body', async () => {
     function addKernel(c, a, b) {
       c = c.flatten(); a = a.flatten(); b = b.flatten()

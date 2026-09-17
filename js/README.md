@@ -1,16 +1,28 @@
 # Polygrad JavaScript
 
-JavaScript bindings for Polygrad, a C11 tensor compiler with Node, WASM, and
-browser runtimes.
+Train and run models in Node.js or the browser. Use tensors, automatic
+differentiation and neural-network layers directly in JavaScript, or load a
+Polygrad model trained in Python without rewriting it in JavaScript.
 
-The package uses the same C compiler core as Polygrad Python. In Node it tries
-the native addon first and falls back to packaged WASM. In browsers it runs the
-C runtime through WASM, with optional WebGPU execution.
+In a browser application, model execution can stay on the user's device through
+WebAssembly or WebGPU; no Python server is required.
 
-Use this package when JavaScript owns the application flow but tensor execution
-should still come from the shared Polygrad compiler/runtime: Node services,
-browser ML tools, WebGPU demos, or packages that accept a caller-provided
-Polygrad runtime.
+[Project overview and shared C/runtime reference](https://github.com/polygrad/polygrad#readme) | [Python guide](https://github.com/polygrad/polygrad/blob/main/py/README.md)
+
+## Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Choose A Runtime](#choose-a-runtime)
+- [Browser](#browser)
+- [Data Flow](#data-flow)
+- [Training](#training)
+- [Models](#models)
+- [JIT And Compile](#jit-and-compile)
+- [Custom Kernels](#custom-kernels)
+- [Common API Recipes](#common-api-recipes)
+- [Package Integration](#package-integration)
+- [Troubleshooting](#troubleshooting)
 
 ## Install
 
@@ -18,55 +30,21 @@ Polygrad runtime.
 npm install polygrad
 ```
 
-## Stateful Models
+Requires Node 18 or newer. The CPU backend needs `clang` at runtime;
+Wasm does not. Browser/WebGPU setup is covered in [Browser](#browser).
+The current native and Wasm checks run on Node 22.23.0.
 
-`new pg.Model(author, {inputs, targets, params, loss})` captures evaluation and
-training forwards with shared named state. The author runs twice at construction,
-not during `forward` or `fit`. Object authors expose `forward(inputs)` and their
-Tensor attributes supply state unless `params` overrides it. BatchNorm and RNG
-updates belong to the Model; authoring Tensor roots and `Tensor.training` are
-restored on failure too. Set the seed before construction.
+### Native installation
 
-For WebGPU, use `await pg.Model.fromCallableAsync(author, options)` to seal the
-graph; the author itself must stay synchronous and must not start async reads or
-execution. Authored assignments require auxiliary state (`is_param_(false)`);
-parameter updates belong to the optimizer. Arbitrary JavaScript side effects
-are not rolled back. Saved bundles preserve auxiliary/RNG and optional optimizer
-state; reapply the same optimizer configuration to resume training after loading.
-To replace weights on an existing WebGPU Model, use
-`await model.importWeightsAsync(bytes)`. Replacement reads current device state
-for rollback; the queued call owns a copy of `bytes`. Synchronous backends also
-support `model.importWeights(bytes)`.
-Without a loss, capture uses the current `Tensor.training` mode for its forward
-entrypoint; changing that setting later does not recapture the Model.
-
-Model inputs may have one bounded variable leading dimension with fixed trailing
-dimensions; storage currently reserves the maximum capacity. Calls reject empty
-inputs. A flat typed array uses the declared signature, or supply
-`{data: typedArray, shape: [rows, columns]}` for an explicit shape.
-
-Tensor inputs must belong to the Model's Runtime and device. Any Tensor input
-makes outputs owned device Tensors; array-only calls return host arrays. Returned
-Tensors keep their invocation's values and shape across later calls and Model
-disposal, but not Runtime disposal. This uses device copies, not zero-copy or
-differentiable Model composition. Dispose results when finished.
-
-## Native installation
-
-Node tries to build the native addon during install. If that fails, runtime
+Node tries to build the native addon during install, using a C/C++ compiler,
+Python and the platform's `node-gyp` build tools. If that fails, runtime
 creation can still use the WASM core. To skip native compilation:
 
 ```bash
 POLYGRAD_SKIP_NATIVE=1 npm install polygrad
 ```
 
-From this repository:
-
-```bash
-cd js
-npm install
-node test/test_wasm.js
-```
+For a source checkout, see [building from source](https://github.com/polygrad/polygrad#building-from-source).
 
 ## Quick Start
 
@@ -77,7 +55,7 @@ const a = Tensor.rand(3, 4)
 const b = Tensor.rand(4, 5)
 const c = a.dot(b).softmax(-1)
 
-console.log(c.toArray())
+console.log(c.toArray())  // 15 values: three rows of five probabilities
 ```
 
 Autograd:
@@ -85,7 +63,7 @@ Autograd:
 ```js
 const { Tensor } = require('polygrad')
 
-const x = new Tensor([1.0, 2.0, 3.0])
+const x = new Tensor([1, 2, 3], { dtype: 'float32' }) // gradients need floats
 const loss = x.mul(x).sum()
 
 loss.backward()
@@ -108,8 +86,8 @@ Linear algebra:
 ```js
 const { Tensor } = require('polygrad')
 
-const A = new Tensor([[4.0, 2.0], [2.0, 5.0]])
-const b = new Tensor([1.0, 3.0])
+const A = new Tensor([[4.0, 2.0], [2.0, 5.0]], { dtype: 'float32' })
+const b = new Tensor([1.0, 3.0], { dtype: 'float32' })
 const x = A.solve(b)
 
 console.log(x.toArray())
@@ -131,7 +109,16 @@ startup itself must be awaited:
 
 ```js
 const { createAsync } = require('polygrad/async')
-const pg = await createAsync({ core: 'wasm' })
+
+async function main() {
+  const pg = await createAsync({ core: 'wasm' })
+  try {
+    console.log(new pg.Tensor([1, 2, 3]).mul(2).toArray())
+  } finally {
+    await pg.dispose()
+  }
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })
 ```
 
 Runtime matrix:
@@ -185,7 +172,7 @@ explicit runtime.
 
 ## Browser
 
-With an npm-installed package and a browser bundler:
+Browser-only, with an npm-installed package and a browser bundler:
 
 ```js
 import { Tensor } from 'polygrad'
@@ -194,7 +181,7 @@ const y = new Tensor([1, 2, 3]).mul(2).add(1)
 console.log(y.toArray())
 ```
 
-For WebGPU, create an explicit runtime and use async execution/readback:
+Browser-only WebGPU: create an explicit runtime and use async execution/readback:
 
 ```js
 import { create } from 'polygrad'
@@ -210,20 +197,14 @@ through the package `browser` export condition. Node `require('polygrad')`
 still resolves to the Node entry.
 
 If a bundler or CDN resolver picks the Node entry by mistake, force the browser
-entry explicitly:
+entry explicitly (browser-only):
 
 ```js
 import { create } from 'polygrad/browser'
 ```
 
-For a local checkout or manual browser bundle, build browser artifacts from the
-repository root:
-
-```bash
-make wasm-pkg
-cd js
-npm run build:browser
-```
+For a local checkout or manual browser bundle, see
+[building from source](https://github.com/polygrad/polygrad#building-from-source).
 
 Outputs:
 
@@ -277,7 +258,7 @@ read data back.
 ```js
 const { Tensor } = require('polygrad')
 
-const x = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+const x = new Tensor(new Float32Array([1, 2, 3, 4]))
 const y = x.mul(3).sub(1).realize()
 
 console.log(y.toTypedArray())  // Float32Array
@@ -289,7 +270,7 @@ tensors:
 ```js
 const { Tensor } = require('polygrad')
 
-const x = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+const x = new Tensor(new Float32Array([1, 2, 3, 4]))
 x.realize()
 x.copyFrom(new Float32Array([5, 6, 7, 8]))
 ```
@@ -304,6 +285,121 @@ const a = x.add(1)
 const b = x.mul(2)
 const [aData, bData] = Tensor.toTypedArrays(a, b)
 ```
+
+## Training
+
+```js
+const { Tensor, nn } = require('polygrad')
+
+const model = new nn.Linear(4, 1)
+const opt = new nn.SGD(nn.getParameters(model), { lr: 0.01 })
+
+const x = Tensor.randn(8, 4)
+const target = Tensor.randn(8, 1)
+
+const wasTraining = Tensor.training
+Tensor.training = true
+try {
+  opt.zeroGrad()
+  const loss = model.call(x).sub(target).square().mean()
+  loss.backward()
+  opt.step()
+} finally {
+  Tensor.training = wasTraining
+}
+```
+
+## Models
+
+Train a captured model, save its graph and weights, and load it without the
+JavaScript object that built it.
+
+### Train a Model
+
+```js
+const { Model, Tensor } = require('polygrad')
+
+const net = {
+  a: new Tensor([0], { dtype: 'float32' }),
+  b: new Tensor([0], { dtype: 'float32' }),
+  forward({ x }) { return { prediction: x.mul(this.a).add(this.b) } }
+}
+const model = new Model(net, {
+  inputs: { x: Tensor.empty(5) },
+  targets: { y: Tensor.empty(5) },
+  loss: (outputs, { y }) => outputs.prediction.sub(y).square().mean()
+})
+try {
+  model.fit({ x: new Float32Array([-2, -1, 0, 1, 2]), y: new Float32Array([-4, -1, 2, 5, 8]) },
+    { epochs: 100, optimizer: 'sgd', lr: 0.1 })
+  console.log(Array.from(model.forward({ x: new Float32Array([3, 4, 5, 6, 7]) }).prediction))
+} finally {
+  model.dispose()
+}
+```
+
+`fit` accepts `{ batchSize, epochs, optimizer, lr }`. Minibatches visit samples
+in order; there is no implicit shuffling or padding. An incomplete last batch
+is rejected unless `remainder: 'drop'` skips it or `remainder: 'keep'` processes
+a smaller extent allowed by the Model's input bounds. On WebGPU, use `fitAsync`.
+
+### Load a Model trained in Python
+
+First run the [Python export example](https://github.com/polygrad/polygrad/blob/main/py/README.md#fit-in-python-load-in-javascript)
+to create `linear.pgb`, then run this in the same working directory:
+
+```js
+const { Model } = require('polygrad')
+
+const model = Model.load('linear.pgb')
+try {
+  const { prediction } = model.forward({ x: new Float32Array([3, 4, 5, 6, 7]) })
+  console.log(Array.from(prediction))  // approximately [11, 14, 17, 20, 23]
+} finally {
+  model.dispose()
+}
+```
+
+`Model.load` uses the default runtime; use `pg.Model.load(...)` for an explicit
+runtime. Browser callers pass bundle bytes to `Model.fromBundle`, not filesystem
+paths. Each load owns independent state; tied aliases inside a Model remain tied.
+Disposing the Model does not dispose its runtime.
+
+`save()` returns bundle bytes; Node also supports `save(path)`. Optimizer state
+is included unless `{ includeOptimizer: false }` is supplied. To resume training,
+reapply the optimizer configuration after loading.
+
+For C-built families and `models.Sequential` / `models.Graph`, see
+[model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
+
+### Capture and input rules
+
+- Object authors expose `forward(inputs)`; their Tensor attributes supply state
+  unless `params` overrides it. With a loss, construction captures evaluation
+  and training forwards against the same state. The author runs twice during
+  construction, never during `forward` or `fit`.
+- Set the seed before construction. BatchNorm/RNG updates belong to Model-owned
+  state. Authoring Tensor roots and `Tensor.training` are restored even on
+  failure, but arbitrary JavaScript side effects are not rolled back.
+- Authored assignments require auxiliary state (`is_param_(false)`); the
+  optimizer updates parameters. Without a loss, capture uses the current
+  `Tensor.training`; changing it later does not recapture the graph.
+- On WebGPU, construct with `await pg.Model.fromCallableAsync(author, options)`.
+  The author must remain synchronous and must not start async reads or execution.
+- Inputs may have one bounded variable leading dimension and fixed trailing
+  dimensions. Storage currently reserves maximum capacity; empty calls reject.
+  Flat typed arrays use the signature, or provide
+  `{data: typedArray, shape: [rows, columns]}` as a Model input binding.
+- Tensor inputs must share the Model's runtime and device. Any Tensor input
+  makes outputs owned device Tensors; array-only calls return host arrays.
+  Results retain their values and shapes across later calls and Model disposal,
+  but not runtime disposal. Dispose results when finished. This uses device
+  copies; it is not zero-copy or differentiable Model composition.
+
+Saved bundles preserve auxiliary/RNG and optional optimizer state. To replace
+weights, use `model.importWeights(bytes)` on synchronous backends or
+`await model.importWeightsAsync(bytes)` on WebGPU. The latter snapshots the
+supplied bytes and reads current device state for rollback.
 
 ## JIT And Compile
 
@@ -323,6 +419,8 @@ console.log(f(new Tensor([7, 8, 9])).toArray())  // replay
 `compile(fn, sampleInputs)` warms and captures immediately:
 
 ```js
+const { Tensor, compile } = require('polygrad')
+
 const compiled = compile(
   (x) => x.add(1).realize(),
   [new Tensor([1, 2, 3])]
@@ -347,105 +445,68 @@ const { Tensor, uop } = require('polygrad')
 function addKernel(out, a, b) {
   out = out.flatten(); a = a.flatten(); b = b.flatten()
   const i = uop.range(out.numel(), 0)
-  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink(
+    new uop.KernelInfo('custom_add_4')
+  )
 }
 
 const out = Tensor.empty([4], { dtype: 'float32' })
 const y = out.customKernel(
-  new Tensor([1, 2, 3, 4]),
-  new Tensor([10, 20, 30, 40]),
+  new Tensor([1, 2, 3, 4], { dtype: 'float32' }),
+  new Tensor([10, 20, 30, 40], { dtype: 'float32' }),
   addKernel
 )[0]
-console.log(y.toArray())
+console.log(y.toArray()) // [11, 22, 33, 44]
 ```
 
-This is a UOp `CALL` extension point, not a raw program-launch API. Custom
-backward functions are not implemented yet.
+`KernelInfo` is required to mark the executable kernel boundary. Without it,
+the body can leave the output unchanged, as in pinned tinygrad. Match each
+stored value's dtype to its destination, using an explicit UOp `cast` when
+needed. In 0.5.1, the CPU renderer rejects mismatched vector stores with
+`vector STORE dtype mismatch; cast the value to the destination dtype`.
+Scalar C stores can convert numerically, but that is not a portable kernel
+contract. Wasm/INTERP mismatched stores remain a known limitation: cast
+explicitly on every backend. Version 0.5.0 can silently return incorrect values
+for mismatched vector stores.
 
 ## Common API Recipes
-
-Default runtime:
-
-```js
-const { Tensor, jit, compile, nn } = require('polygrad')
-
-const x = new Tensor([1, 2, 3])
-console.log(x.mul(2).add(1).toArray())
-```
-
-Explicit runtime and device selection:
-
-```js
-const polygrad = require('polygrad')
-const pg = polygrad.create({ core: 'wasm' })
-
-const x = new pg.Tensor([1, 2, 3])
-console.log(x.mul(2).toArray())
-pg.dispose()
-```
 
 Create tensors. Shape constructors accept either `Tensor.zeros(2, 3)` or `Tensor.zeros([2, 3])`:
 
 ```js
+const { Tensor } = require('polygrad')
+
 const a = Tensor.zeros([2, 3])
 const b = Tensor.ones([2, 3])
 const c = Tensor.randn([2, 3])
 const d = Tensor.arange(6).reshape(2, 3)
-const e = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [2, 2] })
+const e = new Tensor(new Float32Array([1, 2, 3, 4])).reshape(2, 2)
 ```
+
+JavaScript arrays containing only integer-valued numbers infer `int32`, even
+when written as `1.0`. Use `{ dtype: 'float32' }` or a `Float32Array` for
+floating-point work such as gradients. Typed arrays preserve their dtype.
+Set shape with `.reshape(...)`, not a constructor option. The constructor's
+public options are `dtype`, `device`, `logical`, and `isParam` (`is_param`).
+Version 0.5.1 rejects unknown options; 0.5.0 silently ignored them.
 
 Math, movement, indexing:
 
 ```js
+const { Tensor } = require('polygrad')
+
 const x = Tensor.arange(12).reshape(3, 4)
 const y = x.permute(1, 0).reshape(2, 6)
 const z = y.relu().sum(1)
 const picked = x.gather(1, new Tensor([[0, 2], [1, 3], [0, 1]], { dtype: 'int32' }))
 ```
 
-Autograd and optimization:
-
-```js
-const model = new nn.Linear(4, 1)
-const opt = new nn.SGD(nn.getParameters(model), { lr: 0.01 })
-
-const x = Tensor.randn(8, 4)
-const target = Tensor.randn(8, 1)
-
-opt.zeroGrad()
-const loss = model.call(x).sub(target).square().mean()
-loss.backward()
-opt.step()
-```
-
-Linear algebra:
-
-```js
-const A = new Tensor([[4, 2], [2, 5]])
-const b = new Tensor([1, 3])
-
-console.log(A.solve(b).toArray())
-console.log(A.cholesky().toArray())
-console.log(A.lstsq(b).toArray())
-```
-
-JIT and compile:
-
-```js
-const f = jit((x) => x.add(1).realize())
-f(new Tensor([1, 2, 3]))  // run
-f(new Tensor([4, 5, 6]))  // capture
-console.log(f(new Tensor([7, 8, 9])).toArray())  // replay
-
-const compiled = compile((x) => x.mul(2).realize(), [Tensor.empty(3)])
-console.log(compiled.run([new Tensor([1, 2, 3])]).toArray())
-compiled.dispose()
-```
-
 Repeated input updates:
 
 ```js
-const x = new Tensor(new Float32Array([1, 2, 3]), { shape: [3] }).realize()
+const { Tensor, compile } = require('polygrad')
+
+const x = new Tensor(new Float32Array([1, 2, 3])).realize()
 const f = compile((x) => x.square().sum().realize(), [x])
 
 console.log(f.run([x]).item())
@@ -457,19 +518,22 @@ f.dispose()
 Readback:
 
 ```js
+const { Tensor } = require('polygrad')
+
 const y = new Tensor([1, 2, 3]).mul(2)
 console.log(y.toArray())              // typed array on sync runtimes
 console.log(y.tolist())               // nested JS arrays
-console.log(y.item())                 // scalar tensors only
+console.log(y.sum().item())          // item() requires a scalar
 
 const [a, b] = Tensor.toTypedArrays(y, y.add(1))
 ```
 
-WebGPU readback is explicit async:
+WebGPU readback is explicit async (browser-only ESM):
 
 ```js
-const polygrad = require('polygrad')
-const pg = polygrad.create({ core: 'wasm', device: 'webgpu' })
+import { create } from 'polygrad'
+
+const pg = create({ core: 'wasm', device: 'webgpu' })
 const y = new pg.Tensor([1, 2, 3]).mul(2)
 console.log(await y.toArrayAsync())
 pg.dispose()
@@ -481,7 +545,7 @@ Runtime inspection:
 const polygrad = require('polygrad')
 
 console.log(polygrad.stats())
-polygrad.resetCounters()
+polygrad.getDefaultRuntime().resetCounters()
 console.log(polygrad.canRun({ op: 'add', shape: [1024] }))
 ```
 
@@ -497,6 +561,7 @@ API reference at a glance:
 | Area | Main APIs |
 |---|---|
 | Runtime | `create`, `createAsync`, `disposeDefault`, `stats`, `canRun` |
+| Models | `Model`, `fromCallable`, `fromTensors`, `fit`, `forward`, `save`, `load`, `summary`, `dispose`; `models` factories |
 | Tensor creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange`, `empty` |
 | Tensor math | `add`, `sub`, `mul`, `div`, `exp`, `log`, `sqrt`, `relu`, `gelu`, `silu`, `softmax` |
 | Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
@@ -528,30 +593,26 @@ function createModel({ polygrad: pg }) {
 This lets applications share one set of runtime caches, device handles, and
 buffer residency across packages.
 
-## Tests
+## Troubleshooting
 
-From the repository root:
+- **"No leaf tensors require grad":** check input dtypes first. Integer-valued
+  JavaScript arrays infer `int32`, including `[1.0, 2.0]`. For gradients, use
+  `new Tensor([1, 2], { dtype: 'float32' })` or a `Float32Array`, and keep the
+  floating-point input Tensors alive until `backward()`.
+- **CPU compilation cannot find clang:** install clang, or use `DEV=X86`
+  with the native addon on a supported x86 machine, or `DEV=INTERP`.
+- **Native installation fell back to Wasm:** inspect `pg.core`. Install the
+  native build prerequisites and rebuild if native execution is needed;
+  `create({ core: 'native' })` reports failure instead of falling back.
+- **`PolyAsyncRequired`:** WebGPU execution/readback must use the async methods,
+  such as `await tensor.toArrayAsync()` and `await model.forwardAsync(inputs)`.
+- **"TRAINING must be enabled":** enable `Tensor.training` around optimizer
+  steps and restore it in `finally`, as in [Training](#training).
+- **Memory grows across many different graphs:** at an idle boundary, use
+  `pg.clearScheduleCache()` and `pg.collect()`. Live owners still retain their
+  resources; later execution rebuilds cleared schedules. Do not clear per step.
 
-```bash
-make test-js-native
-TMPDIR=$PWD/temp/cc_tmp EM_CACHE=$PWD/temp/emscripten-cache make test-js-wasm
-DISPLAY=:1 make test-browser
-make test-browser-matrix
-```
-
-`test-browser` keeps the default Chromium/WebGPU path. `test-browser-matrix`
-runs the browser sync bundle against a non-WebGPU smoke matrix and skips local
-browser executables that are not installed. Override the matrix when you need a
-specific browser or older Chrome binary:
-
-```bash
-BROWSER_MATRIX="chromium,firefox,old-chrome=chromium@/path/to/chrome" make test-browser-matrix
-BROWSER_MATRIX_DEVICES="auto,interp" make test-browser-matrix
-```
-
-Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
-`label=engine@/absolute/path`. WebGPU coverage remains Chromium-only and lives
-in `make test-browser`.
+For contributor checks, see [tests](https://github.com/polygrad/polygrad#tests).
 
 ## License
 
