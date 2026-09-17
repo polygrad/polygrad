@@ -2514,10 +2514,14 @@ cleanup:
   free(pending_out);
   free(pending_roots);
   free(pending_tensors);
-  /* Tensor realization is a context-thread safe point after current roots,
-   * cache entries and JIT capture owners are published. Tinygrad's weak UOps
-   * release the same unreachable producer/compiler rows without a stats call. */
-  if (rc == 0 && poly_ctx_collect_at_safe_point(ctx) != 0) rc = -1;
+  /* Pinned Tensor.realize does no scheduling for already-backed/virtual
+   * roots. Do not scan residency on that path just because a wrapper died.
+   * Unlike Python's weak UOps, C IR still needs its growth-budgeted sweep,
+   * including loops creating empty tensors without any storage allocation.
+   * Genuine materialization and allocation retain their collection boundaries. */
+  if (rc == 0 && (n_pending > 0 || poly_ctx_ir_collection_due(ctx)) &&
+      poly_ctx_collect_at_safe_point(ctx) != 0)
+    rc = -1;
   return rc;
 }
 

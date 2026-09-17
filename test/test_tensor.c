@@ -220,6 +220,82 @@ TEST(tensor, dirty_residency_is_collected_before_replacement_allocation) {
   PASS();
 }
 
+TEST(tensor, backed_readback_does_not_collect_unrelated_storage) {
+  /* Pinned Tensor.realize excludes has_buffer_identity roots. A read of
+   * existing storage is not an execution/collection boundary. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  float value = 7, actual = 0;
+  PolyTensor *live = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *dead = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(live);
+  ASSERT_NOT_NULL(dead);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, live->uop_physical, &value, sizeof(value)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, dead->uop_physical, &value, sizeof(value)), 0);
+  poly_tensor_release(dead);
+  for (int i = 0; i < 32; i++) {
+    ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+    ASSERT_TRUE(actual == value);
+    ASSERT_TRUE(ctx->collection_dirty);
+    ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 2 * sizeof(float));
+  }
+  /* The next real allocation must reclaim the dropped owner without an
+   * explicit collect, while preserving the tensor repeatedly read above. */
+  PolyTensor *next = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(next);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, next->uop_physical, &value, sizeof(value)), 0);
+  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 2 * sizeof(float));
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, live, &actual, sizeof(actual)), 0);
+  ASSERT_TRUE(actual == value);
+  poly_tensor_release(next);
+  poly_tensor_release(live);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, dropped_storage_loop_is_bounded_without_explicit_collection) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1024};
+  float values[1024] = {3};
+  for (int i = 0; i < 256; i++) {
+    PolyTensor *t = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(t);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, t->uop_physical, values, sizeof(values)), 0);
+    ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == sizeof(values));
+    poly_tensor_release(t);
+  }
+  /* Final unreachable allocation lasts until another allocation, a genuine
+   * materialization, explicit collection, or context destruction. */
+  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == sizeof(values));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, backed_realize_bounds_ir_without_storage_allocation) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[] = {1};
+  size_t peak = 0;
+  for (int i = 0; i < 4096; i++) {
+    PolyTensor *t = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(t);
+    PolyTensor *out = NULL;
+    ASSERT_INT_EQ(poly_realize_tensors(ctx, &t, 1, &out), 0);
+    ASSERT_PTR_EQ(out, t);
+    if (ctx->uop_storage_bytes > peak) peak = ctx->uop_storage_bytes;
+    poly_tensor_release(t);
+  }
+  /* Unlike Python's weak UOps, C records need an IR sweep even when no
+   * storage allocation or kernel execution supplies a collection boundary. */
+  bool bounded = peak < 2 * POLY_IR_COLLECTION_MIN_GROWTH;
+  ASSERT_TRUE(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CPU) == 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(bounded);
+  PASS();
+}
+
 TEST(tensor, retained_physical_uop_owns_residency_but_logical_uop_does_not) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

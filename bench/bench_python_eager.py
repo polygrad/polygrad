@@ -1,4 +1,4 @@
-"""Paired eager and training guards against an isolated installed package."""
+"""Paired eager, training and JIT/readback guards against an installed package."""
 
 import argparse
 import hashlib
@@ -73,7 +73,44 @@ print(json.dumps(dict(median_us=statistics.median(samples), samples_us=samples,
                      package=polygrad.__file__, library=_ffi._lib._name)))
 '''
 
-WORKLOADS = dict(eager=PROBE, training=TRAINING_PROBE)
+JIT_READBACK_PROBE = '''
+import json, statistics, sys, time
+import polygrad, numpy as np
+from polygrad import Tensor, TinyJit, Context, _ffi
+from polygrad.nn import Linear
+from polygrad.nn.optim import Adam
+from polygrad.nn.state import get_parameters
+Tensor.manual_seed(0)
+l1, l2 = Linear(16, 32), Linear(32, 1)
+opt = Adam(get_parameters([l1, l2]), lr=.001)
+x, y = Tensor.randn(8, 16).realize(), Tensor.randn(8, 1).realize()
+@TinyJit
+def step(x, y):
+    with Context(TRAINING=1):
+        opt.zero_grad()
+        loss = (l2(l1(x).relu()) - y).square().mean()
+        loss.backward()
+        opt.step()
+        return loss.realize()
+initial = step(x, y).item()
+for _ in range(19): step(x, y).item()
+samples = []
+for _ in range(150):
+    start = time.perf_counter()
+    final = step(x, y).item()
+    samples.append((time.perf_counter() - start) * 1e6)
+# Include host readback: omitting it hid redundant residency collection.
+# Pinned Tinygrad v0.14.0 agrees on this seeded Adam trajectory.
+np.testing.assert_allclose([initial, final], [0.7308312058448792, 7.073858341755113e-06],
+                          rtol=1e-4, atol=1e-7)
+print(json.dumps(dict(median_us=statistics.median(samples), samples_us=samples,
+                     initial_loss=initial, final_loss=final,
+                     python=sys.version, version=polygrad.__version__,
+                     prefix=sys.prefix, numpy_version=np.__version__,
+                     package=polygrad.__file__, library=_ffi._lib._name)))
+'''
+
+WORKLOADS = dict(eager=PROBE, training=TRAINING_PROBE, jit_readback=JIT_READBACK_PROBE)
 
 
 def summarize(rows, max_ratio):

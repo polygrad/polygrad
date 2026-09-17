@@ -1242,7 +1242,7 @@ make bench-smoke-regression
 make bench-ratios
 ```
 
-For Python eager-call and training-step overhead, compare against an isolated
+For Python eager, training and JIT/readback overhead, compare against an isolated
 interpreter with the published package installed:
 
 ```bash
@@ -1252,8 +1252,9 @@ make bench-py-eager PY_PERF_BASELINE=/path/to/baseline/venv/bin/python
 Run this on an idle machine. For each workload it alternates nine
 candidate/baseline process pairs, checks numerical results, isolated
 package/library paths, and matching Python and NumPy versions. The training
-fixture runs a small two-layer MLP with backward, Adam updates and loss readback;
-its loss trajectory is checked against pinned Tinygrad. Each workload must meet
+fixtures run small two-layer MLPs with backward, Adam updates and loss readback.
+The JIT fixture keeps `.item()` inside the timed replay. Their loss trajectories
+are checked against pinned Tinygrad. Each workload must meet
 the 1.02 median paired-ratio limit independently. All pairs are retained, without
 retries or discarded outliers. The JSON report is
 `temp/python-eager-performance.json`.

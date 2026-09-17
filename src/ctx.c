@@ -564,7 +564,7 @@ int poly_ctx_collect(PolyCtx *ctx) {
   return poly_ctx_collect_with_root(ctx, NULL, true);
 }
 
-static bool poly_ctx_ir_collection_due(const PolyCtx *ctx) {
+bool poly_ctx_ir_collection_due(const PolyCtx *ctx) {
   if (!ctx || !ctx->ir_collection_dirty) return false;
   if (ctx->uop_storage_bytes < ctx->ir_collection_baseline_bytes) return true;
   return ctx->uop_storage_bytes - ctx->ir_collection_baseline_bytes >=

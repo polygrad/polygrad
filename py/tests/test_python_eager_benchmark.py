@@ -67,11 +67,11 @@ def test_training_regression_cannot_hide_behind_fast_eager_calls(bench):
     assert not report['passed']
 
 
-def test_default_gate_measures_training_and_eager(bench, tmp_path, monkeypatch):
+def test_default_gate_measures_training_eager_and_jit_readback(bench, tmp_path, monkeypatch):
     calls = []
     def fake_run(command, **kwargs):
         label = 'candidate' if command[0] == sys.executable else 'baseline'
-        workload = 'training' if 'Adam' in command[-1] else 'eager'
+        workload = 'jit_readback' if 'TinyJit' in command[-1] else 'training' if 'Adam' in command[-1] else 'eager'
         calls.append((label, workload))
         prefix = ROOT if label == 'candidate' else Path('/baseline')
         value = 110 if label == 'candidate' and workload == 'training' else 100
@@ -84,7 +84,8 @@ def test_default_gate_measures_training_and_eager(bench, tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['bench', '--baseline-python', '/baseline/bin/python',
                                      '--rounds', '5', '--output', str(output)])
     assert bench['main']() == 1
-    assert len(calls) == 20
+    assert len(calls) == 30
+    assert sum(workload == 'jit_readback' for _, workload in calls) == 10
     assert not json.loads(output.read_text())['workloads']['training']['passed']
 
 

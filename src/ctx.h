@@ -121,6 +121,7 @@ void poly_ctx_record_memory_free_exact(
 );
 uint64_t poly_ctx_mem_used_for_device_uop(PolyCtx *ctx, PolyUOp *device_uop);
 int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root);
+bool poly_ctx_ir_collection_due(const PolyCtx *ctx);
 int poly_ctx_collect_at_safe_point(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);

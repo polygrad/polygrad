@@ -567,6 +567,28 @@ def test_pure_view_realize_is_zero_call():
     assert x.uop.raw == source_root
 
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'CUDA'])
+def test_tinyjit_repeated_scalar_readback_preserves_replay(device):
+    from polygrad import Runtime
+    from polygrad.device import Device
+
+    if device == 'CUDA' and not Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    with Runtime(device=device) as rt:
+        x = rt.Tensor([1.0, 2.0, 3.0]).realize()
+        step = TinyJit(lambda value: (value * 2 + 1).sum().realize())
+        try:
+            for i in range(32):
+                x.copy_from(np.array([i, i + 1, i + 2], dtype=np.float32))
+                out = step(x)
+                root = out.uop.raw
+                assert out.item() == 6 * i + 9
+                assert out.item() == 6 * i + 9
+                assert out.uop.raw == root
+        finally:
+            step.reset()
+
+
 def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
     # Host-backed input makes the ADD deviceful in pinned tinygrad. A pure
     # arange+1 root is device-free and realize() is intentionally a no-op.

@@ -1658,6 +1658,26 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await got.toArray(), expected, 1e-4)
   })
 
+  await test('jit repeated scalar readback preserves replay', async () => {
+    const x = new Tensor(new Float32Array([1, 2, 3]))
+    await x.realize()
+    const step = pg.jit((value) => value.mul(2).add(1).sum().realize())
+    try {
+      for (let i = 0; i < 32; i++) {
+        await x.copyFrom(new Float32Array([i, i + 1, i + 2]))
+        const out = await step(x)
+        const root = out.uop.key
+        assertClose(await out.toArray(), [6 * i + 9])
+        assertClose(await out.toArray(), [6 * i + 9])
+        assert(out.uop.key === root, 'readback must preserve the realized root')
+      }
+      assert(step.stats().replayCount === 30, 'readback must not reset capture')
+    } finally {
+      step.dispose()
+      x.dispose()
+    }
+  })
+
   await test('jit correctness protects output fed back as input', async () => {
     const f = pg.jitAsync((buf, frame) => {
       const joined = buf.shrink([[1, 3]]).cat(frame)
