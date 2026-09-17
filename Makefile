@@ -728,10 +728,15 @@ test-py: verify-source-mirrors build/libpolygrad.so
 # an idle machine; this guard measures frontend overhead, not only C kernels.
 PY_PERF_BASELINE ?=
 PY_PERF_OUTPUT ?= temp/python-eager-performance.json
-.PHONY: bench-py-eager
+PY_PERF_BASELINE_SDIST ?=
+.PHONY: bench-py-eager test-release-py-performance
 bench-py-eager: build/libpolygrad.so
 	@test -n "$(PY_PERF_BASELINE)" || { echo 'Set PY_PERF_BASELINE to the baseline package interpreter'; exit 2; }
 	$(PARITY_PY) bench/bench_python_eager.py --baseline-python "$(PY_PERF_BASELINE)" --output "$(PY_PERF_OUTPUT)"
+
+test-release-py-performance: build/libpolygrad.so
+	$(PARITY_PY) bench/bench_python_eager.py --prepare-baseline --output "$(PY_PERF_OUTPUT)" \
+		$(if $(PY_PERF_BASELINE_SDIST),--baseline-sdist "$(PY_PERF_BASELINE_SDIST)")
 
 # Default-runtime assertions stay unchanged; explicit-owner lanes reuse the
 # existing NN numerical and gradient bodies, not a second set of expectations.
@@ -861,7 +866,7 @@ RELEASE_MAKE := $(MAKE)
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
 RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
-                   QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE
+                   QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
 	@$(PARITY_PY) scripts/test_release.py --make '$(RELEASE_MAKE)' --output '$(RELEASE_DIR)' \

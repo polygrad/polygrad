@@ -1,17 +1,24 @@
 """Paired, isolated eager-loop guard against an installed Python package."""
 
 import argparse
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import shutil
 import statistics
 import subprocess
 import sys
+import urllib.request
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 PROBE = '''
 import json, statistics, sys, time
-import polygrad
+import polygrad, numpy
 from polygrad import Tensor, _ffi
 a = Tensor([1., 2., 3., 4.]).realize()
 def step():
@@ -24,25 +31,100 @@ for _ in range(9):
     samples.append((time.perf_counter() - start) * 5000)
 print(json.dumps(dict(median_us=statistics.median(samples), samples_us=samples,
                      python=sys.version, version=polygrad.__version__,
+                     prefix=sys.prefix, numpy_version=numpy.__version__,
                      package=polygrad.__file__, library=_ffi._lib._name)))
 '''
 
 
+def summarize(rows, max_ratio):
+    if not math.isfinite(max_ratio) or max_ratio <= 0:
+        raise ValueError('budget must be finite and positive')
+    pairs = {}
+    for row in rows:
+        label, value = row['label'], row['median_us']
+        pair = pairs.setdefault(row['round'], {})
+        if label not in ('baseline', 'candidate') or label in pair or not math.isfinite(value) or value <= 0:
+            raise ValueError('duplicate label or invalid timing')
+        pair[label] = value
+    if len(pairs) < 5 or sorted(pairs) != list(range(len(pairs))) or any(len(pair) != 2 for pair in pairs.values()):
+        raise ValueError('at least five complete sequential pairs required')
+    ratios = [pairs[i]['candidate'] / pairs[i]['baseline'] for i in range(len(pairs))]
+    # Pair adjacent processes before aggregating: ratio-of-medians can mask
+    # regressions when machine speed changes between pairs. Never drop/retry a pair.
+    ratio = statistics.median(ratios)
+    return dict(baseline_us=statistics.median(pair['baseline'] for pair in pairs.values()),
+                candidate_us=statistics.median(pair['candidate'] for pair in pairs.values()),
+                ratio=ratio, pair_ratios=ratios, max_ratio=max_ratio, passed=ratio <= max_ratio, rows=rows)
+
+
+def validate_pair(pair):
+    baseline, candidate = (next(row for row in pair if row['label'] == label) for label in ('baseline', 'candidate'))
+    for key in ('package', 'library'):
+        if Path(baseline[key]).resolve() == Path(candidate[key]).resolve():
+            raise ValueError('Baseline and candidate must use independent package/library installations')
+        if not Path(baseline[key]).resolve().is_relative_to(Path(baseline['prefix']).resolve()):
+            raise ValueError('baseline must load from its isolated environment')
+    if (Path(candidate['package']).resolve() != ROOT / 'py/polygrad/__init__.py' or
+            Path(candidate['library']).resolve() != ROOT / 'build/libpolygrad.so'):
+        raise ValueError('candidate loaded outside checkout')
+    if any(baseline[key] != candidate[key] for key in ('python', 'numpy_version')):
+        raise ValueError('baseline and candidate require the same Python and NumPy versions')
+
+
+def verify_archive(artifact, spec):
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != spec['sha256']:
+        raise ValueError('baseline archive differs from pinned published artifact')
+
+
+def prepare_baseline(work, archive=None):
+    # Reuse the installed-package harness, never a checkout or editable baseline.
+    sys.path.insert(0, str(ROOT))
+    from test.test_package_install import clean_environment, run
+    import numpy
+    spec = json.loads((ROOT / 'test/fixtures/python_performance_baseline.json').read_text())
+    work.mkdir(parents=True, exist_ok=False)
+    artifact = work / spec['filename']
+    if archive:
+        verify_archive(archive, spec)
+        shutil.copyfile(archive, artifact)
+    else:
+        with urllib.request.urlopen(spec['url'], timeout=60) as response, artifact.open('wb') as output:
+            shutil.copyfileobj(response, output)
+        verify_archive(artifact, spec)
+    install_env = clean_environment()
+    run([sys.executable, '-m', 'venv', str(work / 'venv')], work, install_env, work / 'venv.log')
+    python = work / 'venv/bin/python'
+    run([str(python), '-I', '-m', 'pip', '--isolated', 'install', '--no-cache-dir',
+         '--index-url', 'https://pypi.org/simple', '--timeout', '30', '--retries', '2',
+         f'numpy=={numpy.__version__}', str(artifact)], work, install_env, work / 'install.log')
+    (work / 'provenance.json').write_text(json.dumps(dict(spec, numpy_version=numpy.__version__,
+                                                       python=sys.version), indent=2) + '\n')
+    return python, spec['version']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline-python', required=True, help='Python with the baseline package installed')
-    parser.add_argument('--rounds', type=int, default=5)
+    baseline = parser.add_mutually_exclusive_group(required=True)
+    baseline.add_argument('--baseline-python', help='Python with the baseline package installed')
+    baseline.add_argument('--prepare-baseline', action='store_true', help='Install the pinned published sdist into a fresh venv')
+    parser.add_argument('--baseline-sdist', type=Path, help='Use a local copy of the hash-pinned sdist')
+    parser.add_argument('--rounds', type=int, default=9)
     parser.add_argument('--max-ratio', type=float, default=1.02)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    if args.rounds < 3 or args.max_ratio <= 0:
-        parser.error('use at least three rounds and a positive max-ratio')
-    root = Path(__file__).resolve().parents[1]
+    if args.rounds < 5 or not math.isfinite(args.max_ratio) or args.max_ratio <= 0:
+        parser.error('use at least five rounds and a finite positive max-ratio')
+    if args.baseline_sdist and not args.prepare_baseline:
+        parser.error('--baseline-sdist requires --prepare-baseline')
+    root = ROOT
     # Both children use the same execution settings. The baseline must load its
     # installed package, never the checkout's Python files or native library.
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith('POLY') and k not in ('PYTHONPATH', 'DEV', 'DEBUG', 'BEAM', 'NOOPT')}
+           if not k.startswith('POLY') and k not in ('PYTHONPATH', 'PYTHONHOME', 'DEV', 'DEBUG', 'BEAM', 'NOOPT')}
     env.update(POLY_DEV='CPU', DEBUG='0', BEAM='0', NOOPT='0')
+    expected_version = None
+    if args.prepare_baseline:
+        args.baseline_python, expected_version = prepare_baseline(args.output.resolve().parent / 'baseline', args.baseline_sdist)
     rows = []
     for round_id in range(args.rounds):
         for label in (('baseline', 'candidate') if round_id % 2 == 0 else ('candidate', 'baseline')):
@@ -58,18 +140,13 @@ def main():
             row = dict(json.loads(result.stdout), label=label, round=round_id)
             rows.append(row)
             print(f"{label} {round_id}: {row['median_us']:.1f} us", flush=True)
-        first_pair = rows[:2]
-        if any(Path(first_pair[0][key]).resolve() == Path(first_pair[1][key]).resolve()
-               for key in ('package', 'library')):
-            raise RuntimeError('Baseline and candidate must use independent package/library installations')
-    baseline, candidate = (statistics.median(r['median_us'] for r in rows if r['label'] == label)
-                           for label in ('baseline', 'candidate'))
-    ratio = candidate / baseline
-    report = dict(baseline_us=baseline, candidate_us=candidate, ratio=ratio,
-                  max_ratio=args.max_ratio, passed=ratio <= args.max_ratio, rows=rows)
+        validate_pair(rows[-2:])
+        if expected_version and next(row['version'] for row in rows[-2:] if row['label'] == 'baseline') != expected_version:
+            raise ValueError('installed baseline version differs from pinned version')
+    report = summarize(rows, args.max_ratio)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
-    print(f'candidate/baseline: {ratio:.3f} (limit {args.max_ratio:.3f})')
+    print(f"median paired candidate/baseline: {report['ratio']:.3f} (limit {args.max_ratio:.3f})")
     return 0 if report['passed'] else 1
 
 

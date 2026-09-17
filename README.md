@@ -1098,6 +1098,11 @@ expensive tests. Release subprocesses use UTF-8. Override
 `QWEN3_GGUF` and `BENCH_BASELINE` as needed. The runner
 does not download missing fixtures, approve debts, or update baselines itself.
 Individual targets retain their existing package/network behavior.
+The Python performance gate installs the hash-pinned published 0.5.1 source
+package in a fresh virtual environment, with the runner's NumPy version. It
+requires PyPI access for dependencies. Set `PY_PERF_BASELINE_SDIST` to a local
+copy of that exact source archive to avoid downloading the archive itself;
+its hash is still checked. Installation or measurement failure fails acceptance.
 
 Results go to a fresh `temp/release-*` directory, or a new `RELEASE_DIR` supplied
 by the caller. Each gate gets a command log, exit code and elapsed time in
@@ -1244,10 +1249,19 @@ the published package installed:
 make bench-py-eager PY_PERF_BASELINE=/path/to/baseline/venv/bin/python
 ```
 
-Run this on an idle machine. It alternates five candidate/baseline process pairs,
-checks numerical results and loaded package paths, and fails above a 1.02 timing
-ratio. The JSON report is `temp/python-eager-performance.json`; this small-loop
-guard is not a substitute for training or Model benchmarks.
+Run this on an idle machine. It alternates nine candidate/baseline process pairs,
+checks numerical results, isolated package/library paths, and matching Python
+and NumPy versions. It fails when the median of the paired timing ratios exceeds
+1.02; all pairs are retained, without retries or discarded outliers. The JSON
+report is `temp/python-eager-performance.json`.
+
+`test-release` runs this guard automatically using its own fresh published-package
+installation, not `PY_PERF_BASELINE`. Its report, installation logs and baseline
+provenance are under `python-performance/` in the release evidence directory.
+For a standalone run, use `make test-release-py-performance
+PY_PERF_OUTPUT=temp/my-new-performance-run/report.json` with a fresh output
+directory. This small-loop guard does not certify training or Model performance;
+the value assertion in `test_perf.py` is not a timing acceptance check.
 
 Absolute benchmark baselines are machine-specific and are stored under ignored
 local paths.

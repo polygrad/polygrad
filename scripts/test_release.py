@@ -29,7 +29,7 @@ def release_gates():
     # test-parity-opt: those would repeat whole suites. Analyze precedes HLB
     # because its temporary .plist files affect HLB's checkout source lock.
     targets = '''
-        test-release-preflight format-check verify-source-mirrors test-headers test-analyze-reviewed
+        test-release-preflight format-check verify-source-mirrors test-headers test-release-py-performance test-analyze-reviewed
         test test-x86 test-interp test-cuda test-qwen3
         test-harness-skip-accounting test-release-gates
         test-py test-py-x86 test-hf-e2e
@@ -49,7 +49,9 @@ def release_gates():
     '''.split()
     gates = [dict(target=target, variables={}) for target in targets]
     for gate in gates:
-        if gate['target'] == 'test-compat-tinygrad-upstream-ratchet':
+        if gate['target'] == 'test-release-py-performance':
+            gate['variables']['PY_PERF_OUTPUT'] = '{output}/python-performance/report.json'
+        elif gate['target'] == 'test-compat-tinygrad-upstream-ratchet':
             gate['variables']['UPSTREAM_COMPAT_DIR'] = '{output}/upstream-nine'
         elif gate['target'] == 'test-compat-tinygrad-ops':
             # This 427-case file exceeded 1800s after 405 completed cases. Keep

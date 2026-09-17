@@ -39,6 +39,10 @@ def test_release_manifest_covers_required_lanes_once(runner):
                 'test-hip', 'publish-py', 'publish-js'} & set(targets)
     assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
     assert 'test-symbolic-z3-supported' in targets
+    assert 'test-release-py-performance' in targets
+    assert targets.index('test-release-py-performance') < targets.index('test')
+    perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
+    assert perf['variables']['PY_PERF_OUTPUT'] == '{output}/python-performance/report.json'
     assert 'test-symbolic-z3' not in targets and 'test-symbolic-z3-fixed' not in targets
     assert targets[-1] == 'bench-hlb-cuda-timing'
     ops = next(g for g in runner['release_gates']() if g['target'] == 'test-compat-tinygrad-ops')
@@ -131,6 +135,20 @@ def test_release_continues_after_failure_and_preserves_logs(runner, tmp_path):
     assert 'second' in (output / report['gates'][1]['log']).read_text()
     with pytest.raises(FileExistsError):
         runner['run_release'](tmp_path, output, ['make'], gates, {})
+
+
+def test_performance_failure_blocks_release_and_keeps_private_report_path(runner, tmp_path):
+    (tmp_path / 'Makefile').write_text(
+        'test-release-py-performance:\n\t@test "$(PY_PERF_OUTPUT)" != override.json\n\t@exit 1\n'
+        'next:\n\t@echo next\n')
+    gate = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
+    output = tmp_path / 'results'
+    assert runner['run_release'](tmp_path, output, ['make'], [gate, dict(target='next', variables={})],
+                                 {'PY_PERF_OUTPUT': 'override.json'}) == 1
+    report = json.loads((output / 'summary.json').read_text())
+    assert report['status'] == 'failed'
+    assert [g['status'] for g in report['gates']] == ['failed', 'passed']
+    assert f'PY_PERF_OUTPUT={output}/python-performance/report.json' in report['gates'][0]['command']
 
 
 def test_release_serializes_recursive_make_and_clears_filters(runner, tmp_path, monkeypatch):
