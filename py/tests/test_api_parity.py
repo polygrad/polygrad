@@ -15,6 +15,11 @@ from polygrad.nn.optim import SGD
 from polygrad.uop.ops import UOp as OpsUOp, resolve
 
 
+def test_gguf_annotations_are_deferred_for_python39():
+    from polygrad.llm.gguf import gguf_load
+    assert isinstance(gguf_load.__annotations__['fn'], str)
+
+
 @pytest.mark.parametrize('env,code,expected', [
     ({'DEV': 'iNtErP'}, 'print(Tensor([1.]).device)', 'INTERP'),
     ({'DEV': 'INTERP', 'POLY_DEV': 'CPU'}, 'print(Tensor([1.]).device)', 'CPU'),

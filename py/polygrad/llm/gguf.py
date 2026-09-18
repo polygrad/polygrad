@@ -1,5 +1,8 @@
 # Literal port of pinned tinygrad/llm/gguf.py at ba1d3baa.
-# Only package import paths differ; graph construction and format semantics are unchanged.
+# Package paths and deferred annotations support Polygrad/Python 3.9;
+# graph construction and format semantics are unchanged.
+from __future__ import annotations
+
 import functools, io, pathlib, re, struct
 from typing import Any, Callable
 
