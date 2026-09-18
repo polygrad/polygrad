@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.5.2 (release candidate)
+
+The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
+ABI numbers below describe development checkpoints, not package requirements.
+Full release acceptance is pending.
+
+- Cache shared-core CUDA graph estimates while preserving changing symbolic
+  bindings, reducing native CUDA JIT replay overhead without changing public APIs.
+- Add shared-core CLIP, ViT, DINOv2 and DINOv3 ViT builders and HF imports.
+  Qwen3 owns its rotary tables; newly imported models need only token input x.
+
+- Require ABI101 for shared Model AUX helpers and removal of unused C layer
+  constructors. Import-only model calls report the supported loader, including
+  Async calls. Shared AUX copying is instrumented for Wasm suspension.
+
+- Bind C ABI100's scoped UOp names in native and Wasm backends. JavaScript
+  method names are unchanged; dtype-ID adapters delegate to typed C APIs.
+
+- Consolidate C construction at ABI97: use poly_model_from_config for JSON or
+  the existing typed poly_mlp_into/poly_gpt2_into/poly_qwen3_into entries. Explicit
+  NULL requests an owned context. Remove per-type JSON/no-context aliases and
+  their empty headers. Add the registry-discovered DistilGPT2 six-block preset,
+  reusing GPT-2 topology and checkpoint mapping with no frontend factory code.
+
+- Share Tensor cross-entropy and Model losses in C; consolidate activation and
+  initialization helpers. Replace the separate import registry with model-type
+  capabilities exposed by models.list(). Reject mismatched checkpoint shapes;
+  only GPT-2 position tables opt into leading-axis cropping. ABI96 replaces
+  poly_model_family_name with poly_model_type_name and adds capability queries.
+
+- Sequential/Graph accept typed and bounded-leading-dimension inputs plus shared
+  embedding, normalization, RoPE, attention, cast and permute components (ABI95).
+  WebGPU construction uses the existing Async factories and shared C path.
+
+- Shared C family dispatch (ABI94), GPT2 exposure and tagged Model configurations.
+  Checkpoint-required models reject execution/export before complete weight
+  initialization. Canonical bundle re-save and named input/objective diagnostics.
+
+- Uniform Model `place`/`placeAsync` preserve exact native CPU identities through
+  C ABI93. Wasm maps plain CPU to WASM, not CPU ordinals; invalid placement rejects.
+
+- Fix interpreter numeric STORE conversion and Wasm scalar conversions; reject
+  mismatched vector stores. Preserve batched Model module cuts across placement
+  and export/import on native, Wasm and browser runtimes.
+
+- Reclaim retired storage on subsequent readback without scanning on every
+  JIT replay. Cover direct and final-view disposal in native, Wasm and browser
+  tests, preserving deferred release during asynchronous work.
+- Avoid shared-core collection on already-backed Tensor realization. Add a
+  shared native/Wasm/browser JIT-plus-readback regression.
+- Stop shared-core shape inference at cached ancestors, avoiding repeated
+  traversal of retained graphs without changing logical-policy behavior.
+- Keep native N-API callback references per worker environment. Preserve loaded
+  Linux addon code needed by thread-local cleanup after workers exit.
+- Fix shared CPU compiler cache races across worker runtimes.
+- Fix NaN simplification, RNG policy transitions and invalid padded integer
+  division/remainder on the shared core path.
+- Clarify GCC/Clang requirements and worker runtime ownership.
+
+## 0.5.1 (2026-09-17)
+
+C ABI92 and artifact formats are unchanged. Wasm/INTERP mixed-dtype raw stores
+remain a known limitation; portable custom kernels must cast explicitly.
+
+- Reject unknown Tensor constructor options, including the previously ignored
+  `shape`; use `.reshape(...)` instead. No new shaping API.
+- Fix native CPU custom-kernel vector stores that could reinterpret integer
+  bits as floats. Explicit UOp casts remain supported.
+- Correct runnable Node/browser examples and keep the frontend guide detailed.
+
 ## 0.5.0 (2026-09-16)
 
 Node and browser packages use version 0.5.0 with C ABI92, PGIR19 and PGPM10.

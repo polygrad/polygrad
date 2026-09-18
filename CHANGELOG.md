@@ -1,5 +1,128 @@
 # Changelog
 
+## 0.5.2 (release candidate)
+
+The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
+ABI numbers below describe development checkpoints, not package requirements.
+Full release acceptance is pending.
+
+- Cache simplified CUDA graph estimates without freezing variable bindings.
+  Fixed-shape replay avoids repeated expression walks; counters, COPY accounting
+  and graph execution are unchanged.
+- Keep Python >=3.9 support, including quantized GGUF decoding. Require an
+  isolated Python3.9 installed-package lane in release acceptance, independently
+  of CPython3.11 audit tooling.
+
+- ABI101 removes the unused context-registry layer constructors poly_linear,
+  poly_layernorm, poly_rmsnorm and poly_embedding. Use poly_model_* or explicit
+  Tensor operations. The remaining context-global registry, from_ctx/from_sinks
+  and low-level binding adapters are scheduled for removal in 0.6.0; migrate
+  to Model-owned declarations/from_bindings. Share owned AUX snapshot creation
+  between rotary builders; keep architecture-specific arithmetic unchanged.
+- Fix Python 3.9 GGUF import annotations and report supported import routes
+  when an import-only model type is called through Python/JS models namespaces.
+
+- ABI100 scopes raw graph operations as poly_uop_* and makes polygrad.h an
+  umbrella over core.h and domain headers. Tensor operations belong to tensor.h;
+  dtype-ID adapters live in frontend.h/c and delegate to typed core APIs. Remove
+  old raw-operation names rather than keeping aliases. Python/JS methods and
+  PGIR19/PGPM10 are unchanged.
+
+- ABI99 exposes the existing Tensor.cat handle implementation for shared C
+  construction. Add CLIP, ViT, DINOv2 and DINOv3 ViT registry builders and strict
+  HF imports, reusing shared patch/attention helpers. Fixed-resolution eval
+  signatures, required-weight readiness and portable Model artifacts; no
+  frontend-specific model execution. Vision fixtures include gated FFNs and
+  register tokens. No change to PGIR/PGPM formats.
+
+- Qwen3 now owns rotary tables as auxiliary state, using the shared Model RoPE
+  helper. New models require only token input x; existing bundles retain their
+  serialized signatures. Remove duplicate GGUF table initialization. ABI98 and
+  portable formats unchanged. The shared helper rounds rotary angles to float
+  before sinf/cosf; old Qwen imports evaluated double angles with sin/cos before
+  casting. New logits can therefore differ slightly; this is not bitwise parity.
+
+- ABI98 removes redundant GPT-2/Qwen checkpoint entrypoints. Use generic HF/GGUF
+  loaders; model-specific decoded adapters are private. Reject zero Qwen GGUF
+  attention heads before width derivation instead of terminating the process.
+
+- Consolidate C construction at ABI97: use poly_model_from_config for JSON or
+  the existing typed poly_mlp_into/poly_gpt2_into/poly_qwen3_into entries. Explicit
+  NULL requests an owned context. Remove per-type JSON/no-context aliases and
+  their empty headers. Add the registry-discovered DistilGPT2 six-block preset,
+  reusing GPT-2 topology and checkpoint mapping with no frontend factory code.
+
+- Share Tensor cross-entropy and Model losses in C; consolidate activation and
+  initialization helpers. Replace the separate import registry with model-type
+  capabilities exposed by models.list(). Reject mismatched checkpoint shapes;
+  only GPT-2 position tables opt into leading-axis cropping. ABI96 replaces
+  poly_model_family_name with poly_model_type_name and adds capability queries.
+
+Shared-runtime concurrent Python calls remain unsupported; use one runtime per
+thread and keep cleanup there.
+
+- Typed and bounded-batch Sequential/Graph inputs; embedding, normalization,
+  split-half RoPE, attention, cast and permute components reuse shared C owners.
+  Preserve symbolic extents in embedding/rotary helpers and mean reductions.
+  Share parameter/frequency construction with Llama without changing its artifacts.
+
+- Unify C/Python/JS configuration factories and expose GPT2 through the shared
+  built-in family table. Checkpoint-required GPT-2/Llama/Qwen reject execution
+  and export until complete parameter writes; tied aliases share readiness.
+- Canonicalize portable export identities across load/save without sharing
+  runtime storage. Report named input dtype/shape and missing-objective errors.
+
+- Accept exact native CPU identities such as `CPU:1` for uniform Model placement,
+  matching module maps in Python and JS. Add `poly_model_set_device_name` (ABI93);
+  preserve the enum API and reject unsupported ordinals without changing the Model.
+
+- Fix INTERP mixed-dtype numeric stores, packed integer writes and invalid
+  conversion rejection; reject mismatched Wasm vector stores and correct scalar
+  signedness/width conversions. Preserve reshaped Model inputs across device-map
+  cuts, including batched linear layers and portable round trips.
+
+- Request safe-point residency collection when a covering storage owner is
+  retired, including final views and Model/JIT graph owners. Keep ordinary
+  replay/readback scan-free without a byte threshold or release-time graph walk.
+- Skip ordinary residency scans on already-backed/virtual Tensor realization,
+  matching Tinygrad's no-op path. Preserve growth-budgeted IR sweeps and
+  pre-allocation reclamation, and add repeated
+  JIT/readback and bounded-storage regressions. Include scalar readback in the
+  independently budgeted JIT/Adam release performance workload.
+- Stop shape inference at cached ancestors, matching Tinygrad's recursive
+  property traversal. Avoid repeatedly walking retained training history without
+  changing the default logical policy. Release performance acceptance now checks
+  eager execution and an Adam training step independently against published0.5.1.
+- Remove the unreleased Python per-call locking/handle wrapper after measuring
+  eager-loop overhead. Keep direct CDLL calls and cache immutable device mappings.
+  Shared-runtime Python concurrency remains unsupported and explicitly documented.
+- Isolate Node native callbacks per worker environment and keep Linux addon
+  cleanup code loaded across worker teardown.
+- Synchronize shared dtype/tokenizer initialization, render counters and CPU
+  compiler-cache bookkeeping; use independent temporary cache-publication files.
+- Guard integer divisors only at invalid padded coordinates, including fused
+  scans (approved PG-DIV-010). Valid-coordinate division by zero is unchanged.
+- Preserve Tinygrad MAX operand order for NaNs in simplification, constant
+  folding and INTERP. Preserve RNG streams across logical-policy changes.
+- Include the X86 renderer in x86-64 Python package builds. Correct the README
+  device-map example and distinguish GCC support from Clang float16 support.
+- Compare C smoke performance in alternating pairs against the pinned 0.5.1
+  source checkpoint instead of a machine-local absolute baseline. Record machine
+  load and affinity around release gates; preserve each workload's noise budget.
+
+## 0.5.1 (2026-09-17)
+
+C ABI92, PGIR19 and PGPM10 are unchanged. Wasm/INTERP mixed-dtype raw stores
+remain a known limitation; portable custom kernels must cast explicitly.
+
+- Type C-rendered STORE destinations from their memory dtype and extent.
+  Reject mismatched vector stores instead of reinterpreting bits; explicit
+  casts and scalar C numeric assignment remain supported.
+- Reject unknown JavaScript Tensor constructor options before allocation.
+  Use `.reshape(...)`; `{shape: ...}` was previously ignored.
+- Correct and deduplicate README examples, including executable custom kernels,
+  integer pretrained tokens, runtime counters and async startup.
+
 ## 0.5.0 (2026-09-16)
 
 Package version 0.5.0 targets Tinygrad v0.14.0 with C ABI92, PGIR19 and PGPM10.

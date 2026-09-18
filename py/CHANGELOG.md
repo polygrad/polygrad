@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.5.2 (release candidate)
+
+The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
+ABI numbers below describe development checkpoints, not package requirements.
+Full release acceptance is pending.
+
+- Cache shared-core CUDA graph estimates while preserving changing symbolic
+  bindings, reducing JIT replay overhead without changing Tensor or Model APIs.
+- Preserve Python >=3.9 for quantized GGUF decoding and require a Python3.9
+  isolated-package execution lane during release acceptance.
+- Add shared-core CLIP, ViT, DINOv2 and DINOv3 ViT builders and HF imports.
+  Qwen3 owns its rotary tables; newly imported models need only token input x.
+
+- Require ABI101 for shared Model AUX helpers and removal of unused C layer
+  constructors. Fix GGUF imports on Python3.9 with deferred annotations.
+  Calling an import-only model type now names its supported loader.
+
+- Bind C ABI100's scoped UOp names and ship the separated core/domain headers.
+  Python method names are unchanged; dtype-ID adapters delegate to typed C APIs.
+
+- Consolidate C construction at ABI97: use poly_model_from_config for JSON or
+  the existing typed poly_mlp_into/poly_gpt2_into/poly_qwen3_into entries. Explicit
+  NULL requests an owned context. Remove per-type JSON/no-context aliases and
+  their empty headers. Add the registry-discovered DistilGPT2 six-block preset,
+  reusing GPT-2 topology and checkpoint mapping with no frontend factory code.
+
+- Share Tensor cross-entropy and Model losses in C; consolidate activation and
+  initialization helpers. Replace the separate import registry with model-type
+  capabilities exposed by models.list(). Reject mismatched checkpoint shapes;
+  only GPT-2 position tables opt into leading-axis cropping. ABI96 replaces
+  poly_model_family_name with poly_model_type_name and adds capability queries.
+
+Concurrent calls on a shared Python runtime remain unsupported; use independent
+runtimes and thread-local cleanup.
+
+- Sequential/Graph accept typed and bounded-leading-dimension inputs plus shared
+  embedding, normalization, RoPE, attention, cast and permute components (ABI95).
+  Calls and training preserve invocation extents through save/load.
+
+- Shared C family dispatch (ABI94), GPT2 exposure and tagged Model configurations.
+  Checkpoint-required models reject execution/export before complete weight
+  initialization. Canonical bundle re-save and named input/objective diagnostics.
+
+- `Model.place('CPU:1')` preserves the exact native CPU identity like module maps.
+  Uses the name-taking core placement API (ABI93); unsupported ordinals reject.
+
+- Fix interpreter custom-kernel STORE conversion and batched Model module-map
+  inputs; preserve exact cut shapes and atomic failed-map behavior.
+
+- Reclaim unowned storage at the next Tensor readback, including a small final
+  view of a large allocation and disposed Model state. Preserve scan-free
+  steady JIT/readback through shared-core ownership tracking.
+- Avoid redundant collection during already-realized Tensor readback. Add a
+  JIT/Adam performance guard with `.item()` inside timing, plus CPU/INTERP/CUDA
+  replay/readback regressions; logical defaults and ownership are unchanged.
+- Avoid full ancestry walks for cached shapes during Tensor training. Preserve
+  logical-policy behavior; add an independently budgeted training performance gate.
+- Remove the unreleased per-call locking/handle wrapper; cache immutable device
+  mappings. Shared-runtime concurrency remains unsupported: use independent
+  runtimes per thread or serialize all shared-runtime use and cleanup.
+- Enable X86 in x86-64 source-package builds and test it after isolated installation.
+- Fix clip(NaN), RNG policy transitions and invalid padded integer division/remainder.
+- Correct the device-map example and compiler requirements.
+
+## 0.5.1 (2026-09-17)
+
+C ABI92 and artifact formats are unchanged. Wasm/INTERP mixed-dtype raw stores
+remain a known limitation; portable custom kernels must cast explicitly.
+
+- Fix CPU custom-kernel vector stores that could reinterpret integer bits as
+  floats. Explicit UOp casts and scalar C numeric assignment remain supported.
+- Correct custom-kernel and pretrained examples; use BEAM rather than POLY_BEAM.
+
 ## 0.5.0 (2026-09-16)
 
 Python package version 0.5.0 requires C ABI92 and uses PGIR19/PGPM10 artifacts.

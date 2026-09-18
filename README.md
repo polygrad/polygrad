@@ -1131,7 +1131,7 @@ CUDA/Wasm candidate acceptance, use:
 ```bash
 make test-release-list  # inspect the gate list without running it
 make test-release PYTHON=/path/to/test/python PARITY_PY=/path/to/parity/python \
-  HF_PYTHON=/path/to/hf/python
+  PYTHON_MIN=/path/to/python3.9 HF_PYTHON=/path/to/hf/python
 ```
 
 `test-release` runs maintained targets serially, including common and specific
