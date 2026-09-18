@@ -6,6 +6,11 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Reduce replay allocation churn by sharing simplified PROGRAM estimates on
+  retained runtime entries, preparing fixed runner launch bounds once, and
+  using scratch storage for short device names. Dynamic bindings, PROGRAM
+  identity and artifact formats are unchanged.
+
 - Preserve exact integer UOp constants converted from finite floats beyond
   signed 64-bit range, matching Tinygrad without an overflowing C cast.
 - Cache simplified CUDA graph estimates without freezing variable bindings.

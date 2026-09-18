@@ -2254,6 +2254,21 @@ TEST(uop, device_constructor_uses_canonical_string_identity) {
   ASSERT_INT_EQ(poly_uop_device_from_device_uop(cpu1), POLY_DEVICE_CPU);
   ASSERT_TRUE(poly_uop_explicit_devices_supported(ctx, cpu1));
 
+  /* The canonicalizer's temporary storage must not escape into CSE. Cover
+   * both short stack-backed names and the heap fallback for long DISK paths. */
+  char path[1024];
+  memset(path, 'a', sizeof(path));
+  memcpy(path, "disk:/MiXeD/", 12);
+  path[sizeof(path) - 1] = '\0';
+  PolyUOp *disk = poly_device_uop_from_name(ctx, path);
+  ASSERT_NOT_NULL(disk);
+  ASSERT_STR_EQ(disk->arg.str + 4, path + 4);
+  ASSERT_TRUE(strncmp(disk->arg.str, "DISK", 4) == 0);
+  ASSERT_PTR_EQ(poly_device_uop_from_name(ctx, path), disk);
+  memset(path, 0, sizeof(path));
+  ASSERT_INT_EQ(strlen(disk->arg.str), sizeof(path) - 1);
+  ASSERT_STR_EQ(cuda->arg.str, "CUDA");
+
   poly_ctx_destroy(ctx);
   PASS();
 }

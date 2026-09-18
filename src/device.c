@@ -184,10 +184,10 @@ const char *poly_device_name(PolyDevice device) {
   return "auto";
 }
 
-static char *poly_device_canonical_name(const char *name) {
+static char *poly_device_canonical_name(const char *name, char *scratch, size_t capacity) {
   if (!name || !name[0]) return NULL;
   size_t n = strlen(name);
-  char *canonical = malloc(n + 1);
+  char *canonical = n < capacity ? scratch : malloc(n + 1);
   if (!canonical) return NULL;
   const char *sep = strchr(name, ':');
   size_t prefix_n = sep ? (size_t)(sep - name) : n;
@@ -200,10 +200,13 @@ static char *poly_device_canonical_name(const char *name) {
 
 PolyUOp *poly_device_uop_from_name(PolyCtx *ctx, const char *name) {
   if (!ctx) return NULL;
-  char *canonical = poly_device_canonical_name(name);
+  char scratch[128];
+  char *canonical = poly_device_canonical_name(name, scratch, sizeof(scratch));
   if (!canonical) return NULL;
   PolyUOp *ret = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(canonical));
-  free(canonical);
+  /* UOp/CSE copies the argument before this scratch storage expires. Long
+   * device names (notably case-sensitive DISK paths) retain the heap fallback. */
+  if (canonical != scratch) free(canonical);
   return ret;
 }
 
@@ -213,7 +216,7 @@ PolyUOp *poly_device_uop_from_names(PolyCtx *ctx, const char **names, int n) {
   const char **canonical = n > 0 ? calloc((size_t)n, sizeof(*canonical)) : NULL;
   if (n > 0 && !canonical) return NULL;
   for (int i = 0; i < n; i++) {
-    canonical[i] = poly_device_canonical_name(names[i]);
+    canonical[i] = poly_device_canonical_name(names[i], NULL, 0);
     if (!canonical[i]) {
       for (int j = 0; j < i; j++)
         free((void *)canonical[j]);

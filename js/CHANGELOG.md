@@ -6,6 +6,10 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Reduce native, Wasm and WebGPU replay allocation churn through shared
+  estimate preparation, fixed launch metadata and device-name scratch storage.
+  Dynamic bindings and Asyncify execution contracts are unchanged.
+
 - Preserve wide integer UOp constants converted from Numbers in native and
   Wasm runtimes without an overflowing int64 cast.
 - Cache shared-core CUDA graph estimates while preserving changing symbolic

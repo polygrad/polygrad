@@ -6,6 +6,10 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Reduce core replay allocation churn through cached symbolic estimates,
+  prepared fixed launch bounds and short device-name scratch storage. No
+  Python API, ABI or artifact-format change.
+
 - Preserve wide integer UOp constants converted from floats without an
   overflowing int64 cast in the core or dtype-ID adapter.
 - Cache shared-core CUDA graph estimates while preserving changing symbolic

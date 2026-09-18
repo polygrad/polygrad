@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-09-18",
-  "basis": "Complete CUDA-enabled/HIP-disabled Clang14 scan of 84 units: 69 diagnostics. Reviewed the source delta from 61d73b0, accounting for raw-operation renames, and the new text paths in Compose, registry, TabM, vision, DINOv3, STORE rendering and padded indexing. Retained count/fill, immutable-source, refcount and validated-binding invariants were rechecked. A separate float-to-integer constant overflow was reproduced with UBSan and fixed to preserve Tinygrad integer values; the post-fix scan has the same paths, with four Tensor locations shifted by one line. Evidence: temp/release-052-analyzer.IrSs0i/complete-analysis/, new-paths.log and review.md; prior detailed reviews: temp/candidate-reconcile-20260915.Ud7MV5/analyzer-review.md and temp/llama-feedback-20260916/analyzer-review.md. No checker suppression or scope reduction.",
+  "basis": "Replay metadata batch: fresh 84-unit scan retains 69 diagnostics; reviewed device scratch ownership and runtime estimate retention/rollback. Three existing schedule diagnostics moved; initialized-prefix and resolved-argument invariants are unchanged. Evidence: temp/alloc-prep-20260918/analyzer/ and analyzer-review.md. Complete CUDA-enabled/HIP-disabled Clang14 scan of 84 units: 69 diagnostics. Reviewed the source delta from 61d73b0, accounting for raw-operation renames, and the new text paths in Compose, registry, TabM, vision, DINOv3, STORE rendering and padded indexing. Retained count/fill, immutable-source, refcount and validated-binding invariants were rechecked. A separate float-to-integer constant overflow was reproduced with UBSan and fixed to preserve Tinygrad integer values; the post-fix scan has the same paths, with four Tensor locations shifted by one line. Evidence: temp/release-052-analyzer.IrSs0i/complete-analysis/, new-paths.log and review.md; prior detailed reviews: temp/candidate-reconcile-20260915.Ud7MV5/analyzer-review.md and temp/llama-feedback-20260916/analyzer-review.md. No checker suppression or scope reduction.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -127,7 +127,7 @@
       "src/core.h": "afe514065b5bf3e84675b4d4b1a975da4fd058bed50e37e097ea999d38999c95",
       "src/ctx.c": "54a4129afafd0285cc25ee7346351c836eefe1c2c34c0417415d68bfc3fb3381",
       "src/ctx.h": "6459920406bff1b37029c0152cb992f45be1f217c1f920a3375dd1e22bd058e9",
-      "src/device.c": "b8a354daeb8b2e25bbe81cc3d59d2d732071b757e9483b01f393275aa7874c7f",
+      "src/device.c": "4747ee05fccdba07775cc05a5146a464f37389a693651a62fccc6035b7db87d5",
       "src/device.h": "5e079afb10ae2df9fde9ed33ca09f2890ea49d8f394ecc49f45d7a2c4c45e25c",
       "src/dtype.c": "a5a1b720adca3e0465b41416aff8e0fdc2c08d2cde14e73a9ccfbc67c378c383",
       "src/engine/capability.c": "0e1a3a77e2eaadae6124d908cbcdd203a0f0f325a4e6105e9ee5b3fc98e37e21",
@@ -135,7 +135,7 @@
       "src/engine/jit.h": "2d425001350ea0faecd3b418887b381c5cfdc6ae6ad26e80b61525f05022f949",
       "src/engine/realize.c": "00c0e0f1f10e5bc9aa5f69965d58f596b72c8deba3fabda5a0c4dc5278e8ee77",
       "src/engine/realize.h": "0efb03179b956db6da7005b5ef2094237cacd641837d2bf4b86a36d5e06366c1",
-      "src/engine/schedule.c": "4212592193c2166d783c6aed41f8ad9998713d0cb88442bbabc08ff31de6a37a",
+      "src/engine/schedule.c": "58e9abb809719768d10504e44af1c172e46fba93e8111b54d2696030102f3e37",
       "src/engine/schedule.h": "31ce129c28a8f2abee8811cd897f7e52dcb248ddc0d221b18cab6549165259ec",
       "src/frontend.c": "d585254a633100f56688fba65108f9fc3dd9c35d9cfb73f173703bf6df9b38e5",
       "src/frontend.h": "d389be3264ff1ccc265377fda9bc0f7e3a04c1d4ea24d68ae9dea0eff551faec",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 817,
+      "line": 818,
       "column": 36,
       "message": "The left operand of '==' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -414,7 +414,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 849,
+      "line": 850,
       "column": 5,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -423,7 +423,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 4574,
+      "line": 4601,
       "column": 28,
       "message": "Array access (via field 'items') results in a null pointer dereference",
       "checker": "core.NullDereference",

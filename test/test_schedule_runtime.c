@@ -19,6 +19,9 @@
 #include "../src/uop/ops.h"
 #include "../src/tensor.h"
 
+/* Exercise internal cache teardown while the test retains its LINEAR root. */
+extern void poly_engine_ctx_cleanup(PolyCtx *ctx);
+
 static int execution_owner_probe(void *self, void **args, int n_args) {
   PolyRunner *runner = self;
   (*(int *)runner->handle)++;
@@ -326,6 +329,36 @@ TEST(schedule_runtime, execution_owner_launch_admission) {
   runner.grid_exprs[0] = wide;
   ok &= isinf(poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, &binding, 1, 1, INFINITY, 0));
   ok &= calls == 2 && runner.grid[0] == 1;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(schedule_runtime, fixed_launch_preparation_preserves_program) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ptr = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0);
+  PolyUOp *bound = poly_uop_cast(ctx, poly_uop_const_int(ctx, 8), POLY_INT32);
+  PolyUOp *idx = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, ptr, &idx, 1),
+      poly_uop_const_float(ctx, 7), poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "fixed_launch");
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, ptr, poly_arg_none());
+  PolyUOp *program = poly_program_from_call(ctx, call, "fixed_launch");
+  ASSERT_NOT_NULL(program);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, program), 0);
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  ASSERT_NOT_NULL(info);
+  PolyUOp *original = info->global_exprs[0];
+  call = poly_uop_replace_src(ctx, call, (PolyUOp *[]){program, ptr});
+  PolyRunner runner = {0};
+  ASSERT_INT_EQ(poly_time_call_prepare(ctx, call, POLY_DEVICE_INTERP, &runner), 0);
+  bool ok = runner.grid[0] == 8 && runner.grid_exprs[0] == NULL;
+  /* Derived runner metadata must not rewrite the serialized PROGRAM. */
+  ok &= poly_program_info(ctx, program) == info && info->global_exprs[0] == original;
+  poly_time_call_finish(ctx, &runner, POLY_DEVICE_INTERP);
+  poly_uop_release(ctx, program);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);
   PASS();
@@ -1012,10 +1045,18 @@ TEST_BACKEND(cuda, graph_scalar_integer_args) {
   PASS();
 }
 
-static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bool saturated) {
-  ASSERT_TRUE(poly_cuda_available());
+#endif
+
+static void runtime_estimates_cached(
+    int *_passed,
+    int *_failed,
+    PolyDevice device,
+    bool graph,
+    bool symbolic,
+    bool saturated
+) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, device);
   PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT64, 1, 0);
   PolyParamArg arg = {
       .slot = 1,
@@ -1038,9 +1079,10 @@ static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bo
   PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 1, poly_arg_none());
   linear = poly_compile_linear(ctx, linear, 0);
   ASSERT_NOT_NULL(linear);
-  PolyUOp *other = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
-  PolyUOp *copied = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
-  PolyUOp *copy = poly_uop1(ctx, POLY_OP_COPY, POLY_INT64, other, poly_arg_str("CUDA"));
+  PolyUOp *other = poly_test_buffer_on_device(ctx, POLY_INT64, 1, device);
+  PolyUOp *copied = poly_test_buffer_on_device(ctx, POLY_INT64, 1, device);
+  PolyUOp *copy =
+      poly_uop1(ctx, POLY_OP_COPY, POLY_INT64, other, poly_arg_str(poly_device_name(device)));
   calls[2] = poly_uop3(ctx, POLY_OP_CALL, POLY_VOID, copy, copied, other, poly_arg_none());
   /* Create derived metadata after compilation's collection safe point.
    * Pinned GraphRunner sums Estimates(2*n,8*n,8*n) twice plus an 8-byte COPY. */
@@ -1079,7 +1121,7 @@ static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bo
   }
   linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 3, poly_arg_none());
   ASSERT_NOT_NULL(linear);
-  linear = runtime_test_graph(ctx, linear);
+  if (graph) linear = runtime_test_graph(ctx, linear);
   ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
   const int64_t values[] = {2, 7, 2};
   for (int i = 0; i < 3; i++) {
@@ -1087,17 +1129,20 @@ static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bo
     poly_ctx_reset_counters(ctx);
     poly_test_estimates_walk_count(true);
     ASSERT_INT_EQ(poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, true, false), 0);
-    ASSERT_INT_EQ(ctx->kernel_count, 1);
+    ASSERT_INT_EQ(ctx->kernel_count, graph ? 1 : 3);
     ASSERT_TRUE(
         ctx->global_ops == (saturated ? UINT64_MAX - 1 : 4 * (uint64_t)(symbolic ? values[i] : 3))
     );
     ASSERT_TRUE(
         ctx->global_mem == (saturated ? UINT64_MAX : 16 * (uint64_t)(symbolic ? values[i] : 3) + 8)
     );
-    ASSERT_INT_EQ(poly_test_estimates_walk_count(false), symbolic ? 6 : 0);
+    bool uncached = !graph && getenv("POLY_PCACHE") && strcmp(getenv("POLY_PCACHE"), "0") == 0;
+    ASSERT_INT_EQ(poly_test_estimates_walk_count(false), symbolic || uncached ? 6 : 0);
     int64_t got = 0;
     ASSERT_INT_EQ(poly_buffer_read(ctx, copied, &got, sizeof(got)), 0);
     ASSERT_INT_EQ(got, values[i]);
+    /* Graph runners still own their runtime entry after the map drops it. */
+    if (i == 0) poly_runtime_cache_clear(ctx);
     ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
   }
   poly_ctx_reset_counters(ctx);
@@ -1119,16 +1164,42 @@ static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bo
   PASS();
 }
 
+TEST(schedule_runtime, runtime_estimates_cached_constants_without_walks) {
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_INTERP, false, false, false);
+}
+
+TEST(schedule_runtime, runtime_estimates_cached_symbolic_bindings_and_copy) {
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_INTERP, false, true, false);
+}
+
+TEST(schedule_runtime, runtime_estimates_cached_preserves_saturating_totals) {
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_INTERP, false, false, true);
+}
+
+TEST(schedule_runtime, runtime_estimates_cached_disabled) {
+  const char *value = getenv("POLY_PCACHE");
+  char *saved = value ? strdup(value) : NULL;
+  setenv("POLY_PCACHE", "0", 1);
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_INTERP, false, false, false);
+  if (saved) {
+    setenv("POLY_PCACHE", saved, 1);
+    free(saved);
+  } else {
+    unsetenv("POLY_PCACHE");
+  }
+}
+
+#ifdef POLY_HAS_CUDA
 TEST_BACKEND(cuda, graph_estimates_cached_symbolic_bindings_and_copy) {
-  graph_estimates_cached(_passed, _failed, true, false);
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_CUDA, true, true, false);
 }
 
 TEST_BACKEND(cuda, graph_estimates_cached_constants_without_walks) {
-  graph_estimates_cached(_passed, _failed, false, false);
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_CUDA, true, false, false);
 }
 
 TEST_BACKEND(cuda, graph_estimates_cached_preserves_saturating_totals) {
-  graph_estimates_cached(_passed, _failed, false, true);
+  runtime_estimates_cached(_passed, _failed, POLY_DEVICE_CUDA, true, false, true);
 }
 #endif
 

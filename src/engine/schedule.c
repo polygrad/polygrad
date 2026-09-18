@@ -61,6 +61,7 @@ typedef struct PolyRuntimeCacheEntry {
   PolyDevice device;
   uint32_t env_stamp;
   PolyRunner runner;
+  PolyEstimates estimates;
 } PolyRuntimeCacheEntry;
 
 typedef struct {
@@ -1343,7 +1344,47 @@ static void poly_runner_apply_program_launch_info(
       runner->block[dim] = 1;
       runner->block_exprs[dim] = NULL;
     }
+    /* ProgramInfo.from_sink uses ssimplify. Keep this C-only preparation on
+     * the runner: rewriting ProgramInfo would change PROGRAM/BEAM/export keys.
+     * Dynamic and invalid bounds retain the checked execution-time path. */
+    PolyUOp **exprs[] = {&runner->grid_exprs[dim], &runner->block_exprs[dim]};
+    int *sizes[] = {&runner->grid[dim], &runner->block[dim]};
+    for (int i = 0; i < 2; i++) {
+      if (!*exprs[i]) continue;
+      PolyUOp *fixed = poly_graph_rewrite(ctx, *exprs[i], poly_symbolic());
+      int64_t value = 0;
+      if (fixed && fixed->op == POLY_OP_CONST && poly_launch_arg_to_i64(fixed->arg, &value) &&
+          value > 0 && value <= INT32_MAX) {
+        *sizes[i] = (int)value;
+        *exprs[i] = NULL;
+      }
+    }
   }
+}
+
+static void runtime_estimates_release(PolyCtx *ctx, PolyEstimates *estimates) {
+  poly_uop_release(ctx, estimates->ops);
+  poly_uop_release(ctx, estimates->lds);
+  poly_uop_release(ctx, estimates->mem);
+  memset(estimates, 0, sizeof(*estimates));
+}
+
+/* UOp._sym_fxn and GraphRunner's Estimates.simplify cache expressions, not
+ * bound values. C retains each field independently, including merged roots.
+ * Roll back partial preparation so a failed attempt is safe to retry. */
+static bool runtime_estimates_simplify(PolyCtx *ctx, PolyEstimates *out, const PolyEstimates *in) {
+  if (!in) return false;
+  PolyUOp *src[] = {in->ops, in->lds, in->mem};
+  PolyUOp **dst[] = {&out->ops, &out->lds, &out->mem};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *simplified = src[i] ? poly_graph_rewrite(ctx, src[i], poly_symbolic()) : NULL;
+    if (!simplified || poly_uop_retain(ctx, simplified) != 0) {
+      runtime_estimates_release(ctx, out);
+      return false;
+    }
+    *dst[i] = simplified;
+  }
+  return true;
 }
 
 static PolyUOp *linear_rebuild_preserving_metadata(PolyCtx *ctx, PolyUOp *original, PolyUOp **src) {
@@ -1431,6 +1472,7 @@ static void poly_runtime_cache_entry_release(PolyRuntimeCacheEntry *entry) {
       entry->ctx->runtime_artifact_live_bytes = 0;
   }
   poly_runner_cleanup(&entry->runner, entry->device);
+  runtime_estimates_release(entry->ctx, &entry->estimates);
   poly_uop_release(entry->ctx, entry->program);
   poly_uop_release(entry->ctx, entry->device_uop);
   free(entry);
@@ -1510,9 +1552,7 @@ static void poly_graph_cache_entry_free(const void *key, void *value, void *user
   if (!entry) return;
   poly_cuda_graph_destroy(entry->graph);
   for (int i = 0; i < entry->n_nodes; i++) {
-    poly_uop_release(ctx, entry->estimates[i].ops);
-    poly_uop_release(ctx, entry->estimates[i].lds);
-    poly_uop_release(ctx, entry->estimates[i].mem);
+    runtime_estimates_release(ctx, &entry->estimates[i]);
     if (entry->runtime_entries[i]) {
       poly_runner_cleanup_local_mappings(&entry->runners[i]);
       poly_runtime_cache_entry_release(entry->runtime_entries[i]);
@@ -2186,6 +2226,7 @@ static int poly_lower_compute_call_cached(
 
     PolyRunner lowered = {0};
     if (backend->lower_item(ctx, program, fn_name, &lowered) != 0) return -1;
+    poly_runner_apply_program_launch_info(ctx, program, &lowered);
 
     /* get_runtime(cache=False) reuses hits above, but never publishes a miss. */
     if (cache && poly_engine_cache_enabled() && ctx && ctx->runtime_cache) {
@@ -2213,18 +2254,15 @@ static int poly_lower_compute_call_cached(
         out->var_indices = NULL;
         out->n_vars = 0;
         out->borrowed_handle = true;
-        poly_runner_apply_program_launch_info(ctx, program, out);
         return 0;
       } else {
         free(entry);
         poly_runtime_cache_entry_release(runtime_entry);
         *out = lowered;
-        poly_runner_apply_program_launch_info(ctx, program, out);
         return 0;
       }
     } else {
       *out = lowered;
-      poly_runner_apply_program_launch_info(ctx, program, out);
       return 0;
     }
   }
@@ -2238,7 +2276,6 @@ static int poly_lower_compute_call_cached(
   out->var_indices = NULL;
   out->n_vars = 0;
   out->borrowed_handle = true;
-  poly_runner_apply_program_launch_info(ctx, program, out);
   return 0;
 }
 
@@ -4035,7 +4072,7 @@ int poly_test_linear_lane_vars(
 
 static int poly_linear_stats(
     PolyCtx *ctx,
-    PolyUOp *body,
+    const PolyEstimates *estimates,
     PolyVarBinding *bindings,
     int n_bindings,
     uint64_t copy_bytes,
@@ -4044,8 +4081,6 @@ static int poly_linear_stats(
 ) {
   if (!ctx || !update_stats || ctx->stats_suppression_depth > 0) return 0;
   uint64_t ops = 0, mem = copy_bytes, lds = 0;
-  const PolyEstimates *estimates =
-      body && body->op == POLY_OP_PROGRAM ? poly_program_estimates(body) : NULL;
   if (estimates && estimates->ops && estimates->lds && estimates->mem &&
       poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
     return -1;
@@ -4214,8 +4249,16 @@ static int poly_exec_linear_program(
         goto lane_cleanup;
     }
     ctx->launch_count++;
-    if (poly_linear_stats(ctx, program, lane_bindings, n_lane_bindings, 0, elapsed, update_stats) !=
-        0)
+    const PolyEstimates *estimates = poly_program_estimates(program);
+    if (update_stats && ctx->stats_suppression_depth == 0 && runtime_entry && estimates) {
+      if (!runtime_entry->estimates.ops &&
+          !runtime_estimates_simplify(ctx, &runtime_entry->estimates, estimates))
+        goto lane_cleanup;
+      estimates = &runtime_entry->estimates;
+    }
+    if (poly_linear_stats(
+            ctx, estimates, lane_bindings, n_lane_bindings, 0, elapsed, update_stats
+        ) != 0)
       goto lane_cleanup;
     rc = 0;
 
@@ -4459,22 +4502,6 @@ static void graph_cache_entry_destroy(PolyCtx *ctx, PolyGraphCacheEntry *entry) 
   poly_graph_cache_entry_free(NULL, entry, ctx);
 }
 
-/* GraphRunner.__init__/Estimates.simplify: cache expressions, not bound values.
- * Keep per-PROGRAM terms so C's checked signed-64 inference and saturating
- * unsigned counter sum do not become an overflowing signed graph expression.
- * Each field owns a retain, including when simplification merges the roots. */
-static bool graph_estimates_simplify(PolyCtx *ctx, PolyEstimates *out, const PolyEstimates *in) {
-  if (!in) return false;
-  PolyUOp *src[] = {in->ops, in->lds, in->mem};
-  PolyUOp **dst[] = {&out->ops, &out->lds, &out->mem};
-  for (int i = 0; i < 3; i++) {
-    PolyUOp *simplified = src[i] ? poly_graph_rewrite(ctx, src[i], poly_symbolic()) : NULL;
-    if (!simplified || poly_uop_retain(ctx, simplified) != 0) return false;
-    *dst[i] = simplified;
-  }
-  return true;
-}
-
 /* Current Tinygrad engine/realize.py:get_graph_runtime + exec_graph. */
 static int poly_exec_linear_graph(
     PolyCtx *ctx,
@@ -4600,10 +4627,16 @@ static int poly_exec_linear_graph(
       specs[node].value.program.block[dim] = runner->block[dim];
     }
     uint64_t ops = 0, lds = 0, mem = 0;
-    if (new_entry &&
-        !graph_estimates_simplify(ctx, &entry->estimates[node], poly_program_estimates(body)))
+    /* Keep per-PROGRAM checked inference and saturating totals. A graph owns
+     * fallback metadata when runtime caching is disabled; otherwise share the
+     * existing retained runtime owner with ordinary LINEAR execution. */
+    PolyEstimates *estimates = entry->runtime_entries[node]
+                                   ? &entry->runtime_entries[node]->estimates
+                                   : &entry->estimates[node];
+    if (!estimates->ops &&
+        !runtime_estimates_simplify(ctx, estimates, poly_program_estimates(body)))
       goto fail_prepared;
-    if (poly_estimates_infer(&entry->estimates[node], bindings, n_bindings, &ops, &lds, &mem) != 0)
+    if (poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
       goto fail_prepared;
     total_ops = poly_counter_add_sat(total_ops, ops);
     total_mem = poly_counter_add_sat(total_mem, mem);
