@@ -970,13 +970,14 @@ async function checkTypedIntegerInput(pg, Model) {
     const output = await inst.forward({ typed_x: new Int32Array([0, 1, 2]) })
     assertClose(output.typed_out, [0, 1, 2], 0)
 
-    let rejected = false
+    let rejection = ''
     try {
       await inst.forward({ typed_x: new Float32Array([0, 1, 2]) })
     } catch (e) {
-      rejected = /call\('forward'\) failed/.test(String(e && e.message))
+      rejection = String(e && e.message)
     }
-    assert(rejected, 'float32 bytes must not bind to an int32 Model input')
+    assert(/input 'typed_x': expected int32, received float32/.test(rejection),
+      `float32 bytes must not bind to an int32 Model input; received: ${rejection}`)
   } finally {
     inst.dispose()
   }
@@ -1008,13 +1009,14 @@ async function checkCallSignatureAndSelectedOutputs(pg, Model) {
     assertClose(plus.plus, [7, 10], 0)
     assertClose(minus.minus, [3, 4], 0)
 
-    let rejected = false
+    let rejection = ''
     try {
       await call('plus_ep', { x: new Float32Array([9, 9]) })
     } catch (err) {
-      rejected = /call\('plus_ep'\) failed/.test(String(err && err.message))
+      rejection = String(err && err.message)
     }
-    assert(rejected, 'missing required input must not reuse stale Model bytes')
+    assert(/entrypoint 'plus_ep' requires input 'y' exactly once/.test(rejection),
+      `missing required input must not reuse stale Model bytes; received: ${rejection}`)
   } finally {
     if (webgpu) await inst.dispose()
     else inst.dispose()
