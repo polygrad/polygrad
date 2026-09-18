@@ -30,13 +30,12 @@
 
 #include "layers.h"
 #include "../nn/nn.h"
-#include "../tensor.h"
+#include "../polygrad.h"
 #include "../model.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 
 /* GPT-2 Config */
 

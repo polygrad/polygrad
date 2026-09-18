@@ -10,18 +10,15 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "models.h"
 #include "factory.h"
 #include <limits.h>
 
-#include "layers.h"
 #include "../model.h"
-#include "../tensor.h"
+#include "../polygrad.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 
 static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
   PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);

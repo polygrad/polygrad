@@ -1,10 +1,13 @@
-#include "models.h"
+#include "../model.h"
+#include "../polygrad.h"
+#include "../tensor.h"
 #include "factory.h"
 #include "layers.h"
 #include "../nn/nn.h"
 #include "registry.h"
 #include "../loaders/import_error.h"
 #include "../loaders/bind.h"
+#include "../../vendor/cjson/cJSON.h"
 #include <limits.h>
 #include <float.h>
 #include <math.h>
