@@ -1621,7 +1621,6 @@ PolyTensor *poly_tensor_alu3(
   return tensor_alu(ctx, op, inputs, 3);
 }
 
-static PolyTensor *tensor_cat_internal(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim);
 static int uop_shape(PolyCtx *ctx, PolyUOp *u, int64_t *out_shape);
 
 /* Pinned tinygrad Tensor.cast/bitcast applies UOp.cast/bitcast directly to the
@@ -5199,7 +5198,7 @@ static PolyTensor *rng_getitem_1d(
   return shrunk ? rng_reshape_if_needed(ctx, shrunk, shape, collapse ? 0 : 1) : NULL;
 }
 
-static PolyTensor *tensor_cat_internal(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim) {
+PolyTensor *poly_tensor_cat(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim) {
   if (!ctx || !tensors || n_tensors <= 0) return NULL;
   int build_logical = poly_tensor_result_builds_logical(ctx, tensors, n_tensors);
   if (build_logical < 0) return NULL;
@@ -5234,7 +5233,7 @@ static PolyTensor *tensor_cat_internal(PolyCtx *ctx, PolyTensor **tensors, int n
 
 static PolyTensor *rng_cat2(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
   PolyTensor *src[2] = {a, b};
-  return tensor_cat_internal(ctx, src, 2, 0);
+  return poly_tensor_cat(ctx, src, 2, 0);
 }
 
 static PolyTensor *rng_arange_u32(PolyCtx *ctx, uint64_t stop, PolyDevice device) {
@@ -5321,7 +5320,7 @@ static PolyTensor *rng_random_bits(
     chunks[n_chunks++] = chunk;
     i += chunk_num;
   }
-  PolyTensor *out = tensor_cat_internal(ctx, chunks, n_chunks, 0);
+  PolyTensor *out = poly_tensor_cat(ctx, chunks, n_chunks, 0);
   free(chunks);
   return out;
 }

@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 98
+#define POLYGRAD_ABI_VERSION 99
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1187,6 +1187,8 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
 PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
 PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
 PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
+/* Tensor.cat: shared logical/physical construction and runtime-owner validation. */
+PolyTensor *poly_tensor_cat(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_reshape_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);

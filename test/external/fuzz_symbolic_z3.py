@@ -229,11 +229,11 @@ def load_lib() -> ctypes.CDLL:
     # stop here until the declarations are reviewed, not corrupt ctypes calls.
     lib.poly_abi_version.restype = ctypes.c_int
     lib.poly_abi_version.argtypes = []
-    # ABI98 removes model-specific checkpoint exports without changing these layouts;
+    # ABI99 exposes Tensor.cat without changing these layouts;
     # test_api_parity compares every mirrored
     # top-level field offset and size against the compiled C header.
-    if (abi := lib.poly_abi_version()) != 98:
-        raise SystemExit(f"Z3 harness requires reviewed ABI98 layouts; core has ABI{abi}")
+    if (abi := lib.poly_abi_version()) != 99:
+        raise SystemExit(f"Z3 harness requires reviewed ABI99 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []
@@ -867,7 +867,7 @@ def run(args: argparse.Namespace) -> int:
         assert ranged.contents.arg.value.range.axis_type == AXIS_LOOP
     finally:
         poly.close()
-    print("Z3 harness ABI92: typed scalar and RANGE controls pass")
+    print(f"Z3 harness ABI{lib.poly_abi_version()}: typed scalar and RANGE controls pass")
     rng = random.Random(args.seed)
     skipped = 0
     checked = 0

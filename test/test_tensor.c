@@ -157,6 +157,36 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
 
 static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n);
 
+TEST(tensor, cat_handles_reuse_shared_uop_and_reject_foreign_owner) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  float a_data[] = {1, 2, 3, 4}, b_data[] = {7, 8}, actual[6];
+  PolyTensor *a =
+      poly_tensor_from_host(ctx, a_data, sizeof(a_data), POLY_FLOAT32, (int64_t[]){2, 2}, 2);
+  PolyTensor *b =
+      poly_tensor_from_host(ctx, b_data, sizeof(b_data), POLY_FLOAT32, (int64_t[]){2, 1}, 2);
+  PolyTensor *out = poly_tensor_cat(ctx, (PolyTensor *[]){a, b}, 2, 1);
+  ASSERT_NOT_NULL(out);
+  PolyUOp *physical[] = {a->uop_physical, b->uop_physical},
+          *logical[] = {a->uop_logical, b->uop_logical};
+  ASSERT_TRUE(out->uop_physical == poly_cat(ctx, physical, 2, 1));
+  ASSERT_TRUE(out->uop_logical == poly_cat(ctx, logical, 2, 1));
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, out, actual, sizeof(actual)), 0);
+  float expected[] = {1, 2, 7, 3, 4, 8};
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(actual[i], expected[i], 0);
+  PolyTensor *foreign =
+      poly_tensor_from_host(other, b_data, sizeof(b_data), POLY_FLOAT32, (int64_t[]){2, 1}, 2);
+  ASSERT_TRUE(poly_tensor_cat(ctx, (PolyTensor *[]){a, foreign}, 2, 1) == NULL);
+  poly_tensor_release(foreign);
+  poly_tensor_release(out);
+  poly_tensor_release(b);
+  poly_tensor_release(a);
+  poly_ctx_destroy(other);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, released_handles_retire_exact_buffer_residency) {
   /* Tinygrad 2026-08-22 UOp/Buffer destruction drops each allocation when
    * its final Tensor/UOp owner dies.  Polygrad exposes that lifetime
