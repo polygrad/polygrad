@@ -20,7 +20,7 @@
 TEST(sym, where_to_max_preserves_comparison_operand_order) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
-  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *zero = poly_uop_const_float(ctx, 0.0);
   for (int constant_first = 0; constant_first < 2; constant_first++) {
     PolyUOp *a = constant_first ? zero : x;
     PolyUOp *b = constant_first ? x : zero;
@@ -40,18 +40,18 @@ TEST(sym, where_to_max_preserves_comparison_operand_order) {
 TEST(sym, owner_exact_interval_allocation_failure_cleans_up) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *load = poly_uop1(
       ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
   );
-  PolyUOp *shift = poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 62));
+  PolyUOp *shift = poly_uop_alu2(ctx, POLY_OP_SHR, load, poly_uop_const_int(ctx, 62));
   int64_t lo = -1, hi = -1;
   poly_test_exact_int_range_alloc_fail(true);
   poly_uop_minmax(ctx, shift, &lo, &hi);
   poly_test_exact_int_range_alloc_fail(false);
   bool correct = lo == 0 && hi == INT64_MAX;
   /* A fresh query after failure must still use the exact interval engine. */
-  PolyUOp *next = poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 61));
+  PolyUOp *next = poly_uop_alu2(ctx, POLY_OP_SHR, load, poly_uop_const_int(ctx, 61));
   poly_uop_minmax(ctx, next, &lo, &hi);
   correct &= lo == 0 && hi == 7;
   poly_ctx_destroy(ctx);
@@ -63,17 +63,17 @@ TEST(sym, owner_exact_interval_allocation_failure_cleans_up) {
 TEST(sym, owner_uint64_derived_bounds_use_full_source_domain) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_program_param(ctx, POLY_UINT64, 1, 0);
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *load = poly_uop1(
       ctx, POLY_OP_LOAD, POLY_UINT64, poly_uop_index(ctx, buf, &zero, 1), poly_arg_none()
   );
   PolyUOp *expressions[] = {
-      poly_alu2(ctx, POLY_OP_SHR, load, poly_const_int(ctx, 62)),
-      poly_alu2(
+      poly_uop_alu2(ctx, POLY_OP_SHR, load, poly_uop_const_int(ctx, 62)),
+      poly_uop_alu2(
           ctx, POLY_OP_FLOORDIV, load,
           poly_uop_const(ctx, poly_arg_int(INT64_C(1) << 62), POLY_UINT64)
       ),
-      poly_alu2(ctx, POLY_OP_AND, load, poly_uop_const(ctx, poly_arg_int(3), POLY_UINT64)),
+      poly_uop_alu2(ctx, POLY_OP_AND, load, poly_uop_const(ctx, poly_arg_int(3), POLY_UINT64)),
   };
   bool correct = true;
   for (size_t i = 0; i < sizeof(expressions) / sizeof(*expressions); i++) {
@@ -116,7 +116,7 @@ TEST(sym, scheduler_divides_parameter_multiple) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *n =
       poly_uop_variable(ctx, "n", poly_arg_int(8), poly_arg_int(32), POLY_WEAKINT, 8, true);
-  PolyUOp *expected = poly_alu2(ctx, POLY_OP_IDIV, n, poly_const_int(ctx, 4));
+  PolyUOp *expected = poly_uop_alu2(ctx, POLY_OP_IDIV, n, poly_uop_const_int(ctx, 4));
   bool correct = poly_uop_divides(ctx, n, 4) == expected && poly_uop_divides(ctx, n, 3) == NULL;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(correct);
@@ -161,13 +161,13 @@ TEST(sym, current_symbolic_simple_identity_batch) {
   ASSERT_PTR_EQ(
       simplify(ctx, poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, b, false_uop, poly_arg_none())), b
   );
-  ASSERT_PTR_EQ(simplify(ctx, poly_logical_not(ctx, poly_logical_not(ctx, b))), b);
+  ASSERT_PTR_EQ(simplify(ctx, poly_uop_logical_not(ctx, poly_uop_logical_not(ctx, b))), b);
 
   PolyUOp *b_int = poly_uop1(ctx, POLY_OP_CAST, POLY_WEAKINT, b, poly_arg_none());
   ASSERT_PTR_EQ(
       simplify(ctx, poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, b_int, zero, poly_arg_none())), b
   );
-  PolyUOp *not_b = poly_logical_not(ctx, b);
+  PolyUOp *not_b = poly_uop_logical_not(ctx, b);
   ASSERT_PTR_EQ(
       simplify(
           ctx, poly_uop2(
@@ -234,7 +234,7 @@ TEST(sym, current_symbolic_completion_batch) {
   PolyUOp *ten = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(10));
   PolyUOp *truth = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
 
-  PolyUOp *not_cond = poly_logical_not(ctx, cond);
+  PolyUOp *not_cond = poly_uop_logical_not(ctx, cond);
   PolyUOp *out = poly_graph_rewrite(
       ctx, poly_uop2(ctx, POLY_OP_OR, POLY_BOOL, cond, not_cond, poly_arg_none()), poly_symbolic()
   );
@@ -1984,9 +1984,9 @@ TEST(alu, pow_domain_values_match_safe_pow) {
   }
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *base = poly_const_typed(ctx, POLY_FLOAT32, -28.0);
-  PolyUOp *exponent = poly_const_typed(ctx, POLY_FLOAT32, 0.2);
-  PolyUOp *out = simplify(ctx, poly_alu2(ctx, POLY_OP_POW, base, exponent));
+  PolyUOp *base = poly_uop_const_typed(ctx, POLY_FLOAT32, -28.0);
+  PolyUOp *exponent = poly_uop_const_typed(ctx, POLY_FLOAT32, 0.2);
+  PolyUOp *out = simplify(ctx, poly_uop_alu2(ctx, POLY_OP_POW, base, exponent));
   ASSERT_NOT_NULL(out);
   ASSERT_EQ(out->op, POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(out->dtype, POLY_FLOAT32));
@@ -2343,7 +2343,7 @@ TEST(sym, where_logical_not_swaps_branches) {
    *   cond.logical_not().where(t, f) -> cond.where(f, t) */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *cond = Variable(ctx, "c", 0, 1, POLY_BOOL);
-  PolyUOp *not_cond = poly_logical_not(ctx, cond);
+  PolyUOp *not_cond = poly_uop_logical_not(ctx, cond);
   PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
   PolyUOp *f = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
   PolyUOp *wh = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, not_cond, t, f, poly_arg_none());
@@ -2367,7 +2367,7 @@ TEST(sym, where_logical_not_is_not_symbolic_simple) {
   /* Current tinygrad keeps this rule in symbolic, after symbolic_simple. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *cond = Variable(ctx, "c", 0, 1, POLY_BOOL);
-  PolyUOp *not_cond = poly_logical_not(ctx, cond);
+  PolyUOp *not_cond = poly_uop_logical_not(ctx, cond);
   PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
   PolyUOp *f = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
   PolyUOp *wh = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, not_cond, t, f, poly_arg_none());
@@ -2560,7 +2560,7 @@ static bool sym_eval_i64(PolyUOp *u, const SymEvalEnv *env, int64_t *out) {
 
 static int sym_count_ops_in_root(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  PolyUOp **topo = poly_uop_toposort(ctx, root, &n);
   int count = 0;
   for (int i = 0; i < n; i++)
     if (topo[i]->op == op) count++;
@@ -2776,9 +2776,9 @@ TEST(sym, add_divmod_recombine_canonicalizes_nested_quotient) {
    * recognizes ((r//6)//6) as r//36 before recombining r%36. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *r = poly_range(ctx, 432, 0, POLY_AXIS_LOOP);
-  PolyUOp *six = poly_const_int(ctx, 6);
-  PolyUOp *thirty_six = poly_const_int(ctx, 36);
+  PolyUOp *r = poly_uop_range(ctx, 432, 0, POLY_AXIS_LOOP);
+  PolyUOp *six = poly_uop_const_int(ctx, 6);
+  PolyUOp *thirty_six = poly_uop_const_int(ctx, 36);
   PolyUOp *q0 = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, r, six, poly_arg_none());
   PolyUOp *q1 = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, q0, six, poly_arg_none());
   PolyUOp *lhs = poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, q1, thirty_six, poly_arg_none());
@@ -2794,8 +2794,8 @@ TEST(sym, nested_floordiv_constants_match_current_tinygrad) {
   /* tinygrad@2026-08-22/a9069c177a9d uop/symbolic.py:269-270. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *r = poly_range(ctx, 432, 0, POLY_AXIS_LOOP);
-  PolyUOp *six = poly_const_int(ctx, 6);
+  PolyUOp *r = poly_uop_range(ctx, 432, 0, POLY_AXIS_LOOP);
+  PolyUOp *six = poly_uop_const_int(ctx, 6);
   PolyUOp *q0 = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, r, six, poly_arg_none());
   PolyUOp *q1 = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, q0, six, poly_arg_none());
 
@@ -2812,12 +2812,12 @@ TEST(sym, divmod_splits_constant_for_signed_nonzero_divisor) {
   /* tinygrad@2026-08-22/a9069c177a9d uop/divandmod.py:102-105. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *r = poly_range(ctx, 432, 0, POLY_AXIS_LOOP);
-  PolyUOp *thirteen = poly_const_int(ctx, 13);
+  PolyUOp *r = poly_uop_range(ctx, 432, 0, POLY_AXIS_LOOP);
+  PolyUOp *thirteen = poly_uop_const_int(ctx, 13);
   PolyUOp *numerator = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, r, thirteen, poly_arg_none());
 
   for (int divisor = 6; divisor >= -6; divisor -= 12) {
-    PolyUOp *d = poly_const_int(ctx, divisor);
+    PolyUOp *d = poly_uop_const_int(ctx, divisor);
     PolyUOp *div = poly_graph_rewrite(
         ctx, poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, numerator, d, poly_arg_none()),
         poly_symbolic()
@@ -3586,10 +3586,10 @@ TEST(sym, minmax_vector_bool_index_and_gate_stays_dynamic) {
   PolyUOp *base = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_GLOBAL);
   PolyUOp *exponent = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 1, POLY_ADDR_GLOBAL);
   PolyUOp *zero_lanes[4] = {
-      poly_const_float(ctx, 0.0),
-      poly_const_float(ctx, 0.0),
-      poly_const_float(ctx, 0.0),
-      poly_const_float(ctx, 0.0),
+      poly_uop_const_float(ctx, 0.0),
+      poly_uop_const_float(ctx, 0.0),
+      poly_uop_const_float(ctx, 0.0),
+      poly_uop_const_float(ctx, 0.0),
   };
   PolyUOp *zero_vec = poly_uop_stack(ctx, zero_lanes, 4);
   PolyUOp *base_eq = poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, base, zero_vec, poly_arg_none());
@@ -3601,7 +3601,7 @@ TEST(sym, minmax_vector_bool_index_and_gate_stays_dynamic) {
   PolyUOp *as_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, both, poly_arg_none());
   PolyUOp *as_float = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, as_int, poly_arg_none());
   PolyUOp *gate = poly_uop2(
-      ctx, POLY_OP_CMPNE, POLY_BOOL, as_float, poly_const_float(ctx, 0.0), poly_arg_none()
+      ctx, POLY_OP_CMPNE, POLY_BOOL, as_float, poly_uop_const_float(ctx, 0.0), poly_arg_none()
   );
 
   check_mm(ctx, base_eq, 0, 1, "vector CMPEQ");
@@ -3610,8 +3610,8 @@ TEST(sym, minmax_vector_bool_index_and_gate_stays_dynamic) {
   check_mm(ctx, gate, 0, 1, "casted bool gate");
 
   PolyUOp *where = poly_uop3(
-      ctx, POLY_OP_WHERE, POLY_FLOAT32, gate, poly_const_float(ctx, 1.0),
-      poly_const_float(ctx, 8.0), poly_arg_none()
+      ctx, POLY_OP_WHERE, POLY_FLOAT32, gate, poly_uop_const_float(ctx, 1.0),
+      poly_uop_const_float(ctx, 8.0), poly_arg_none()
   );
   PolyUOp *rewritten = simplify(ctx, where);
   ASSERT_NOT_NULL(rewritten);
@@ -3755,8 +3755,8 @@ TEST(sym, reciprocal_product_rules_match_pinned_topology) {
    * where d = reciprocal(1+x). */
   PolyUOp *x = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(0));
   PolyUOp *y = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(1));
-  PolyUOp *one = poly_const_like_float(ctx, x, 1.0);
-  PolyUOp *neg_one = poly_const_like_float(ctx, x, -1.0);
+  PolyUOp *one = poly_uop_const_like_float(ctx, x, 1.0);
+  PolyUOp *neg_one = poly_uop_const_like_float(ctx, x, -1.0);
   PolyUOp *den = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT16, one, x, poly_arg_none());
   PolyUOp *d = poly_uop1(ctx, POLY_OP_RECIPROCAL, POLY_FLOAT16, den, poly_arg_none());
   ASSERT_NOT_NULL(x);
@@ -3812,7 +3812,7 @@ TEST(sym, move_const_to_end_matches_commutative_outer_orientation) {
    * The nested same-op subtree can therefore be either outer operand. */
   PolyUOp *x = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(0));
   PolyUOp *y = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(1));
-  PolyUOp *c = poly_const_like_float(ctx, x, -1.0);
+  PolyUOp *c = poly_uop_const_like_float(ctx, x, -1.0);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(y);
   ASSERT_NOT_NULL(c);
@@ -3847,8 +3847,8 @@ TEST(sym, reciprocal_product_stabilizes_after_commutative_const_move) {
   PolyUOp *z = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(0));
   PolyUOp *v = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(1));
   PolyUOp *x = poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT16, z, poly_arg_none());
-  PolyUOp *one = poly_const_like_float(ctx, x, 1.0);
-  PolyUOp *neg_one = poly_const_like_float(ctx, x, -1.0);
+  PolyUOp *one = poly_uop_const_like_float(ctx, x, 1.0);
+  PolyUOp *neg_one = poly_uop_const_like_float(ctx, x, -1.0);
   PolyUOp *d = poly_uop1(
       ctx, POLY_OP_RECIPROCAL, POLY_FLOAT16,
       poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT16, one, x, poly_arg_none()), poly_arg_none()
@@ -3955,7 +3955,7 @@ TEST(sym, minmax_deep_chain_is_iterative) {
   check_mm(ctx, expr, 12000, 12009, "deep add chain");
   /* CAST's typed source query must reuse already-computed integer bounds. */
   for (int i = 0; i < 12000; i++)
-    expr = poly_cast(ctx, expr, i % 2 ? POLY_INT32 : POLY_INT64);
+    expr = poly_uop_cast(ctx, expr, i % 2 ? POLY_INT32 : POLY_INT64);
   check_mm(ctx, expr, 12000, 12009, "deep cast chain");
   poly_ctx_destroy(ctx);
   PASS();
@@ -3979,8 +3979,8 @@ TEST(sym, minmax_backward_slice_score_uses_rewound_scratch_toposort) {
   PASS();
 }
 
-/* Phase D end-to-end gate * poly_arange returns a *Tensor-level* UOp graph composed of movement ops
- * (RESHAPE / EXPAND / PAD / PERMUTE / SHRINK) over a CONST + REDUCE_AXIS
+/* Phase D end-to-end gate * poly_uop_arange returns a *Tensor-level* UOp graph composed of movement
+ * ops (RESHAPE / EXPAND / PAD / PERMUTE / SHRINK) over a CONST + REDUCE_AXIS
  * + ADD. Tinygrad's _min_max has no special case for any of these (they
  * live in GroupOp.Movement, not GroupOp.Binary), so the bounds at this
  * level fall through to the dtype default. Tight bounds emerge only after
@@ -3991,7 +3991,7 @@ TEST(sym, minmax_backward_slice_score_uses_rewound_scratch_toposort) {
  * on a real arange graph and must respect the dtype-bounds fallback. */
 TEST(sym, minmax_arange_0_to_5_smoke) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *ar = poly_arange(ctx, 0.0, 5.0, 1.0);
+  PolyUOp *ar = poly_uop_arange(ctx, 0.0, 5.0, 1.0);
   ASSERT_NOT_NULL(ar);
   int64_t lo, hi;
   poly_uop_minmax(ctx, ar, &lo, &hi);
@@ -4055,14 +4055,14 @@ TEST(sym, minmax_explicit_cache_does_not_allocate_arena_values) {
   PASS();
 }
 
-/* poly_logical_not / bool comparison parity (Phase A P5) *
+/* poly_uop_logical_not / bool comparison parity (Phase A P5) *
  * Tinygrad's `logical_not()` (mixin/elementwise.py:25-33) lowers to
  *   CMPNE(CAST(x, bool), CONST(true))
  * which symbolic.py:126 collapses to
  *   CMPNE(x, CONST(true))           when x is already bool.
  *
- * Polygrad's poly_logical_not is the same form (CMPNE-with-true). All
- * comparison helpers (poly_le, poly_ge, poly_eq) return bool via this
+ * Polygrad's poly_uop_logical_not is the same form (CMPNE-with-true). All
+ * comparison helpers (poly_uop_le, poly_uop_ge, poly_uop_eq) return bool via this
  * canonical NOT, mirroring tinygrad's mixin/elementwise.py:240-250.
  *
  * Captured against tinygrad in test/parity_scripts/tg_logical_not_gt.py. */
@@ -4071,7 +4071,7 @@ TEST(sym, logical_not_canonical_form) {
   PolyUOp *r = mk_range(ctx, 5, 0);
   PolyUOp *c3 = mk_const(ctx, 3);
   PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, c3, poly_arg_none());
-  PolyUOp *not_lt = poly_logical_not(ctx, lt);
+  PolyUOp *not_lt = poly_uop_logical_not(ctx, lt);
   /* Shape: CMPNE(CMPLT(...), CONST(true)) */
   ASSERT_INT_EQ(not_lt->op, POLY_OP_CMPNE);
   ASSERT_TRUE(poly_dtype_eq(not_lt->dtype, POLY_BOOL));
@@ -4085,11 +4085,11 @@ TEST(sym, logical_not_canonical_form) {
 }
 
 TEST(sym, poly_le_returns_bool) {
-  /* poly_le must return bool (was previously float WHERE(0,1) before P5). */
+  /* poly_uop_le must return bool (was previously float WHERE(0,1) before P5). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = mk_range(ctx, 5, 0);
   PolyUOp *b = mk_const(ctx, 3);
-  PolyUOp *le = poly_le(ctx, a, b);
+  PolyUOp *le = poly_uop_le(ctx, a, b);
   ASSERT_TRUE(poly_dtype_eq(le->dtype, POLY_BOOL));
   /* Structure: CMPNE(CMPLT(b, a), CONST(true)) per the (b<a).logical_not() form */
   ASSERT_INT_EQ(le->op, POLY_OP_CMPNE);
@@ -4102,7 +4102,7 @@ TEST(sym, poly_ge_returns_bool) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = mk_range(ctx, 5, 0);
   PolyUOp *b = mk_const(ctx, 3);
-  PolyUOp *ge = poly_ge(ctx, a, b);
+  PolyUOp *ge = poly_uop_ge(ctx, a, b);
   ASSERT_TRUE(poly_dtype_eq(ge->dtype, POLY_BOOL));
   ASSERT_INT_EQ(ge->op, POLY_OP_CMPNE);
   ASSERT_INT_EQ(ge->src[0]->op, POLY_OP_CMPLT);
@@ -4111,11 +4111,11 @@ TEST(sym, poly_ge_returns_bool) {
 }
 
 TEST(sym, poly_eq_returns_bool) {
-  /* poly_eq = (a != b).logical_not() = CMPNE(CMPNE(a,b), true). */
+  /* poly_uop_eq = (a != b).logical_not() = CMPNE(CMPNE(a,b), true). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = mk_range(ctx, 5, 0);
   PolyUOp *b = mk_const(ctx, 3);
-  PolyUOp *eq = poly_eq(ctx, a, b);
+  PolyUOp *eq = poly_uop_eq(ctx, a, b);
   ASSERT_TRUE(poly_dtype_eq(eq->dtype, POLY_BOOL));
   ASSERT_INT_EQ(eq->op, POLY_OP_CMPNE);
   ASSERT_INT_EQ(eq->src[0]->op, POLY_OP_CMPNE);
@@ -4129,10 +4129,10 @@ TEST(sym, poly_eq_returns_bool) {
  * History: Phase D's pm_reduce_unparented produces
  *   MUL(CONST_float, CAST(CONST_int -> float))
  * which symbolic_simple folds via rule_cast_const + rule_const_fold_binary.
- * The original poly_const_like (src/uop/upat.c) blindly copied the source
+ * The original poly_uop_const_like (src/uop/upat.c) blindly copied the source
  * CONST's PolyArg into a CONST tagged with the new dtype, producing a
  * CONST(dtype=float, arg.kind=INT) — a tagged-union mismatch that the
- * codegen misread as a denormal/zero. The fix: poly_const_like now
+ * codegen misread as a denormal/zero. The fix: poly_uop_const_like now
  * normalizes the value through poly_arg_float / _int / _bool dispatch,
  * matching tinygrad's DType.const(b) at dtype.py:92-100. These tests
  * lock the fix in place. */
@@ -4140,7 +4140,7 @@ TEST(sym, poly_eq_returns_bool) {
 TEST(sym, cast_const_int_to_float) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
-  PolyUOp *cast = poly_cast(ctx, c, POLY_FLOAT32);
+  PolyUOp *cast = poly_uop_cast(ctx, c, POLY_FLOAT32);
   PolyUOp *folded = simplify(ctx, cast);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
@@ -4173,7 +4173,7 @@ TEST(sym, vector_stack_cast_remains_explicit_like_tinygrad) {
 TEST(sym, cast_const_float_to_int) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.7));
-  PolyUOp *cast = poly_cast(ctx, c, POLY_INT32);
+  PolyUOp *cast = poly_uop_cast(ctx, c, POLY_INT32);
   PolyUOp *folded = simplify(ctx, cast);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_INT32));
@@ -4187,7 +4187,7 @@ TEST(sym, cast_const_large_int_to_uint64_preserves_integer_bits) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t big = 9007199254740993LL;
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(big));
-  PolyUOp *cast = poly_cast(ctx, c, POLY_UINT64);
+  PolyUOp *cast = poly_uop_cast(ctx, c, POLY_UINT64);
   PolyUOp *folded = simplify(ctx, cast);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_UINT64));
@@ -4200,7 +4200,7 @@ TEST(sym, cast_const_large_int_to_uint64_preserves_integer_bits) {
 TEST(sym, cast_const_bool_to_float) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
-  PolyUOp *cast = poly_cast(ctx, c, POLY_FLOAT32);
+  PolyUOp *cast = poly_uop_cast(ctx, c, POLY_FLOAT32);
   PolyUOp *folded = simplify(ctx, cast);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
@@ -4213,7 +4213,7 @@ TEST(sym, cast_const_bool_to_float) {
 TEST(sym, cast_const_zero_int_to_bool) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *cast = poly_cast(ctx, c, POLY_BOOL);
+  PolyUOp *cast = poly_uop_cast(ctx, c, POLY_BOOL);
   PolyUOp *folded = simplify(ctx, cast);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_BOOL));
@@ -4229,8 +4229,8 @@ TEST(sym, mul_float_cast_int_const_fold) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *one_f = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *five_i = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
-  PolyUOp *cast = poly_cast(ctx, five_i, POLY_FLOAT32);
-  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, one_f, cast);
+  PolyUOp *cast = poly_uop_cast(ctx, five_i, POLY_FLOAT32);
+  PolyUOp *mul = poly_uop_alu2(ctx, POLY_OP_MUL, one_f, cast);
   PolyUOp *folded = simplify(ctx, mul);
   ASSERT_TRUE(folded->op == POLY_OP_CONST);
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
@@ -4247,8 +4247,8 @@ TEST(sym, double_logical_not_idempotent_via_minmax) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = mk_range(ctx, 5, 0);
   PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, mk_const(ctx, 3), poly_arg_none());
-  PolyUOp *not_lt = poly_logical_not(ctx, lt);
-  PolyUOp *not_not_lt = poly_logical_not(ctx, not_lt);
+  PolyUOp *not_lt = poly_uop_logical_not(ctx, lt);
+  PolyUOp *not_not_lt = poly_uop_logical_not(ctx, not_lt);
   int64_t lo_a, hi_a, lo_b, hi_b;
   poly_uop_minmax(ctx, lt, &lo_a, &hi_a);
   poly_uop_minmax(ctx, not_not_lt, &lo_b, &hi_b);
@@ -4265,9 +4265,9 @@ TEST(sym, weak_index_combines_same_base_terms_with_pinned_dtype_topology) {
   /* Pinned tinygrad/uop/symbolic.py:242,247 canonicalizes both x+x and
    * x*c0+x*c1 while retaining the weak-index result dtype. */
   PolyUOp *n = Variable(ctx, "n", 1, 8, POLY_WEAKINT);
-  PolyUOp *two = poly_const_int(ctx, 2);
-  PolyUOp *three = poly_const_int(ctx, 3);
-  PolyUOp *five = poly_const_int(ctx, 5);
+  PolyUOp *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *five = poly_uop_const_int(ctx, 5);
   ASSERT_NOT_NULL(n);
   ASSERT_NOT_NULL(two);
   ASSERT_NOT_NULL(three);
@@ -4533,7 +4533,7 @@ TEST(sym, cast_bounds_round_before_integer_width_decisions) {
       poly_uop_minmax(ctx, unknown, &cases[i].lo, &cases[i].hi);
     }
     PolyUOp *input = poly_uop_const(ctx, cases[i].value, cases[i].from);
-    PolyUOp *cast = poly_cast(ctx, input, cases[i].to);
+    PolyUOp *cast = poly_uop_cast(ctx, input, cases[i].to);
     int64_t lo, hi;
     poly_uop_minmax(ctx, cast, &lo, &hi);
     if (lo != cases[i].lo || hi != cases[i].hi) {
@@ -4548,7 +4548,7 @@ TEST(sym, cast_bounds_round_before_integer_width_decisions) {
       PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, input->dtype, input, effect, poly_arg_none());
       PolyUOp *lanes[] = {input, after};
       PolyUOp *stack = poly_uop_stack(ctx, lanes, 2);
-      poly_uop_minmax(ctx, poly_cast(ctx, stack, cases[i].to), &lo, &hi);
+      poly_uop_minmax(ctx, poly_uop_cast(ctx, stack, cases[i].to), &lo, &hi);
       matched &= lo == cases[i].lo && hi == cases[i].hi;
     }
   }

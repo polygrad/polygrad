@@ -29,7 +29,7 @@
 
 static int count_ops_in(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++)
     if (topo[i]->op == op) count++;
@@ -41,7 +41,7 @@ static int count_ops_in(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
 static PolyUOp *make_unary_kernel(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_FLOAT32, n, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, n, 1);
-  PolyUOp *bound = poly_const_int(ctx, n);
+  PolyUOp *bound = poly_uop_const_int(ctx, n);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -59,7 +59,7 @@ static PolyUOp *make_binary_kernel(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_FLOAT32, n, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, n, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_FLOAT32, n, 2);
-  PolyUOp *bound = poly_const_int(ctx, n);
+  PolyUOp *bound = poly_uop_const_int(ctx, n);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -76,7 +76,7 @@ static PolyUOp *make_binary_kernel(PolyCtx *ctx, PolyOps op, int n) {
 
 static int count_range_axis_type(PolyCtx *ctx, PolyUOp *sink, PolyAxisType type) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_RANGE && poly_arg_is_range(topo[i]->arg) &&
@@ -87,7 +87,7 @@ static int count_range_axis_type(PolyCtx *ctx, PolyUOp *sink, PolyAxisType type)
 }
 
 static PolyUOp *make_many_index_kernel(PolyCtx *ctx, int n_pairs, int n) {
-  PolyUOp *bound = poly_const_int(ctx, n);
+  PolyUOp *bound = poly_uop_const_int(ctx, n);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp **stores = (PolyUOp **)malloc((size_t)n_pairs * sizeof(PolyUOp *));
@@ -162,7 +162,7 @@ TEST(decomp, cmod_power_of_two_stays_cmod_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 8, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 8, 1);
-  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *bound = poly_uop_const_int(ctx, 8);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -193,7 +193,7 @@ TEST(decomp, mulacc_caps_preserves) {
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 2);
   PolyUOp *p3 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 3);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -228,7 +228,7 @@ TEST(decomp, mul_add_fuses_to_mulacc) {
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 2);
   PolyUOp *p3 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 3);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -263,7 +263,7 @@ TEST(decomp, mul_add_int_fuses_when_supported) {
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_INT32, 4, 2);
   PolyUOp *p3 = poly_test_program_param(ctx, POLY_INT32, 4, 3);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -300,7 +300,7 @@ TEST(decomp, threefry_lowered_when_no_native_support) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_UINT64, 8, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_UINT64, 8, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_UINT64, 8, 2);
-  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *bound = poly_uop_const_int(ctx, 8);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -416,7 +416,7 @@ TEST(decomp, threefry_preserved_with_native_caps) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_UINT64, 8, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_UINT64, 8, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_UINT64, 8, 2);
-  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *bound = poly_uop_const_int(ctx, 8);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -445,7 +445,7 @@ TEST(decomp, mul_neg1_to_neg) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -473,7 +473,7 @@ TEST(decomp, add_neg_to_sub) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_INT32, 4, 2);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -516,7 +516,7 @@ TEST(decomp, mul_one_over_b_to_fdiv) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 2);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -760,7 +760,7 @@ TEST(regression, mul_to_shl) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -784,7 +784,7 @@ TEST(regression, idiv_to_shr) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_INT32, 4, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_INT32, 4, 1);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -1098,9 +1098,9 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
 
   /* Build tensor-level graph: out[i] = op(in[i]) via poly_test_realize_buffer_views.
    * Respects POLY_DEV so conformance tests run on the selected backend. */
-  PolyUOp *buf_in = poly_buffer_f32(ctx, n);
-  PolyUOp *result = poly_alu1(ctx, op, buf_in);
-  PolyUOp *buf_out = poly_buffer_f32(ctx, n);
+  PolyUOp *buf_in = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *result = poly_uop_alu1(ctx, op, buf_in);
+  PolyUOp *buf_out = poly_uop_buffer_f32(ctx, n);
   PolyUOp *store = poly_test_store_to_buffer(ctx, buf_out, result);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1306,7 +1306,7 @@ TEST(conformance, exp2_bitpattern_sweep) {
 static PolyUOp *make_unary_kernel_f64(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *p0 = poly_test_program_param(ctx, POLY_FLOAT64, n, 0);
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT64, n, 1);
-  PolyUOp *bound = poly_const_int(ctx, n);
+  PolyUOp *bound = poly_uop_const_int(ctx, n);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -1519,7 +1519,7 @@ static bool simplify_after_two_range_subst_i64(
 
 static int count_floormod_with_const_den(PolyCtx *ctx, PolyUOp *root, int64_t den) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, root, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
@@ -1532,7 +1532,7 @@ static int count_floormod_with_const_den(PolyCtx *ctx, PolyUOp *root, int64_t de
 
 static int count_floordiv_with_const_den(PolyCtx *ctx, PolyUOp *root, int64_t den) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, root, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
@@ -1925,12 +1925,12 @@ TEST(decomp, shl_add_fuses_to_mulacc) {
 TEST(devectorize, e2e_vecadd) {
   /* Build tensor-level: out = a + b, N=8 (divisible by 4 for UPCAST) */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, 8);
-  PolyUOp *b = poly_buffer_f32(ctx, 8);
-  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out = poly_buffer_f32(ctx, 8);
-  PolyUOp *st = poly_store_val(ctx, out, c);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *c = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *st = poly_uop_store_val(ctx, out, c);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float db[] = {10, 20, 30, 40, 50, 60, 70, 80};
@@ -1956,12 +1956,12 @@ TEST(devectorize, e2e_vecadd) {
 TEST(beam, vecadd_correct) {
   PolyCtx *ctx = poly_ctx_new();
   int N = 64;
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out = poly_buffer_f32(ctx, N);
-  PolyUOp *st = poly_store_val(ctx, out, c);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *st = poly_uop_store_val(ctx, out, c);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[64], db[64], dout[64];
   for (int i = 0; i < N; i++) {
@@ -1988,12 +1988,12 @@ TEST(beam, vecadd_correct) {
 TEST(beam, reduce_correct) {
   PolyCtx *ctx = poly_ctx_new();
   int N = 32;
-  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
   int64_t axis = 0;
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, &axis, 1);
-  PolyUOp *out = poly_buffer_f32(ctx, 1);
-  PolyUOp *st = poly_store_val(ctx, out, sum);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, &axis, 1);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *st = poly_uop_store_val(ctx, out, sum);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[32], dout[1] = {0};
   float expected = 0;
@@ -2018,12 +2018,12 @@ TEST(beam, reduce_correct) {
 TEST(beam, zero_is_heuristic) {
   PolyCtx *ctx = poly_ctx_new();
   int N = 16;
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out = poly_buffer_f32(ctx, N);
-  PolyUOp *st = poly_store_val(ctx, out, c);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *st = poly_uop_store_val(ctx, out, c);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[16], db[16], dout[16];
   for (int i = 0; i < N; i++) {
@@ -2084,12 +2084,12 @@ TEST(optimizer_caps, heuristic_upcasts_complete_large_buffer_view) {
 TEST(beam, cache_roundtrip) {
   PolyCtx *ctx = poly_ctx_new();
   int N = 64;
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out = poly_buffer_f32(ctx, N);
-  PolyUOp *st = poly_store_val(ctx, out, c);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *st = poly_uop_store_val(ctx, out, c);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[64], db[64], dout1[64], dout2[64];
   for (int i = 0; i < N; i++) {
@@ -2107,12 +2107,12 @@ TEST(beam, cache_roundtrip) {
 
   /* Second run: should hit cache */
   PolyCtx *ctx2 = poly_ctx_new();
-  PolyUOp *a2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *b2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *c2 = poly_alu2(ctx2, POLY_OP_ADD, a2, b2);
-  PolyUOp *out2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *st2 = poly_store_val(ctx2, out2, c2);
-  PolyUOp *sink2 = poly_sink1(ctx2, st2);
+  PolyUOp *a2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *b2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *c2 = poly_uop_alu2(ctx2, POLY_OP_ADD, a2, b2);
+  PolyUOp *out2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *st2 = poly_uop_store_val(ctx2, out2, c2);
+  PolyUOp *sink2 = poly_uop_sink1(ctx2, st2);
 
   PolyTestBufferView bindings2[] = {
       POLY_TEST_HOST_VIEW(a2, da), POLY_TEST_HOST_VIEW(b2, db), POLY_TEST_HOST_VIEW(out2, dout2)};
@@ -2134,14 +2134,14 @@ TEST(beam, cache_roundtrip) {
 TEST(beam, chain_correct) {
   PolyCtx *ctx = poly_ctx_new();
   int N = 128;
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *c = poly_buffer_f32(ctx, N);
-  PolyUOp *ab = poly_alu2(ctx, POLY_OP_MUL, a, b);
-  PolyUOp *abc = poly_alu2(ctx, POLY_OP_ADD, ab, c);
-  PolyUOp *out = poly_buffer_f32(ctx, N);
-  PolyUOp *st = poly_store_val(ctx, out, abc);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *ab = poly_uop_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *abc = poly_uop_alu2(ctx, POLY_OP_ADD, ab, c);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *st = poly_uop_store_val(ctx, out, abc);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   float da[128], db[128], dc[128], dout[128];
   for (int i = 0; i < N; i++) {
@@ -2376,7 +2376,7 @@ static PolyUOp *build_matmul_16x16x16_ast(PolyCtx *ctx) {
 
 static int count_ops(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
   int n_topo = 0, count = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   for (int i = 0; i < n_topo; i++)
     if (topo[i]->op == op) count++;
   return count;
@@ -2384,7 +2384,7 @@ static int count_ops(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
 
 static int count_buffer_addrspace(PolyCtx *ctx, PolyUOp *sink, PolyAddrSpace addrspace) {
   int n_topo = 0, count = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_BUFFER && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
@@ -2396,7 +2396,7 @@ static int count_buffer_addrspace(PolyCtx *ctx, PolyUOp *sink, PolyAddrSpace add
 
 static int count_stage_addrspace(PolyCtx *ctx, PolyUOp *sink, PolyAddrSpace addrspace) {
   int n_topo = 0, count = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_STAGE && poly_bufferize_arg_addrspace(u->arg) == addrspace) count++;
@@ -2414,7 +2414,7 @@ TEST(tc, structural_matmul_ast_shape) {
   ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_MUL) >= 1);
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   bool found = false;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_REDUCE &&
@@ -2450,14 +2450,14 @@ TEST(tc, warp_arithmetic_stays_weak) {
   );
   int n = 0, warps = 0;
   bool weak = actual != NULL;
-  PolyUOp **topo = actual ? poly_toposort_alloc(ctx, actual, &n) : NULL;
+  PolyUOp **topo = actual ? poly_uop_toposort_alloc(ctx, actual, &n) : NULL;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_RANGE && poly_range_axis_type(u->arg) == POLY_AXIS_WARP) warps++;
     if (u->op == POLY_OP_RANGE || u->op == POLY_OP_FLOORDIV || u->op == POLY_OP_FLOORMOD)
       weak &= poly_dtype_eq(u->dtype, POLY_WEAKINT);
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(warps, 1);
   ASSERT_TRUE(weak);
@@ -2499,7 +2499,7 @@ TEST(tc, admission_accepts_folded_axis_bound) {
   PolyUOp *eight = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(8));
   PolyUOp *folded = poly_uop1(
       ctx, POLY_OP_RANGE, POLY_WEAKINT,
-      poly_alu2(
+      poly_uop_alu2(
           ctx, POLY_OP_MUL, poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2)), eight
       ),
       m->arg
@@ -2583,7 +2583,7 @@ TEST(tc, detect_wmma_in_heuristic) {
     fprintf(stderr, "  detect_wmma: no WMMA found after heuristic\n");
     /* Dump op counts for debugging */
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    PolyUOp **topo = poly_uop_toposort(ctx, optimized, &n_topo);
     for (int i = 0; i < n_topo; i++) {
       if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_WMMA)
         fprintf(
@@ -2598,7 +2598,7 @@ TEST(tc, detect_wmma_in_heuristic) {
   int n_reduce = 0;
   {
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    PolyUOp **topo = poly_uop_toposort(ctx, optimized, &n_topo);
     for (int i = 0; i < n_topo; i++) {
       if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_REDUCE &&
           topo[i]->arg.reduce.op == POLY_OP_ADD)
@@ -2610,7 +2610,7 @@ TEST(tc, detect_wmma_in_heuristic) {
   /* No lingering TC tags */
   {
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    PolyUOp **topo = poly_uop_toposort(ctx, optimized, &n_topo);
     for (int i = 0; i < n_topo; i++) {
       if (topo[i]->tag == 0x5443) { /* TC_TAG */
         FAIL("lingering TC tag on op %d at topo[%d]", topo[i]->op, i);
@@ -2746,12 +2746,12 @@ TEST(tc, rejects_nondivisible) {
 TEST(tc, admission_uses_first_reduction) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 64);
-  PolyUOp *q = poly_range(ctx, 8, 3, POLY_AXIS_REDUCE);
-  PolyUOp *sources[] = {poly_cast(ctx, q, POLY_FLOAT32), q};
+  PolyUOp *q = poly_uop_range(ctx, 8, 3, POLY_AXIS_REDUCE);
+  PolyUOp *sources[] = {poly_uop_cast(ctx, q, POLY_FLOAT32), q};
   PolyUOp *maximum =
       poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, sources, 2, poly_arg_reduce(POLY_OP_MAX, 0));
   PolyUOp *aux = poly_test_program_param(ctx, POLY_FLOAT32, 1, 3);
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *store = poly_uop2(
       ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, aux, &zero, 1), maximum, poly_arg_none()
   );
@@ -2831,11 +2831,11 @@ TEST(tc, preserves_all_residual_reduce_ranges) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 32);
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
   PolyUOp *red = NULL;
   for (int i = 0; i < n; i++)
     if (topo[i]->op == POLY_OP_REDUCE) red = topo[i];
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   PolyUOp *old_k = red->src[1];
   PolyUOp *k = poly_uop1(
       ctx, POLY_OP_RANGE, old_k->dtype, old_k->src[0], poly_arg_range(100, POLY_AXIS_REDUCE)
@@ -2864,7 +2864,7 @@ TEST(tc, preserves_all_residual_reduce_ranges) {
         .n_arg_tuple = 3}
   );
   bool ok = out != NULL;
-  topo = out ? poly_toposort_alloc(ctx, out, &n) : NULL;
+  topo = out ? poly_uop_toposort_alloc(ctx, out, &n) : NULL;
   red = NULL;
   int n_red = 0, n_wmma = 0;
   for (int i = 0; topo && i < n; i++) {
@@ -2886,7 +2886,7 @@ TEST(tc, preserves_all_residual_reduce_ranges) {
       found |= red->src[i] == expected;
     ok &= found;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);
   PASS();
@@ -2938,7 +2938,7 @@ TEST(tc, pre_expander_wmma_structure) {
 
   /* Find WMMA node */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, optimized, &n_topo);
   PolyUOp *wmma = NULL;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_WMMA) wmma = topo[i];
@@ -2993,7 +2993,7 @@ TEST(tc, temporary_permutation_tags_do_not_escape_wmma_construction) {
   unsetenv("TC");
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, optimized, &n_topo);
   int n_tagged = 0;
   int n_wmma = 0;
   for (int i = 0; i < n_topo; i++) {
@@ -3052,23 +3052,23 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
 
   PolyUOp *x_flat = poly_test_buffer(ctx, POLY_FLOAT32, 75);
   int64_t x_shape[] = {1, 3, 5, 5};
-  PolyUOp *x = poly_reshape(ctx, x_flat, x_shape, 4);
+  PolyUOp *x = poly_uop_reshape(ctx, x_flat, x_shape, 4);
 
   int64_t pad_pairs[][2] = {{0, 0}, {0, 0}, {1, 1}, {1, 1}};
-  PolyUOp *xp = poly_pad(ctx, x, pad_pairs, 4);
+  PolyUOp *xp = poly_uop_pad(ctx, x, pad_pairs, 4);
 
   int64_t s1_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {0, 5}};
   int64_t s2_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {1, 6}};
-  PolyUOp *s1 = poly_shrink(ctx, xp, s1_pairs, 4);
-  PolyUOp *s2 = poly_shrink(ctx, xp, s2_pairs, 4);
+  PolyUOp *s1 = poly_uop_shrink(ctx, xp, s1_pairs, 4);
+  PolyUOp *s2 = poly_uop_shrink(ctx, xp, s2_pairs, 4);
 
   int64_t out_shape[] = {1, 2, 5, 5};
-  PolyUOp *e1 = poly_expand(ctx, s1, out_shape, 4);
-  PolyUOp *e2 = poly_expand(ctx, s2, out_shape, 4);
+  PolyUOp *e1 = poly_uop_expand(ctx, s1, out_shape, 4);
+  PolyUOp *e2 = poly_uop_expand(ctx, s2, out_shape, 4);
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, e1, e2, poly_arg_none());
 
   int64_t red_axes[] = {1, 2, 3};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sum, red_axes, 3);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, sum, red_axes, 3);
 
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, loss, poly_arg_none());
@@ -3162,7 +3162,7 @@ static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
   PolyUOp *p_in = poly_test_program_param(ctx, POLY_FLOAT32, N, 0);
   PolyUOp *p_out = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
 
-  PolyUOp *bound = poly_const_int(ctx, N);
+  PolyUOp *bound = poly_uop_const_int(ctx, N);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
   PolyUOp *idx = poly_uop_index(ctx, p_in, &range, 1);
@@ -3172,7 +3172,7 @@ static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
   PolyUOp *reduce =
       poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, poly_arg_reduce(POLY_OP_ADD, 0));
 
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *out_idx = poly_uop_index(ctx, p_out, &zero, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, reduce, poly_arg_none());
   return poly_test_kernel_sink(ctx, &store, 1, "future_reduce");
@@ -3183,14 +3183,14 @@ static PolyUOp *build_2range_kernel(PolyCtx *ctx, int M, int N) {
   PolyUOp *p_in = poly_test_program_param(ctx, POLY_FLOAT32, (int64_t)M * N, 0);
   PolyUOp *p_out = poly_test_program_param(ctx, POLY_FLOAT32, (int64_t)M * N, 1);
 
-  PolyUOp *cm = poly_const_int(ctx, M);
-  PolyUOp *cn = poly_const_int(ctx, N);
+  PolyUOp *cm = poly_uop_const_int(ctx, M);
+  PolyUOp *cn = poly_uop_const_int(ctx, N);
   PolyUOp *rng_i =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, cm, poly_arg_range(0, POLY_AXIS_GLOBAL));
   PolyUOp *rng_j =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, cn, poly_arg_range(1, POLY_AXIS_GLOBAL));
 
-  PolyUOp *stride = poly_const_int(ctx, N);
+  PolyUOp *stride = poly_uop_const_int(ctx, N);
   PolyUOp *flat = poly_uop2(
       ctx, POLY_OP_ADD, POLY_WEAKINT,
       poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, rng_i, stride, poly_arg_none()), rng_j,
@@ -3229,7 +3229,7 @@ TEST(unify_pre, gpudims_replaces_outermost_range) {
 
   /* Verify gidx0 exists */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   bool has_gidx = false;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_SPECIAL && topo[i]->arg.kind == POLY_ARG_STRING &&
@@ -3252,7 +3252,7 @@ TEST(unify_pre, control_flow_adds_predecessors) {
 
   /* Count max RANGE src count before control_flow */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, sink, &n_topo);
   int max_range_srcs_before = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_RANGE && topo[i]->n_src > max_range_srcs_before)
@@ -3261,7 +3261,7 @@ TEST(unify_pre, control_flow_adds_predecessors) {
 
   sink = poly_apply_control_flow(ctx, sink);
 
-  topo = poly_toposort(ctx, sink, &n_topo);
+  topo = poly_uop_toposort(ctx, sink, &n_topo);
   int max_range_srcs_after = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_RANGE && topo[i]->n_src > max_range_srcs_after)
@@ -3292,7 +3292,7 @@ TEST(unify_pre, symbolic_arithmetic_range_bound_linearizes_like_tinygrad) {
   PolyUOp *n =
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(7), POLY_WEAKINT, 1, false);
   PolyUOp *bound_n = poly_uop_bind(ctx, n, 3);
-  PolyUOp *bound = poly_alu2(ctx, POLY_OP_ADD, bound_n, poly_const_int(ctx, 1));
+  PolyUOp *bound = poly_uop_alu2(ctx, POLY_OP_ADD, bound_n, poly_uop_const_int(ctx, 1));
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, bound->dtype, bound, poly_arg_range(10, POLY_AXIS_LOOP));
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, range, poly_arg_none());
@@ -3392,7 +3392,7 @@ TEST(unify_pre, control_flow_preserves_wide_parent_arity) {
     ASSERT_PTR_EQ(rewritten->src[i], src[i]);
 
   int n_topo = 0, range_count = 0, one_source_ranges = 0, two_source_ranges = 0;
-  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &n_topo);
   PolyUOp *ordered_range = NULL;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op != POLY_OP_RANGE) continue;

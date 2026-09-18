@@ -801,11 +801,11 @@ class Tensor:
                     )
                     current_uop = imported
                     if post_cast_dt is not None:
-                        cast_uop = _ffi._lib.poly_cast_by_id(
+                        cast_uop = _ffi._lib.poly_uop_cast_by_id(
                             self._ctx, imported.raw, _dtype_id(post_cast_dt)
                         )
                         if not cast_uop:
-                            raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
+                            raise RuntimeError(f'poly_uop_cast_by_id failed for dtype {post_cast_dt}')
                         current_uop = UOp(self._ctx, cast_uop)
                     owner_uop = imported
                 key_uop = owner_uop.buffer or owner_uop
@@ -1189,12 +1189,12 @@ class Tensor:
         wrt_arr = (_ffi._ptr * len(wrts))(*wrts)
         out_arr = (_ffi._ptr * len(wrts))()
         present_arr = (ctypes.c_uint8 * len(wrts))()
-        rc = _ffi._lib.poly_grad_many_ex(
+        rc = _ffi._lib.poly_uop_grad_many_ex(
             ctx, _uop_raw(root), _uop_raw(initial_grad), wrt_arr, len(wrts),
             out_arr, present_arr,
         )
         if rc != 0:
-            raise RuntimeError('poly_grad_many failed')
+            raise RuntimeError('poly_uop_grad_many failed')
         grads = tuple(out_arr)
         if return_present:
             return grads, tuple(bool(v) for v in present_arr)
@@ -1274,7 +1274,7 @@ class Tensor:
             return nxt
         if not nxt:
             return cur
-        return _ffi._lib.poly_alu2(ctx, _ffi.OPS['ADD'], cur, nxt)
+        return _ffi._lib.poly_uop_alu2(ctx, _ffi.OPS['ADD'], cur, nxt)
 
     def replace(self, x):
         """Replace this Tensor's value graph while preserving its wrapper identity.
@@ -2546,7 +2546,7 @@ class Tensor:
             self._ctx, self._tensor, k_arr, nk, s_arr, d_arr
         )
         if not core:
-            raise RuntimeError(f'poly_pool failed for shape={self.shape}, kernel={k}, stride={s}, dilation={d}')
+            raise RuntimeError(f'poly_uop_pool failed for shape={self.shape}, kernel={k}, stride={s}, dilation={d}')
         current = self._core_uop_raw(core)
         return self._make_result_from_core(
             core, _shape_from_uop(self._ctx, current)
@@ -3163,7 +3163,7 @@ class Tensor:
             *self._pool2d_args(kernel_size, stride, dilation, padding),
             bool(ceil_mode), ctypes.byref(indices) if return_indices else None)
         if not core:
-            raise RuntimeError('poly_max_pool2d failed')
+            raise RuntimeError('poly_uop_max_pool2d failed')
         current = self._core_uop_raw(core)
         shape = _shape_from_uop(self._ctx, current)
         out = self._make_result_from_core(core, shape)
@@ -3239,7 +3239,7 @@ class Tensor:
             _ffi._lib.poly_tensor_conv2d_dtype_by_id(*args, _dtype_id(_dtype_name(dtype)))
         )
         if not core:
-            raise RuntimeError('poly_conv2d failed')
+            raise RuntimeError('poly_uop_conv2d failed')
         inputs = [self, weight] + ([bias] if bias is not None else [])
         current = self._core_uop_raw(core)
         return self._make_result_from_core(
@@ -3257,7 +3257,7 @@ class Tensor:
             mean._tensor, invstd._tensor, axes, n_axes,
         )
         if not core:
-            raise RuntimeError('poly_batchnorm failed')
+            raise RuntimeError('poly_uop_batchnorm failed')
         inputs = [self, mean, invstd]
         if weight is not None:
             inputs.append(weight)
@@ -3460,7 +3460,7 @@ class Tensor:
             ctx, formula.encode('utf-8'),
             tensor_arr, n)
         if not core:
-            raise RuntimeError(f'poly_einsum failed for formula: {formula}')
+            raise RuntimeError(f'poly_uop_einsum failed for formula: {formula}')
         current = operands[0]._core_uop_raw(core)
         return operands[0]._make_result_from_core(
             core, _shape_from_uop(ctx, current)
@@ -3482,7 +3482,7 @@ class Tensor:
             self._tensor,
             axis_names, axis_values, n)
         if not core:
-            raise ValueError(f'poly_rearrange failed for formula: {formula}')
+            raise ValueError(f'poly_uop_rearrange failed for formula: {formula}')
         current = self._core_uop_raw(core)
         return self._make_result_from_core(
             core, _shape_from_uop(self._ctx, current)
@@ -4008,7 +4008,7 @@ class Tensor:
             )
         else:
             # tinygrad calls gradient(*targets), so every live target is handled by
-            # one reverse pass. Calling poly_grad repeatedly can observe frontend
+            # one reverse pass. Calling poly_uop_grad repeatedly can observe frontend
             # retargeting side effects between targets.
             out_grads, out_present = Tensor._grad_many_raw(
                 self._ctx, root, initial_grad, target_roots, return_present=True
@@ -4020,7 +4020,7 @@ class Tensor:
                 grads.append(target.const_like(0))
                 continue
             if not grad_uop:
-                raise RuntimeError('poly_grad_many returned NULL for a present target')
+                raise RuntimeError('poly_uop_grad_many returned NULL for a present target')
             grad_handle = target._core_create_result_like(
                 grad_uop if target.uop_logical is not None else None,
                 grad_uop, _POLY_TENSOR_VALUE, target._device,

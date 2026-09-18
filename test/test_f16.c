@@ -116,10 +116,10 @@ TEST(f16, host_bfloat16_staging_executes_before_cpu_copy) {
 TEST(f16, cast_f32_to_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *in = poly_buffer_f32(ctx, 4);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT16);
+  PolyUOp *in = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_FLOAT16);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 4);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
   ASSERT_INT_EQ(out->op, POLY_OP_BUFFER);
   ASSERT_INT_EQ(out->n_src, 1);
   ASSERT_INT_EQ(out->src[0]->op, POLY_OP_CONST);
@@ -155,7 +155,8 @@ TEST(f16, interp_compile_keeps_f16_storage_as_uint16) {
 
   PolyUOp *in = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT16, 4, POLY_DEVICE_INTERP);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_cast(ctx, in, POLY_FLOAT16)));
+  PolyUOp *sink =
+      poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, poly_uop_cast(ctx, in, POLY_FLOAT16)));
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
   PolyUOp *compiled = poly_compile_linear(ctx, linear, -1);
@@ -167,7 +168,7 @@ TEST(f16, interp_compile_keeps_f16_storage_as_uint16) {
   ASSERT_INT_EQ(program->src[1]->op, POLY_OP_LINEAR);
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, program->src[0], &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, program->src[0], &n_topo);
   ASSERT_NOT_NULL(topo);
   int u16_params = 0, f32_params = 0, u16_indices = 0, stores = 0;
   for (int i = 0; i < n_topo; i++) {
@@ -191,7 +192,7 @@ TEST(f16, interp_compile_keeps_f16_storage_as_uint16) {
       stores++;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   ASSERT_INT_EQ(u16_params, 1);
   ASSERT_INT_EQ(f32_params, 1);
   ASSERT_INT_EQ(u16_indices, 4);
@@ -206,10 +207,10 @@ TEST(f16, interp_compile_keeps_f16_storage_as_uint16) {
 TEST(f16, cast_f32_to_f16_ieee_edges_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *in = poly_buffer_f32(ctx, 9);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT16);
+  PolyUOp *in = poly_uop_buffer_f32(ctx, 9);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_FLOAT16);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 9);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   float in_data[] = {
       0x1p-24f,        -0x1p-24f, 0x1.ff8p-15f, 0x1p-14f, 1.0f + 0x1p-11f,
@@ -247,9 +248,9 @@ TEST(f16, cast_f16_to_f32_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *in = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT32);
-  PolyUOp *out = poly_buffer_f32(ctx, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_FLOAT32);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 3);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(3.5f), f32_to_f16_bits(-2.0f)};
   float out_data[3] = {0};
@@ -274,9 +275,9 @@ TEST(f16, add_f16_e2e) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT16, 4);
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT16, 4);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 4);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {
       f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-1.0f)};
@@ -307,9 +308,9 @@ TEST(f16, mul_f16_e2e) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT16, 3);
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, a, b);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, prod));
 
   uint16_t a_data[] = {f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-4.0f)};
   uint16_t b_data[] = {f32_to_f16_bits(5.0f), f32_to_f16_bits(0.5f), f32_to_f16_bits(2.0f)};
@@ -335,9 +336,9 @@ TEST(f16, neg_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, a);
+  PolyUOp *neg = poly_uop_alu1(ctx, POLY_OP_NEG, a);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, neg));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, neg));
 
   uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(-2.0f), f32_to_f16_bits(0.0f)};
   uint16_t out_data[3] = {0};
@@ -361,9 +362,9 @@ TEST(f16, const_f16_e2e) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT16, 3);
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT16, poly_arg_float(10.0f));
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, c);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, c);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   uint16_t out_data[3] = {0};
@@ -386,11 +387,11 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *in = poly_test_buffer(ctx, POLY_FLOAT16, 3);
-  PolyUOp *as_f32 = poly_cast(ctx, in, POLY_FLOAT32);
+  PolyUOp *as_f32 = poly_uop_cast(ctx, in, POLY_FLOAT32);
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(100.0f));
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, as_f32, c);
-  PolyUOp *out = poly_buffer_f32(ctx, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, as_f32, c);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 3);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   float out_data[3] = {0};
@@ -413,10 +414,10 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
 TEST(f16, cast_f64_to_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *in = poly_buffer_f64(ctx, 2);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT16);
+  PolyUOp *in = poly_uop_buffer_f64(ctx, 2);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_FLOAT16);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT16, 2);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   double in_data[] = {1.5, -2.5};
   uint16_t out_data[2] = {0};
@@ -438,10 +439,10 @@ TEST(f16, cast_f64_to_f16_e2e) {
 TEST(f16, cast_f32_to_bf16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *in = poly_buffer_f32(ctx, 3);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_BFLOAT16);
+  PolyUOp *in = poly_uop_buffer_f32(ctx, 3);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_BFLOAT16);
   PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   float in_data[] = {1.0f, -2.0f, 0.5f};
   uint16_t out_data[3] = {0};
@@ -465,10 +466,10 @@ TEST(f16, cast_f32_to_bf16_e2e) {
 TEST(f16, cast_f32_to_bf16_vector4_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *in = poly_buffer_f32(ctx, 4);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_BFLOAT16);
+  PolyUOp *in = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_BFLOAT16);
   PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 4);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   float in_data[] = {1.0f, -2.0f, 0.5f, 3.25f};
   uint16_t out_data[4] = {0};
@@ -489,9 +490,9 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *in = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT32);
-  PolyUOp *out = poly_buffer_f32(ctx, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_FLOAT32);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 3);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
 
   uint16_t in_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-3.0f), f32_to_bf16_bits(0.25f)};
   float out_data[3] = {0};
@@ -519,7 +520,7 @@ TEST(f16, bitcast_bf16_int16_roundtrip_e2e) {
   PolyUOp *bf16_in = poly_test_buffer(ctx, POLY_BFLOAT16, 5);
   PolyUOp *int16_out = poly_test_buffer(ctx, POLY_INT16, 5);
   PolyUOp *to_i16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT16, bf16_in, poly_arg_none());
-  PolyUOp *first_sink = poly_sink1(ctx, poly_store_val(ctx, int16_out, to_i16));
+  PolyUOp *first_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, int16_out, to_i16));
   uint16_t bf16_data[] = {
       f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-2.0f), f32_to_bf16_bits(0.5f), 0x0001u, 0x8001u,
   };
@@ -535,7 +536,7 @@ TEST(f16, bitcast_bf16_int16_roundtrip_e2e) {
   PolyUOp *int16_in = poly_test_buffer(ctx, POLY_INT16, 5);
   PolyUOp *bf16_out = poly_test_buffer(ctx, POLY_BFLOAT16, 5);
   PolyUOp *to_bf16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, int16_in, poly_arg_none());
-  PolyUOp *second_sink = poly_sink1(ctx, poly_store_val(ctx, bf16_out, to_bf16));
+  PolyUOp *second_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, bf16_out, to_bf16));
   int16_t reverse_input[5];
   for (int i = 0; i < 5; i++)
     reverse_input[i] = (int16_t)bf16_data[i];
@@ -574,7 +575,7 @@ TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
   PolyUOp *bf16_in = poly_test_buffer(ctx, POLY_BFLOAT16, 5);
   PolyUOp *f16_out = poly_test_buffer(ctx, POLY_FLOAT16, 5);
   PolyUOp *to_f16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT16, bf16_in, poly_arg_none());
-  PolyUOp *first_sink = poly_sink1(ctx, poly_store_val(ctx, f16_out, to_f16));
+  PolyUOp *first_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, f16_out, to_f16));
   uint16_t bf16_data[] = {
       f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-2.0f), f32_to_bf16_bits(0.5f), 0x0001u, 0x8001u,
   };
@@ -593,7 +594,7 @@ TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
   PolyUOp *f16_in = poly_test_buffer(ctx, POLY_FLOAT16, 5);
   PolyUOp *bf16_out = poly_test_buffer(ctx, POLY_BFLOAT16, 5);
   PolyUOp *to_bf16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, f16_in, poly_arg_none());
-  PolyUOp *second_sink = poly_sink1(ctx, poly_store_val(ctx, bf16_out, to_bf16));
+  PolyUOp *second_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, bf16_out, to_bf16));
   uint16_t reverse_input[5];
   memcpy(reverse_input, bf16_data, sizeof(reverse_input));
   uint16_t roundtrip[5] = {0};
@@ -627,7 +628,7 @@ TEST(f16, bitcast_bf16_to_float16_preserves_nan_payload_bits_e2e) {
   PolyUOp *bf16_in = poly_test_buffer(ctx, POLY_BFLOAT16, 6);
   PolyUOp *f16_out = poly_test_buffer(ctx, POLY_FLOAT16, 6);
   PolyUOp *to_f16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT16, bf16_in, poly_arg_none());
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, f16_out, to_f16));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, f16_out, to_f16));
   uint16_t input[] = {0x7c01u, 0x7d55u, 0x7e55u, 0xfc01u, 0xfd55u, 0xfe55u};
   uint16_t output[6] = {0};
   PolyTestBufferView binds[] = {
@@ -654,9 +655,9 @@ TEST(f16, add_bf16_e2e) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
   PolyUOp *b = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(2.0f), f32_to_bf16_bits(-1.0f)};
   uint16_t b_data[] = {f32_to_bf16_bits(10.0f), f32_to_bf16_bits(20.0f), f32_to_bf16_bits(1.0f)};
@@ -683,9 +684,9 @@ TEST(f16, mul_bf16_e2e) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
   PolyUOp *b = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, a, b);
   PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 3);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, prod));
 
   uint16_t a_data[] = {f32_to_bf16_bits(2.0f), f32_to_bf16_bits(3.0f), f32_to_bf16_bits(-4.0f)};
   uint16_t b_data[] = {f32_to_bf16_bits(5.0f), f32_to_bf16_bits(0.5f), f32_to_bf16_bits(2.0f)};
@@ -714,10 +715,10 @@ TEST(f16, bf16_chain_matches_native_or_emulated_renderer_rounding) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_BFLOAT16, 1);
   PolyUOp *b = poly_test_buffer(ctx, POLY_BFLOAT16, 1);
   PolyUOp *c = poly_test_buffer(ctx, POLY_BFLOAT16, 1);
-  PolyUOp *ab = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ab, c);
+  PolyUOp *ab = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, ab, c);
   PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 1);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {f32_to_bf16_bits(1.0f)};
   uint16_t b_data[] = {f32_to_bf16_bits(1.0f / 256.0f)};
@@ -777,11 +778,12 @@ TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
     PolyCtx *ctx = poly_ctx_new();
     ASSERT_NOT_NULL(ctx);
     PolyUOp *input = poly_test_buffer(ctx, POLY_FLOAT16, 5);
-    PolyUOp *activated = quick ? poly_quick_gelu(ctx, input) : poly_gelu(ctx, input);
-    PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, activated, (int64_t[]){0}, 1);
-    PolyUOp *gradient = poly_grad(ctx, loss, input);
+    PolyUOp *activated = quick ? poly_uop_quick_gelu(ctx, input) : poly_uop_gelu(ctx, input);
+    PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, activated, (int64_t[]){0}, 1);
+    PolyUOp *gradient = poly_uop_grad(ctx, loss, input);
     PolyUOp *output = poly_test_buffer(ctx, POLY_FLOAT16, 5);
-    PolyUOp *sink = gradient ? poly_sink1(ctx, poly_store_val(ctx, output, gradient)) : NULL;
+    PolyUOp *sink =
+        gradient ? poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, gradient)) : NULL;
     ASSERT_NOT_NULL(activated);
     ASSERT_NOT_NULL(loss);
     ASSERT_NOT_NULL(gradient);

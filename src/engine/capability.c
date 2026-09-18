@@ -37,7 +37,7 @@ static PolyUOp *canrun_buffer(PolyCtx *ctx, PolyDType dt, const int64_t *shape, 
   PolyUOp *buf =
       device ? poly_uop_new_buffer(ctx, device, numel, dt, poly_ctx_next_unique_id(ctx)) : NULL;
   if (!buf) return NULL;
-  return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
+  return poly_uop_reshape(ctx, buf, (int64_t *)shape, ndim);
 }
 
 static PolyUOp *canrun_store_sink(PolyCtx *ctx, PolyUOp *value) {
@@ -50,8 +50,8 @@ static PolyUOp *canrun_store_sink(PolyCtx *ctx, PolyUOp *value) {
   for (int i = 0; i < ndim; i++)
     shape[i] = dims[i];
   PolyUOp *target = canrun_buffer(ctx, value->dtype, shape, ndim);
-  PolyUOp *store = target ? poly_store_val(ctx, target, value) : NULL;
-  return store ? poly_sink1(ctx, store) : NULL;
+  PolyUOp *store = target ? poly_uop_store_val(ctx, target, value) : NULL;
+  return store ? poly_uop_sink1(ctx, store) : NULL;
 }
 
 static PolyUOp *canrun_build_probe_graph(
@@ -72,7 +72,7 @@ static PolyUOp *canrun_build_probe_graph(
       return canrun_budget_exceeded(status);
     PolyUOp *a = canrun_buffer(ctx, dt, a_shape, 2);
     PolyUOp *b = canrun_buffer(ctx, dt, b_shape, 2);
-    return (a && b) ? poly_dot(ctx, a, b) : NULL;
+    return (a && b) ? poly_uop_dot(ctx, a, b) : NULL;
   }
 
   if (!strcmp(op, "triangular_solve") || !strcmp(op, "triangularSolve")) {
@@ -82,7 +82,7 @@ static PolyUOp *canrun_build_probe_graph(
     int64_t b_shape[2] = {shape[0], (ndim == 3) ? shape[2] : 1};
     PolyUOp *a = canrun_buffer(ctx, dt, a_shape, 2);
     PolyUOp *b = canrun_buffer(ctx, dt, b_shape, 2);
-    return (a && b) ? poly_triangular_solve(ctx, a, b, 0, 0, 0) : NULL;
+    return (a && b) ? poly_uop_triangular_solve(ctx, a, b, 0, 0, 0) : NULL;
   }
 
   if (!strcmp(op, "solve")) {
@@ -92,7 +92,7 @@ static PolyUOp *canrun_build_probe_graph(
     int64_t b_shape[2] = {shape[0], (ndim == 3) ? shape[2] : 1};
     PolyUOp *a = canrun_buffer(ctx, dt, a_shape, 2);
     PolyUOp *b = canrun_buffer(ctx, dt, b_shape, 2);
-    return (a && b) ? poly_solve(ctx, a, b) : NULL;
+    return (a && b) ? poly_uop_solve(ctx, a, b) : NULL;
   }
 
   if (!strcmp(op, "lstsq")) {
@@ -102,7 +102,7 @@ static PolyUOp *canrun_build_probe_graph(
     int64_t b_shape[2] = {shape[0], (ndim == 3) ? shape[2] : 1};
     PolyUOp *a = canrun_buffer(ctx, dt, a_shape, 2);
     PolyUOp *b = canrun_buffer(ctx, dt, b_shape, 2);
-    return (a && b) ? poly_lstsq(ctx, a, b) : NULL;
+    return (a && b) ? poly_uop_lstsq(ctx, a, b) : NULL;
   }
 
   if (!canrun_shape_budget_ok(shape, ndim, 8192)) return canrun_budget_exceeded(status);
@@ -113,63 +113,63 @@ static PolyUOp *canrun_build_probe_graph(
     if (ndim < 2) return NULL;
     if (shape[ndim - 2] > 16 || shape[ndim - 1] > 16) return canrun_budget_exceeded(status);
     PolyUOp *q = NULL, *r = NULL;
-    return poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) == 0 ? r : NULL;
+    return poly_uop_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) == 0 ? r : NULL;
   }
   if (!strcmp(op, "cholesky")) {
     if (ndim < 2 || shape[ndim - 2] <= 0 || shape[ndim - 2] != shape[ndim - 1]) return NULL;
     if (shape[ndim - 1] > 16) return canrun_budget_exceeded(status);
-    return poly_cholesky(ctx, a, 0);
+    return poly_uop_cholesky(ctx, a, 0);
   }
   if (!strcmp(op, "gather") || !strcmp(op, "gather_dim")) {
     if (ndim < 1) return NULL;
     if (!canrun_shape_budget_ok(shape, ndim, 4096)) return canrun_budget_exceeded(status);
     PolyUOp *idx = canrun_buffer(ctx, POLY_INT32, shape, ndim);
-    return idx ? poly_gather_dim(ctx, a, ndim - 1, idx) : NULL;
+    return idx ? poly_uop_gather_dim(ctx, a, ndim - 1, idx) : NULL;
   }
   if (!strcmp(op, "sort")) {
     if (ndim < 1) return NULL;
     PolyUOp *values = NULL, *indices = NULL;
-    if (poly_sort(ctx, a, ndim - 1, 0, &values, &indices) != 0) return NULL;
+    if (poly_uop_sort(ctx, a, ndim - 1, 0, &values, &indices) != 0) return NULL;
     (void)indices;
     return values;
   }
   if (!strcmp(op, "argsort")) {
     if (ndim < 1) return NULL;
-    return poly_argsort(ctx, a, ndim - 1, 0);
+    return poly_uop_argsort(ctx, a, ndim - 1, 0);
   }
   if (!strcmp(op, "topk")) {
     if (ndim < 1 || shape[ndim - 1] <= 0) return NULL;
     int64_t k = shape[ndim - 1] >= 2 ? 2 : 1;
     PolyUOp *values = NULL, *indices = NULL;
-    if (poly_topk(ctx, a, k, ndim - 1, 1, 1, &values, &indices) != 0) return NULL;
+    if (poly_uop_topk(ctx, a, k, ndim - 1, 1, 1, &values, &indices) != 0) return NULL;
     (void)indices;
     return values;
   }
   if (!strcmp(op, "sum") || !strcmp(op, "reduce_sum"))
-    return poly_sum_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
+    return poly_uop_sum_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
   if (!strcmp(op, "max") || !strcmp(op, "reduce_max"))
-    return poly_max_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
-  if (!strcmp(op, "mean")) return poly_mean_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
-  if (!strcmp(op, "neg")) return poly_alu1(ctx, POLY_OP_NEG, a);
-  if (!strcmp(op, "sqrt")) return poly_alu1(ctx, POLY_OP_SQRT, a);
-  if (!strcmp(op, "exp2")) return poly_alu1(ctx, POLY_OP_EXP2, a);
-  if (!strcmp(op, "log2")) return poly_alu1(ctx, POLY_OP_LOG2, a);
-  if (!strcmp(op, "exp")) return poly_exp(ctx, a);
-  if (!strcmp(op, "log")) return poly_log(ctx, a);
-  if (!strcmp(op, "relu")) return poly_relu(ctx, a);
-  if (!strcmp(op, "sigmoid")) return poly_sigmoid(ctx, a);
+    return poly_uop_max_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
+  if (!strcmp(op, "mean")) return poly_uop_mean_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
+  if (!strcmp(op, "neg")) return poly_uop_alu1(ctx, POLY_OP_NEG, a);
+  if (!strcmp(op, "sqrt")) return poly_uop_alu1(ctx, POLY_OP_SQRT, a);
+  if (!strcmp(op, "exp2")) return poly_uop_alu1(ctx, POLY_OP_EXP2, a);
+  if (!strcmp(op, "log2")) return poly_uop_alu1(ctx, POLY_OP_LOG2, a);
+  if (!strcmp(op, "exp")) return poly_uop_exp(ctx, a);
+  if (!strcmp(op, "log")) return poly_uop_log(ctx, a);
+  if (!strcmp(op, "relu")) return poly_uop_relu(ctx, a);
+  if (!strcmp(op, "sigmoid")) return poly_uop_sigmoid(ctx, a);
 
   PolyUOp *b = canrun_buffer(ctx, dt, shape, ndim);
   if (!b) return NULL;
-  if (!strcmp(op, "add")) return poly_add(ctx, a, b);
-  if (!strcmp(op, "sub")) return poly_sub(ctx, a, b);
-  if (!strcmp(op, "mul")) return poly_mul(ctx, a, b);
-  if (!strcmp(op, "div")) return poly_div(ctx, a, b);
-  if (!strcmp(op, "maximum")) return poly_maximum(ctx, a, b);
-  if (!strcmp(op, "gt")) return poly_gt(ctx, a, b);
+  if (!strcmp(op, "add")) return poly_uop_add(ctx, a, b);
+  if (!strcmp(op, "sub")) return poly_uop_sub(ctx, a, b);
+  if (!strcmp(op, "mul")) return poly_uop_mul(ctx, a, b);
+  if (!strcmp(op, "div")) return poly_uop_div(ctx, a, b);
+  if (!strcmp(op, "maximum")) return poly_uop_maximum(ctx, a, b);
+  if (!strcmp(op, "gt")) return poly_uop_gt(ctx, a, b);
   if (!strcmp(op, "where")) {
-    PolyUOp *cond = poly_gt(ctx, a, b);
-    return cond ? poly_where_op(ctx, cond, a, b) : NULL;
+    PolyUOp *cond = poly_uop_gt(ctx, a, b);
+    return cond ? poly_uop_where(ctx, cond, a, b) : NULL;
   }
   return NULL;
 }

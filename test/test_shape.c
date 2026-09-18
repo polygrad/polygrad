@@ -16,7 +16,7 @@ extern size_t poly_test_shape_take_walk_nodes(void);
 TEST(shape, cached_ancestry_is_not_revisited) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *root = poly_const_typed(ctx, POLY_FLOAT32, 1.0);
+  PolyUOp *root = poly_uop_const_typed(ctx, POLY_FLOAT32, 1.0);
   for (int i = 0; i < 4096; i++)
     root = poly_uop1(ctx, POLY_OP_SIN, POLY_FLOAT32, root, poly_arg_none());
   ASSERT_NOT_NULL(root);
@@ -171,9 +171,9 @@ TEST(shape, current_wmma_uses_accumulator_fragment_shape) {
     half[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT16, poly_arg_float(i));
   for (int i = 0; i < 6; i++)
     zero[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0));
-  PolyUOp *a = poly_reshape(ctx, poly_uop_stack(ctx, half, 4), (int64_t[]){1, 4}, 2);
-  PolyUOp *b = poly_reshape(ctx, poly_uop_stack(ctx, half, 8), (int64_t[]){2, 4}, 2);
-  PolyUOp *acc = poly_reshape(ctx, poly_uop_stack(ctx, zero, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *a = poly_uop_reshape(ctx, poly_uop_stack(ctx, half, 4), (int64_t[]){1, 4}, 2);
+  PolyUOp *b = poly_uop_reshape(ctx, poly_uop_stack(ctx, half, 8), (int64_t[]){2, 4}, 2);
+  PolyUOp *acc = poly_uop_reshape(ctx, poly_uop_stack(ctx, zero, 6), (int64_t[]){2, 3}, 2);
   int dims[] = {1, 1, 1};
   PolyUOp *wmma = poly_uop(
       ctx, POLY_OP_WMMA, POLY_FLOAT32, (PolyUOp *[]){a, b, acc}, 3,
@@ -237,11 +237,11 @@ TEST(shape, multi_family_matches_pinned_tuple_device_shapes) {
   const char *devices[] = {"CPU", "CPU:1"};
   PolyUOp *tuple = poly_device_uop_from_names(ctx, devices, 2);
   PolyUOp *local = poly_uop_new_buffer(ctx, tuple, 2, POLY_FLOAT32, 203);
-  PolyUOp *device_range = poly_range(ctx, 2, -1, POLY_AXIS_DEVICE);
+  PolyUOp *device_range = poly_uop_range(ctx, 2, -1, POLY_AXIS_DEVICE);
   int64_t axis0 = 0;
   PolyUOp *ranges[] = {device_range};
-  PolyUOp *multi = poly_unshard(ctx, local, &axis0, ranges, 1);
-  PolyUOp *allreduce = poly_allreduce(ctx, multi, POLY_OP_ADD, tuple);
+  PolyUOp *multi = poly_uop_unshard(ctx, local, &axis0, ranges, 1);
+  PolyUOp *allreduce = poly_uop_allreduce(ctx, multi, POLY_OP_ADD, tuple);
 
   PolyUOp *roots[] = {stack, select, multi, allreduce};
   for (int i = 0; i < 4; i++) {
@@ -252,7 +252,7 @@ TEST(shape, multi_family_matches_pinned_tuple_device_shapes) {
   }
 
   int64_t axis1 = 1;
-  PolyUOp *bad_axis = poly_unshard(ctx, local, &axis1, ranges, 1);
+  PolyUOp *bad_axis = poly_uop_unshard(ctx, local, &axis1, ranges, 1);
   PolyShape bad_axis_shape = poly_uop_max_shape(ctx, bad_axis);
   ASSERT_INT_EQ(bad_axis_shape.ndim, -1);
   free(bad_axis_shape.dims);
@@ -347,7 +347,7 @@ TEST(shape, reshape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 100);
   int64_t dims[] = {10, 10};
-  PolyUOp *r = poly_reshape(ctx, buf, dims, 2);
+  PolyUOp *r = poly_uop_reshape(ctx, buf, dims, 2);
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(r->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(r->arg.kind, POLY_ARG_NONE);
@@ -373,9 +373,9 @@ TEST(shape, expand) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 10);
   int64_t rdims[] = {1, 10};
-  PolyUOp *r = poly_reshape(ctx, buf, rdims, 2);
+  PolyUOp *r = poly_uop_reshape(ctx, buf, rdims, 2);
   int64_t edims[] = {5, 10};
-  PolyUOp *e = poly_expand(ctx, r, edims, 2);
+  PolyUOp *e = poly_uop_expand(ctx, r, edims, 2);
   ASSERT_NOT_NULL(e);
   ASSERT_INT_EQ(e->op, POLY_OP_EXPAND);
   ASSERT_INT_EQ(e->arg.kind, POLY_ARG_NONE);
@@ -401,7 +401,7 @@ TEST(shape, reshape_expand_accept_scalar_shape_sources) {
    * UOp.as_shape treats a scalar expression as one symbolic dimension
    * (uop/ops.py:697-700). */
   PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 8);
-  PolyUOp *eight = poly_const_int(ctx, 8);
+  PolyUOp *eight = poly_uop_const_int(ctx, 8);
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(buf->n_src, 1);
   ASSERT_NOT_NULL(buf->src);
@@ -424,7 +424,8 @@ TEST(shape, reshape_expand_accept_scalar_shape_sources) {
   ASSERT_INT_EQ(reshape_shape.ndim, 1);
   ASSERT_INT_EQ(reshape_shape.dims[0], 8);
 
-  PolyUOp *one_shape = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 1), (int64_t[]){1}, 1);
+  PolyUOp *one_shape =
+      poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 1), (int64_t[]){1}, 1);
   PolyUOp *n = poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_INT32, 1, false);
   PolyUOp *expand_src[] = {one_shape, n};
   PolyUOp *expand = poly_uop(ctx, POLY_OP_EXPAND, POLY_FLOAT32, expand_src, 2, poly_arg_none());
@@ -448,7 +449,7 @@ TEST(shape, reshape_expand_reject_negative_shape_ranges) {
   /* Pinned uop/ops.py:330-336 rejects a negative RESHAPE dimension and an
    * EXPAND target whose symbolic range is not wholly nonnegative. */
   PolyUOp *value = poly_test_buffer(ctx, POLY_FLOAT32, 1);
-  PolyUOp *negative = poly_const_int(ctx, -1);
+  PolyUOp *negative = poly_uop_const_int(ctx, -1);
   PolyUOp *reshape_srcs[] = {value, negative};
   PolyUOp *reshape = poly_uop(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_srcs, 2, poly_arg_none());
   ASSERT_NOT_NULL(reshape);
@@ -472,7 +473,7 @@ TEST(shape, reshape_cardinality_and_expand_use_exact_dimensions) {
    * or a literal input singleton (mixin/movement.py:129-148). Allocation
    * maxima and fixed variable ranges are not semantic dimension identities. */
   PolyUOp *bad_reshape =
-      poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 4}, 2);
+      poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 4}, 2);
   ASSERT_NOT_NULL(bad_reshape);
   ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, bad_reshape).ndim, -1);
 
@@ -486,16 +487,17 @@ TEST(shape, reshape_cardinality_and_expand_use_exact_dimensions) {
         ctx, name, poly_arg_int(ranges[i][0]), poly_arg_int(ranges[i][1]), POLY_WEAKINT, 1, false
     );
     PolyUOp *source = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
-    PolyUOp *expanded = poly_expand(ctx, source, (int64_t[]){ranges[i][2]}, 1);
+    PolyUOp *expanded = poly_uop_expand(ctx, source, (int64_t[]){ranges[i][2]}, 1);
     ASSERT_TRUE(expanded == NULL);
   }
 
   PolyUOp *n =
       poly_uop_variable(ctx, "valid_n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
-  PolyUOp *two = poly_const_int(ctx, 2);
-  PolyUOp *base = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){2, 1}, 2);
+  PolyUOp *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *base =
+      poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 2), (int64_t[]){2, 1}, 2);
   PolyUOp *input_shape_srcs[] = {two, n};
-  PolyUOp *expanded = poly_expand_uop(ctx, base, input_shape_srcs, 2);
+  PolyUOp *expanded = poly_uop_expand_symbolic(ctx, base, input_shape_srcs, 2);
   ASSERT_NOT_NULL(expanded);
   ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, expanded).ndim, 2);
 
@@ -513,9 +515,9 @@ TEST(shape, reshape_cardinality_and_expand_use_exact_dimensions) {
   ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, valid_reshape, 0), n);
 
   PolyUOp *same_source = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
-  ASSERT_PTR_EQ(poly_expand_uop(ctx, same_source, &n, 1), same_source);
+  ASSERT_PTR_EQ(poly_uop_expand_symbolic(ctx, same_source, &n, 1), same_source);
   PolyUOp *literal_one = poly_test_buffer(ctx, POLY_FLOAT32, 1);
-  PolyUOp *symbolic_expand = poly_expand_uop(ctx, literal_one, &n, 1);
+  PolyUOp *symbolic_expand = poly_uop_expand_symbolic(ctx, literal_one, &n, 1);
   ASSERT_NOT_NULL(symbolic_expand);
   ASSERT_INT_EQ(symbolic_expand->op, POLY_OP_EXPAND);
   ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, symbolic_expand, 0), n);
@@ -528,9 +530,9 @@ TEST(shape, reduce) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_test_buffer(ctx, POLY_FLOAT32, 100);
   int64_t rdims[] = {10, 10};
-  PolyUOp *r = poly_reshape(ctx, buf, rdims, 2);
+  PolyUOp *r = poly_uop_reshape(ctx, buf, rdims, 2);
   int64_t axes[] = {1};
-  PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, r, axes, 1);
+  PolyUOp *red = poly_uop_reduce_axis(ctx, POLY_OP_ADD, r, axes, 1);
   PolyShape s = poly_uop_max_shape(ctx, red);
   ASSERT_INT_EQ(s.ndim, 1);
   ASSERT_INT_EQ(s.dims[0], 10);
@@ -545,11 +547,11 @@ TEST(shape, chain) {
   PolyUOp *buf1 = poly_test_buffer(ctx, POLY_FLOAT32, 20);
   PolyUOp *buf2 = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   int64_t d1[] = {5, 4};
-  PolyUOp *r1 = poly_reshape(ctx, buf1, d1, 2);
+  PolyUOp *r1 = poly_uop_reshape(ctx, buf1, d1, 2);
   int64_t d2[] = {1, 4};
-  PolyUOp *r2 = poly_reshape(ctx, buf2, d2, 2);
+  PolyUOp *r2 = poly_uop_reshape(ctx, buf2, d2, 2);
   int64_t d3[] = {5, 4};
-  PolyUOp *e2 = poly_expand(ctx, r2, d3, 2);
+  PolyUOp *e2 = poly_uop_expand(ctx, r2, d3, 2);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, r1, e2, poly_arg_none());
   PolyShape s = poly_uop_max_shape(ctx, add);
   ASSERT_INT_EQ(s.ndim, 2);
@@ -610,10 +612,10 @@ TEST(shape, range_is_scalar_like_tinygrad) {
 
 TEST(shape, index_and_stage_match_tinygrad_topology) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *two = poly_const_int(ctx, 2);
-  PolyUOp *three = poly_const_int(ctx, 3);
-  PolyUOp *four = poly_const_int(ctx, 4);
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *four = poly_uop_const_int(ctx, 4);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *shape_src[] = {two, three};
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, shape_src, 2, poly_arg_none());
   PolyParamArg param_arg = {
@@ -674,14 +676,14 @@ TEST(shape, rank_cap_rejects_overrank_movement_constructors) {
     pairs[i][1] = 1;
   }
 
-  ASSERT_TRUE(poly_reshape(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_expand(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_permute(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_shrink(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_pad(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_flip(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_TRUE(poly_reduce_axis(ctx, POLY_OP_ADD, buf, dims, POLY_MAX_DIMS + 1) == NULL);
-  ASSERT_PTR_EQ(poly_reduce_axis(ctx, POLY_OP_ADD, buf, NULL, 0), buf);
+  ASSERT_TRUE(poly_uop_reshape(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_expand(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_permute(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_shrink(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_pad(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_flip(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_PTR_EQ(poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf, NULL, 0), buf);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -699,7 +701,7 @@ TEST(shape, rank_cap_rejects_low_level_overrank_uops) {
   PolyArg tuple = int_tuple(dims, POLY_MAX_DIMS + 1);
   PolyUOp *shape_dims[POLY_MAX_DIMS + 1];
   for (int i = 0; i < POLY_MAX_DIMS + 1; i++)
-    shape_dims[i] = poly_const_int(ctx, 1);
+    shape_dims[i] = poly_uop_const_int(ctx, 1);
   PolyUOp *overrank_shape =
       poly_uop(ctx, POLY_OP_STACK, POLY_WEAKINT, shape_dims, POLY_MAX_DIMS + 1, poly_arg_none());
   ASSERT_NOT_NULL(overrank_shape);
@@ -722,7 +724,7 @@ TEST(shape, rank_cap_rejects_low_level_overrank_uops) {
   ASSERT_TRUE(
       poly_uop(ctx, POLY_OP_PAD, POLY_FLOAT32, sized_movement_src, 3, poly_arg_none()) == NULL
   );
-  ASSERT_TRUE(poly_reduce_axis(ctx, POLY_OP_ADD, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf, dims, POLY_MAX_DIMS + 1) == NULL);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -759,16 +761,16 @@ TEST(shape, movement_construction_canonicalizes_shape_sources) {
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
   PolyUOp *canonical =
-      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
-  PolyUOp *base = poly_const_float(ctx, 1.0);
-  PolyUOp *expanded = poly_expand_uop(ctx, base, &twice, 1);
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_uop_const_int(ctx, 2), poly_arg_none());
+  PolyUOp *base = poly_uop_const_float(ctx, 1.0);
+  PolyUOp *expanded = poly_uop_expand_symbolic(ctx, base, &twice, 1);
   ASSERT_NOT_NULL(expanded);
   ASSERT_INT_EQ(expanded->op, POLY_OP_EXPAND);
   ASSERT_INT_EQ(expanded->n_src, 2);
   ASSERT_PTR_EQ(expanded->src[0], base);
   ASSERT_PTR_EQ(expanded->src[1], canonical);
-  PolyUOp *dims[] = {poly_const_int(ctx, 1), twice};
-  PolyUOp *reshaped = poly_reshape_uop(ctx, expanded, dims, 2);
+  PolyUOp *dims[] = {poly_uop_const_int(ctx, 1), twice};
+  PolyUOp *reshaped = poly_uop_reshape_symbolic(ctx, expanded, dims, 2);
   ASSERT_NOT_NULL(reshaped);
   ASSERT_INT_EQ(reshaped->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(reshaped->n_src, 2);
@@ -787,19 +789,19 @@ TEST(shape, pad_shrink_construction_canonicalizes_both_shape_sources) {
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
   PolyUOp *canonical =
-      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
-  PolyUOp *zero = poly_const_int(ctx, 0);
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_uop_const_int(ctx, 2), poly_arg_none());
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *offset = poly_uop2(
       ctx, POLY_OP_ADD, POLY_WEAKINT, n,
-      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, -1), poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_uop_const_int(ctx, -1), poly_arg_none()),
       poly_arg_none()
   );
-  PolyUOp *base = poly_const_float(ctx, 1.0);
-  PolyUOp *wide = poly_expand(ctx, base, (int64_t[]){32}, 1);
-  PolyUOp *small = poly_expand(ctx, base, (int64_t[]){1}, 1);
+  PolyUOp *base = poly_uop_const_float(ctx, 1.0);
+  PolyUOp *wide = poly_uop_expand(ctx, base, (int64_t[]){32}, 1);
+  PolyUOp *small = poly_uop_expand(ctx, base, (int64_t[]){1}, 1);
   PolyUOp *roots[] = {
-      poly_shrink_uop(ctx, wide, &offset, &twice, 1),
-      poly_pad_uop(ctx, small, &offset, &twice, 1),
+      poly_uop_shrink_symbolic(ctx, wide, &offset, &twice, 1),
+      poly_uop_pad_symbolic(ctx, small, &offset, &twice, 1),
   };
   for (int i = 0; i < 2; i++) {
     ASSERT_NOT_NULL(roots[i]);
@@ -820,16 +822,16 @@ TEST(shape, movement_canonical_shape_identity_returns_source) {
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, n, poly_arg_none());
   PolyUOp *canonical =
-      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, 2), poly_arg_none());
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_uop_const_int(ctx, 2), poly_arg_none());
   PolyUOp *offset = poly_uop2(
       ctx, POLY_OP_ADD, POLY_WEAKINT, n,
-      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_const_int(ctx, -1), poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, n, poly_uop_const_int(ctx, -1), poly_arg_none()),
       poly_arg_none()
   );
-  PolyUOp *base = poly_expand_uop(ctx, poly_const_float(ctx, 1.0), &canonical, 1);
-  ASSERT_PTR_EQ(poly_reshape_uop(ctx, base, &twice, 1), base);
-  ASSERT_PTR_EQ(poly_shrink_uop(ctx, base, &offset, &twice, 1), base);
-  ASSERT_PTR_EQ(poly_pad_uop(ctx, base, &offset, &twice, 1), base);
+  PolyUOp *base = poly_uop_expand_symbolic(ctx, poly_uop_const_float(ctx, 1.0), &canonical, 1);
+  ASSERT_PTR_EQ(poly_uop_reshape_symbolic(ctx, base, &twice, 1), base);
+  ASSERT_PTR_EQ(poly_uop_shrink_symbolic(ctx, base, &offset, &twice, 1), base);
+  ASSERT_PTR_EQ(poly_uop_pad_symbolic(ctx, base, &offset, &twice, 1), base);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -837,23 +839,23 @@ TEST(shape, movement_canonical_shape_identity_returns_source) {
 TEST(shape, pad_shrink_reject_wrong_rank_before_scalar_noop) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *scalar = poly_const_float(ctx, 1.0);
-  PolyUOp *vector = poly_expand(ctx, scalar, (int64_t[]){3}, 1);
-  ASSERT_PTR_EQ(poly_pad(ctx, scalar, NULL, 0), scalar);
-  ASSERT_PTR_EQ(poly_shrink(ctx, scalar, NULL, 0), scalar);
-  ASSERT_PTR_EQ(poly_pad_uop(ctx, scalar, NULL, NULL, 0), scalar);
-  ASSERT_PTR_EQ(poly_shrink_uop(ctx, scalar, NULL, NULL, 0), scalar);
-  ASSERT_TRUE(poly_pad(ctx, vector, NULL, 0) == NULL);
-  ASSERT_TRUE(poly_shrink(ctx, vector, NULL, 0) == NULL);
-  ASSERT_TRUE(poly_pad_uop(ctx, vector, NULL, NULL, 0) == NULL);
-  ASSERT_TRUE(poly_shrink_uop(ctx, vector, NULL, NULL, 0) == NULL);
-  PolyUOp *offsets[] = {poly_const_int(ctx, 0), poly_const_int(ctx, 0)};
-  PolyUOp *sizes[] = {poly_const_int(ctx, 1), poly_const_int(ctx, 1)};
+  PolyUOp *scalar = poly_uop_const_float(ctx, 1.0);
+  PolyUOp *vector = poly_uop_expand(ctx, scalar, (int64_t[]){3}, 1);
+  ASSERT_PTR_EQ(poly_uop_pad(ctx, scalar, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_uop_shrink(ctx, scalar, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_uop_pad_symbolic(ctx, scalar, NULL, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_uop_shrink_symbolic(ctx, scalar, NULL, NULL, 0), scalar);
+  ASSERT_TRUE(poly_uop_pad(ctx, vector, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_uop_shrink(ctx, vector, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_uop_pad_symbolic(ctx, vector, NULL, NULL, 0) == NULL);
+  ASSERT_TRUE(poly_uop_shrink_symbolic(ctx, vector, NULL, NULL, 0) == NULL);
+  PolyUOp *offsets[] = {poly_uop_const_int(ctx, 0), poly_uop_const_int(ctx, 0)};
+  PolyUOp *sizes[] = {poly_uop_const_int(ctx, 1), poly_uop_const_int(ctx, 1)};
   int64_t pairs[2][2] = {{0, 1}, {0, 1}};
-  ASSERT_TRUE(poly_pad(ctx, vector, pairs, 2) == NULL);
-  ASSERT_TRUE(poly_shrink(ctx, vector, pairs, 2) == NULL);
-  ASSERT_TRUE(poly_pad_uop(ctx, vector, offsets, sizes, 2) == NULL);
-  ASSERT_TRUE(poly_shrink_uop(ctx, vector, offsets, sizes, 2) == NULL);
+  ASSERT_TRUE(poly_uop_pad(ctx, vector, pairs, 2) == NULL);
+  ASSERT_TRUE(poly_uop_shrink(ctx, vector, pairs, 2) == NULL);
+  ASSERT_TRUE(poly_uop_pad_symbolic(ctx, vector, offsets, sizes, 2) == NULL);
+  ASSERT_TRUE(poly_uop_shrink_symbolic(ctx, vector, offsets, sizes, 2) == NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -868,11 +870,11 @@ TEST(shape, pad_shrink_bounds_match_resolve_default_true) {
   PolyUOp *negative = poly_uop_variable(
       ctx, "negative", poly_arg_int(-4), poly_arg_int(-1), POLY_WEAKINT, 1, false
   );
-  PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
-  PolyUOp *two = poly_const_int(ctx, 2), *three = poly_const_int(ctx, 3);
-  PolyUOp *four = poly_const_int(ctx, 4), *six = poly_const_int(ctx, 6);
-  PolyUOp *minus_one = poly_const_int(ctx, -1);
-  PolyUOp *limit = poly_const_int(ctx, INT64_MAX);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *two = poly_uop_const_int(ctx, 2), *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *four = poly_uop_const_int(ctx, 4), *six = poly_uop_const_int(ctx, 6);
+  PolyUOp *minus_one = poly_uop_const_int(ctx, -1);
+  PolyUOp *limit = poly_uop_const_int(ctx, INT64_MAX);
   struct {
     PolyOps op;
     PolyUOp *dim, *offset, *size;
@@ -882,7 +884,7 @@ TEST(shape, pad_shrink_bounds_match_resolve_default_true) {
       {POLY_OP_SHRINK, four, minus_one, three, false},
       {POLY_OP_SHRINK, four, zero, minus_one, false},
       {POLY_OP_SHRINK, four, four, zero, true},
-      {POLY_OP_SHRINK, four, poly_const_int(ctx, 5), zero, false},
+      {POLY_OP_SHRINK, four, poly_uop_const_int(ctx, 5), zero, false},
       {POLY_OP_SHRINK, four, limit, one, false},
       {POLY_OP_PAD, four, three, six, false},
       {POLY_OP_PAD, four, minus_one, six, false},
@@ -893,24 +895,24 @@ TEST(shape, pad_shrink_bounds_match_resolve_default_true) {
       {POLY_OP_SHRINK, four, zero, negative, false},
       {POLY_OP_SHRINK, four, unknown, one, true},
       {POLY_OP_PAD, four, unknown, six, true},
-      {POLY_OP_SHRINK, n, poly_alu2(ctx, POLY_OP_ADD, n, minus_one), one, true},
+      {POLY_OP_SHRINK, n, poly_uop_alu2(ctx, POLY_OP_ADD, n, minus_one), one, true},
       {POLY_OP_SHRINK, n, n, one, true},
-      {POLY_OP_PAD, n, one, poly_alu2(ctx, POLY_OP_ADD, n, one), true},
-      {POLY_OP_PAD, n, two, poly_alu2(ctx, POLY_OP_ADD, n, one), true},
+      {POLY_OP_PAD, n, one, poly_uop_alu2(ctx, POLY_OP_ADD, n, one), true},
+      {POLY_OP_PAD, n, two, poly_uop_alu2(ctx, POLY_OP_ADD, n, one), true},
   };
   /* Pinned _shape uses resolve(..., True), not a proof of validity for
    * every binding. Inspect admission only: unresolved graphs are not run. */
   int mismatches = 0;
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    PolyUOp *base = poly_expand_uop(ctx, poly_const_float(ctx, 1), &cases[i].dim, 1);
+    PolyUOp *base = poly_uop_expand_symbolic(ctx, poly_uop_const_float(ctx, 1), &cases[i].dim, 1);
     PolyUOp *raw = poly_uop(
         ctx, cases[i].op, POLY_FLOAT32, (PolyUOp *[]){base, cases[i].offset, cases[i].size}, 3,
         poly_arg_none()
     );
     bool accepted = poly_uop_ndim(ctx, raw) == 1;
     PolyUOp *built = cases[i].op == POLY_OP_PAD
-                         ? poly_pad_uop(ctx, base, &cases[i].offset, &cases[i].size, 1)
-                         : poly_shrink_uop(ctx, base, &cases[i].offset, &cases[i].size, 1);
+                         ? poly_uop_pad_symbolic(ctx, base, &cases[i].offset, &cases[i].size, 1)
+                         : poly_uop_shrink_symbolic(ctx, base, &cases[i].offset, &cases[i].size, 1);
     if (accepted != cases[i].accepted || (built != NULL) != cases[i].accepted) {
       fprintf(
           stderr, "movement bounds case %zu: raw=%d built=%d expected=%d\n", i, accepted,
@@ -937,10 +939,10 @@ TEST(shape, movement_shape_lanes_use_full_pinned_symbolic_canonicalization) {
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
   PolyUOp *y =
       poly_uop_variable(ctx, "y", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
-  PolyUOp *one = poly_const_int(ctx, 1);
-  PolyUOp *two = poly_const_int(ctx, 2);
-  PolyUOp *three = poly_const_int(ctx, 3);
-  PolyUOp *five = poly_const_int(ctx, 5);
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *five = poly_uop_const_int(ctx, 5);
   ASSERT_NOT_NULL(n);
 
   PolyUOp *left[5] = {
@@ -977,14 +979,15 @@ TEST(shape, movement_shape_lanes_use_full_pinned_symbolic_canonicalization) {
       ),
   };
 
-  PolyUOp *base = poly_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3, 1}, 2);
+  PolyUOp *base =
+      poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3, 1}, 2);
   ASSERT_NOT_NULL(base);
   for (int i = 0; i < 5; i++) {
     PolyUOp *expand_shape_src[] = {three, left[i]};
-    PolyUOp *expanded = poly_expand_uop(ctx, base, expand_shape_src, 2);
+    PolyUOp *expanded = poly_uop_expand_symbolic(ctx, base, expand_shape_src, 2);
 
     PolyUOp *reshape_shape_src[] = {three, right[i]};
-    PolyUOp *reshaped = poly_reshape_uop(ctx, expanded, reshape_shape_src, 2);
+    PolyUOp *reshaped = poly_uop_reshape_symbolic(ctx, expanded, reshape_shape_src, 2);
 
     ASSERT_NOT_NULL(expanded);
     ASSERT_NOT_NULL(reshaped);
@@ -1023,7 +1026,7 @@ TEST(shape, unequal_width_bitcast_preserves_current_symbolic_last_axis) {
   ASSERT_INT_EQ(last->src[1]->arg.i, 4);
 
   PolyUOp *invalid_source =
-      poly_reshape(ctx, poly_test_buffer(ctx, POLY_UINT8, 3), (int64_t[]){3}, 1);
+      poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_UINT8, 3), (int64_t[]){3}, 1);
   PolyUOp *invalid = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, invalid_source, poly_arg_none());
   ASSERT_NOT_NULL(invalid);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, invalid), -1);
@@ -1040,9 +1043,9 @@ TEST(shape, scalar_param_shape_uses_full_pinned_symbolic_canonicalization) {
    * scalar shape source too, not only to STACK lanes. */
   PolyUOp *n =
       poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
-  PolyUOp *one = poly_const_int(ctx, 1);
-  PolyUOp *two = poly_const_int(ctx, 2);
-  PolyUOp *three = poly_const_int(ctx, 3);
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *three = poly_uop_const_int(ctx, 3);
   PolyUOp *source = poly_uop2(
       ctx, POLY_OP_ADD, POLY_WEAKINT,
       poly_uop2(ctx, POLY_OP_ADD, POLY_WEAKINT, n, one, poly_arg_none()), two, poly_arg_none()
@@ -1070,43 +1073,43 @@ TEST(shape, multi_axis_propagates_like_pinned_uop_axis) {
   const char *names[] = {"CPU", "CPU:1"};
   PolyUOp *device_tuple = poly_device_uop_from_names(ctx, names, 2);
   PolyUOp *buffer = poly_uop_new_buffer(ctx, device_tuple, 4, POLY_FLOAT32, 511);
-  PolyUOp *local = poly_reshape(ctx, buffer, (int64_t[]){2, 2}, 2);
-  PolyUOp *device_range = poly_range(ctx, 2, -1, POLY_AXIS_DEVICE);
+  PolyUOp *local = poly_uop_reshape(ctx, buffer, (int64_t[]){2, 2}, 2);
+  PolyUOp *device_range = poly_uop_range(ctx, 2, -1, POLY_AXIS_DEVICE);
   int64_t axis0 = 0;
   PolyUOp *ranges[] = {device_range};
-  PolyUOp *multi = poly_unshard(ctx, local, &axis0, ranges, 1);
+  PolyUOp *multi = poly_uop_unshard(ctx, local, &axis0, ranges, 1);
   ASSERT_NOT_NULL(multi);
 
   int axis = -1;
   ASSERT_TRUE(poly_uop_axis(ctx, multi, &axis));
   ASSERT_INT_EQ(axis, 0);
 
-  PolyUOp *contiguous = poly_contiguous(ctx, multi);
+  PolyUOp *contiguous = poly_uop_contiguous(ctx, multi);
   ASSERT_TRUE(poly_uop_axis(ctx, contiguous, &axis));
   ASSERT_INT_EQ(axis, 0);
 
   PolyUOp *cpu = poly_device_uop_from_name(ctx, "CPU");
-  PolyUOp *copy = poly_copy_to_device_uop(ctx, multi, cpu);
+  PolyUOp *copy = poly_uop_copy_to_device(ctx, multi, cpu);
   ASSERT_FALSE(poly_uop_axis(ctx, copy, &axis));
 
-  PolyUOp *full = poly_shrink(ctx, multi, (int64_t[][2]){{0, 4}, {0, 2}}, 2);
-  PolyUOp *partial = poly_shrink(ctx, multi, (int64_t[][2]){{0, 2}, {0, 2}}, 2);
+  PolyUOp *full = poly_uop_shrink(ctx, multi, (int64_t[][2]){{0, 4}, {0, 2}}, 2);
+  PolyUOp *partial = poly_uop_shrink(ctx, multi, (int64_t[][2]){{0, 2}, {0, 2}}, 2);
   ASSERT_TRUE(poly_uop_axis(ctx, full, &axis));
   ASSERT_INT_EQ(axis, 0);
   ASSERT_FALSE(poly_uop_axis(ctx, partial, &axis));
 
-  PolyUOp *permuted = poly_permute(ctx, multi, (int64_t[]){1, 0}, 2);
+  PolyUOp *permuted = poly_uop_permute(ctx, multi, (int64_t[]){1, 0}, 2);
   ASSERT_TRUE(poly_uop_axis(ctx, permuted, &axis));
   ASSERT_INT_EQ(axis, 1);
 
-  PolyUOp *reshaped = poly_reshape(ctx, multi, (int64_t[]){2, 4}, 2);
+  PolyUOp *reshaped = poly_uop_reshape(ctx, multi, (int64_t[]){2, 4}, 2);
   ASSERT_TRUE(poly_uop_axis(ctx, reshaped, &axis));
   ASSERT_INT_EQ(axis, 0);
 
   int64_t other_axis[] = {1};
   int64_t shard_axis[] = {0};
-  PolyUOp *reduce_other = poly_reduce_axis(ctx, POLY_OP_ADD, multi, other_axis, 1);
-  PolyUOp *reduce_shard = poly_reduce_axis(ctx, POLY_OP_ADD, multi, shard_axis, 1);
+  PolyUOp *reduce_other = poly_uop_reduce_axis(ctx, POLY_OP_ADD, multi, other_axis, 1);
+  PolyUOp *reduce_shard = poly_uop_reduce_axis(ctx, POLY_OP_ADD, multi, shard_axis, 1);
   ASSERT_TRUE(poly_uop_axis(ctx, reduce_other, &axis));
   ASSERT_INT_EQ(axis, 0);
   ASSERT_FALSE(poly_uop_axis(ctx, reduce_shard, &axis));

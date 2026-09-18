@@ -170,7 +170,7 @@ PolyUOp *poly_linear(
   int64_t ws[] = {out_features, in_features};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ws, 2, "%s.weight", prefix);
   if (!w) return NULL;
-  w = poly_reshape(ctx, w, ws, 2);
+  w = poly_uop_reshape(ctx, w, ws, 2);
 
   PolyUOp *b = NULL;
   if (use_bias) {
@@ -179,7 +179,7 @@ PolyUOp *poly_linear(
     if (!b) return NULL;
   }
 
-  return poly_linear_apply(ctx, x, w, b);
+  return poly_uop_linear_apply(ctx, x, w, b);
 }
 
 PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
@@ -188,8 +188,8 @@ PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, d
   PolyUOp *b = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.bias", prefix);
   if (!w || !b) return NULL;
 
-  return poly_layernorm_apply(
-      ctx, x, poly_reshape(ctx, w, ds, 1), poly_reshape(ctx, b, ds, 1), -1, eps
+  return poly_uop_layernorm_apply(
+      ctx, x, poly_uop_reshape(ctx, w, ds, 1), poly_uop_reshape(ctx, b, ds, 1), -1, eps
   );
 }
 
@@ -197,7 +197,7 @@ PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, dou
   int64_t ds[] = {dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
   if (!w) return NULL;
-  return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, w, ds, 1), eps);
+  return poly_uop_rmsnorm_apply(ctx, x, poly_uop_reshape(ctx, w, ds, 1), eps);
 }
 
 PolyUOp *poly_embedding(
@@ -210,7 +210,7 @@ PolyUOp *poly_embedding(
   int64_t ws[] = {vocab_size, embed_dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ws, 2, "%s.weight", prefix);
   if (!w) return NULL;
-  return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
+  return poly_uop_embedding_apply(ctx, tokens, poly_uop_reshape(ctx, w, ws, 2));
 }
 
 static int model_parameters(

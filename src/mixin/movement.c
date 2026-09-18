@@ -60,7 +60,7 @@ static PolyUOp *static_shape_arg(PolyCtx *ctx, const int64_t *dims, int ndim) {
   return poly_shape_to_shape_arg(ctx, vals, ndim);
 }
 
-PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+PolyUOp *poly_uop_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   if (poly_uop_ndim(ctx, src) == ndim) {
     bool same = true;
@@ -74,7 +74,7 @@ PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   return poly_uop(ctx, POLY_OP_RESHAPE, src->dtype, srcs, 2, poly_arg_none());
 }
 
-PolyUOp *poly_reshape_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
+PolyUOp *poly_uop_reshape_symbolic(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   PolyUOp *shape = movement_shape_arg(ctx, dims, ndim);
   if (!shape) return NULL;
@@ -148,7 +148,7 @@ static PolyUOp *broadcast_to(PolyCtx *ctx, PolyUOp *src, PolyUOp **new_shape, in
       kept_dims[i] = poly_uop_shape_dim(ctx, src, kept[i]);
       if (!kept_dims[i]) return NULL;
     }
-    squeezed = poly_reshape_uop(ctx, src, kept_dims, n_kept);
+    squeezed = poly_uop_reshape_symbolic(ctx, src, kept_dims, n_kept);
     if (!squeezed) return NULL;
   }
 
@@ -187,10 +187,10 @@ static PolyUOp *broadcast_to(PolyCtx *ctx, PolyUOp *src, PolyUOp **new_shape, in
       identity = false;
       break;
     }
-  return identity ? expanded : poly_permute(ctx, expanded, perm, new_ndim);
+  return identity ? expanded : poly_uop_permute(ctx, expanded, perm, new_ndim);
 }
 
-PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+PolyUOp *poly_uop_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   PolyUOp *new_shape[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++)
@@ -198,7 +198,7 @@ PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   return broadcast_to(ctx, src, new_shape, ndim);
 }
 
-PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
+PolyUOp *poly_uop_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(perm, ndim) || poly_uop_ndim(ctx, src) != ndim) return NULL;
   /* MovementMixin.permute resolves/validates axes before _mop and preserves
    * source identity for a no-op, including callers without a Tensor frontend. */
@@ -221,7 +221,7 @@ PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
   return poly_uop1(ctx, POLY_OP_PERMUTE, src->dtype, src, arg);
 }
 
-PolyUOp *poly_stack(PolyCtx *ctx, PolyUOp **src, int n_src, int dim) {
+PolyUOp *poly_uop_stack_axis(PolyCtx *ctx, PolyUOp **src, int n_src, int dim) {
   if (!ctx || !src || n_src <= 0) return NULL;
   int ndim = poly_uop_ndim(ctx, src[0]);
   if (ndim < 0 || ndim >= POLY_MAX_DIMS) return NULL;
@@ -250,14 +250,20 @@ PolyUOp *poly_stack(PolyCtx *ctx, PolyUOp **src, int n_src, int dim) {
   perm[pos++] = 0;
   for (int axis = dim + 1; axis < out_ndim; axis++)
     perm[pos++] = axis;
-  return poly_permute(ctx, stacked, perm, out_ndim);
+  return poly_uop_permute(ctx, stacked, perm, out_ndim);
 }
 
-PolyUOp *poly_expand_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
+PolyUOp *poly_uop_expand_symbolic(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
   return broadcast_to(ctx, src, dims, ndim);
 }
 
-PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp **sizes, int ndim) {
+PolyUOp *poly_uop_shrink_symbolic(
+    PolyCtx *ctx,
+    PolyUOp *src,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    int ndim
+) {
   if (!ctx || !src || !rank_tuple_valid(starts, ndim) || !rank_tuple_valid(sizes, ndim) ||
       poly_uop_ndim(ctx, src) != ndim)
     return NULL;
@@ -275,7 +281,13 @@ PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp *
   return out && poly_uop_ndim(ctx, out) == ndim ? out : NULL;
 }
 
-PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **sizes, int ndim) {
+PolyUOp *poly_uop_pad_symbolic(
+    PolyCtx *ctx,
+    PolyUOp *src,
+    PolyUOp **offsets,
+    PolyUOp **sizes,
+    int ndim
+) {
   if (!ctx || !src || !rank_tuple_valid(offsets, ndim) || !rank_tuple_valid(sizes, ndim) ||
       poly_uop_ndim(ctx, src) != ndim)
     return NULL;
@@ -293,7 +305,7 @@ PolyUOp *poly_pad_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **offsets, PolyUOp **s
   return out && poly_uop_ndim(ctx, out) == ndim ? out : NULL;
 }
 
-PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+PolyUOp *poly_uop_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
   if (!ctx || !src || !rank_tuple_valid(pairs, ndim) || poly_uop_ndim(ctx, src) != ndim)
     return NULL;
   /* Pinned UOp._mop returns scalar PAD/SHRINK unchanged when the movement
@@ -309,10 +321,10 @@ PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) 
     starts[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(pairs[i][0]));
     sizes[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(size));
   }
-  return poly_shrink_uop(ctx, src, starts, sizes, ndim);
+  return poly_uop_shrink_symbolic(ctx, src, starts, sizes, ndim);
 }
 
-PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
+PolyUOp *poly_uop_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
   if (!ctx || !src || !rank_tuple_valid(axes, n_axes)) return NULL;
   PolyShape shape = poly_uop_max_shape_cached(ctx, src);
   if (shape.ndim < 0 || shape.ndim > POLY_MAX_DIMS) return NULL;
@@ -330,7 +342,7 @@ PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
   return poly_uop1(ctx, POLY_OP_FLIP, src->dtype, src, arg);
 }
 
-PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+PolyUOp *poly_uop_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
   if (!ctx || !src || !rank_tuple_valid(pairs, ndim)) return NULL;
   PolyShape shape = poly_uop_max_shape_cached(ctx, src);
   if (shape.ndim != ndim) return NULL;
@@ -352,5 +364,5 @@ PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
       sizes[i] = poly_graph_rewrite(ctx, sizes[i], poly_symbolic_simple());
     }
   }
-  return poly_pad_uop(ctx, src, offsets, sizes, ndim);
+  return poly_uop_pad_symbolic(ctx, src, offsets, sizes, ndim);
 }

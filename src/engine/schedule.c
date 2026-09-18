@@ -344,13 +344,13 @@ static bool estimate_not_end(PolyUOp *u) {
 static PolyUOp *estimate_without_specials(PolyCtx *ctx, PolyUOp *expr) {
   if (!ctx || !expr) return NULL;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, expr, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, expr, &n_topo);
   if (!topo) return NULL;
   int n_special = 0;
   for (int i = 0; i < n_topo; i++)
     if (topo[i]->op == POLY_OP_SPECIAL) n_special++;
   if (n_special == 0) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return expr;
   }
   PolyUOp **from = calloc((size_t)n_special, sizeof(*from));
@@ -359,7 +359,7 @@ static PolyUOp *estimate_without_specials(PolyCtx *ctx, PolyUOp *expr) {
   if (!from || !to || !zero) {
     free(from);
     free(to);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
   int at = 0;
@@ -371,7 +371,7 @@ static PolyUOp *estimate_without_specials(PolyCtx *ctx, PolyUOp *expr) {
   PolyUOp *out = poly_uop_substitute(ctx, expr, from, to, n_special);
   free(from);
   free(to);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return out;
 }
 
@@ -411,14 +411,15 @@ int poly_estimates_from_uops(
       if (!u || (u->op != POLY_OP_INDEX && u->op != POLY_OP_SHRINK)) continue;
       for (int j = 1; j < u->n_src; j++) {
         int n_topo = 0;
-        PolyUOp **topo = poly_toposort_ex_alloc(ctx, u->src[j], &n_topo, estimate_not_end, true);
+        PolyUOp **topo =
+            poly_uop_toposort_ex_alloc(ctx, u->src[j], &n_topo, estimate_not_end, true);
         if (!topo) {
           rc = -1;
           break;
         }
         for (int k = 0; topo && k < n_topo; k++)
           poly_map_set(excluded, poly_ptr_hash(topo[k]), topo[k], (void *)1, poly_ptr_eq);
-        poly_toposort_free(topo);
+        poly_uop_toposort_free(topo);
       }
       if (rc != 0) break;
     }
@@ -798,12 +799,12 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
   info->has_local_size = true;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, body, &n_topo);
   if (!topo) return false;
   if (n_topo > 0) {
     info->vars = malloc((size_t)n_topo * sizeof(*info->vars));
     if (!info->vars) {
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       return false;
     }
   }
@@ -817,7 +818,7 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
       if (u->arg.param->name && strcmp(u->arg.param->name, "core_id") == 0) {
         int64_t n = 0;
         if (!poly_arg_integer_to_i64(u->arg.param->max_val, &n) || n < 0 || n >= INT32_MAX) {
-          poly_toposort_free(topo);
+          poly_uop_toposort_free(topo);
           return false;
         }
         info->global_size[0] = (int)(n + 1);
@@ -853,7 +854,7 @@ static bool poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
     }
     info->vars[j] = value;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return true;
 }
 
@@ -1129,7 +1130,7 @@ static bool poly_eval_launch_expr(
   /* tinygrad UOp._sym_fxn topologically renders each shared symbolic UOp once.
    * Evaluate the same unique-node order into a pass-local contiguous array. */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(NULL, u, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(NULL, u, &n_topo);
   PolyArg *values = n_topo > 0 ? calloc((size_t)n_topo, sizeof(*values)) : NULL;
   PolyMap *memo = poly_map_new((size_t)(n_topo > 0 ? n_topo : 16));
   bool ok = topo && values && memo;
@@ -1195,7 +1196,7 @@ static bool poly_eval_launch_expr(
     ok = false;
   poly_map_destroy(memo);
   free(values);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ok;
 }
 
@@ -1966,7 +1967,7 @@ static bool program_call_params_valid(PolyCtx *ctx, PolyUOp *call, PolyUOp *ast)
   PolyUOp *root = poly_program_linear(ast);
   if (!root) root = poly_program_body(ast);
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n && valid; i++) {
@@ -1992,7 +1993,7 @@ static bool program_call_params_valid(PolyCtx *ctx, PolyUOp *call, PolyUOp *ast)
       valid = found;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   if (valid) return true;
 invalid:
   fprintf(stderr, "polygrad: kernel PARAMs/ProgramInfo do not match CALL arguments\n");
@@ -2250,7 +2251,7 @@ void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
   /* opt/postrange.py:args_from_ast, adapted to the existing C wrapper's
    * compact buffer-then-scalar arguments and implicit core_id. */
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n_topo);
   int n_params = 0;
   void **bufs = NULL;
   if (!topo) goto cleanup;
@@ -2298,12 +2299,12 @@ void **poly_args_from_ast(PolyCtx *ctx, PolyUOp *sink, int *n_args) {
         fp[j] = 0.1f + (float)(j % 100) * 0.01f;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
 
   *n_args = n_params;
   return bufs;
 cleanup:
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   timing_free_args(bufs, n_params);
   return NULL;
 }
@@ -2330,7 +2331,7 @@ bool poly_timing_buffers_init(
   raw->allocator = backend->get_allocator();
   raw->host = poly_args_from_ast(ctx, sink, &raw->n_host);
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
   if (!raw->host || !raw->allocator || !topo) goto failed;
   for (int i = 0; i < n; i++)
     if (topo[i]->op == POLY_OP_PARAM && !poly_uop_is_alu_param(topo[i]))
@@ -2372,10 +2373,10 @@ bool poly_timing_buffers_init(
         raw->allocator->copy_in(&raw->buffers[i], &host, nbytes, raw->allocator->dev_ctx) != 0)
       goto failed;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return true;
 failed:
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   poly_timing_buffers_free(raw);
   return false;
 }
@@ -3458,7 +3459,7 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
 static PolyUOp *poly_call_device_num_var(PolyCtx *ctx, PolyUOp *body) {
   if (!ctx || !body) return NULL;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, body, &n_topo);
   if (!topo) return NULL;
   PolyUOp *found = NULL;
   for (int i = 0; i < n_topo; i++) {
@@ -3469,7 +3470,7 @@ static PolyUOp *poly_call_device_num_var(PolyCtx *ctx, PolyUOp *body) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return found;
 }
 
@@ -3718,7 +3719,7 @@ PolyUOp *poly_compile_linear(PolyCtx *ctx, PolyUOp *linear, int beam) {
     if (device_uop && device_uop->arg.kind == POLY_ARG_STRING_TUPLE &&
         device_uop->arg.string_tuple.n > 0)
       device_uop = poly_device_uop_from_name(ctx, device_uop->arg.string_tuple.vals[0]);
-    PolyDevice item_device = poly_device_from_device_uop(device_uop);
+    PolyDevice item_device = poly_uop_device_from_device_uop(device_uop);
     if (!device_uop || item_device == POLY_DEVICE_AUTO) {
       ok = false;
       break;
@@ -3860,7 +3861,7 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
   PolyUOp *device_uop = poly_uop_device_uop_cached(ctx, uop, NULL);
   if (!device_uop && identity)
     device_uop = poly_uop_device_uop_cached(ctx, (PolyUOp *)identity, NULL);
-  PolyDevice device = poly_device_from_device_uop(device_uop);
+  PolyDevice device = poly_uop_device_from_device_uop(device_uop);
   /* Tinygrad 2026-08-22 a9069c17 engine/realize.py:180-187 resolves each
    * physical CALL argument to its device-specific Buffer, then calls
    * ensure_allocated. C stores residency separately, so restore that same
@@ -3887,7 +3888,7 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
           (void *)buffer->base->src
       );
     if (poly_debug_at_least(7) && (rc != 0 || (read && !buffer->valid))) {
-      char *graph = poly_graph_str(uop);
+      char *graph = poly_uop_graph_str(uop);
       fprintf(
           stderr, "[polygrad:run_linear] buffer graph=%s\n", graph ? graph : "<allocation failure>"
       );
@@ -3897,7 +3898,7 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
     return 0;
   }
   if (poly_debug_at_least(7)) {
-    char *graph = poly_graph_str(uop);
+    char *graph = poly_uop_graph_str(uop);
     fprintf(
         stderr, "[polygrad:run_linear] unresolved buffer op=%s graph=%s\n", poly_op_name(uop->op),
         graph ? graph : "<allocation failure>"
@@ -4115,7 +4116,7 @@ static int poly_exec_linear_program(
     PolyUOp *device_uop = devices->arg.kind == POLY_ARG_STRING_TUPLE
                               ? poly_device_uop_from_name(ctx, devices->arg.string_tuple.vals[lane])
                               : devices;
-    PolyDevice device = poly_device_from_device_uop(device_uop);
+    PolyDevice device = poly_uop_device_from_device_uop(device_uop);
     if (!device_uop || device == POLY_DEVICE_AUTO || !poly_device_can_execute(device)) return -1;
 
     PolyRunner runner = {0};

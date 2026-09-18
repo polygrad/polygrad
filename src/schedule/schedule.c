@@ -374,7 +374,7 @@ PolyUOp *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
   if (!sctx.kernel_index) return NULL;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, kernel_graph, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, kernel_graph, &n_topo, NULL, false);
   if (!topo) goto fail;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_AFTER && !collect_after(&sctx, topo[i])) goto fail;
@@ -412,12 +412,12 @@ PolyUOp *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
 
   PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, n_calls, poly_arg_none());
   free(calls);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   schedule_context_destroy(&sctx);
   return linear;
 
 fail:
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   schedule_context_destroy(&sctx);
   return NULL;
 }
@@ -465,9 +465,9 @@ static PolyPatternMatcher *pm_schedule(void) {
 static PolyUOp *rebuild_uop(PolyCtx *ctx, PolyUOp *u, PolyUOp **src) {
   if (u->tag || u->tag_arg.kind != POLY_ARG_NONE)
     return poly_uop_tagged_arg(
-        ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg, u->tag, u->tag_arg
+        ctx, u->op, poly_uop_rebuild_dtype(u, src), src, u->n_src, u->arg, u->tag, u->tag_arg
     );
-  return poly_uop(ctx, u->op, poly_rebuild_dtype(u, src), src, u->n_src, u->arg);
+  return poly_uop(ctx, u->op, poly_uop_rebuild_dtype(u, src), src, u->n_src, u->arg);
 }
 
 /* Current Tinygrad schedule/__init__.py:create_new_buffer. */
@@ -598,7 +598,7 @@ static PolyUOp *apply_binds(PolyCtx *ctx, PolyUOp *call, LinearBind *binds, int 
   int n_sub = 0, cap = 0;
   for (int i = 0; i < call->n_src; i++) {
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort_ex_alloc(ctx, call->src[i], &n_topo, NULL, false);
+    PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, call->src[i], &n_topo, NULL, false);
     if (!topo) goto fail;
     for (int j = 0; j < n_topo; j++) {
       int found = bind_slot(topo[j], binds, n_binds);
@@ -611,13 +611,13 @@ static PolyUOp *apply_binds(PolyCtx *ctx, PolyUOp *call, LinearBind *binds, int 
         int next = cap ? cap * 2 : 8;
         PolyUOp **grown_from = realloc(from, (size_t)next * sizeof(*grown_from));
         if (!grown_from) {
-          poly_toposort_free(topo);
+          poly_uop_toposort_free(topo);
           goto fail;
         }
         from = grown_from;
         PolyUOp **grown_to = realloc(to, (size_t)next * sizeof(*grown_to));
         if (!grown_to) {
-          poly_toposort_free(topo);
+          poly_uop_toposort_free(topo);
           goto fail;
         }
         to = grown_to;
@@ -626,7 +626,7 @@ static PolyUOp *apply_binds(PolyCtx *ctx, PolyUOp *call, LinearBind *binds, int 
       from[n_sub] = topo[j];
       to[n_sub++] = binds[found].value;
     }
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
   }
   PolyUOp *ret = call;
   if (n_sub) {
@@ -743,7 +743,7 @@ static bool collect_used_vars(PolyCtx *ctx, PolyUOp *linear, PolyUOp ***vars_out
     PolyUOp *call = linear->src[i];
     if (!call || call->op != POLY_OP_CALL || call->n_src < 1) goto fail;
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort_alloc(ctx, call->src[0], &n_topo);
+    PolyUOp **topo = poly_uop_toposort_alloc(ctx, call->src[0], &n_topo);
     if (!topo) goto fail;
     bool ok = true;
     for (int j = 0; j < n_topo; j++)
@@ -751,7 +751,7 @@ static bool collect_used_vars(PolyCtx *ctx, PolyUOp *linear, PolyUOp ***vars_out
         ok = false;
         break;
       }
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     if (!ok) goto fail;
   }
   *vars_out = vars;
@@ -884,7 +884,7 @@ static bool same_copy_index(PolyUOp *left, PolyUOp *right) {
 /* Current Tinygrad schedule/__init__.py:assert_all_same_devices. */
 static bool assert_all_same_devices(PolyCtx *ctx, PolyUOp *ast) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, ast, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, ast, &n_topo);
   if (!topo) return false;
   PolyUOp *device = NULL;
   bool ok = true;
@@ -900,7 +900,7 @@ static bool assert_all_same_devices(PolyCtx *ctx, PolyUOp *ast) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ok;
 }
 
@@ -959,7 +959,7 @@ static PolyUOp *copy_kernel_to_copy_uop(PolyCtx *ctx, PolyUOp *call) {
       dst_param->arg.param->slot != 0 || src_param->arg.param->slot != 1 || !dst_device)
     return assert_all_same_devices(ctx, sink) ? call : NULL;
 
-  PolyUOp *copy = poly_copy_to_device_uop(ctx, src_param, dst_device);
+  PolyUOp *copy = poly_uop_copy_to_device(ctx, src_param, dst_device);
   if (!copy) return NULL;
   PolyUOp **call_src = malloc((size_t)call->n_src * sizeof(*call_src));
   if (!call_src) return NULL;

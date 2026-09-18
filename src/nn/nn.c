@@ -1,8 +1,8 @@
 /* nn.c — Reusable raw-UOp and paired-Tensor layer programs. */
 
 #include "nn/nn.h"
-#include "tensor.h" /* poly_mean_reduce */
-#include "engine/schedule.h" /* poly_reshape, poly_permute, poly_expand */
+#include "tensor.h" /* poly_uop_mean_reduce */
+#include "engine/schedule.h" /* poly_uop_reshape, poly_uop_permute, poly_uop_expand */
 #include <stdint.h>
 #include <limits.h>
 #include <math.h>
@@ -44,7 +44,7 @@ static PolyTensor *nn_tensor_result(
 
 /* nn.LSTMCell: gate order is input, forget, candidate, output. There is no
  * recurrent executor: callers connect the returned state into the next call. */
-int poly_lstm_cell(
+int poly_uop_lstm_cell(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *h,
@@ -65,26 +65,27 @@ int poly_lstm_cell(
   if (!xs || !ws || ws[1] <= 0 || ws[1] > INT64_MAX / 4 || ws[0] != 4 * ws[1]) return -1;
   int64_t batch = xs[0], hidden = ws[1];
   if (!h) {
-    PolyUOp *zero = poly_const_typed(ctx, x->dtype, 0);
-    h = poly_expand(
-        ctx, poly_reshape(ctx, zero, (int64_t[]){1, 1}, 2), (int64_t[]){batch, hidden}, 2
+    PolyUOp *zero = poly_uop_const_typed(ctx, x->dtype, 0);
+    h = poly_uop_expand(
+        ctx, poly_uop_reshape(ctx, zero, (int64_t[]){1, 1}, 2), (int64_t[]){batch, hidden}, 2
     );
     c = h;
   }
-  PolyUOp *gates = poly_add(
-      ctx, poly_linear_apply(ctx, x, weight_ih, bias_ih),
-      poly_linear_apply(ctx, h, weight_hh, bias_hh)
+  PolyUOp *gates = poly_uop_add(
+      ctx, poly_uop_linear_apply(ctx, x, weight_ih, bias_ih),
+      poly_uop_linear_apply(ctx, h, weight_hh, bias_hh)
   );
   if (!gates) return -1;
   PolyUOp *parts[4];
   for (int i = 0; i < 4; i++) {
     parts[i] =
-        poly_shrink(ctx, gates, (int64_t[][2]){{0, batch}, {i * hidden, (i + 1) * hidden}}, 2);
-    parts[i] = i == 2 ? poly_tanh_act(ctx, parts[i]) : poly_sigmoid(ctx, parts[i]);
+        poly_uop_shrink(ctx, gates, (int64_t[][2]){{0, batch}, {i * hidden, (i + 1) * hidden}}, 2);
+    parts[i] = i == 2 ? poly_uop_tanh(ctx, parts[i]) : poly_uop_sigmoid(ctx, parts[i]);
     if (!parts[i]) return -1;
   }
-  PolyUOp *nc = poly_add(ctx, poly_mul(ctx, parts[1], c), poly_mul(ctx, parts[0], parts[2]));
-  PolyUOp *nh = poly_mul(ctx, parts[3], poly_tanh_act(ctx, nc));
+  PolyUOp *nc =
+      poly_uop_add(ctx, poly_uop_mul(ctx, parts[1], c), poly_uop_mul(ctx, parts[0], parts[2]));
+  PolyUOp *nh = poly_uop_mul(ctx, parts[3], poly_uop_tanh(ctx, nc));
   if (!nc || !nh) return -1;
   *new_h = nh;
   *new_c = nc;
@@ -110,14 +111,14 @@ int poly_tensor_lstm_cell(
   int logical = poly_tensor_result_builds_logical(ctx, inputs, 7);
   if (logical < 0) return -1;
   PolyUOp *hp = NULL, *cp = NULL, *hl = NULL, *cl = NULL;
-  if (poly_lstm_cell(
+  if (poly_uop_lstm_cell(
           ctx, x->uop_physical, h ? h->uop_physical : NULL, c ? c->uop_physical : NULL,
           weight_ih->uop_physical, weight_hh->uop_physical, bias_ih ? bias_ih->uop_physical : NULL,
           bias_hh ? bias_hh->uop_physical : NULL, &hp, &cp
       ) != 0)
     return -1;
   if (logical &&
-      poly_lstm_cell(
+      poly_uop_lstm_cell(
           ctx, x->uop_logical, h ? h->uop_logical : NULL, c ? c->uop_logical : NULL,
           weight_ih->uop_logical, weight_hh->uop_logical, bias_ih ? bias_ih->uop_logical : NULL,
           bias_hh ? bias_hh->uop_logical : NULL, &hl, &cl
@@ -136,12 +137,12 @@ int poly_tensor_lstm_cell(
 
 /* Linear */
 
-PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
+PolyUOp *poly_uop_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
   if (!ctx || !x || !w) return NULL;
   int64_t perm[] = {1, 0};
-  PolyUOp *out = poly_dot(ctx, x, poly_permute(ctx, w, perm, 2));
+  PolyUOp *out = poly_uop_dot(ctx, x, poly_uop_permute(ctx, w, perm, 2));
   if (!out) return NULL;
-  if (b) out = poly_add(ctx, out, b);
+  if (b) out = poly_uop_add(ctx, out, b);
   return out;
 }
 
@@ -154,17 +155,17 @@ PolyTensor *poly_tensor_linear_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w,
    * Tensor.linear is dot followed by optional add
    * (nn/__init__.py:156-177; mixin/__init__.py:1335-1350). */
   PolyUOp *physical =
-      poly_linear_apply(ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL);
+      poly_uop_linear_apply(ctx, x->uop_physical, w->uop_physical, b ? b->uop_physical : NULL);
   PolyUOp *logical =
       build_logical
-          ? poly_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL)
+          ? poly_uop_linear_apply(ctx, x->uop_logical, w->uop_logical, b ? b->uop_logical : NULL)
           : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, b ? 3 : 2);
 }
 
 /* LayerNorm */
 
-PolyUOp *poly_layernorm_apply(
+PolyUOp *poly_uop_layernorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -173,10 +174,10 @@ PolyUOp *poly_layernorm_apply(
     double eps
 ) {
   int64_t a = axis;
-  return poly_layernorm_axes_apply(ctx, x, w, b, &a, 1, eps);
+  return poly_uop_layernorm_axes_apply(ctx, x, w, b, &a, 1, eps);
 }
 
-PolyUOp *poly_layernorm_axes_apply(
+PolyUOp *poly_uop_layernorm_axes_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -190,16 +191,17 @@ PolyUOp *poly_layernorm_axes_apply(
   if (n_axes) memcpy(reduce_axes, axes, (size_t)n_axes * sizeof(int64_t));
   /* nn.LayerNorm / Tensor.layernorm: reduce the declared axes together,
    * preserving the centered value and the input accumulation/cast rules. */
-  PolyUOp *mean = poly_mean_axes(ctx, x, reduce_axes, n_axes, true);
-  PolyUOp *centered = poly_sub(ctx, x, mean);
-  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, centered, centered);
-  PolyUOp *var = poly_mean_axes(ctx, sq, reduce_axes, n_axes, true);
-  PolyUOp *normed = poly_mul(
-      ctx, centered, poly_rsqrt(ctx, poly_add(ctx, var, poly_const_typed(ctx, POLY_WEAKFLOAT, eps)))
+  PolyUOp *mean = poly_uop_mean_axes(ctx, x, reduce_axes, n_axes, true);
+  PolyUOp *centered = poly_uop_sub(ctx, x, mean);
+  PolyUOp *sq = poly_uop_alu2(ctx, POLY_OP_MUL, centered, centered);
+  PolyUOp *var = poly_uop_mean_axes(ctx, sq, reduce_axes, n_axes, true);
+  PolyUOp *normed = poly_uop_mul(
+      ctx, centered,
+      poly_uop_rsqrt(ctx, poly_uop_add(ctx, var, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, eps)))
   );
 
-  if (w) normed = poly_mul(ctx, normed, w);
-  if (b) normed = poly_add(ctx, normed, b);
+  if (w) normed = poly_uop_mul(ctx, normed, w);
+  if (b) normed = poly_uop_add(ctx, normed, b);
 
   return normed;
 }
@@ -231,11 +233,11 @@ PolyTensor *poly_tensor_layernorm_axes_apply(
   if (build_logical < 0) return NULL;
   /* Pinned LayerNorm first runs Tensor.layernorm, then applies the affine
    * weight and bias (nn/__init__.py:235-261; mixin/__init__.py:1548-1564). */
-  PolyUOp *physical = poly_layernorm_axes_apply(
+  PolyUOp *physical = poly_uop_layernorm_axes_apply(
       ctx, x->uop_physical, w ? w->uop_physical : NULL, b ? b->uop_physical : NULL, axes, n_axes,
       eps
   );
-  PolyUOp *logical = build_logical ? poly_layernorm_axes_apply(
+  PolyUOp *logical = build_logical ? poly_uop_layernorm_axes_apply(
                                          ctx, x->uop_logical, w ? w->uop_logical : NULL,
                                          b ? b->uop_logical : NULL, axes, n_axes, eps
                                      )
@@ -245,7 +247,7 @@ PolyTensor *poly_tensor_layernorm_axes_apply(
 
 /* RMSNorm */
 
-PolyUOp *poly_groupnorm_apply(
+PolyUOp *poly_uop_groupnorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -270,14 +272,15 @@ PolyUOp *poly_groupnorm_apply(
   /* The batch is not reduced or folded into a group. Preserve its actual
    * shape expression, as GroupNorm.reshape(x.shape[0], groups, -1) does. */
   PolyUOp *group_shape[] = {
-      dims[0], poly_const_int(ctx, groups), poly_const_int(ctx, count / groups)};
-  PolyUOp *flat = poly_reshape_uop(ctx, x, group_shape, 3);
-  PolyUOp *out =
-      poly_reshape_uop(ctx, poly_layernorm_apply(ctx, flat, NULL, NULL, -1, eps), dims, ndim);
+      dims[0], poly_uop_const_int(ctx, groups), poly_uop_const_int(ctx, count / groups)};
+  PolyUOp *flat = poly_uop_reshape_symbolic(ctx, x, group_shape, 3);
+  PolyUOp *out = poly_uop_reshape_symbolic(
+      ctx, poly_uop_layernorm_apply(ctx, flat, NULL, NULL, -1, eps), dims, ndim
+  );
   if (!w || !b) return out;
-  return poly_add(
-      ctx, poly_mul(ctx, out, poly_reshape(ctx, w, affine, ndim)),
-      poly_reshape(ctx, b, affine, ndim)
+  return poly_uop_add(
+      ctx, poly_uop_mul(ctx, out, poly_uop_reshape(ctx, w, affine, ndim)),
+      poly_uop_reshape(ctx, b, affine, ndim)
   );
 }
 
@@ -293,10 +296,10 @@ PolyTensor *poly_tensor_groupnorm_apply(
   PolyTensor *inputs[] = {x, w, b};
   int logical = poly_tensor_result_builds_logical(ctx, inputs, 3);
   if (logical < 0) return NULL;
-  PolyUOp *p = poly_groupnorm_apply(
+  PolyUOp *p = poly_uop_groupnorm_apply(
       ctx, x->uop_physical, w ? w->uop_physical : NULL, b ? b->uop_physical : NULL, groups, eps
   );
-  PolyUOp *l = logical ? poly_groupnorm_apply(
+  PolyUOp *l = logical ? poly_uop_groupnorm_apply(
                              ctx, x->uop_logical, w ? w->uop_logical : NULL,
                              b ? b->uop_logical : NULL, groups, eps
                          )
@@ -322,17 +325,18 @@ static int batchnorm_stats(
   int64_t axes[POLY_MAX_DIMS];
   int n_axes = 0;
   for (int i = 0; i < ndim; i++) {
-    shape[i] = i == 1 ? poly_uop_shape_dim(ctx, x, 1) : poly_const_int(ctx, 1);
+    shape[i] = i == 1 ? poly_uop_shape_dim(ctx, x, 1) : poly_uop_const_int(ctx, 1);
     if (i != 1) axes[n_axes++] = i;
   }
   if (running_mean && !training) {
     *mean = running_mean;
-    *var = poly_reshape_uop(ctx, running_var, shape, ndim);
+    *var = poly_uop_reshape_symbolic(ctx, running_var, shape, ndim);
   } else {
-    *mean = poly_mean_axes(ctx, x, axes, n_axes, false);
-    PolyUOp *centered =
-        poly_sub(ctx, x, poly_reshape_uop(ctx, poly_detach(ctx, *mean), shape, ndim));
-    *var = poly_mean_axes(ctx, poly_mul(ctx, centered, centered), axes, n_axes, false);
+    *mean = poly_uop_mean_axes(ctx, x, axes, n_axes, false);
+    PolyUOp *centered = poly_uop_sub(
+        ctx, x, poly_uop_reshape_symbolic(ctx, poly_uop_detach(ctx, *mean), shape, ndim)
+    );
+    *var = poly_uop_mean_axes(ctx, poly_uop_mul(ctx, centered, centered), axes, n_axes, false);
   }
   return *mean && *var ? 0 : -1;
 }
@@ -403,9 +407,10 @@ PolyTensor *poly_tensor_batchnorm_apply(
     PolyUOp *m = domain ? mean->uop_logical : mean->uop_physical;
     PolyUOp *v = domain ? var->uop_logical : var->uop_physical;
     int64_t channel = 1;
-    r[0] = poly_batchnorm(
+    r[0] = poly_uop_batchnorm(
         ctx, roots[0], roots[1], roots[2], m,
-        poly_rsqrt(ctx, poly_add(ctx, v, poly_const_typed(ctx, POLY_WEAKFLOAT, eps))), &channel, 1
+        poly_uop_rsqrt(ctx, poly_uop_add(ctx, v, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, eps))),
+        &channel, 1
     );
     if (update) {
       int ndim = poly_uop_ndim(ctx, roots[0]);
@@ -414,19 +419,21 @@ PolyTensor *poly_tensor_batchnorm_apply(
         if (poly_uop_const_i64(poly_uop_shape_dim(ctx, roots[0], i), &shape[i]) != 0) goto done;
       int64_t count = poly_shape_numel_checked(shape, ndim);
       if (count <= shape[1]) goto done;
-      PolyUOp *remain = poly_const_typed(ctx, POLY_WEAKFLOAT, 1 - momentum);
-      r[1] = poly_add(
-          ctx, poly_mul(ctx, remain, roots[3]),
-          poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, momentum), poly_detach(ctx, m))
-      );
-      r[2] = poly_add(
-          ctx, poly_mul(ctx, remain, roots[4]),
-          poly_mul(
-              ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, momentum * count / (count - shape[1])),
-              poly_detach(ctx, v)
+      PolyUOp *remain = poly_uop_const_typed(ctx, POLY_WEAKFLOAT, 1 - momentum);
+      r[1] = poly_uop_add(
+          ctx, poly_uop_mul(ctx, remain, roots[3]),
+          poly_uop_mul(
+              ctx, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, momentum), poly_uop_detach(ctx, m)
           )
       );
-      r[3] = poly_add(ctx, roots[5], poly_const_int(ctx, 1));
+      r[2] = poly_uop_add(
+          ctx, poly_uop_mul(ctx, remain, roots[4]),
+          poly_uop_mul(
+              ctx, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, momentum * count / (count - shape[1])),
+              poly_uop_detach(ctx, v)
+          )
+      );
+      r[3] = poly_uop_add(ctx, roots[5], poly_uop_const_int(ctx, 1));
     }
   }
   /* Prepare every result before the pinned ordered Tensor.assign calls.
@@ -454,15 +461,16 @@ done:
   return out;
 }
 
-PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
+PolyUOp *poly_uop_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   if (!ctx || !x) return NULL;
   /* nn.RMSNorm._norm/__call__: normalize in float32 even for half/double,
    * cast back before affine multiplication, and let UOp infer broadcasting. */
-  PolyUOp *xf = poly_cast(ctx, x, POLY_FLOAT32);
-  PolyUOp *mean = poly_mean_reduce(ctx, poly_mul(ctx, xf, xf), -1, 1);
-  PolyUOp *scale = poly_rsqrt(ctx, poly_add(ctx, mean, poly_const_typed(ctx, POLY_WEAKFLOAT, eps)));
-  PolyUOp *normed = poly_cast(ctx, poly_mul(ctx, xf, scale), x->dtype);
-  return w ? poly_mul(ctx, normed, w) : normed;
+  PolyUOp *xf = poly_uop_cast(ctx, x, POLY_FLOAT32);
+  PolyUOp *mean = poly_uop_mean_reduce(ctx, poly_uop_mul(ctx, xf, xf), -1, 1);
+  PolyUOp *scale =
+      poly_uop_rsqrt(ctx, poly_uop_add(ctx, mean, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, eps)));
+  PolyUOp *normed = poly_uop_cast(ctx, poly_uop_mul(ctx, xf, scale), x->dtype);
+  return w ? poly_uop_mul(ctx, normed, w) : normed;
 }
 
 PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps) {
@@ -473,10 +481,10 @@ PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w
   /* Pinned RMSNorm normalizes x.float(), casts back, and applies the optional
    * affine weight (nn/__init__.py:281-304). The existing raw program is run
    * over both retained occurrences without correspondence. */
-  PolyUOp *physical = poly_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
-  PolyUOp *logical = build_logical
-                         ? poly_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps)
-                         : NULL;
+  PolyUOp *physical = poly_uop_rmsnorm_apply(ctx, x->uop_physical, w ? w->uop_physical : NULL, eps);
+  PolyUOp *logical =
+      build_logical ? poly_uop_rmsnorm_apply(ctx, x->uop_logical, w ? w->uop_logical : NULL, eps)
+                    : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, w ? 2 : 1);
 }
 
@@ -484,7 +492,7 @@ PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w
 
 /* nn.InstanceNorm reshapes spatial dimensions into one normalization axis.
  * Affine state remains caller-owned, so C models and frontends share this graph. */
-PolyUOp *poly_instancenorm_apply(
+PolyUOp *poly_uop_instancenorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -501,15 +509,15 @@ PolyUOp *poly_instancenorm_apply(
   int64_t count = poly_shape_numel_checked(shape + 1, ndim - 1);
   if (count < 0 || count % num_features) return NULL;
   PolyUOp *flat =
-      poly_reshape(ctx, x, (int64_t[]){shape[0], num_features, count / num_features}, 3);
+      poly_uop_reshape(ctx, x, (int64_t[]){shape[0], num_features, count / num_features}, 3);
   PolyUOp *result =
-      poly_reshape(ctx, poly_layernorm_apply(ctx, flat, NULL, NULL, -1, eps), shape, ndim);
+      poly_uop_reshape(ctx, poly_uop_layernorm_apply(ctx, flat, NULL, NULL, -1, eps), shape, ndim);
   if (!w || !b) return result;
   for (int i = 0; i < ndim; i++)
     affine[i] = i == 1 ? num_features : 1;
-  return poly_add(
-      ctx, poly_mul(ctx, result, poly_reshape(ctx, w, affine, ndim)),
-      poly_reshape(ctx, b, affine, ndim)
+  return poly_uop_add(
+      ctx, poly_uop_mul(ctx, result, poly_uop_reshape(ctx, w, affine, ndim)),
+      poly_uop_reshape(ctx, b, affine, ndim)
   );
 }
 
@@ -525,11 +533,11 @@ PolyTensor *poly_tensor_instancenorm_apply(
   PolyTensor *inputs[] = {x, w, b};
   int logical = poly_tensor_result_builds_logical(ctx, inputs, 3);
   if (logical < 0) return NULL;
-  PolyUOp *p = poly_instancenorm_apply(
+  PolyUOp *p = poly_uop_instancenorm_apply(
       ctx, x->uop_physical, w ? w->uop_physical : NULL, b ? b->uop_physical : NULL, num_features,
       eps
   );
-  PolyUOp *l = logical ? poly_instancenorm_apply(
+  PolyUOp *l = logical ? poly_uop_instancenorm_apply(
                              ctx, x->uop_logical, w ? w->uop_logical : NULL,
                              b ? b->uop_logical : NULL, num_features, eps
                          )
@@ -537,8 +545,8 @@ PolyTensor *poly_tensor_instancenorm_apply(
   return nn_tensor_result(ctx, l, p, inputs, 3);
 }
 
-PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
-  return poly_gather(ctx, table, tokens);
+PolyUOp *poly_uop_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
+  return poly_uop_gather(ctx, table, tokens);
 }
 
 PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTensor *table) {
@@ -548,27 +556,27 @@ PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTe
   if (build_logical < 0) return NULL;
   /* Pinned Embedding is its one-hot WHERE/SUM program over the ordered weight
    * and index Tensor.uops (nn/__init__.py:368-391). */
-  PolyUOp *physical = poly_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
+  PolyUOp *physical = poly_uop_embedding_apply(ctx, tokens->uop_physical, table->uop_physical);
   PolyUOp *logical =
-      build_logical ? poly_embedding_apply(ctx, tokens->uop_logical, table->uop_logical) : NULL;
+      build_logical ? poly_uop_embedding_apply(ctx, tokens->uop_logical, table->uop_logical) : NULL;
   return nn_tensor_result(ctx, logical, physical, inputs, 2);
 }
 
 /* Causal attention mask */
 
-PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
+PolyUOp *poly_uop_causal_mask(PolyCtx *ctx, int64_t T) {
   if (!ctx || T <= 0) return NULL;
 
-  PolyUOp *arange_buf = poly_arange(ctx, 0.0, (double)T, 1.0);
+  PolyUOp *arange_buf = poly_uop_arange(ctx, 0.0, (double)T, 1.0);
   int64_t row_shape[] = {T, 1};
   PolyUOp *row =
-      poly_expand(ctx, poly_reshape(ctx, arange_buf, row_shape, 2), (int64_t[]){T, T}, 2);
+      poly_uop_expand(ctx, poly_uop_reshape(ctx, arange_buf, row_shape, 2), (int64_t[]){T, T}, 2);
   int64_t col_shape[] = {1, T};
   PolyUOp *col =
-      poly_expand(ctx, poly_reshape(ctx, arange_buf, col_shape, 2), (int64_t[]){T, T}, 2);
+      poly_uop_expand(ctx, poly_uop_reshape(ctx, arange_buf, col_shape, 2), (int64_t[]){T, T}, 2);
 
-  PolyUOp *mask = poly_alu2(ctx, POLY_OP_CMPLT, row, col);
-  return poly_where_op(ctx, mask, poly_const_float(ctx, -1e9), poly_const_float(ctx, 0.0));
+  PolyUOp *mask = poly_uop_alu2(ctx, POLY_OP_CMPLT, row, col);
+  return poly_uop_where(ctx, mask, poly_uop_const_float(ctx, -1e9), poly_uop_const_float(ctx, 0.0));
 }
 
 PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
@@ -577,8 +585,8 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
   /* Pinned GPT-2/LLaMA mask construction is a pure Tensor graph. With no
    * BUFFER occurrence, retained and executable roots may CSE to the same
    * node, but both approved roots are stored explicitly. */
-  PolyUOp *physical = poly_causal_mask(ctx, T);
-  PolyUOp *logical = build_logical ? poly_causal_mask(ctx, T) : NULL;
+  PolyUOp *physical = poly_uop_causal_mask(ctx, T);
+  PolyUOp *logical = build_logical ? poly_uop_causal_mask(ctx, T) : NULL;
   if (!physical || (build_logical && !logical)) return NULL;
   PolyTensor *out = poly_tensor_create_with_roots(
       ctx, logical, physical, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
@@ -618,7 +626,7 @@ static PolyUOp *sdpa_weights(
       int ndim = poly_uop_ndim(ctx, *kv[i]);
       const int64_t *dims = poly_uop_max_shape_dims(ctx, *kv[i]);
       if (!dims || dims[ndim - 3] <= 0 || heads / dims[ndim - 3] > INT_MAX) return NULL;
-      *kv[i] = poly_repeat_interleave(ctx, *kv[i], (int)(heads / dims[ndim - 3]), -3);
+      *kv[i] = poly_uop_repeat_interleave(ctx, *kv[i], (int)(heads / dims[ndim - 3]), -3);
       if (!*kv[i]) return NULL;
     }
   }
@@ -633,7 +641,7 @@ static PolyUOp *sdpa_weights(
     k_perm[i] = i;
   k_perm[k_ndim - 2] = k_ndim - 1;
   k_perm[k_ndim - 1] = k_ndim - 2;
-  PolyUOp *k_t = poly_permute(ctx, k, k_perm, k_ndim);
+  PolyUOp *k_t = poly_uop_permute(ctx, k, k_perm, k_ndim);
 
   /* RandMixin.scaled_dot_product_attention: dot in at least float32, divide
    * by weak sqrt(head_dim), then cast scores back before softmax. */
@@ -641,27 +649,29 @@ static PolyUOp *sdpa_weights(
   if (!poly_dtype_least_upper(q->dtype, k->dtype, &acc) ||
       !poly_dtype_least_upper(acc, POLY_FLOAT32, &acc))
     return NULL;
-  PolyUOp *scores = poly_dot_dtype(ctx, q, k_t, &acc);
-  scores = poly_div(ctx, scores, poly_const_typed(ctx, POLY_WEAKFLOAT, sqrt((double)d_k)));
+  PolyUOp *scores = poly_uop_dot_dtype(ctx, q, k_t, &acc);
+  scores = poly_uop_div(ctx, scores, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, sqrt((double)d_k)));
 
   if (is_causal) {
     /* const_like preserves the score dtype unless explicitly overridden. */
-    mask = poly_tril(ctx, poly_const_like_dtype(ctx, scores, poly_arg_bool(true), POLY_BOOL), 0);
+    mask = poly_uop_tril(
+        ctx, poly_uop_const_like_dtype(ctx, scores, poly_arg_bool(true), POLY_BOOL), 0
+    );
     if (!mask) return NULL;
   }
 
   if (mask && poly_dtype_eq(mask->dtype, POLY_BOOL)) {
-    mask = poly_where_op(
-        ctx, mask, poly_const_int(ctx, 0), poly_const_typed(ctx, POLY_WEAKFLOAT, -INFINITY)
+    mask = poly_uop_where(
+        ctx, mask, poly_uop_const_int(ctx, 0), poly_uop_const_typed(ctx, POLY_WEAKFLOAT, -INFINITY)
     );
     if (!mask) return NULL;
   }
-  if (mask) scores = poly_add(ctx, scores, mask);
+  if (mask) scores = poly_uop_add(ctx, scores, mask);
 
-  return poly_softmax(ctx, poly_cast(ctx, scores, q->dtype), -1);
+  return poly_uop_softmax(ctx, poly_uop_cast(ctx, scores, q->dtype), -1);
 }
 
-PolyUOp *poly_sdpa(
+PolyUOp *poly_uop_sdpa(
     PolyCtx *ctx,
     PolyUOp *q,
     PolyUOp *k,
@@ -671,16 +681,17 @@ PolyUOp *poly_sdpa(
     int enable_gqa
 ) {
   PolyUOp *weights = sdpa_weights(ctx, q, k, &v, mask, is_causal, enable_gqa);
-  return weights ? poly_dot(ctx, weights, v) : NULL;
+  return weights ? poly_uop_dot(ctx, weights, v) : NULL;
 }
 
 static PolyUOp *dropout(PolyCtx *ctx, PolyUOp *x, PolyUOp *noise, double p) {
-  if (p == 1) return poly_const_like(ctx, x, poly_arg_int(0));
-  PolyUOp *keep =
-      poly_contiguous(ctx, poly_ge(ctx, noise, poly_const_typed(ctx, POLY_WEAKFLOAT, p)));
-  return poly_div(
-      ctx, poly_where_op(ctx, keep, x, poly_const_int(ctx, 0)),
-      poly_const_typed(ctx, POLY_WEAKFLOAT, 1 - p)
+  if (p == 1) return poly_uop_const_like(ctx, x, poly_arg_int(0));
+  PolyUOp *keep = poly_uop_contiguous(
+      ctx, poly_uop_ge(ctx, noise, poly_uop_const_typed(ctx, POLY_WEAKFLOAT, p))
+  );
+  return poly_uop_div(
+      ctx, poly_uop_where(ctx, keep, x, poly_uop_const_int(ctx, 0)),
+      poly_uop_const_typed(ctx, POLY_WEAKFLOAT, 1 - p)
   );
 }
 
@@ -707,7 +718,9 @@ PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int train
     PolyDevice device = x->device;
     if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
     if (device == POLY_DEVICE_AUTO) device = poly_device_default();
-    noise = poly_tensor_rand_by_id(ctx, dims, ndim, poly_get_default_float(), device, 0);
+    PolyDType dtype;
+    if (!poly_dtype_by_id(poly_get_default_float(), &dtype)) return NULL;
+    noise = poly_tensor_rand(ctx, dims, ndim, dtype, device, 0);
     if (!noise || (build_logical && !noise->uop_logical)) {
       poly_tensor_release(noise);
       return NULL;
@@ -749,12 +762,12 @@ PolyTensor *poly_tensor_sdpa(
   PolyTensor *weights = nn_tensor_result(ctx, logical, physical, inputs, mask ? 4 : 3);
   if (!weights) return NULL;
   PolyTensor *dropped = poly_tensor_dropout(ctx, weights, dropout_p, training);
-  PolyTensor *out = dropped
-                        ? nn_tensor_result(
-                              ctx, build_logical ? poly_dot(ctx, dropped->uop_logical, vl) : NULL,
-                              poly_dot(ctx, dropped->uop_physical, vp), inputs, mask ? 4 : 3
-                          )
-                        : NULL;
+  PolyTensor *out =
+      dropped ? nn_tensor_result(
+                    ctx, build_logical ? poly_uop_dot(ctx, dropped->uop_logical, vl) : NULL,
+                    poly_uop_dot(ctx, dropped->uop_physical, vp), inputs, mask ? 4 : 3
+                )
+              : NULL;
   poly_tensor_release(dropped);
   poly_tensor_release(weights);
   return out;

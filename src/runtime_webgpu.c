@@ -96,7 +96,7 @@ static bool webgpu_dtype_is_unsupported(PolyDType dt) {
 
 static bool webgpu_graph_has_unsupported_dtype(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n_topo);
   bool unsupported = false;
   for (int i = 0; i < n_topo; i++) {
     if (webgpu_dtype_is_unsupported(topo[i]->dtype)) {
@@ -104,7 +104,7 @@ static bool webgpu_graph_has_unsupported_dtype(PolyCtx *ctx, PolyUOp *root) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return unsupported;
 }
 

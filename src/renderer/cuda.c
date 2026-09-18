@@ -836,9 +836,9 @@ char *poly_render_cuda(
 
     /* --- RANGE: for loop (reduce loops stay as loops) ----------------- */
     if (u->op == POLY_OP_RANGE) {
-      char *range = poly_range_str(u->arg);
+      char *range = poly_uop_range_str(u->arg);
       char *name = malloc(strlen(range) + 6);
-      snprintf(name, strlen(range) + 6, "%cidx%s", poly_axis_letter(u->arg), range);
+      snprintf(name, strlen(range) + 6, "%cidx%s", poly_uop_axis_letter(u->arg), range);
       free(range);
       csmap_set(&names, u, name);
 

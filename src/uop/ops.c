@@ -125,7 +125,7 @@ PolyUOp *poly_uop_get_valid(PolyCtx *ctx, PolyUOp *u) {
   );
 }
 
-char poly_axis_letter(PolyArg arg) {
+char poly_uop_axis_letter(PolyArg arg) {
   static const char letters[] = {
       [POLY_AXIS_DEVICE] = 'd', [POLY_AXIS_GLOBAL] = 'g',       [POLY_AXIS_WARP] = 'w',
       [POLY_AXIS_LOCAL] = 'l',  [POLY_AXIS_WEAK] = 'L',         [POLY_AXIS_GROUP_REDUCE] = 'G',
@@ -139,7 +139,7 @@ char poly_axis_letter(PolyArg arg) {
   return letters[axis_type];
 }
 
-char *poly_range_str(PolyArg arg) {
+char *poly_uop_range_str(PolyArg arg) {
   int n_extra = poly_range_n_extra(arg);
   size_t cap = 24 + (size_t)n_extra * 24;
   char *name = malloc(cap);
@@ -213,7 +213,7 @@ int poly_uop_contiguous_view_offset(PolyCtx *ctx, PolyUOp *u, int64_t *out) {
 
   int ndim = poly_uop_ndim(ctx, u);
   if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
-  PolyUOp *numel = poly_const_int(ctx, 1);
+  PolyUOp *numel = poly_uop_const_int(ctx, 1);
   for (int i = 0; i < ndim; i++) {
     PolyUOp *dim = poly_uop_shape_dim(ctx, u, i);
     if (!dim || !(numel = poly_uop2(ctx, POLY_OP_MUL, POLY_WEAKINT, numel, dim, poly_arg_none())))
@@ -222,7 +222,7 @@ int poly_uop_contiguous_view_offset(PolyCtx *ctx, PolyUOp *u, int64_t *out) {
   numel = poly_graph_rewrite(ctx, numel, poly_symbolic());
   if (!numel) return -1;
 
-  PolyUOp *flat = poly_reshape_uop(ctx, u, &numel, 1);
+  PolyUOp *flat = poly_uop_reshape_symbolic(ctx, u, &numel, 1);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, numel, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *indexed = range ? poly_uop_index(ctx, flat, &range, 1) : NULL;
@@ -1410,7 +1410,7 @@ PolyUOp *poly_uop(
 
 /* Current tinygrad UOp.unshard (`tinygrad/uop/ops.py:667-681`). C callers
  * pass sorted axes explicitly; each axis keeps its sharding expression. */
-PolyUOp *poly_unshard(
+PolyUOp *poly_uop_unshard(
     PolyCtx *ctx,
     PolyUOp *value,
     const int64_t *axes,
@@ -1444,7 +1444,7 @@ PolyUOp *poly_unshard(
 }
 
 /* Current tinygrad UOp.allreduce (`tinygrad/uop/ops.py:654-656`). */
-PolyUOp *poly_allreduce(PolyCtx *ctx, PolyUOp *value, PolyOps op, PolyUOp *device) {
+PolyUOp *poly_uop_allreduce(PolyCtx *ctx, PolyUOp *value, PolyOps op, PolyUOp *device) {
   if (!ctx || !value || !device || device->op != POLY_OP_DEVICE) return NULL;
   PolyArg arg;
   if (device->arg.kind == POLY_ARG_STRING_TUPLE)
@@ -1457,7 +1457,7 @@ PolyUOp *poly_allreduce(PolyCtx *ctx, PolyUOp *value, PolyOps op, PolyUOp *devic
 }
 
 /* Current tinygrad UOp.range (`tinygrad/uop/ops.py:563-565`). */
-PolyUOp *poly_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, PolyAxisType axis_type) {
+PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, PolyAxisType axis_type) {
   if (!ctx || bound < 0 || axis_type < POLY_AXIS_DEVICE || axis_type > POLY_AXIS_LOOP) return NULL;
   PolyUOp *bound_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(bound));
   return bound_uop
@@ -1521,7 +1521,13 @@ PolyUOp *poly_shape_to_shape_arg(PolyCtx *ctx, PolyUOp **items, int n_items) {
   );
 }
 
-int poly_broadcast_shape(PolyCtx *ctx, PolyUOp **src, int n_src, PolyUOp **out_dims, int max_dims) {
+int poly_uop_broadcast_shape(
+    PolyCtx *ctx,
+    PolyUOp **src,
+    int n_src,
+    PolyUOp **out_dims,
+    int max_dims
+) {
   if (!ctx || !src || n_src <= 0 || !out_dims || max_dims < 0) return -1;
   int ndim = 0;
   for (int i = 0; i < n_src; i++) {
@@ -1602,7 +1608,7 @@ PolyUOp *poly_uop3(
 /* Exact C port of current UOp._rop (tinygrad/uop/ops.py:630-638).
  * Public reduction axes are sorted, proved-singleton axes are skipped, actual
  * reduction axes are moved to the prefix, and REDUCE stores only their count. */
-PolyUOp *poly_reduce_axis(
+PolyUOp *poly_uop_reduce_axis(
     PolyCtx *ctx,
     PolyOps reduce_op,
     PolyUOp *src,
@@ -1661,7 +1667,7 @@ PolyUOp *poly_reduce_axis(
     bool identity = n_perm == ndim;
     for (int i = 0; identity && i < ndim; i++)
       identity = perm[i] == i;
-    PolyUOp *ordered = identity ? src : poly_permute(ctx, src, perm, ndim);
+    PolyUOp *ordered = identity ? src : poly_uop_permute(ctx, src, perm, ndim);
     ret = ordered
               ? poly_uop1(
                     ctx, POLY_OP_REDUCE, src->dtype, ordered, poly_arg_reduce(reduce_op, n_reduced)
@@ -1685,7 +1691,7 @@ PolyUOp *poly_reduce_axis(
         if (!shape[n_shape++]) return NULL;
       }
     }
-    ret = poly_reshape_uop(ctx, ret, shape, n_shape);
+    ret = poly_uop_reshape_symbolic(ctx, ret, shape, n_shape);
   }
   return ret;
 }
@@ -1841,7 +1847,7 @@ static PolyUOp **toposort_worker(
   return result;
 }
 
-PolyUOp **poly_toposort_ex(
+PolyUOp **poly_uop_toposort_ex(
     PolyCtx *ctx,
     PolyUOp *root,
     int *n_out,
@@ -1851,7 +1857,7 @@ PolyUOp **poly_toposort_ex(
   return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, POLY_TOPO_RESULT_ARENA);
 }
 
-PolyUOp **poly_toposort_ex_user(
+PolyUOp **poly_uop_toposort_ex_user(
     PolyCtx *ctx,
     PolyUOp *root,
     int *n_out,
@@ -1864,11 +1870,11 @@ PolyUOp **poly_toposort_ex_user(
   );
 }
 
-PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+PolyUOp **poly_uop_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
   return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_ARENA);
 }
 
-PolyUOp **poly_toposort_ex_alloc(
+PolyUOp **poly_uop_toposort_ex_alloc(
     PolyCtx *ctx,
     PolyUOp *root,
     int *n_out,
@@ -1878,7 +1884,7 @@ PolyUOp **poly_toposort_ex_alloc(
   return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, POLY_TOPO_RESULT_OWNED);
 }
 
-PolyUOp **poly_toposort_ex_user_alloc(
+PolyUOp **poly_uop_toposort_ex_user_alloc(
     PolyCtx *ctx,
     PolyUOp *root,
     int *n_out,
@@ -1891,7 +1897,7 @@ PolyUOp **poly_toposort_ex_user_alloc(
   );
 }
 
-PolyUOp **poly_toposort_alloc(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+PolyUOp **poly_uop_toposort_alloc(PolyCtx *ctx, PolyUOp *root, int *n_out) {
   return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_OWNED);
 }
 
@@ -1912,7 +1918,7 @@ PolyUOp **poly_toposort_ex_user_scratch(
   );
 }
 
-void poly_toposort_free(PolyUOp **topo) {
+void poly_uop_toposort_free(PolyUOp **topo) {
   free(topo);
 }
 
@@ -1942,7 +1948,7 @@ int poly_range_start(PolyOps op) {
  * Ports tinygrad's `no_range` (codegen/simplify.py:75) and the
  * `_ranges`/`ranges`/`ended_ranges` triple (uop/ops.py:351-378).
  *
- * `poly_no_range(u)` = not any RANGE in u's backward slice (simple, exact).
+ * `poly_uop_no_range(u)` = not any RANGE in u's backward slice (simple, exact).
  *
  * `poly_uop_ranges(u)` = the set of *active* RANGE UOps at u's position:
  *   ranges(u) = union(ranges(src) for src in u.src)
@@ -1972,7 +1978,7 @@ typedef struct PolyRangeSet {
   int cap;
 } PolyRangeSet;
 
-int poly_range_arg_cmp(PolyArg a, PolyArg b) {
+int poly_uop_range_arg_cmp(PolyArg a, PolyArg b) {
   int64_t aid = poly_range_axis_id(a), bid = poly_range_axis_id(b);
   if (aid != bid) return aid < bid ? -1 : 1;
   int an = poly_range_n_extra(a), bn = poly_range_n_extra(b);
@@ -2279,11 +2285,11 @@ PolyUOp *poly_uop_unsharded_base(PolyUOp *u) {
 bool poly_uop_op_in_backward_slice_with_self(PolyCtx *ctx, PolyUOp *u, PolyOps op) {
   if (!ctx || !u) return false;
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, u, &n);
   bool found = false;
   for (int i = 0; i < n && !found; i++)
     found = topo[i]->op == op;
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return found;
 }
 
@@ -2334,7 +2340,7 @@ bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target) {
   if (!ctx || !root || !target) return false;
   if (root == target) return true;
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n);
   if (!topo) return false;
   /* Mirrors tinygrad's `t.uop in loss.uop.toposort()` frontend test. */
   bool found = false;
@@ -2344,21 +2350,21 @@ bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return found;
 }
 
-bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
-  return poly_no_range_ex(ctx, u, NULL);
+bool poly_uop_no_range(PolyCtx *ctx, PolyUOp *u) {
+  return poly_uop_no_range_ex(ctx, u, NULL);
 }
 
-bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache) {
+bool poly_uop_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache) {
   (void)cache; /* no_range is a single backward-slice walk; caching wouldn't
                 * help because we short-circuit on the first RANGE hit. */
   if (!u) return true;
   if (u->op == POLY_OP_RANGE) return false;
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, u, &n);
   if (!topo) return false;
   bool no_range = true;
   for (int i = 0; i < n; i++) {
@@ -2367,7 +2373,7 @@ bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return no_range;
 }
 
@@ -2791,7 +2797,7 @@ char *poly_uop_str(PolyUOp *u) {
   return buf;
 }
 
-char *poly_graph_str(PolyUOp *root) {
+char *poly_uop_graph_str(PolyUOp *root) {
   /* Simple: just print the root node for now */
   /* A full graph print would need toposort, but that needs a ctx */
   return poly_uop_str(root);
@@ -3167,18 +3173,16 @@ PolyUOp *poly_aux(
   return register_named(ctx, POLY_ROLE_AUX, dt, shape, ndim, name);
 }
 
-PolyUOp *poly_register_buffer_by_id(
+PolyUOp *poly_register_buffer(
     PolyCtx *ctx,
     int role,
-    int dtype_id,
+    PolyDType dtype,
     const int64_t *shape,
     int ndim,
     const char *name
 ) {
-  PolyDType dt;
-  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
   if (role < POLY_ROLE_PARAM || role > POLY_ROLE_AUX) return NULL;
-  return register_named(ctx, (PolyBufRole)role, dt, shape, ndim, name);
+  return register_named(ctx, (PolyBufRole)role, dtype, shape, ndim, name);
 }
 
 PolyUOp *poly_register_existing_buffer(
@@ -3311,15 +3315,15 @@ int poly_op_count(void) {
   return (int)POLY_OP_COUNT;
 }
 
-PolyUOp *poly_const_float(PolyCtx *ctx, double value) {
+PolyUOp *poly_uop_const_float(PolyCtx *ctx, double value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(value));
 }
 
-PolyUOp *poly_const_double(PolyCtx *ctx, double value) {
+PolyUOp *poly_uop_const_double(PolyCtx *ctx, double value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(value));
 }
 
-PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
+PolyUOp *poly_uop_const_int(PolyCtx *ctx, int64_t value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(value));
 }
 
@@ -3485,7 +3489,7 @@ bool poly_dtype_from_uop(
   return false;
 }
 
-PolyDType poly_rebuild_dtype(PolyUOp *u, PolyUOp **new_src) {
+PolyDType poly_uop_rebuild_dtype(PolyUOp *u, PolyUOp **new_src) {
   if (!u || (u->n_src > 0 && !new_src)) return u ? u->dtype : POLY_VOID;
   bool same = true;
   for (int i = 0; i < u->n_src; i++)
@@ -3543,11 +3547,11 @@ PolyUOp *poly_uop_const(PolyCtx *ctx, PolyArg val, PolyDType dtype) {
   return poly_uop0(ctx, POLY_OP_CONST, dtype, val);
 }
 
-PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
+PolyUOp *poly_uop_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
   return poly_uop_const(ctx, poly_arg_float(value), dt);
 }
 
-PolyUOp *poly_const_like_dtype(PolyCtx *ctx, PolyUOp *ref, PolyArg val, PolyDType dtype) {
+PolyUOp *poly_uop_const_like_dtype(PolyCtx *ctx, PolyUOp *ref, PolyArg val, PolyDType dtype) {
   if (!ctx || !ref) return NULL;
   PolyUOp *scalar = poly_uop_const(ctx, val, dtype);
   if (!scalar) return NULL;
@@ -3562,20 +3566,20 @@ PolyUOp *poly_const_like_dtype(PolyCtx *ctx, PolyUOp *ref, PolyArg val, PolyDTyp
     dims[i] = poly_uop_shape_dim(ctx, ref, i);
     if (!dims[i]) return NULL;
   }
-  return poly_expand_uop(ctx, scalar, dims, ref_ndim);
+  return poly_uop_expand_symbolic(ctx, scalar, dims, ref_ndim);
 }
 
-PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
+PolyUOp *poly_uop_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
   if (!ctx || !ref) return NULL;
 
-  return poly_const_like_dtype(ctx, ref, val, ref->dtype);
+  return poly_uop_const_like_dtype(ctx, ref, val, ref->dtype);
 }
 
-PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
-  return poly_const_like(ctx, ref, poly_arg_int(val));
+PolyUOp *poly_uop_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
+  return poly_uop_const_like(ctx, ref, poly_arg_int(val));
 }
 
-PolyUOp *poly_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
+PolyUOp *poly_uop_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
   if (!ctx || !ref) return NULL;
   int64_t count = poly_uop_max_numel(ctx, ref);
   /* v0.14 UOp.vconst_like/broadcast uses flat repeated values, not EXPAND.
@@ -3594,15 +3598,15 @@ PolyUOp *poly_vconst_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
   return ret;
 }
 
-PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
-  return poly_const_like(ctx, ref, poly_arg_float(val));
+PolyUOp *poly_uop_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
+  return poly_uop_const_like(ctx, ref, poly_arg_float(val));
 }
 
-PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val) {
-  return poly_const_like(ctx, ref, poly_arg_bool(val));
+PolyUOp *poly_uop_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val) {
+  return poly_uop_const_like(ctx, ref, poly_arg_bool(val));
 }
 
-PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
+PolyUOp *poly_uop_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
   /* Pinned identity_element returns dtype.const({ADD:0, MUL:1,
    * MAX:dtype.min}) (uop/ops.py:47, dtype.py:82-92). Keep the identity typed;
    * routing floating -infinity through an integer cast is not equivalent. */
@@ -3722,10 +3726,10 @@ PolyUOp *poly_uop_placeholder(
   PolyOps op = addrspace == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER;
   PolyUOp *storage = extent ? poly_uop1(ctx, op, dtype, extent, poly_arg_param(&param)) : NULL;
   if (!storage || ndim <= 1) return storage;
-  return poly_reshape(ctx, storage, (int64_t *)shape, ndim);
+  return poly_uop_reshape(ctx, storage, (int64_t *)shape, ndim);
 }
 
-PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
+PolyUOp *poly_uop_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
   if (!ctx || !src) return NULL;
   PolyDType dtype = src->dtype;
   if (op == POLY_OP_SIN || op == POLY_OP_LOG2 || op == POLY_OP_EXP2 || op == POLY_OP_SQRT ||
@@ -3741,7 +3745,7 @@ PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
   return poly_uop1(ctx, op, dtype, src, poly_arg_none());
 }
 
-PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
+PolyUOp *poly_uop_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
   if (!ctx || !a || !b) return NULL;
   PolyDType dt;
   if (op == POLY_OP_SHL || op == POLY_OP_SHR) {
@@ -3757,7 +3761,7 @@ PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
   return poly_uop2(ctx, op, dt, a, b, poly_arg_none());
 }
 
-PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c) {
+PolyUOp *poly_uop_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c) {
   PolyDType dt = a->dtype;
   if (op == POLY_OP_WHERE) {
     if (!poly_dtype_is_bool(a->dtype)) return NULL;
@@ -3770,7 +3774,7 @@ PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c)
 
 /* Tinygrad 2026-08-22/a9069c177a9d UOp.cast keeps lanes in UOp shape, not
  * DType, and returns self on exact scalar dtype identity (uop/ops.py:787). */
-PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+PolyUOp *poly_uop_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
   if (!ctx || !x) return NULL;
   if (poly_dtype_eq(x->dtype, target)) return x;
   return poly_uop1(ctx, POLY_OP_CAST, target, x, poly_arg_none());
@@ -3798,7 +3802,7 @@ PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like) {
   PolyUOp *dim_src[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++) {
     dim_src[i] = poly_uop_shape_dim(ctx, like, i);
-    if (!dim_src[i]) dim_src[i] = poly_const_int(ctx, max_shape[i]);
+    if (!dim_src[i]) dim_src[i] = poly_uop_const_int(ctx, max_shape[i]);
     if (!dim_src[i]) return NULL;
   }
   PolyUOp *shape = poly_shape_to_shape_arg(ctx, dim_src, ndim);
@@ -3935,23 +3939,23 @@ PolyUOp *poly_uop_bind(PolyCtx *ctx, PolyUOp *var, int64_t value) {
       (arg->has_multiple_of && value % arg->multiple_of != 0))
     return NULL;
   PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, var->dtype, poly_arg_int(value));
-  PolyUOp *store = val ? poly_store_val(ctx, var, val) : NULL;
+  PolyUOp *store = val ? poly_uop_store_val(ctx, var, val) : NULL;
   return store ? poly_uop2(ctx, POLY_OP_AFTER, var->dtype, var, store, poly_arg_none()) : NULL;
 }
 
-PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value) {
+PolyUOp *poly_uop_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value) {
   return poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf, value, poly_arg_none());
 }
 
-PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store) {
+PolyUOp *poly_uop_sink1(PolyCtx *ctx, PolyUOp *store) {
   return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_none());
 }
 
-PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n) {
+PolyUOp *poly_uop_sink_n(PolyCtx *ctx, PolyUOp **stores, int n) {
   return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, n, poly_arg_none());
 }
 
-PolyUOp *poly_bitcast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+PolyUOp *poly_uop_bitcast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
   if (!ctx || !x) return NULL;
   /* Pinned uop/ops.py:UOp.bitcast. Unequal widths remain raw BITCAST;
    * UOp shape inference owns the final-dimension byte calculation. */
@@ -3975,7 +3979,7 @@ PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr) {
 
 PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value) {
   if (!ctx || !addr || !value) return NULL;
-  return poly_store_val(ctx, addr, value);
+  return poly_uop_store_val(ctx, addr, value);
 }
 
 PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges) {
@@ -4403,7 +4407,7 @@ static bool substitute_iter(
 #ifdef POLY_TESTING
 static _Thread_local int substitute_fail_after = -1;
 
-void poly_test_substitute_fail_after(int count) {
+void poly_uop_test_substitute_fail_after(int count) {
   substitute_fail_after = count;
 }
 #endif

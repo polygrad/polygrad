@@ -69,12 +69,12 @@ static BenchResult bench_vecadd(int N, int beam_width) {
   unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
-  PolyUOp *a1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *b1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *c1 = poly_alu2(ctx1, POLY_OP_ADD, a1, b1);
-  PolyUOp *o1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *s1 = poly_store_val(ctx1, o1, c1);
-  PolyUOp *sk1 = poly_sink1(ctx1, s1);
+  PolyUOp *a1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *b1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *c1 = poly_uop_alu2(ctx1, POLY_OP_ADD, a1, b1);
+  PolyUOp *o1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *s1 = poly_uop_store_val(ctx1, o1, c1);
+  PolyUOp *sk1 = poly_uop_sink1(ctx1, s1);
 
   float *da = calloc(N, sizeof(float));
   float *db = calloc(N, sizeof(float));
@@ -95,12 +95,12 @@ static BenchResult bench_vecadd(int N, int beam_width) {
   setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
-  PolyUOp *a2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *b2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *c2 = poly_alu2(ctx2, POLY_OP_ADD, a2, b2);
-  PolyUOp *o2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *s2 = poly_store_val(ctx2, o2, c2);
-  PolyUOp *sk2 = poly_sink1(ctx2, s2);
+  PolyUOp *a2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *b2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *c2 = poly_uop_alu2(ctx2, POLY_OP_ADD, a2, b2);
+  PolyUOp *o2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *s2 = poly_uop_store_val(ctx2, o2, c2);
+  PolyUOp *sk2 = poly_uop_sink1(ctx2, s2);
 
   memset(dout, 0, N * sizeof(float));
   PolyBufferBinding bind2[] = {
@@ -119,12 +119,12 @@ static BenchResult bench_reduce_sum(int N, int beam_width) {
   unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
-  PolyUOp *a1 = poly_buffer_f32(ctx1, N);
+  PolyUOp *a1 = poly_uop_buffer_f32(ctx1, N);
   int64_t axis = 0;
-  PolyUOp *sum1 = poly_reduce_axis(ctx1, POLY_OP_ADD, a1, &axis, 1);
-  PolyUOp *o1 = poly_buffer_f32(ctx1, 1);
-  PolyUOp *s1 = poly_store_val(ctx1, o1, sum1);
-  PolyUOp *sk1 = poly_sink1(ctx1, s1);
+  PolyUOp *sum1 = poly_uop_reduce_axis(ctx1, POLY_OP_ADD, a1, &axis, 1);
+  PolyUOp *o1 = poly_uop_buffer_f32(ctx1, 1);
+  PolyUOp *s1 = poly_uop_store_val(ctx1, o1, sum1);
+  PolyUOp *sk1 = poly_uop_sink1(ctx1, s1);
 
   float *da = calloc(N, sizeof(float));
   float dout = 0;
@@ -141,11 +141,11 @@ static BenchResult bench_reduce_sum(int N, int beam_width) {
   setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
-  PolyUOp *a2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *sum2 = poly_reduce_axis(ctx2, POLY_OP_ADD, a2, &axis, 1);
-  PolyUOp *o2 = poly_buffer_f32(ctx2, 1);
-  PolyUOp *s2 = poly_store_val(ctx2, o2, sum2);
-  PolyUOp *sk2 = poly_sink1(ctx2, s2);
+  PolyUOp *a2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *sum2 = poly_uop_reduce_axis(ctx2, POLY_OP_ADD, a2, &axis, 1);
+  PolyUOp *o2 = poly_uop_buffer_f32(ctx2, 1);
+  PolyUOp *s2 = poly_uop_store_val(ctx2, o2, sum2);
+  PolyUOp *sk2 = poly_uop_sink1(ctx2, s2);
 
   dout = 0;
   PolyBufferBinding bind2[] = {POLY_BIND_HOST(a2, da), POLY_BIND_HOST(o2, &dout)};
@@ -161,15 +161,15 @@ static BenchResult bench_chain_fused(int N, int beam_width) {
   unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
-  PolyUOp *a1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *b1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *ab = poly_alu2(ctx1, POLY_OP_MUL, a1, b1);
-  PolyUOp *neg = poly_alu1(ctx1, POLY_OP_NEG, ab);
-  PolyUOp *two = poly_const_float(ctx1, 2.0);
-  PolyUOp *add2 = poly_alu2(ctx1, POLY_OP_ADD, neg, two);
-  PolyUOp *o1 = poly_buffer_f32(ctx1, N);
-  PolyUOp *s1 = poly_store_val(ctx1, o1, add2);
-  PolyUOp *sk1 = poly_sink1(ctx1, s1);
+  PolyUOp *a1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *b1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *ab = poly_uop_alu2(ctx1, POLY_OP_MUL, a1, b1);
+  PolyUOp *neg = poly_uop_alu1(ctx1, POLY_OP_NEG, ab);
+  PolyUOp *two = poly_uop_const_float(ctx1, 2.0);
+  PolyUOp *add2 = poly_uop_alu2(ctx1, POLY_OP_ADD, neg, two);
+  PolyUOp *o1 = poly_uop_buffer_f32(ctx1, N);
+  PolyUOp *s1 = poly_uop_store_val(ctx1, o1, add2);
+  PolyUOp *sk1 = poly_uop_sink1(ctx1, s1);
 
   float *da = calloc(N, sizeof(float));
   float *db = calloc(N, sizeof(float));
@@ -189,15 +189,15 @@ static BenchResult bench_chain_fused(int N, int beam_width) {
   setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
-  PolyUOp *a2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *b2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *ab2 = poly_alu2(ctx2, POLY_OP_MUL, a2, b2);
-  PolyUOp *neg2 = poly_alu1(ctx2, POLY_OP_NEG, ab2);
-  PolyUOp *two2 = poly_const_float(ctx2, 2.0);
-  PolyUOp *add22 = poly_alu2(ctx2, POLY_OP_ADD, neg2, two2);
-  PolyUOp *o2 = poly_buffer_f32(ctx2, N);
-  PolyUOp *s2 = poly_store_val(ctx2, o2, add22);
-  PolyUOp *sk2 = poly_sink1(ctx2, s2);
+  PolyUOp *a2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *b2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *ab2 = poly_uop_alu2(ctx2, POLY_OP_MUL, a2, b2);
+  PolyUOp *neg2 = poly_uop_alu1(ctx2, POLY_OP_NEG, ab2);
+  PolyUOp *two2 = poly_uop_const_float(ctx2, 2.0);
+  PolyUOp *add22 = poly_uop_alu2(ctx2, POLY_OP_ADD, neg2, two2);
+  PolyUOp *o2 = poly_uop_buffer_f32(ctx2, N);
+  PolyUOp *s2 = poly_uop_store_val(ctx2, o2, add22);
+  PolyUOp *sk2 = poly_uop_sink1(ctx2, s2);
 
   memset(dout, 0, N * sizeof(float));
   PolyBufferBinding bind2[] = {
@@ -216,18 +216,19 @@ static BenchResult bench_matmul(int M, int K, int N, int beam_width) {
   unsetenv("BEAM");
 
   PolyCtx *ctx1 = poly_ctx_new();
-  PolyUOp *a1 = poly_buffer_f32(ctx1, M * K);
-  PolyUOp *b1 = poly_buffer_f32(ctx1, K * N);
-  a1 = poly_reshape(ctx1, a1, (int64_t[]){M, K}, 2);
-  b1 = poly_reshape(ctx1, b1, (int64_t[]){K, N}, 2);
+  PolyUOp *a1 = poly_uop_buffer_f32(ctx1, M * K);
+  PolyUOp *b1 = poly_uop_buffer_f32(ctx1, K * N);
+  a1 = poly_uop_reshape(ctx1, a1, (int64_t[]){M, K}, 2);
+  b1 = poly_uop_reshape(ctx1, b1, (int64_t[]){K, N}, 2);
   int64_t out_shape1[2];
   int out_ndim1;
-  PolyUOp *c1 =
-      poly_dot(ctx1, a1, (int64_t[]){M, K}, 2, b1, (int64_t[]){K, N}, 2, out_shape1, &out_ndim1);
-  PolyUOp *o1 = poly_buffer_f32(ctx1, M * N);
-  o1 = poly_reshape(ctx1, o1, (int64_t[]){M, N}, 2);
-  PolyUOp *s1 = poly_store_val(ctx1, o1, c1);
-  PolyUOp *sk1 = poly_sink1(ctx1, s1);
+  PolyUOp *c1 = poly_uop_dot(
+      ctx1, a1, (int64_t[]){M, K}, 2, b1, (int64_t[]){K, N}, 2, out_shape1, &out_ndim1
+  );
+  PolyUOp *o1 = poly_uop_buffer_f32(ctx1, M * N);
+  o1 = poly_uop_reshape(ctx1, o1, (int64_t[]){M, N}, 2);
+  PolyUOp *s1 = poly_uop_store_val(ctx1, o1, c1);
+  PolyUOp *sk1 = poly_uop_sink1(ctx1, s1);
 
   float *da = calloc(M * K, sizeof(float));
   float *db = calloc(K * N, sizeof(float));
@@ -247,18 +248,19 @@ static BenchResult bench_matmul(int M, int K, int N, int beam_width) {
   setenv("BEAM", bw, 1);
 
   PolyCtx *ctx2 = poly_ctx_new();
-  PolyUOp *a2 = poly_buffer_f32(ctx2, M * K);
-  PolyUOp *b2 = poly_buffer_f32(ctx2, K * N);
-  a2 = poly_reshape(ctx2, a2, (int64_t[]){M, K}, 2);
-  b2 = poly_reshape(ctx2, b2, (int64_t[]){K, N}, 2);
+  PolyUOp *a2 = poly_uop_buffer_f32(ctx2, M * K);
+  PolyUOp *b2 = poly_uop_buffer_f32(ctx2, K * N);
+  a2 = poly_uop_reshape(ctx2, a2, (int64_t[]){M, K}, 2);
+  b2 = poly_uop_reshape(ctx2, b2, (int64_t[]){K, N}, 2);
   int64_t out_shape2[2];
   int out_ndim2;
-  PolyUOp *c2 =
-      poly_dot(ctx2, a2, (int64_t[]){M, K}, 2, b2, (int64_t[]){K, N}, 2, out_shape2, &out_ndim2);
-  PolyUOp *o2 = poly_buffer_f32(ctx2, M * N);
-  o2 = poly_reshape(ctx2, o2, (int64_t[]){M, N}, 2);
-  PolyUOp *s2 = poly_store_val(ctx2, o2, c2);
-  PolyUOp *sk2 = poly_sink1(ctx2, s2);
+  PolyUOp *c2 = poly_uop_dot(
+      ctx2, a2, (int64_t[]){M, K}, 2, b2, (int64_t[]){K, N}, 2, out_shape2, &out_ndim2
+  );
+  PolyUOp *o2 = poly_uop_buffer_f32(ctx2, M * N);
+  o2 = poly_uop_reshape(ctx2, o2, (int64_t[]){M, N}, 2);
+  PolyUOp *s2 = poly_uop_store_val(ctx2, o2, c2);
+  PolyUOp *sk2 = poly_uop_sink1(ctx2, s2);
 
   memset(dout, 0, M * N * sizeof(float));
   PolyBufferBinding bind2[] = {

@@ -10,11 +10,11 @@ Tinygrad source:
 
 Key invariant captured here: after CAST(CONST_INT(5), float).simplify(),
 the resulting CONST.arg is a *float* 5.0, NOT an int 5 wearing a float
-dtype tag. Polygrad's poly_const_like initially skipped this normalisation
+dtype tag. Polygrad's poly_uop_const_like initially skipped this normalisation
 and produced CONST(dtype=float, arg.kind=INT, i=5) — a tagged-union
 mismatch that the codegen mis-lowered to a denormal/zero. This script
 documents the expected behaviour so any future regression in
-poly_const_like / rule_cast_const fails the parity check immediately.
+poly_uop_const_like / rule_cast_const fails the parity check immediately.
 
 Run from anywhere:
   conda run -n tiny python /home/anton/projects/polygrad/polygrad/test/parity_scripts/tg_cast_const_fold_gt.py

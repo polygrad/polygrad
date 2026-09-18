@@ -57,14 +57,14 @@ static PolyUOp *handle_allreduce_naive(PolyCtx *ctx, PolyUOp *buf, PolyUOp *red)
   /* UOp.contiguous returns PARAM/BUFFER identities unchanged
    * (uop/ops.py:587-591); materializing this shaped PARAM would add three
    * spurious kernels to the recursive collective body. */
-  PolyUOp *contiguous = poly_contiguous(ctx, buf);
+  PolyUOp *contiguous = poly_uop_contiguous(ctx, buf);
   PolyUOp *target_device = poly_uop_device_uop_cached(ctx, red, NULL);
   PolyUOp *reduced = NULL;
   for (int i = 0; contiguous && target_device && i < source_device->arg.string_tuple.n; i++) {
     PolyUOp *selected = poly_uop1(ctx, POLY_OP_MSELECT, buf->dtype, contiguous, poly_arg_int(i));
-    PolyUOp *copy = selected ? poly_copy_to_device_uop(ctx, selected, target_device) : NULL;
+    PolyUOp *copy = selected ? poly_uop_copy_to_device(ctx, selected, target_device) : NULL;
     reduced =
-        !reduced ? copy : (copy ? poly_alu2(ctx, red->arg.allreduce.op, reduced, copy) : NULL);
+        !reduced ? copy : (copy ? poly_uop_alu2(ctx, red->arg.allreduce.op, reduced, copy) : NULL);
   }
   return reduced;
 }
@@ -93,7 +93,8 @@ PolyUOp *poly_create_allreduce_function(PolyCtx *ctx, PolyUOp *red) {
       target_device
           ? poly_uop_new_buffer(ctx, target_device, numel, red->dtype, poly_ctx_next_unique_id(ctx))
           : NULL;
-  if (output && (ndim != 1 || shape[0] != numel)) output = poly_reshape(ctx, output, shape, ndim);
+  if (output && (ndim != 1 || shape[0] != numel))
+    output = poly_uop_reshape(ctx, output, shape, ndim);
 
   PolyUOp *invalid = poly_uop_const(ctx, poly_arg_invalid(), red->dtype);
   PolyUOp *invalid_shaped = invalid;
@@ -101,8 +102,8 @@ PolyUOp *poly_create_allreduce_function(PolyCtx *ctx, PolyUOp *red) {
     int64_t ones[POLY_MAX_DIMS];
     for (int i = 0; i < ndim; i++)
       ones[i] = 1;
-    invalid_shaped = poly_reshape(ctx, invalid_shaped, ones, ndim);
-    if (invalid_shaped) invalid_shaped = poly_expand(ctx, invalid_shaped, shape, ndim);
+    invalid_shaped = poly_uop_reshape(ctx, invalid_shaped, ones, ndim);
+    if (invalid_shaped) invalid_shaped = poly_uop_expand(ctx, invalid_shaped, shape, ndim);
   }
   PolyUOp *output_store =
       output && invalid_shaped
@@ -121,8 +122,8 @@ PolyUOp *poly_create_allreduce_function(PolyCtx *ctx, PolyUOp *red) {
       to && reduced ? poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, to, reduced, poly_arg_none()) : NULL;
   PolyUOp *after =
       store ? poly_uop2(ctx, POLY_OP_AFTER, red->dtype, to, store, poly_arg_none()) : NULL;
-  PolyUOp *body = after ? poly_sink1(ctx, after) : NULL;
-  PolyUOp *contiguous = poly_contiguous(ctx, red->src[0]);
+  PolyUOp *body = after ? poly_uop_sink1(ctx, after) : NULL;
+  PolyUOp *contiguous = poly_uop_contiguous(ctx, red->src[0]);
   PolyUOp *call_src[3] = {body, output_after, contiguous};
   PolyUOp *call =
       body && output_after && contiguous

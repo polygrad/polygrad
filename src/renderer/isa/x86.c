@@ -1039,10 +1039,10 @@ static PolyUOp *rule_x86_bool_cmp_legalize(PolyCtx *ctx, PolyUOp *u, const PolyB
   if (u->op == POLY_OP_CMPNE) return poly_uop2(ctx, POLY_OP_XOR, u->dtype, x, y, poly_arg_none());
   if (u->op == POLY_OP_CMPEQ) {
     PolyUOp *xy = poly_uop2(ctx, POLY_OP_XOR, u->dtype, x, y, poly_arg_none());
-    PolyUOp *t = poly_const_like_bool(ctx, xy, true);
+    PolyUOp *t = poly_uop_const_like_bool(ctx, xy, true);
     return poly_uop2(ctx, POLY_OP_XOR, u->dtype, xy, t, poly_arg_none());
   }
-  PolyUOp *t = poly_const_like_bool(ctx, x, true);
+  PolyUOp *t = poly_uop_const_like_bool(ctx, x, true);
   PolyUOp *not_x = poly_uop2(ctx, POLY_OP_XOR, x->dtype, x, t, poly_arg_none());
   return poly_uop2(ctx, POLY_OP_AND, u->dtype, not_x, y, poly_arg_none());
 }
@@ -1083,8 +1083,8 @@ static PolyUOp *rule_x86_cast_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindi
   }
 
   if (poly_dtype_eq(src, POLY_UINT64) && x86_is_float_dtype(dst)) {
-    PolyUOp *one = poly_const_like_int(ctx, y, 1);
-    PolyUOp *two_f = poly_const_like_float(ctx, u, 2.0);
+    PolyUOp *one = poly_uop_const_like_int(ctx, y, 1);
+    PolyUOp *two_f = poly_uop_const_like_float(ctx, u, 2.0);
     PolyUOp *shr = poly_uop2(ctx, POLY_OP_SHR, src, y, one, poly_arg_none());
     PolyUOp *shr_i64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, shr, poly_arg_none());
     PolyUOp *hi = poly_uop2(
@@ -1195,7 +1195,7 @@ static PolyUOp *rule_x86_packed_int_cmpne_legalize(
     return NULL;
   PolyUOp *eq = poly_uop2(ctx, POLY_OP_CMPEQ, u->dtype, u->src[0], u->src[1], poly_arg_none());
   return poly_uop2(
-      ctx, POLY_OP_XOR, u->dtype, eq, poly_const_like_bool(ctx, eq, true), poly_arg_none()
+      ctx, POLY_OP_XOR, u->dtype, eq, poly_uop_const_like_bool(ctx, eq, true), poly_arg_none()
   );
 }
 
@@ -1210,7 +1210,7 @@ static PolyUOp *rule_x86_float_where_mask_legalize(
   if (!m || !poly_dtype_is_bool(m->dtype)) return NULL;
   if (m->n_src > 0 && x86_is_float_dtype(m->src[0]->dtype)) return NULL;
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, u->dtype, m, poly_arg_none());
-  PolyUOp *zero = poly_const_like_float(ctx, cast, 0.0);
+  PolyUOp *zero = poly_uop_const_like_float(ctx, cast, 0.0);
   PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, cast, zero, poly_arg_none());
   return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, mask, u->src[1], u->src[2], poly_arg_none());
 }
@@ -2664,7 +2664,7 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
 ) {
   if (!ctx || !sink || !pm) return sink;
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
   if (!topo) return NULL;
   X86IselUseCtx uctx = {
       .uses = poly_map_new((size_t)(n > 0 ? n * 2 : 16)),
@@ -2676,7 +2676,7 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
     poly_map_destroy(uctx.uses);
     poly_map_destroy(uctx.single_consumer);
     poly_map_destroy(uctx.address_memory_uses);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
   for (int i = 0; i < n; i++) {
@@ -2696,7 +2696,7 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
       poly_map_destroy(uctx.uses);
       poly_map_destroy(uctx.single_consumer);
       poly_map_destroy(uctx.address_memory_uses);
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       return NULL;
     }
     int j = 0;
@@ -2714,7 +2714,7 @@ static PolyUOp *poly_graph_rewrite_x86_with_uses(
       uctx.func_args[j2 + 1] = cur;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   PolyUOp *out = poly_graph_rewrite_ctx_ex(ctx, sink, pm, &uctx, true);
   if (next_vreg) *next_vreg = uctx.next_vreg;
   free(uctx.func_args);

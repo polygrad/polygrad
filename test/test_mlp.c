@@ -150,7 +150,7 @@ TEST(mlp, staged_builder_retains_complete_physical_template) {
   ASSERT_INT_EQ(poly_uop_device(sink->src[0]->src[0]), POLY_DEVICE_INTERP);
 
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(poly_model_ctx(inst), sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(poly_model_ctx(inst), sink, &n);
   ASSERT_NOT_NULL(topo);
   for (int i = 0; i < n; i++)
     if (topo[i]->op == POLY_OP_BUFFER) ASSERT_INT_EQ(poly_uop_device(topo[i]), POLY_DEVICE_INTERP);

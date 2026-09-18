@@ -13,7 +13,8 @@ static uint8_t *program_test_ir(bool with_param, int *out_len) {
   PolyUOp *x = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *rhs = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
   PolyUOp *out = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_MUL, x, rhs)));
+  PolyUOp *sink =
+      poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, poly_uop_alu2(ctx, POLY_OP_MUL, x, rhs)));
   const char *inputs[] = {"x"};
   const char *outputs[] = {"output"};
   PolyIrBufEntry bufs[] = {
@@ -104,7 +105,7 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
   bool saw_value_param = false;
   int n_tag_bool = 0, n_tag_int_tuple = 0, n_tag_string = 0;
   int n_body = 0;
-  PolyUOp **body_topo = poly_toposort_alloc(poly_model_ctx(loaded), body, &n_body);
+  PolyUOp **body_topo = poly_uop_toposort_alloc(poly_model_ctx(loaded), body, &n_body);
   ASSERT_NOT_NULL(body_topo);
   for (int i = 0; i < n_body; i++) {
     saw_value_param |= body_topo[i]->op == POLY_OP_PARAM && body_topo[i]->n_src == 1 &&
@@ -113,7 +114,7 @@ TEST(program, compiled_roundtrip_exact_bytes_and_values) {
     n_tag_int_tuple += body_topo[i]->tag_arg.kind == POLY_ARG_INT_TUPLE;
     n_tag_string += body_topo[i]->tag_arg.kind == POLY_ARG_STRING;
   }
-  poly_toposort_free(body_topo);
+  poly_uop_toposort_free(body_topo);
   ASSERT_TRUE(saw_value_param);
   if (poly_uop_device(body) == POLY_DEVICE_X86) {
     /* X86 stores immediate markers, register lists, and labels in tag_arg.

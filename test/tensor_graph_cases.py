@@ -822,7 +822,7 @@ def bounded_nn_graph(kind):
         if ENGINE == 'tinygrad':
             from tinygrad.nn import _embedding_fwd
             return {'physical': _embedding_fwd(w, x).uop}
-        raw = _ffi._lib.poly_gather(x._ctx, w.uop.raw, x.uop.raw)
+        raw = _ffi._lib.poly_uop_gather(x._ctx, w.uop.raw, x.uop.raw)
     else:
         x = Tensor.empty(n, 2, 3, 4, device='CPU')
         c = Tensor.empty(1, 1, 3, 2, device='CPU')
@@ -837,7 +837,7 @@ def bounded_nn_graph(kind):
             first = (a*c.uop).alu(Ops.SUB, b*s.uop)
             second = b*c.uop+a*s.uop
             return {'physical': first.pad(((0,0),)*3+((0,2),)) + second.pad(((0,0),)*3+((2,0),))}
-        raw = _ffi._lib.poly_rope(x._ctx, x.uop.raw, c.uop.raw, s.uop.raw)
+        raw = _ffi._lib.poly_uop_rope(x._ctx, x.uop.raw, c.uop.raw, s.uop.raw)
     if not raw: raise RuntimeError(f'bounded {kind} returned NULL')
     from polygrad.uop.ops import UOp as PolyUOp
     return {'physical': PolyUOp(x._ctx, raw)}
@@ -2259,9 +2259,9 @@ def sdpa_core_graph(kind, dtype="float32"):
             if kind in ("bool", "bias") else None)
     if ENGINE == "polygrad":
         from polygrad.tensor import _uop_wrap
-        out = _ffi._lib.poly_sdpa(q._ctx, q.uop.raw, k.uop.raw, v.uop.raw,
+        out = _ffi._lib.poly_uop_sdpa(q._ctx, q.uop.raw, k.uop.raw, v.uop.raw,
                                   mask.uop.raw if mask is not None else None, kind == "causal", kind == "gqa")
-        if not out: raise RuntimeError("poly_sdpa failed")
+        if not out: raise RuntimeError("poly_uop_sdpa failed")
         return {"physical": _uop_wrap(q._ctx, out)}
     out = q.scaled_dot_product_attention(k, v, attn_mask=mask,
                                          is_causal=kind == "causal", enable_gqa=kind == "gqa")
@@ -2294,7 +2294,7 @@ def pointwise_owner_graph(op, dtype="float32", raw=False):
     x = Tensor.empty(2, 3, dtype=dtype).realize()
     if raw and ENGINE == "polygrad":
         from polygrad.tensor import _uop_wrap
-        fn = getattr(_ffi._lib, "poly_" + op)
+        fn = getattr(_ffi._lib, "poly_uop_" + op)
         fn.restype = ctypes.c_void_p
         fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + ([ctypes.c_double] if op == "softplus" else [])
         out = fn(x._ctx, x.uop.raw, *([1.0] if op == "softplus" else []))
@@ -2529,10 +2529,10 @@ def configured_dtype_graph(kind, float_dtype, int_dtype):
             idx = Tensor.empty(3, dtype='int32', device='CPU').realize()
             if ENGINE == 'polygrad':
                 from polygrad.uop.ops import UOp
-                raw = (_ffi._lib.poly_mean_reduce(table._ctx, table.uop.raw, 1, 0) if kind == 'mean_raw' else
-                       _ffi._lib.poly_gather(table._ctx, table.uop.raw, idx.uop.raw)
+                raw = (_ffi._lib.poly_uop_mean_reduce(table._ctx, table.uop.raw, 1, 0) if kind == 'mean_raw' else
+                       _ffi._lib.poly_uop_gather(table._ctx, table.uop.raw, idx.uop.raw)
                        if kind == 'gather_raw' else
-                       _ffi._lib.poly_cross_entropy(table._ctx, table.uop.raw, idx.uop.raw, 1))
+                       _ffi._lib.poly_uop_cross_entropy(table._ctx, table.uop.raw, idx.uop.raw, 1))
                 if not raw: raise RuntimeError(f'{kind} returned NULL')
                 return {'physical': UOp(table._ctx, raw)}
             if kind == 'mean_raw': out = table.mean(1)

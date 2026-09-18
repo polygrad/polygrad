@@ -20,17 +20,13 @@ int main(void) {
   poly_buffer_set(ctx, w, w_data, sizeof(w_data), POLY_DEVICE_CPU);
   poly_register_existing_buffer(ctx, POLY_ROLE_PARAM, w, shape, 1, "w", true);
 
-  PolyUOp *x =
-      poly_register_buffer_by_id(ctx, POLY_ROLE_INPUT, poly_dtype_id_by_name("float32"), shape, 1, "x");
-  PolyUOp *y =
-      poly_register_buffer_by_id(ctx, POLY_ROLE_TARGET, poly_dtype_id_by_name("float32"), shape, 1, "y");
-  PolyUOp *loss_buf = poly_register_buffer_by_id(
-      ctx, POLY_ROLE_OUTPUT, poly_dtype_id_by_name("float32"), shape, 1, "loss"
-  );
+  PolyUOp *x = poly_register_buffer(ctx, POLY_ROLE_INPUT, POLY_FLOAT32, shape, 1, "x");
+  PolyUOp *y = poly_register_buffer(ctx, POLY_ROLE_TARGET, POLY_FLOAT32, shape, 1, "y");
+  PolyUOp *loss_buf = poly_register_buffer(ctx, POLY_ROLE_OUTPUT, POLY_FLOAT32, shape, 1, "loss");
 
-  PolyUOp *pred = poly_alu2(ctx, POLY_OP_MUL, x, w);
-  PolyUOp *loss = poly_mse_loss(ctx, pred, y);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, loss_buf, loss));
+  PolyUOp *pred = poly_uop_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyUOp *loss = poly_uop_mse_loss(ctx, pred, y);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, loss_buf, loss));
   const char *names[] = {"loss"};
   PolyUOp *sinks[] = {sink};
   PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);

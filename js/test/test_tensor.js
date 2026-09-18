@@ -359,7 +359,7 @@ async function runTensorTests(pg, createRuntime) {
       // JS Tensor.shrink admits static bounds; exercise symbolic indexing
       // through the existing C/UOp interface, without coercing UOps to numbers.
       const root = source.uopPhysical
-      const raw = pg._core.ffi.poly_shrink_uop(root.ctx, root.raw, [zero.raw], [bound.raw], 1)
+      const raw = pg._core.ffi.poly_uop_shrink_symbolic(root.ctx, root.raw, [zero.raw], [bound.raw], 1)
       assert(raw, 'symbolic prefix construction failed')
       const view = pg.uop.wrap(raw)
       const prefix = new Tensor(view)
@@ -2222,7 +2222,7 @@ async function runTensorTests(pg, createRuntime) {
         ['expm1', x.expm1(), [-1e-6, 0, 1e-6, 0.25].map(Math.expm1)]
       ]
       for (const [name, actual, expectedValues] of rows) {
-        const rawFn = pg._core.ffi[`poly_${name}`]
+        const rawFn = pg._core.ffi[`poly_uop_${name}`]
         const expectedLogical = rawFn(x._ctx, x.uopLogical.raw)
         const expectedPhysical = rawFn(x._ctx, x.uop.raw)
         assert(
@@ -2243,7 +2243,7 @@ async function runTensorTests(pg, createRuntime) {
         ['log1p', moved.log1p()],
         ['expm1', moved.expm1()]
       ]) {
-        const expected = pg._core.ffi[`poly_${name}`](moved._ctx, moved.uop.raw)
+        const expected = pg._core.ffi[`poly_uop_${name}`](moved._ctx, moved.uop.raw)
         assert(
           actual.uop.key === String(pg._core.ffi.poly_uop_key(expected)),
           `${name} lost the nested physical occurrence`
@@ -3614,10 +3614,10 @@ async function runTensorTests(pg, createRuntime) {
     const a = new Tensor([[1, 2], [3, 4]])
     const b = new Tensor([[5, 6], [7, 8]])
       const formula = 'ij,jk->ik'
-      const logical = pg._core.ffi.poly_einsum(
+      const logical = pg._core.ffi.poly_uop_einsum(
         a._ctx, formula, [{ _uop: a._logicalUopRaw() }, { _uop: b._logicalUopRaw() }]
       ).uop
-      const physical = pg._core.ffi.poly_einsum(
+      const physical = pg._core.ffi.poly_uop_einsum(
         a._ctx, formula, [{ _uop: a._currentUopRaw() }, { _uop: b._currentUopRaw() }]
       ).uop
       const out = Tensor.einsum(formula, a, b)
@@ -3638,11 +3638,11 @@ async function runTensorTests(pg, createRuntime) {
       'legacy frontend substitution helper must stay deleted')
       const source = Tensor.arange(6)
       const out = source.rearrange('(h w) -> h w', { h: 2, w: 3 })
-      const expectedLogical = pg._core.ffi.poly_rearrange(
+      const expectedLogical = pg._core.ffi.poly_uop_rearrange(
         source._ctx, '(h w) -> h w', source.uopLogical.raw, source.shape,
         { h: 2, w: 3 }
       )
-      const expectedPhysical = pg._core.ffi.poly_rearrange(
+      const expectedPhysical = pg._core.ffi.poly_uop_rearrange(
         source._ctx, '(h w) -> h w', source.uop.raw, source.shape,
         { h: 2, w: 3 }
       )
@@ -3660,7 +3660,7 @@ async function runTensorTests(pg, createRuntime) {
       const moved = (await Tensor.empty([6], { device: 'cpu' }).realize())
         .to('cuda').to('cpu').reshape([2, 3])
       const movedOut = moved.rearrange('h w -> w h')
-      const expectedMoved = pg._core.ffi.poly_rearrange(
+      const expectedMoved = pg._core.ffi.poly_uop_rearrange(
         moved._ctx, 'h w -> w h', moved.uop.raw, moved.shape, {}
       )
       assert(
@@ -3677,7 +3677,7 @@ async function runTensorTests(pg, createRuntime) {
     } catch (error) {
       message = String(error && error.message ? error.message : error)
     }
-    assert(/poly_einsum failed/.test(message), `unexpected einsum error: ${message}`)
+    assert(/poly_uop_einsum failed/.test(message), `unexpected einsum error: ${message}`)
 
     for (const formula of ['invalid', `${'a'.repeat(300)}->a`, 'a->a->a', '((a))->a']) {
       message = ''
@@ -3686,7 +3686,7 @@ async function runTensorTests(pg, createRuntime) {
       } catch (error) {
         message = String(error && error.message ? error.message : error)
       }
-      assert(/poly_rearrange failed/.test(message),
+      assert(/poly_uop_rearrange failed/.test(message),
         `unexpected rearrange error for ${formula.slice(0, 24)}: ${message}`)
     }
   })

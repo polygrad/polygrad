@@ -9,13 +9,38 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h", "models/models.h")
-OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
+OWNERS = ("core.h", "mixin/elementwise.h", "mixin/movement.h", "mixin/creation.h",
+          "mixin/composite.h", "mixin/gradient.h", "uop/ops.h", "placer.h", "device.h", "engine/jit.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
           "models/mlp.h", "models/gpt2.h", "models/qwen3.h",
           "models/hf_loader.h", "loaders/gguf_loader.h")
 
 
+def check_api_owners():
+    """The umbrella exposes owners; it must not become another declaration list."""
+    umbrella = (ROOT / 'src/polygrad.h').read_text()
+    core = (ROOT / 'src/core.h').read_text()
+    tensor = (ROOT / 'src/tensor.h').read_text()
+    assert '#include "core.h"' in umbrella, 'polygrad.h must expose the shared core header'
+    assert not re.search(r'\bpoly_\w+\s*\(', umbrella), 'declarations belong to domain headers'
+    assert not re.search(r'^#\s*include\s*"', core, re.M), 'core.h must not depend on domain headers'
+    assert 'struct PolyTensor {' not in core and 'struct PolyUOp {' not in core
+    assert not re.search(r'\bpoly_tensor_\w+\s*\(', re.sub(r'/\*.*?\*/', '', core, flags=re.S))
+    assert 'poly_tensor_gelu(' in tensor and 'poly_tensor_relu(' in tensor
+    assert not re.search(r'^PolyUOp\s*\*\s*poly_(?!tensor_)', tensor, re.M), 'raw graph API in tensor.h'
+    assert '_by_id(' not in tensor, 'dtype-ID adaptation belongs to frontend.h'
+    for owner in ('uop/ops.h', 'mixin/elementwise.h', 'mixin/movement.h',
+                  'mixin/creation.h', 'mixin/composite.h', 'mixin/gradient.h', 'tensor.h'):
+        text = (ROOT / 'src' / owner).read_text()
+        assert not re.search(r'#include "(?:\.\./)?polygrad.h"', text), owner
+        if owner != 'tensor.h':
+            declarations = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+            # Shape metadata conversion keeps the shared poly_shape_* namespace.
+            assert not re.search(r'^PolyUOp\s*\*\s*poly_(?!uop|shape_)', declarations, re.M), owner
+
+
 def main():
+    check_api_owners()
     (ROOT / 'temp').mkdir(exist_ok=True)
     # A linkable core must also run independently of Model/codec objects. Two
     # fresh processes exercise ASLR-independent UOp content keys, not pointers.
@@ -27,7 +52,7 @@ def main():
 #include <stdlib.h>
 int main(void) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_const_int(ctx, 2), poly_const_int(ctx, 3));
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_const_int(ctx, 2), poly_uop_const_int(ctx, 3));
   size_t size = 0;
   unsigned char *key = poly_uop_key(ctx, sum, &size);
   if (!key || !size) return 1;
@@ -62,7 +87,7 @@ int main(void) {
     # These public entry headers must not duplicate declarations. Including an
     # owner is sufficient; repeating a signature risks C/C++ linkage drift.
     seen = {}
-    for header in (*PUBLIC[:3], "schedule/schedule.h"):
+    for header in (*PUBLIC[:3], *OWNERS[:7], "engine/jit.h", "schedule/schedule.h"):
         for name in re.findall(r'^\w[^\n;{}]*\b(poly_\w+)\([^;{]*;',
                                (ROOT / "src" / header).read_text(), re.M):
             assert name not in seen, f"{name}: {seen.get(name)}, {header}"

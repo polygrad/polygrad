@@ -100,7 +100,7 @@ static bool resolved_shape_dim(PolyCtx *ctx, const PolyUOp *u, int axis, int64_t
   return true;
 }
 
-int poly_broadcast_axes(
+int poly_uop_broadcast_axes(
     PolyCtx *ctx,
     const PolyUOp *src,
     const PolyUOp *out,
@@ -152,7 +152,7 @@ static PolyUOp *axis_shape_product(PolyCtx *ctx, const PolyUOp *u, int end) {
     if (!dim && max_shape)
       dim = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(max_shape[i]));
     if (!dim) return NULL;
-    product = poly_binop(ctx, POLY_OP_MUL, product, dim);
+    product = poly_uop_binop(ctx, POLY_OP_MUL, product, dim);
     product = product ? poly_graph_rewrite(ctx, product, poly_symbolic_simple()) : NULL;
     if (!product) return NULL;
   }
@@ -396,7 +396,7 @@ static PolyUOp *exact_shape_product(
   for (int i = 0; i < ndim; i++) {
     PolyUOp *dim = canonical_shape_dim(ctx, max_dims[i], dim_uops ? dim_uops[i] : NULL);
     if (!dim) return NULL;
-    product = poly_binop(ctx, POLY_OP_MUL, product, dim);
+    product = poly_uop_binop(ctx, POLY_OP_MUL, product, dim);
     if (!product) return NULL;
   }
   return poly_graph_rewrite(ctx, product, poly_symbolic());
@@ -658,9 +658,10 @@ static PolyUOp *const *src_dim_uops(PolyCtx *ctx, PolyUOp *u, int idx) {
  * admissible; max_shape is an allocation bound, not a substitute for b. */
 static bool shape_resolve_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!a || !b) return false;
-  PolyUOp *less = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
+  PolyUOp *less = poly_uop_alu2(ctx, POLY_OP_CMPLT, b, a);
   PolyUOp *condition =
-      less ? poly_alu2(ctx, POLY_OP_CMPNE, less, poly_const_typed(ctx, POLY_BOOL, 1)) : NULL;
+      less ? poly_uop_alu2(ctx, POLY_OP_CMPNE, less, poly_uop_const_typed(ctx, POLY_BOOL, 1))
+           : NULL;
   return condition && poly_uop_resolve(ctx, condition, 1) == 1;
 }
 
@@ -695,7 +696,7 @@ static ShapeCacheEntry *movement_shape(PolyCtx *ctx, PolyUOp *u) {
     } else {
       PolyUOp *zero = shape_dim_const(ctx, 0);
       if (!shape_resolve_le(ctx, zero, offsets[i]) || !shape_resolve_le(ctx, zero, sizes[i]) ||
-          !shape_resolve_le(ctx, poly_alu2(ctx, POLY_OP_ADD, offsets[i], inner), outer))
+          !shape_resolve_le(ctx, poly_uop_alu2(ctx, POLY_OP_ADD, offsets[i], inner), outer))
         return make_entry_none(ctx);
       int64_t vmin;
       poly_uop_minmax(ctx, sizes[i], &vmin, &dims[i]);
@@ -766,14 +767,14 @@ static PolyUOp *shape_resolve_function_dim(PolyCtx *ctx, PolyUOp *dim, PolyUOp *
   if (!ctx || !dim || !function || function->op != POLY_OP_FUNCTION || function->n_src < 1)
     return NULL;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, dim, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, dim, &n_topo, NULL, false);
   if (!topo) return NULL;
   PolyUOp **from = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*from)) : NULL;
   PolyUOp **to = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*to)) : NULL;
   if (n_topo > 0 && (!from || !to)) {
     free(from);
     free(to);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
 
@@ -797,7 +798,7 @@ static PolyUOp *shape_resolve_function_dim(PolyCtx *ctx, PolyUOp *dim, PolyUOp *
     valid = false;
   free(from);
   free(to);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return valid ? resolved : NULL;
 }
 
@@ -1098,7 +1099,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
         if (shape_dim_is_static(dim_uops[axis])) {
           dim_uops[axis] = shape_dim_const(ctx, dims[axis]);
         } else {
-          dim_uops[axis] = poly_alu2(ctx, POLY_OP_MUL, dim_uops[axis], shape_dim_const(ctx, count));
+          dim_uops[axis] =
+              poly_uop_alu2(ctx, POLY_OP_MUL, dim_uops[axis], shape_dim_const(ctx, count));
           if (!dim_uops[axis]) return make_entry_none(ctx);
         }
       }
@@ -1129,7 +1131,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     PolyUOp *output_product = exact_shape_product(ctx, dims, dim_uops, n);
     if (!input_product || !output_product) return make_entry_none(ctx);
     if (input_product != output_product) {
-      PolyUOp *different = poly_binop(ctx, POLY_OP_CMPNE, input_product, output_product);
+      PolyUOp *different = poly_uop_binop(ctx, POLY_OP_CMPNE, input_product, output_product);
       if (!different || poly_uop_resolve(ctx, different, 1) != 0) return make_entry_none(ctx);
     }
     return make_entry_dims_uops(ctx, dims, dim_uops, n);
@@ -1343,7 +1345,7 @@ PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u) {
   /* MovementMixin.flatten uses prod(shape), not max_numel: allocation
    * bounds cannot replace a symbolic extent in the returned graph. */
   PolyUOp *numel = axis_shape_product(ctx, u, ndim);
-  return numel ? poly_reshape_uop(ctx, u, &numel, 1) : NULL;
+  return numel ? poly_uop_reshape_symbolic(ctx, u, &numel, 1) : NULL;
 }
 
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim) {

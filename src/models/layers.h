@@ -22,13 +22,13 @@ PolyUOp *poly_linear(
     int in_features,
     int out_features,
     bool use_bias
-) POLY_DEPRECATED("use poly_model_linear or poly_linear_apply with explicit params");
+) POLY_DEPRECATED("use poly_model_linear or poly_uop_linear_apply with explicit params");
 
 PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_model_layernorm or poly_layernorm_apply with explicit params");
+    POLY_DEPRECATED("use poly_model_layernorm or poly_uop_layernorm_apply with explicit params");
 
 PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_model_rmsnorm or poly_rmsnorm_apply with explicit params");
+    POLY_DEPRECATED("use poly_model_rmsnorm or poly_uop_rmsnorm_apply with explicit params");
 
 PolyUOp *poly_embedding(
     PolyCtx *ctx,
@@ -36,7 +36,7 @@ PolyUOp *poly_embedding(
     PolyUOp *tokens,
     int vocab_size,
     int embed_dim
-) POLY_DEPRECATED("use poly_model_embedding or poly_embedding_apply with explicit params");
+) POLY_DEPRECATED("use poly_model_embedding or poly_uop_embedding_apply with explicit params");
 
 PolyTensor *poly_model_linear(
     PolyModel *inst,

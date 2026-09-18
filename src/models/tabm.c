@@ -21,7 +21,7 @@
 #include <stdio.h>
 
 static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
-  PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);
+  PolyUOp *constant = poly_uop_const_typed(ctx, POLY_FLOAT32, value);
   if (!constant) return NULL;
   PolyTensor *out =
       poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);

@@ -190,7 +190,7 @@ const char *poly_uop_device_name(PolyCtx *ctx, PolyUOp *u) {
   return poly_uop_device_names(ctx, u, &names, &is_tuple) == 1 && !is_tuple ? names[0] : NULL;
 }
 
-PolyDevice poly_device_from_device_uop(PolyUOp *device) {
+PolyDevice poly_uop_device_from_device_uop(PolyUOp *device) {
   if (!device || device->op != POLY_OP_DEVICE) return POLY_DEVICE_AUTO;
   if (device->arg.kind == POLY_ARG_STRING) return device_from_string_arg(device->arg.str);
   return POLY_DEVICE_AUTO;
@@ -291,7 +291,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
 
   PolyDevice result = POLY_DEVICE_AUTO;
   if (u->op == POLY_OP_DEVICE) {
-    result = poly_device_from_device_uop(u);
+    result = poly_uop_device_from_device_uop(u);
     if (cache)
       poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
@@ -357,7 +357,7 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
   return result;
 }
 
-PolyUOp *poly_copy_to_device_uop(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) {
+PolyUOp *poly_uop_copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyUOp *device) {
   if (!ctx || !value || !device || device->op != POLY_OP_DEVICE) return NULL;
   PolyArg arg;
   if (device->arg.kind == POLY_ARG_STRING)
@@ -420,7 +420,7 @@ static bool place_validate_pure_logical(
 ) {
   if (!ctx || !root) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, place_logical_gate, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, root, &n_topo, place_logical_gate, false);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n_topo; i++) {
@@ -457,7 +457,7 @@ static bool place_validate_logical_root(
    * effects or reinterpret them as named initializers. Every write still
    * targets explicitly bound storage. Ordinary non-SINK roots stay pure. */
   int n = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n, place_logical_gate, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, root, &n, place_logical_gate, false);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n && valid; i++) {
@@ -488,7 +488,7 @@ static bool place_validate_physical_root(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
   /* Pinned RewriteContext keeps CALL/FUNCTION bodies opaque by default.  Their
    * placeholders are not caller-visible storage bindings. */
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n_topo; i++) {
@@ -574,7 +574,7 @@ static PolyUOp *place_exact_copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyUOp
   PolyUOp *current = poly_uop_device_uop_cached(ctx, value, cache);
   poly_map_destroy(cache);
   if (place_same_device_uop(current, device)) return value;
-  return poly_copy_to_device_uop(ctx, value, device);
+  return poly_uop_copy_to_device(ctx, value, device);
 }
 
 static PolyUOp *place_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, PolyUOp *device) {
@@ -618,7 +618,7 @@ static int place_module_input_binding(PolyUOp **bindings, int n, PolyUOp *input)
 static bool place_scalar_devices_valid(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
   PolyMap *device_cache = poly_map_new((size_t)(n_topo > 0 ? n_topo : 1) * 2 + 16);
   if (!topo || !device_cache) {
     free(topo);
@@ -762,7 +762,7 @@ int poly_place_module_map(
 
     PlaceModuleGate gate = {module->inputs, module->n_inputs};
     int n_region = 0;
-    PolyUOp **region = poly_toposort_ex_user_alloc(
+    PolyUOp **region = poly_uop_toposort_ex_user_alloc(
         ctx, module->output, &n_region, place_module_region_gate, &gate, false
     );
     if (!region) goto cleanup;

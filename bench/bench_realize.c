@@ -38,12 +38,12 @@ static double now_us(void) {
 
 static void bench_vecadd(int n, int iters) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, n);
-  PolyUOp *b = poly_buffer_f32(ctx, n);
-  PolyUOp *c = poly_buffer_f32(ctx, n);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, add);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, c, add);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
@@ -76,16 +76,16 @@ static void bench_vecadd(int n, int iters) {
 
 static void bench_reduce_chain(int n, int iters) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, n);
-  PolyUOp *b = poly_buffer_f32(ctx, n);
-  PolyUOp *out = poly_buffer_f32(ctx, n);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, n);
 
   int64_t axes[] = {0};
   int64_t one_sh[] = {1};
   int64_t exp_sh[] = {n};
-  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
-  PolyUOp *s1 = poly_reshape(ctx, s, one_sh, 1);
-  PolyUOp *se = poly_expand(ctx, s1, exp_sh, 1);
+  PolyUOp *s = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *s1 = poly_uop_reshape(ctx, s, one_sh, 1);
+  PolyUOp *se = poly_uop_expand(ctx, s1, exp_sh, 1);
   PolyUOp *c = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, se, b, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, c, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
@@ -120,12 +120,12 @@ static void bench_reduce_chain(int n, int iters) {
 static void bench_cold_compile(int n) {
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, n);
-  PolyUOp *b = poly_buffer_f32(ctx, n);
-  PolyUOp *c = poly_buffer_f32(ctx, n);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, add);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, n);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, c, add);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *ha = calloc(n, sizeof(float));
   float *hb = calloc(n, sizeof(float));

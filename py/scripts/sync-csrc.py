@@ -114,6 +114,7 @@ SOURCES = [
 # Headers needed for compilation
 HEADERS = [
     'src/polygrad.h',
+    'src/core.h',
     'src/arena.h',
     'src/utils.h',
     'src/bigint.h',
@@ -142,6 +143,10 @@ HEADERS = [
     'src/tensor.h',
     'src/placer.h',
     'src/mixin/elementwise.h',
+    'src/mixin/movement.h',
+    'src/mixin/creation.h',
+    'src/mixin/composite.h',
+    'src/mixin/gradient.h',
     'src/engine/schedule.h',
     'src/interp.h',
     'src/bundle.h',

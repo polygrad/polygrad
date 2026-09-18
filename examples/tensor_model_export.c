@@ -19,14 +19,11 @@ int main(void) {
   poly_buffer_set(ctx, w, w_data, sizeof(w_data), POLY_DEVICE_CPU);
   poly_register_existing_buffer(ctx, POLY_ROLE_PARAM, w, shape, 1, "w", true);
 
-  PolyUOp *x =
-      poly_register_buffer_by_id(ctx, POLY_ROLE_INPUT, poly_dtype_id_by_name("float32"), shape, 1, "x");
-  PolyUOp *out = poly_register_buffer_by_id(
-      ctx, POLY_ROLE_OUTPUT, poly_dtype_id_by_name("float32"), shape, 1, "output"
-  );
+  PolyUOp *x = poly_register_buffer(ctx, POLY_ROLE_INPUT, POLY_FLOAT32, shape, 1, "x");
+  PolyUOp *out = poly_register_buffer(ctx, POLY_ROLE_OUTPUT, POLY_FLOAT32, shape, 1, "output");
 
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, x, w);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, prod));
   const char *names[] = {"forward"};
   PolyUOp *sinks[] = {sink};
   PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);

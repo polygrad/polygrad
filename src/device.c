@@ -238,7 +238,7 @@ static PolyUOp *poly_buffer_device_uop(PolyCtx *ctx, PolyUOp *buf, PolyDevice ba
   if (!ctx) return NULL;
   PolyUOp *graph_device = poly_uop_device_uop_cached(ctx, buf, NULL);
   if (graph_device &&
-      (backend == POLY_DEVICE_AUTO || poly_device_from_device_uop(graph_device) == backend))
+      (backend == POLY_DEVICE_AUTO || poly_uop_device_from_device_uop(graph_device) == backend))
     return graph_device;
   return backend == POLY_DEVICE_AUTO ? NULL : poly_device_uop(ctx, backend);
 }
@@ -453,7 +453,7 @@ PolyUOp *poly_buffer_from_host(
   if (poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_HOST) != 0) return NULL;
   /* BUFFER is 1D; a multi-dim tensor needs RESHAPE on top so the scheduler
    * sees the intended shape. */
-  if (ndim > 1) return poly_reshape(ctx, buf, dims, ndim);
+  if (ndim > 1) return poly_uop_reshape(ctx, buf, dims, ndim);
   return buf;
 }
 
@@ -680,7 +680,7 @@ static PolyBuffer *poly_buffer_metadata(PolyCtx *ctx, PolyUOp *buffer) {
   PolyBuffer *cached = poly_buffer_get(ctx, buffer);
   if (cached || !ctx || !buffer || buffer->op != POLY_OP_BUFFER) return cached;
   PolyUOp *device_uop = poly_uop_device_uop_cached(ctx, buffer, NULL);
-  PolyDevice device = poly_device_from_device_uop(device_uop);
+  PolyDevice device = poly_uop_device_from_device_uop(device_uop);
   if (!device_uop || device == POLY_DEVICE_AUTO || device_uop->arg.kind == POLY_ARG_STRING_TUPLE)
     return NULL;
   const PolyBackendDesc *backend = poly_backend_get(device);
@@ -1050,7 +1050,7 @@ static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buf
 
   for (int i = 0; i < n; i++) {
     PolyUOp *child_device = poly_device_uop_from_name(ctx, device->arg.string_tuple.vals[i]);
-    PolyDevice backend = poly_device_from_device_uop(child_device);
+    PolyDevice backend = poly_uop_device_from_device_uop(child_device);
     if (!child_device || backend == POLY_DEVICE_AUTO) {
       poly_buffer_free_chain(ctx, multi);
       return NULL;

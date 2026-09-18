@@ -163,8 +163,8 @@ TEST(model, variable_invocations_preserve_result_owners) {
   int64_t axes[] = {0, 1};
   PolyTensor *mean = poly_tensor_mean(ctx, x, axes, 2, false);
   ASSERT_NOT_NULL(mean);
-  ASSERT_EQ(mean->uop_physical, poly_mean_axes(ctx, x->uop_physical, axes, 2, false));
-  ASSERT_EQ(mean->uop_logical, poly_mean_axes(ctx, x->uop_logical, axes, 2, false));
+  ASSERT_EQ(mean->uop_physical, poly_uop_mean_axes(ctx, x->uop_physical, axes, 2, false));
+  ASSERT_EQ(mean->uop_logical, poly_uop_mean_axes(ctx, x->uop_logical, axes, 2, false));
   poly_tensor_release(mean);
   PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x);
   PolyBindingSpec bindings[] = {
@@ -606,10 +606,10 @@ static uint8_t *make_add_ir(int *out_len) {
 
   PolyUOp *a = model_logical_f32(ctx, 4);
   PolyUOp *b = model_logical_f32(ctx, 4);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *out_buf = model_logical_f32(ctx, 4);
-  PolyUOp *store = poly_store_val(ctx, out_buf, sum);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *store = poly_uop_store_val(ctx, out_buf, sum);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "a", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {4}, .ndim = 1},
@@ -703,11 +703,11 @@ TEST(optim, build_step_sgd_realizes_lazy_state_and_gradient_effects) {
   ASSERT_NOT_NULL(lr);
   ASSERT_NOT_NULL(g_value);
 
-  PolyUOp *zero = poly_full(ctx, (int64_t[]){1}, 1, 0.0f);
+  PolyUOp *zero = poly_uop_full(ctx, (int64_t[]){1}, 1, 0.0f);
   PolyUOp *m_logical = poly_tensor_uop_logical(momentum);
   PolyUOp *m_physical = poly_tensor_uop_physical(momentum);
-  PolyUOp *m_init_store_logical = poly_store_val(ctx, m_logical, zero);
-  PolyUOp *m_init_store_physical = poly_store_val(ctx, m_physical, zero);
+  PolyUOp *m_init_store_logical = poly_uop_store_val(ctx, m_logical, zero);
+  PolyUOp *m_init_store_physical = poly_uop_store_val(ctx, m_physical, zero);
   PolyUOp *m_init_logical_src[2] = {m_logical, m_init_store_logical};
   PolyUOp *m_init_physical_src[2] = {m_physical, m_init_store_physical};
   PolyUOp *m_init_logical =
@@ -716,9 +716,10 @@ TEST(optim, build_step_sgd_realizes_lazy_state_and_gradient_effects) {
       poly_uop(ctx, POLY_OP_AFTER, POLY_FLOAT32, m_init_physical_src, 2, poly_arg_none());
   PolyUOp *grad_logical = poly_tensor_uop_logical(grad);
   PolyUOp *grad_physical = poly_tensor_uop_physical(grad);
-  PolyUOp *grad_store_logical = poly_store_val(ctx, grad_logical, poly_tensor_uop_logical(g_value));
+  PolyUOp *grad_store_logical =
+      poly_uop_store_val(ctx, grad_logical, poly_tensor_uop_logical(g_value));
   PolyUOp *grad_store_physical =
-      poly_store_val(ctx, grad_physical, poly_tensor_uop_physical(g_value));
+      poly_uop_store_val(ctx, grad_physical, poly_tensor_uop_physical(g_value));
   PolyUOp *grad_logical_src[2] = {grad_logical, grad_store_logical};
   PolyUOp *grad_physical_src[2] = {grad_physical, grad_store_physical};
   PolyUOp *grad_effect_logical =
@@ -796,7 +797,7 @@ TEST(optim, build_step_sgd_realizes_lazy_state_and_gradient_effects) {
     ASSERT_EQ(call->op, POLY_OP_CALL);
     if (call->n_src - 1 > max_call_args) max_call_args = call->n_src - 1;
     int n_body_topo = 0;
-    PolyUOp **body_topo = poly_toposort(ctx, call->src[0], &n_body_topo);
+    PolyUOp **body_topo = poly_uop_toposort(ctx, call->src[0], &n_body_topo);
     ASSERT_NOT_NULL(body_topo);
     bool seen_slots[16] = {false};
     int n_storage_params = 0;
@@ -1128,13 +1129,13 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
 
 TEST(optim, build_update_adamw_depends_on_lr_uop) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *lr = poly_buffer_f32(ctx, 1);
-  PolyUOp *param = poly_buffer_f32(ctx, 1);
-  PolyUOp *grad = poly_buffer_f32(ctx, 1);
-  PolyUOp *m = poly_buffer_f32(ctx, 1);
-  PolyUOp *v = poly_buffer_f32(ctx, 1);
-  PolyUOp *bc1 = poly_buffer_f32(ctx, 1);
-  PolyUOp *bc2 = poly_buffer_f32(ctx, 1);
+  PolyUOp *lr = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *param = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *grad = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *m = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *v = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *bc1 = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *bc2 = poly_uop_buffer_f32(ctx, 1);
   ASSERT_NOT_NULL(lr);
 
   PolyOptimConfig cfg = {
@@ -1255,8 +1256,9 @@ TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
       ctx, "optim_lr_n", poly_arg_int(0), poly_arg_int(1), POLY_WEAKINT, 1, false
   );
   PolyUOp *symbolic_dims[] = {n};
-  PolyUOp *lr_symbolic_uop = poly_expand_uop(ctx, poly_buffer_f32(ctx, 1), symbolic_dims, 1);
-  PolyUOp *lr_symbolic_physical = poly_expand_uop(
+  PolyUOp *lr_symbolic_uop =
+      poly_uop_expand_symbolic(ctx, poly_uop_buffer_f32(ctx, 1), symbolic_dims, 1);
+  PolyUOp *lr_symbolic_physical = poly_uop_expand_symbolic(
       ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU), symbolic_dims, 1
   );
   PolyTensor *lr_symbolic = poly_tensor_create_with_roots(
@@ -1333,22 +1335,22 @@ static uint8_t *make_train_ir(int n, int *out_len) {
   PolyUOp *loss_buf = model_logical_f32(ctx, 1);
 
   /* Forward: out = w * x */
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, w, x);
-  PolyUOp *fwd_store = poly_store_val(ctx, out_buf, prod);
-  PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, w, x);
+  PolyUOp *fwd_store = poly_uop_store_val(ctx, out_buf, prod);
+  PolyUOp *fwd_sink = poly_uop_sink1(ctx, fwd_store);
 
   /* Loss: sum((prod - y)^2) */
-  PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, prod, poly_alu1(ctx, POLY_OP_NEG, y));
-  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
+  PolyUOp *diff = poly_uop_alu2(ctx, POLY_OP_ADD, prod, poly_uop_alu1(ctx, POLY_OP_NEG, y));
+  PolyUOp *sq = poly_uop_alu2(ctx, POLY_OP_MUL, diff, diff);
   int64_t axes[] = {0};
-  PolyUOp *loss_val = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
+  PolyUOp *loss_val = poly_uop_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
 
   /* Scale by 1/N */
-  PolyUOp *scale = poly_const_float(ctx, 1.0 / (double)n);
-  PolyUOp *mse = poly_alu2(ctx, POLY_OP_MUL, loss_val, scale);
+  PolyUOp *scale = poly_uop_const_float(ctx, 1.0 / (double)n);
+  PolyUOp *mse = poly_uop_alu2(ctx, POLY_OP_MUL, loss_val, scale);
 
-  PolyUOp *loss_store = poly_store_val(ctx, loss_buf, mse);
-  PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
+  PolyUOp *loss_store = poly_uop_store_val(ctx, loss_buf, mse);
+  PolyUOp *loss_sink = poly_uop_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = w, .shape = {n}, .ndim = 1},
@@ -1759,7 +1761,7 @@ TEST(model, staged_logical_only_output_places_and_runs) {
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(w);
   PolyUOp *logical =
-      poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_logical(x), poly_tensor_uop_logical(w));
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_logical(x), poly_tensor_uop_logical(w));
   PolyTensor *out =
       poly_tensor_create_with_roots(ctx, logical, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(out);
@@ -2540,13 +2542,13 @@ TEST(model, fresh_import_evaluates_closed_named_initializer_once) {
   ASSERT_NOT_NULL(ctx);
   int64_t shape[] = {2};
   PolyUOp *x = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
-  PolyUOp *three = poly_full(ctx, shape, 1, 3.0);
-  PolyUOp *one = poly_full(ctx, shape, 1, 1.0);
-  PolyUOp *w = poly_add(ctx, three, one);
-  PolyUOp *y = poly_mul(ctx, x, w);
+  PolyUOp *three = poly_uop_full(ctx, shape, 1, 3.0);
+  PolyUOp *one = poly_uop_full(ctx, shape, 1, 1.0);
+  PolyUOp *w = poly_uop_add(ctx, three, one);
+  PolyUOp *y = poly_uop_mul(ctx, x, w);
   PolyUOp *out_buffer = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 2);
-  PolyUOp *store = poly_store_val(ctx, out_buffer, y);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *store = poly_uop_store_val(ctx, out_buffer, y);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(w);
   ASSERT_NOT_NULL(y);
@@ -2991,10 +2993,11 @@ TEST(model, stochastic_output_effect_requires_named_rng_state) {
 TEST(model, import_rejects_duplicate_abi_storage_alias) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *input = poly_buffer_f32(ctx, 2);
-  PolyUOp *output = poly_buffer_f32(ctx, 2);
-  PolyUOp *sink =
-      poly_sink1(ctx, poly_store_val(ctx, output, poly_alu2(ctx, POLY_OP_ADD, input, input)));
+  PolyUOp *input = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_uop_sink1(
+      ctx, poly_uop_store_val(ctx, output, poly_uop_alu2(ctx, POLY_OP_ADD, input, input))
+  );
   ASSERT_NOT_NULL(input);
   ASSERT_NOT_NULL(output);
   ASSERT_NOT_NULL(sink);
@@ -3033,9 +3036,9 @@ TEST(model, import_rejects_duplicate_abi_storage_alias) {
 TEST(model, import_rejects_dynamic_abi_alias_with_persistent_state) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *shared = poly_buffer_f32(ctx, 2);
-  PolyUOp *output = poly_buffer_f32(ctx, 2);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, shared));
+  PolyUOp *shared = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, shared));
   ASSERT_NOT_NULL(shared);
   ASSERT_NOT_NULL(output);
   ASSERT_NOT_NULL(sink);
@@ -3074,11 +3077,11 @@ TEST(model, import_rejects_dynamic_abi_alias_with_persistent_state) {
 TEST(model, import_rejects_named_partial_view_state) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *base = poly_buffer_f32(ctx, 4);
+  PolyUOp *base = poly_uop_buffer_f32(ctx, 4);
   int64_t bounds[][2] = {{1, 3}};
-  PolyUOp *view = poly_shrink(ctx, base, bounds, 1);
-  PolyUOp *output = poly_buffer_f32(ctx, 2);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, view));
+  PolyUOp *view = poly_uop_shrink(ctx, base, bounds, 1);
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, view));
   ASSERT_NOT_NULL(base);
   ASSERT_NOT_NULL(view);
   ASSERT_NOT_NULL(output);
@@ -3115,13 +3118,13 @@ TEST(model, import_rejects_named_partial_view_state) {
 TEST(model, checkpoint_import_rejects_input_dependent_named_state_effect) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *input = poly_buffer_f32(ctx, 1);
-  PolyUOp *state = poly_buffer_f32(ctx, 1);
+  PolyUOp *input = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *state = poly_uop_buffer_f32(ctx, 1);
   PolyUOp *updated = poly_uop_after(
-      ctx, state, poly_store_val(ctx, state, poly_alu2(ctx, POLY_OP_ADD, state, input))
+      ctx, state, poly_uop_store_val(ctx, state, poly_uop_alu2(ctx, POLY_OP_ADD, state, input))
   );
-  PolyUOp *output = poly_buffer_f32(ctx, 1);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, updated));
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, updated));
   ASSERT_NOT_NULL(input);
   ASSERT_NOT_NULL(state);
   ASSERT_NOT_NULL(updated);
@@ -3495,11 +3498,11 @@ TEST(model, alias_checkpoint_payloads_follow_deterministic_name_order) {
 TEST(model, fresh_import_rejects_special_before_scheduling) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_WEAKINT, bound, poly_arg_str("gidx0"));
-  PolyUOp *value = poly_cast(ctx, special, POLY_FLOAT32);
-  PolyUOp *output = poly_buffer_f32(ctx, 1);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, value));
+  PolyUOp *value = poly_uop_cast(ctx, special, POLY_FLOAT32);
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, value));
   ASSERT_NOT_NULL(value);
   ASSERT_NOT_NULL(sink);
   PolyIrBufEntry bufs[] = {
@@ -3586,8 +3589,8 @@ TEST(model, later_build_failure_unwinds_named_value_snapshot_and_residency) {
   /* The computed parameter above is snapshotted first.  This internal-only
    * output fixture keeps a valid movement shape but assigns the root VOID
    * dtype, so packing rejects it after initializing the parameter candidate. */
-  PolyUOp *bad_value = poly_full(ctx, shape, 1, 1.0);
-  PolyUOp *bad_reshape = poly_reshape(ctx, bad_value, shape, 1);
+  PolyUOp *bad_value = poly_uop_full(ctx, shape, 1, 1.0);
+  PolyUOp *bad_reshape = poly_uop_reshape(ctx, bad_value, shape, 1);
   ASSERT_NOT_NULL(bad_reshape);
   PolyUOp *bad_root = poly_uop(
       ctx, bad_reshape->op, POLY_VOID, bad_reshape->src, bad_reshape->n_src, bad_reshape->arg
@@ -3717,10 +3720,11 @@ TEST(model, imported_alias_extent_must_match_exact_named_value) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   int64_t value_shape[] = {2};
-  PolyUOp *value =
-      poly_add(ctx, poly_full(ctx, value_shape, 1, 3.0), poly_full(ctx, value_shape, 1, 1.0));
-  PolyUOp *output = poly_buffer_f32(ctx, 2);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, value));
+  PolyUOp *value = poly_uop_add(
+      ctx, poly_uop_full(ctx, value_shape, 1, 3.0), poly_uop_full(ctx, value_shape, 1, 1.0)
+  );
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, value));
   ASSERT_NOT_NULL(value);
   ASSERT_NOT_NULL(output);
   ASSERT_NOT_NULL(sink);
@@ -3774,11 +3778,11 @@ TEST(model, ambiguous_equal_logical_state_occurrences_fail_closed) {
   ASSERT_NOT_NULL(c);
 
   PolyUOp *logical =
-      poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_logical(a), poly_tensor_uop_logical(b));
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_logical(a), poly_tensor_uop_logical(b));
   PolyUOp *physical0 =
-      poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
   PolyUOp *physical1 =
-      poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_physical(a), poly_tensor_uop_physical(c));
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_tensor_uop_physical(a), poly_tensor_uop_physical(c));
   ASSERT_NOT_NULL(logical);
   ASSERT_NOT_NULL(physical0);
   ASSERT_NOT_NULL(physical1);
@@ -4333,7 +4337,7 @@ TEST(model, from_sinks_wraps_selected_lazy_tensor_graph) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {4};
 
-  PolyUOp *w = poly_buffer_f32(ctx, 4);
+  PolyUOp *w = poly_uop_buffer_f32(ctx, 4);
   float w_data[] = {2.0f, 3.0f, 4.0f, 5.0f};
   poly_buffer_set(ctx, w, w_data, sizeof(w_data), POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(poly_register_existing_buffer(ctx, POLY_ROLE_PARAM, w, shape, 1, "w", true));
@@ -4354,11 +4358,12 @@ TEST(model, from_sinks_wraps_selected_lazy_tensor_graph) {
       ctx, POLY_ROLE_OUTPUT, poly_dtype_id_by_name("float32"), shape, 1, "stale"
   );
   poly_register_entrypoint(
-      ctx, "stale", poly_sink1(ctx, poly_store_val(ctx, stale, poly_alu2(ctx, POLY_OP_ADD, x, w)))
+      ctx, "stale",
+      poly_uop_sink1(ctx, poly_uop_store_val(ctx, stale, poly_uop_alu2(ctx, POLY_OP_ADD, x, w)))
   );
 
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, x, w);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, prod));
   const char *names[] = {"forward"};
   PolyUOp *sinks[] = {sink};
   PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);
@@ -6274,19 +6279,19 @@ TEST(model, explicit_module_device_map_places_named_regions_atomically) {
   PolyUOp *forward_compiled = poly_compile_linear(ctx, forward_linear, -1);
   ASSERT_NOT_NULL(forward_compiled);
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(forward_compiled, 0), NULL)
       ),
       POLY_DEVICE_CPU
   );
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(forward_compiled, 1), NULL)
       ),
       POLY_DEVICE_INTERP
   );
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(forward_compiled, 2), NULL)
       ),
       POLY_DEVICE_INTERP
@@ -6369,19 +6374,19 @@ TEST(model, explicit_module_device_map_places_named_regions_atomically) {
   PolyUOp *reverse_compiled = poly_compile_linear(ctx, reverse_linear, -1);
   ASSERT_NOT_NULL(reverse_compiled);
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(reverse_compiled, 0), NULL)
       ),
       POLY_DEVICE_INTERP
   );
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(reverse_compiled, 1), NULL)
       ),
       POLY_DEVICE_CPU
   );
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(
+      poly_uop_device_from_device_uop(
           poly_uop_device_uop_cached(ctx, poly_test_linear_call_body(reverse_compiled, 2), NULL)
       ),
       POLY_DEVICE_CPU

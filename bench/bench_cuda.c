@@ -111,10 +111,12 @@ static void bench_vecadd(int n, int iters) {
   PolyUOp *ga = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gb = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gc = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *sink =
-      poly_sink1(cpu_ctx, poly_store_val(cpu_ctx, c, poly_alu2(cpu_ctx, POLY_OP_ADD, a, b)));
-  PolyUOp *gpu_sink =
-      poly_sink1(gpu_ctx, poly_store_val(gpu_ctx, gc, poly_alu2(gpu_ctx, POLY_OP_ADD, ga, gb)));
+  PolyUOp *sink = poly_uop_sink1(
+      cpu_ctx, poly_uop_store_val(cpu_ctx, c, poly_uop_alu2(cpu_ctx, POLY_OP_ADD, a, b))
+  );
+  PolyUOp *gpu_sink = poly_uop_sink1(
+      gpu_ctx, poly_uop_store_val(gpu_ctx, gc, poly_uop_alu2(gpu_ctx, POLY_OP_ADD, ga, gb))
+  );
 
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
@@ -167,10 +169,12 @@ static void bench_mul(int n, int iters) {
   PolyUOp *ga = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gb = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gc = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *sink =
-      poly_sink1(cpu_ctx, poly_store_val(cpu_ctx, c, poly_alu2(cpu_ctx, POLY_OP_MUL, a, b)));
-  PolyUOp *gpu_sink =
-      poly_sink1(gpu_ctx, poly_store_val(gpu_ctx, gc, poly_alu2(gpu_ctx, POLY_OP_MUL, ga, gb)));
+  PolyUOp *sink = poly_uop_sink1(
+      cpu_ctx, poly_uop_store_val(cpu_ctx, c, poly_uop_alu2(cpu_ctx, POLY_OP_MUL, a, b))
+  );
+  PolyUOp *gpu_sink = poly_uop_sink1(
+      gpu_ctx, poly_uop_store_val(gpu_ctx, gc, poly_uop_alu2(gpu_ctx, POLY_OP_MUL, ga, gb))
+  );
 
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
@@ -222,12 +226,14 @@ static void bench_chain(int n, int iters) {
   PolyUOp *ga = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gb = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gc = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *add = poly_alu2(cpu_ctx, POLY_OP_ADD, a, b);
-  PolyUOp *gadd = poly_alu2(gpu_ctx, POLY_OP_ADD, ga, gb);
-  PolyUOp *sink =
-      poly_sink1(cpu_ctx, poly_store_val(cpu_ctx, c, poly_alu2(cpu_ctx, POLY_OP_MUL, add, a)));
-  PolyUOp *gpu_sink =
-      poly_sink1(gpu_ctx, poly_store_val(gpu_ctx, gc, poly_alu2(gpu_ctx, POLY_OP_MUL, gadd, ga)));
+  PolyUOp *add = poly_uop_alu2(cpu_ctx, POLY_OP_ADD, a, b);
+  PolyUOp *gadd = poly_uop_alu2(gpu_ctx, POLY_OP_ADD, ga, gb);
+  PolyUOp *sink = poly_uop_sink1(
+      cpu_ctx, poly_uop_store_val(cpu_ctx, c, poly_uop_alu2(cpu_ctx, POLY_OP_MUL, add, a))
+  );
+  PolyUOp *gpu_sink = poly_uop_sink1(
+      gpu_ctx, poly_uop_store_val(gpu_ctx, gc, poly_uop_alu2(gpu_ctx, POLY_OP_MUL, gadd, ga))
+  );
 
   float *ha = malloc(n * sizeof(float));
   float *hb = malloc(n * sizeof(float));
@@ -277,10 +283,12 @@ static void bench_exp2(int n, int iters) {
   PolyUOp *c = poly_bench_buffer(cpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CPU);
   PolyUOp *ga = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gc = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *sink =
-      poly_sink1(cpu_ctx, poly_store_val(cpu_ctx, c, poly_alu1(cpu_ctx, POLY_OP_EXP2, a)));
-  PolyUOp *gpu_sink =
-      poly_sink1(gpu_ctx, poly_store_val(gpu_ctx, gc, poly_alu1(gpu_ctx, POLY_OP_EXP2, ga)));
+  PolyUOp *sink = poly_uop_sink1(
+      cpu_ctx, poly_uop_store_val(cpu_ctx, c, poly_uop_alu1(cpu_ctx, POLY_OP_EXP2, a))
+  );
+  PolyUOp *gpu_sink = poly_uop_sink1(
+      gpu_ctx, poly_uop_store_val(gpu_ctx, gc, poly_uop_alu1(gpu_ctx, POLY_OP_EXP2, ga))
+  );
 
   float *ha = malloc(n * sizeof(float));
   float *hc = calloc(n, sizeof(float));
@@ -327,11 +335,13 @@ static void bench_reduce_sum(int n, int iters) {
   PolyUOp *ga = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *gc = poly_bench_buffer(gpu_ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
   int64_t axes[] = {0};
-  PolyUOp *sink = poly_sink1(
-      cpu_ctx, poly_store_val(cpu_ctx, c, poly_reduce_axis(cpu_ctx, POLY_OP_ADD, a, axes, 1))
+  PolyUOp *sink = poly_uop_sink1(
+      cpu_ctx,
+      poly_uop_store_val(cpu_ctx, c, poly_uop_reduce_axis(cpu_ctx, POLY_OP_ADD, a, axes, 1))
   );
-  PolyUOp *gpu_sink = poly_sink1(
-      gpu_ctx, poly_store_val(gpu_ctx, gc, poly_reduce_axis(gpu_ctx, POLY_OP_ADD, ga, axes, 1))
+  PolyUOp *gpu_sink = poly_uop_sink1(
+      gpu_ctx,
+      poly_uop_store_val(gpu_ctx, gc, poly_uop_reduce_axis(gpu_ctx, POLY_OP_ADD, ga, axes, 1))
   );
 
   float *ha = malloc(n * sizeof(float));

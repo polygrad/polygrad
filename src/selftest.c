@@ -70,9 +70,9 @@ int poly_selftest_device(PolyDevice device) {
   if (poly_buffer_write(ctx, a, av, sizeof(av)) != 0) goto cleanup;
   if (poly_buffer_write(ctx, b, bv, sizeof(bv)) != 0) goto cleanup;
 
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, out, sum);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, out, sum);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   if (!sum || !store || !sink) goto cleanup;
 
   PolyUOp *linear = poly_linear_effect_sink(ctx, sink, &var_bindings, &n_var_bindings);

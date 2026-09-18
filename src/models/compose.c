@@ -533,7 +533,7 @@ static PolyTensor *apply(
   }
   if (binary) {
     PolyUOp *sources[] = {xu, poly_tensor_uop_physical(inputs[1])}, *broadcast[8];
-    if (poly_broadcast_shape(d->ctx, sources, 2, broadcast, 8) < 0) {
+    if (poly_uop_broadcast_shape(d->ctx, sources, 2, broadcast, 8) < 0) {
       def_error(d, path, "incompatible broadcast dimensions");
       return NULL;
     }
@@ -579,8 +579,7 @@ static PolyTensor *apply(
   } else if (!strcmp(kind, "cast")) {
     PolyDType dt;
     if (!dtype(d, field(spec, "dtype"), &dt, path)) return NULL;
-    out =
-        poly_tensor_cast_by_id(d->ctx, x, poly_dtype_id_by_name(field(spec, "dtype")->valuestring));
+    out = poly_tensor_cast(d->ctx, x, dt);
   } else if (attention) {
     const cJSON *causal = field(spec, "is_causal"), *gqa = field(spec, "enable_gqa");
     if ((causal && !cJSON_IsBool(causal)) || (gqa && !cJSON_IsBool(gqa))) {

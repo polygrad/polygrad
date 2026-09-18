@@ -1,19 +1,682 @@
-/*
- * tensor.h -- Tensor compositions and logical/physical handle boundaries
- *
- * Shared UOp/ElementwiseMixin operators are declared by polygrad.h. This
- * header adds Tensor-level creation, movement, reduction and handle APIs;
- * language argument adaptation belongs to frontend.h.
- */
-
+/* tensor.h -- Tensor ownership and paired physical/logical operations. */
 #ifndef POLY_TENSOR_H
 #define POLY_TENSOR_H
 
-#include "polygrad.h"
+#include "core.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Core frontend tensor handle.
+ *
+ * PolyUOp stays the pure logical value graph. PolyTensor is the C-side value
+ * reference used by frontends. The tensor carries two roots: logical is the
+ * exportable/re-placement expression, while physical is the mandatory current
+ * tinygrad-shaped execution/readback root. poly_tensor_uop() returns physical;
+ * portable export/provenance uses uop_logical explicitly.
+ */
+
+typedef enum {
+  POLY_TENSOR_VALUE = 0,
+  POLY_TENSOR_PLACE = 1,
+  POLY_TENSOR_BARRIER = 2,
+} PolyTensorRole;
+
+typedef enum {
+  POLY_TENSOR_PROVENANCE_UNKNOWN = 0,
+  POLY_TENSOR_PROVENANCE_USER_INPUT = 1,
+  POLY_TENSOR_PROVENANCE_PARAM_INIT = 2,
+  POLY_TENSOR_PROVENANCE_STATE_LOADED = 3,
+  POLY_TENSOR_PROVENANCE_CONST_INIT = 4,
+  POLY_TENSOR_PROVENANCE_COMPUTED = 5,
+} PolyTensorProvenance;
+
+struct PolyTensor {
+  PolyUOp *uop_logical;
+  PolyUOp *uop_physical;
+  PolyLogicalPolicy logical_policy;
+  PolyLogicalState logical_state;
+  PolyTensorRole role;
+  PolyDevice device;
+  uint64_t order;
+  PolyTensor *source;
+  PolyTensorProvenance provenance;
+  /* C mechanics for Tinygrad's weak live-Tensor registry. */
+  PolyCtx *owner_ctx;
+  uint32_t owner_refs;
+  int owner_slot;
+};
+
+PolyTensor *poly_tensor_create_with_roots(
+    PolyCtx *ctx,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+
+/* FFI adaptation for one-operand results whose portable availability follows
+ * the source Tensor independently of the ambient context policy. */
+PolyTensor *poly_tensor_create_result_like(
+    PolyCtx *ctx,
+    PolyTensor *input,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+
+/* Tensor constructors return one owned handle, including identity returns.
+ * Internal accessors and same-object mutators are borrowed. */
+PolyTensor *poly_tensor_retain(PolyTensor *tensor);
+
+void poly_tensor_release(PolyTensor *tensor);
+
+PolyTensor *poly_tensor_empty(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim,
+    PolyDevice device
+);
+
+PolyTensor *poly_tensor_empty_uop(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
+    int ndim,
+    PolyDevice device
+);
+
+/* CreationMixin.empty preserves the complete device identity (e.g. DISK:path). */
+PolyTensor *poly_tensor_empty_uop_name(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    PolyUOp **dims,
+    int ndim,
+    const char *device
+);
+
+PolyTensor *poly_tensor_from_host(
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim
+);
+
+/* Pinned Tensor.manual_seed/Tensor.rand stateful RNG surface. RNG state is
+ * owned by ctx and separated by exact device identity. */
+void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed);
+
+int poly_tensor_replace_roots(
+    PolyCtx *ctx,
+    PolyTensor *tensor,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+
+PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
+
+PolyTensor *poly_tensor_to_device_name(PolyCtx *ctx, PolyTensor *tensor, const char *device);
+
+PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
+
+PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
+
+PolyTensor *poly_tensor_clone(PolyCtx *ctx, PolyTensor *source, PolyDevice device);
+
+int poly_tensor_custom_kernel(
+    PolyCtx *ctx,
+    PolyUOp *body,
+    PolyTensor **inputs,
+    int n_inputs,
+    uint32_t grad_fxn_key,
+    PolyTensor **outputs
+);
+
+/* Build value-producing FUNCTION roots from result Tensors and ordered input
+ * UOps captured before body execution (tinygrad/function.py:43-79). */
+int poly_tensor_function(
+    PolyCtx *ctx,
+    PolyTensor **results,
+    int n_results,
+    PolyUOp **logical_inputs,
+    PolyUOp **physical_inputs,
+    int n_inputs,
+    const char *name,
+    bool allow_implicit,
+    bool precompile,
+    bool precompile_backward,
+    PolyTensor **outputs
+);
+
+PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
+
+PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
+
+PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
+
+/* rounding: 0 true division, 1 truncate, 2 floor; selected after promotion. */
+PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor, int rounding);
+
+PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src);
+
+/* Composed pointwise/loss methods; reduction: 0=none, 1=sum, 2=mean.
+ * Optional weights/ignore_index may be NULL. Scalar arguments are Tensor
+ * handles to preserve their original weak dtype through promotion. */
+PolyTensor *poly_tensor_log10(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_atanh(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_asinh(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_acosh(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_asin(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_acos(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_atan(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_logsigmoid(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_sinh(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_cosh(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_erf(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_softsign(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_isfinite(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_celu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha);
+
+PolyTensor *poly_tensor_selu(PolyCtx *ctx, PolyTensor *x, PolyTensor *alpha, PolyTensor *gamma);
+
+PolyTensor *poly_tensor_copysign(PolyCtx *ctx, PolyTensor *x, PolyTensor *other);
+
+PolyTensor *poly_tensor_lerp(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *end,
+    PolyTensor *weight,
+    bool scalar_weight
+);
+
+PolyTensor *poly_tensor_isclose(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *other,
+    PolyTensor *rtol,
+    PolyTensor *atol,
+    bool equal_nan
+);
+
+PolyTensor *poly_tensor_binary_crossentropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int reduction
+);
+
+/* Cross-entropy follows Tensor.cross_entropy; class axis is explicit in C.
+ * Reduction: 0=none, 1=sum, 2=mean. Weight/ignore_index belong to nll_loss. */
+PolyTensor *poly_tensor_cross_entropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int axis,
+    int reduction,
+    double smoothing
+);
+
+PolyTensor *poly_tensor_mse_loss(PolyCtx *ctx, PolyTensor *x, PolyTensor *target);
+
+PolyTensor *poly_tensor_binary_crossentropy_logits(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    int reduction
+);
+
+PolyTensor *poly_tensor_nll_loss(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    PolyTensor *weight,
+    PolyTensor *ignore_index,
+    int reduction
+);
+
+PolyTensor *poly_tensor_prod(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+
+PolyTensor *poly_tensor_logsumexp(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+
+PolyTensor *poly_tensor_normalize(PolyCtx *ctx, PolyTensor *src, double p, int axis, double eps);
+
+PolyTensor *poly_tensor_logcumsumexp(PolyCtx *ctx, PolyTensor *src, int axis);
+
+PolyTensor *poly_tensor_gelu_exact(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_diag(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_diagonal(PolyCtx *ctx, PolyTensor *src, int64_t offset, int dim1, int dim2);
+
+PolyTensor *poly_tensor_unfold(PolyCtx *ctx, PolyTensor *src, int dim, int64_t size, int64_t step);
+
+PolyTensor *poly_tensor_argmin(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
+
+PolyTensor *poly_tensor_pad_mode(PolyCtx *ctx, PolyTensor *src, int64_t *pairs, int ndim, int mode);
+
+PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_stack(PolyCtx *ctx, PolyTensor **inputs, int n_inputs, int dim);
+
+PolyTensor *poly_tensor_bitwise_not(PolyCtx *ctx, PolyTensor *src);
+
+/* reduction: 0 none, 1 sum, 2 mean, shared with the other loss boundaries. */
+PolyTensor *poly_tensor_sparse_categorical_crossentropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int64_t ignore_index,
+    double smoothing,
+    int reduction
+);
+
+PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_sum(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+
+PolyTensor *poly_tensor_mean(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+);
+
+PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+
+PolyTensor *poly_tensor_min(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+
+PolyTensor *poly_tensor_all(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+
+PolyTensor *poly_tensor_any(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+
+PolyTensor *poly_tensor_cumsum(PolyCtx *ctx, PolyTensor *src, int axis);
+
+PolyTensor *poly_tensor_cumprod(PolyCtx *ctx, PolyTensor *src, int axis);
+
+int poly_tensor_cummax(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int axis,
+    PolyTensor **values,
+    PolyTensor **indices
+);
+
+int poly_tensor_cummin(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int axis,
+    PolyTensor **values,
+    PolyTensor **indices
+);
+
+PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
+
+PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+
+PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight);
+
+int poly_tensor_qr_ex(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int mode,
+    PolyTensor **out_q,
+    PolyTensor **out_r
+);
+
+PolyTensor *poly_tensor_triangular_solve(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    int upper,
+    int transpose_a,
+    int unit_diagonal
+);
+
+PolyTensor *poly_tensor_cholesky(PolyCtx *ctx, PolyTensor *src, int upper);
+
+PolyTensor *poly_tensor_cholesky_solve(PolyCtx *ctx, PolyTensor *chol, PolyTensor *b, int upper);
+
+PolyTensor *poly_tensor_solve(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+
+PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+
+int poly_tensor_sort(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int dim,
+    int descending,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+);
+
+int poly_tensor_topk(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t k,
+    int dim,
+    int largest,
+    int sorted,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+);
+
+PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
+
+PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
+
+PolyTensor *poly_tensor_rope(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *freqs_cos,
+    PolyTensor *freqs_sin
+);
+
+PolyTensor *poly_tensor_const_like_int(PolyCtx *ctx, PolyTensor *ref, int64_t value);
+
+PolyTensor *poly_tensor_const_like_float(PolyCtx *ctx, PolyTensor *ref, double value);
+
+PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
+
+/* Tensor.cat: shared logical/physical construction and runtime-owner validation. */
+PolyTensor *poly_tensor_cat(PolyCtx *ctx, PolyTensor **tensors, int n_tensors, int dim);
+
+PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+
+PolyTensor *poly_tensor_reshape_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
+
+PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+
+PolyTensor *poly_tensor_expand_uop(PolyCtx *ctx, PolyTensor *src, PolyUOp **dims, int ndim);
+
+PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim);
+
+PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim);
+
+PolyTensor *poly_tensor_shrink_uop(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    int ndim
+);
+
+PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes);
+
+PolyTensor *poly_tensor_pad_value_bool(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    bool value
+);
+
+PolyTensor *poly_tensor_pad_value_int(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    int64_t value
+);
+
+PolyTensor *poly_tensor_pad_value_float(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    double value
+);
+
+PolyTensor *poly_tensor_pool(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation
+);
+
+/* Optional indices receives a separately owned Tensor handle. Failure leaves
+ * it NULL; values and indices follow the input's logical-retention policy. */
+PolyTensor *poly_tensor_max_pool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    bool ceil_mode,
+    PolyTensor **indices
+);
+
+PolyTensor *poly_tensor_avg_pool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    bool ceil_mode,
+    bool count_include_pad
+);
+
+PolyTensor *poly_tensor_interpolate(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *size,
+    int n_size,
+    const char *mode,
+    bool align_corners
+);
+
+PolyTensor *poly_tensor_max_unpool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *indices,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    const int64_t *output_size,
+    int n_output
+);
+
+PolyTensor *poly_tensor_conv_transpose2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    const int64_t *output_padding,
+    int n_output_padding
+);
+
+PolyTensor *poly_tensor_conv2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+
+PolyTensor *poly_tensor_batchnorm(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    PolyTensor *mean,
+    PolyTensor *invstd,
+    const int64_t *axes,
+    int n_axes
+);
+
+PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes);
+
+PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
+
+PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
+
+/* OpMixin._getitem's normalized syntax: one row per index, including new
+ * axes; starts/sizes are scalar shape UOps before striding. NORMALIZED means
+ * a host-list index whose negative entries were adjusted before _frompy.
+ * These borrowed call arguments are not retained as another graph format. */
+typedef enum {
+  POLY_INDEX_NONE = 0,
+  POLY_INDEX_INT = 1,
+  POLY_INDEX_SLICE = 2,
+  POLY_INDEX_TENSOR = 3,
+  POLY_INDEX_NORMALIZED = 4
+} PolyIndexKind;
+
+PolyTensor *poly_tensor_getitem(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n
+);
+
+/* Same normalized arguments; success0, invalid-1, conflicting live uses-2,
+ * dtype mismatch-3, weak target-4, unsupported advanced DISK write-5,
+ * incompatible index broadcast-6. */
+int poly_tensor_setitem(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n,
+    PolyTensor *value
+);
+
+PolyTensor *poly_tensor_scatter(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce
+);
+
+PolyTensor *poly_tensor_scatter_reduce(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce,
+    int include_self
+);
+
+PolyTensor *poly_tensor_einsum(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor **tensors,
+    int n_tensors
+);
+
+PolyTensor *poly_tensor_rearrange(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor *tensor,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+);
+
+PolyUOp *poly_tensor_uop(PolyTensor *tensor);
+
+PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
+
+PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
+
+PolyLogicalPolicy poly_tensor_logical_policy(const PolyTensor *tensor);
+
+PolyLogicalState poly_tensor_logical_state(const PolyTensor *tensor);
+
+int poly_tensor_set_logical_policy(PolyCtx *ctx, PolyTensor *tensor, PolyLogicalPolicy policy);
+
+PolyDevice poly_tensor_device(PolyTensor *tensor);
+
+PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
+
+void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
+
+int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
+
+int poly_realize_tensors_ex(
+    PolyCtx *ctx,
+    PolyTensor **inputs,
+    int n,
+    PolyTensor **outputs,
+    bool update_stats
+);
 
 /* C-only publication of already-built Tensor.assign effects. Shares view
  * alias retargeting with optimizer batches; does not realize or place roots. */
@@ -28,6 +691,7 @@ PolyTensor *poly_tensor_assign_after(
  * operands remain mandatory; this controls only the independent portable
  * result and propagates NEVER/UNSUPPORTED operand state. */
 int poly_tensor_result_builds_logical(PolyCtx *ctx, PolyTensor *const *inputs, int n_inputs);
+
 PolyTensor *poly_tensor_create_result(
     PolyCtx *ctx,
     PolyTensor *const *inputs,
@@ -71,7 +735,9 @@ int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int
  * two owned handles and a device, or -1 at end (failure poisons the capture).
  * No materialization of STORE effects, nested capture or seed reset is allowed. */
 typedef struct PolyTensorCapture PolyTensorCapture;
+
 PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx);
+
 int poly_tensor_capture_wrap(
     PolyTensorCapture *capture,
     PolyTensor **states,
@@ -81,63 +747,17 @@ int poly_tensor_capture_wrap(
     int n_outputs,
     PolyTensor **wrapped
 );
+
 int poly_tensor_capture_rng(
     PolyTensorCapture *capture,
     int index,
     PolyTensor **seed,
     PolyTensor **counter
 );
+
 void poly_tensor_capture_end(PolyTensorCapture *capture);
+
 bool poly_tensor_capture_allows_realize(PolyCtx *ctx, PolyTensor **inputs, int n);
-
-/* Full-buffer STORE effect for optimizer/direct core SINKs.
- * Tensor.assign itself still uses tinygrad's current-value shape:
- * AFTER(target, STORE(target, value)). Direct effect SINKs already sequence
- * stores explicitly, so they should contain STORE(target, value) entries.
- * Movement views are normalized to their base buffer for whole-storage updates. */
-PolyUOp *poly_store_buffer_update(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
-
-/* Movement-op helpers (port of tinygrad mixin/movement.py) */
-
-/* Tensor.repeat -- movement.py:465. n_repeats >= input ndim. */
-PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x, const int64_t *repeats, int n_repeats);
-
-/* Tensor.shrink_to -- movement.py:168. ends[i] == -1 means no-op (keep dim). */
-PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x, const int64_t *ends, int n_ends);
-
-/* Tensor.cat -- tensor.py:1364. Concatenate tensors along `dim`.
- * All tensors must have identical shape except along `dim`. */
-PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim);
-
-/* Tensor._pad_circular -- tensor.py:1075. Circular (wrap-around) padding.
- * Negative pads not supported. Each pad must be <= corresponding dim size. */
-PolyUOp *poly_pad_circular(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
-
-/* Tensor._pad_reflect_replicate (mode="reflect") -- tensor.py:1081.
- * Reflect padding without repeating the edge. Each pad must be < dim size. */
-PolyUOp *poly_pad_reflect(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
-
-/* Tensor._pad_reflect_replicate (mode="replicate") -- tensor.py:1081.
- * Replicate (edge-extend) padding. Repeats the boundary element. */
-PolyUOp *poly_pad_replicate(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
-
-/* Tensor._cumalu -- tensor.py:2048. Cumulative reduction along `axis`.
- * Supports POLY_OP_ADD, POLY_OP_MAX, POLY_OP_MUL (uses poly_pad_value with
- * the operator's identity element). include_initial=true uses negative pad
- * on the right (tinygrad parity). */
-PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op);
-PolyUOp *poly_split_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op);
-
-/* Broadcasting (matches tinygrad's _broadcasted) */
-
-/* Broadcast a UOp to a target shape via reshape + expand.
- * Equivalent to tinygrad's _broadcast_to: left-pad dims with 1, then expand. */
-PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim);
-
-/* Broadcast two UOps to a common shape (tinygrad's _broadcasted).
- * Returns the broadcast shape via out_shape/out_ndim. Returns false on
- * incompatible shapes. */
-bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b, int64_t *out_shape, int *out_ndim);
 
 /* Find a live PolyTensor representative for this storage identity, preferring
  * trainable/state metadata over anonymous aliases. This is for instance/export
@@ -156,222 +776,64 @@ PolyTensor *poly_tensor_full_from_value(
     bool buffer
 );
 
-/* Tensor.dot(dtype=): widen the reduction, not the multiplied operands. */
-PolyUOp *poly_dot_dtype(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const PolyDType *dtype);
-
-/* Tensor losses compose shared elementwise graphs and reductions. */
-PolyUOp *poly_binary_crossentropy(PolyCtx *ctx, PolyUOp *x, PolyUOp *target, int reduction);
-PolyUOp *poly_binary_crossentropy_logits(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    PolyUOp *target,
-    PolyUOp *weight,
-    int reduction
-);
-PolyUOp *poly_nll_loss(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    PolyUOp *target,
-    PolyUOp *weight,
-    PolyUOp *ignore_index,
-    int reduction
-);
-
 /* Paired Tensor boundaries for composed activations. These apply the exact
  * raw tinygrad-shaped program independently to retained logical and current
  * physical roots. */
 PolyTensor *poly_tensor_relu(PolyCtx *ctx, PolyTensor *src);
+
 PolyTensor *poly_tensor_sigmoid(PolyCtx *ctx, PolyTensor *src);
+
 PolyTensor *poly_tensor_tanh(PolyCtx *ctx, PolyTensor *src);
+
 PolyTensor *poly_tensor_silu(PolyCtx *ctx, PolyTensor *src);
 
-/* Deterministic RNG helpers (stateless seed -> tensor). */
-PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
-PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
-PolyUOp *poly_rand_dtype(
+/* Typed dtype options; ID conversion belongs to frontend.h. */
+PolyTensor *poly_tensor_sum_dtype(
     PolyCtx *ctx,
-    const int64_t *shape,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    const PolyDType *dtype
+);
+PolyTensor *poly_tensor_dot_dtype(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    const PolyDType *dtype
+);
+PolyTensor *poly_tensor_conv2d_dtype(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    const PolyDType *dtype
+);
+PolyTensor *poly_tensor_cast(PolyCtx *ctx, PolyTensor *src, PolyDType dtype);
+PolyTensor *poly_tensor_bitcast(PolyCtx *ctx, PolyTensor *src, PolyDType dtype);
+PolyTensor *poly_tensor_rand(
+    PolyCtx *ctx,
+    const int64_t *dims,
     int ndim,
-    uint64_t seed,
-    PolyDType supplied_dtype
+    PolyDType dtype,
+    PolyDevice device,
+    int contiguous
 );
-PolyUOp *poly_randn_dtype(
+PolyTensor *poly_tensor_randn(
     PolyCtx *ctx,
-    const int64_t *shape,
+    const int64_t *dims,
     int ndim,
-    uint64_t seed,
-    PolyDType supplied_dtype
+    PolyDType dtype,
+    PolyDevice device
 );
-
-/* Creation helpers (constant-backed tensors). */
-PolyUOp *poly_full_invalid_dtype(
-    PolyCtx *ctx,
-    const int64_t *shape,
-    int ndim,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step);
-PolyUOp *poly_eye(PolyCtx *ctx, int64_t n);
-PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps);
-PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
-PolyUOp *poly_const_int_dtype(PolyCtx *ctx, int64_t value, PolyDType supplied_dtype);
-PolyUOp *poly_const_uint_dtype(PolyCtx *ctx, uint64_t value, PolyDType supplied_dtype);
-PolyUOp *poly_full_uint_dtype(
-    PolyCtx *ctx,
-    const int64_t *shape,
-    int ndim,
-    uint64_t value,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_const_float_dtype(PolyCtx *ctx, double value, PolyDType supplied_dtype);
-PolyUOp *poly_full_int_dtype(
-    PolyCtx *ctx,
-    const int64_t *shape,
-    int ndim,
-    int64_t fill_value,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_full_float_dtype(
-    PolyCtx *ctx,
-    const int64_t *shape,
-    int ndim,
-    double fill_value,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_arange_int_dtype(
-    PolyCtx *ctx,
-    int64_t start,
-    int64_t stop,
-    int64_t step,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_arange_float_dtype(
-    PolyCtx *ctx,
-    double start,
-    double stop,
-    double step,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_linspace_dtype(
-    PolyCtx *ctx,
-    double start,
-    double stop,
-    int64_t steps,
-    PolyDType supplied_dtype
-);
-PolyUOp *poly_eye_dtype(PolyCtx *ctx, int64_t n, int64_t m, PolyDType supplied_dtype);
-PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);
-PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal);
-PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper);
-PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper);
-PolyUOp *poly_triangular_solve(
-    PolyCtx *ctx,
-    PolyUOp *a,
-    PolyUOp *b,
-    int upper,
-    int transpose_a,
-    int unit_diagonal
-);
-
-/* Shape-aware composed ops (shape read from UOp) */
-
-PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_mean_axes(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim);
-PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction);
-PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-
-PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
-PolyUOp *poly_newton_schulz(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    int steps,
-    const double *coefficients,
-    int n_coefficients,
-    double eps
-);
-#define POLY_QR_COMPLETE 0
-#define POLY_QR_REDUCED 1
-#define POLY_QR_R_ONLY 2
-int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r);
-int poly_qr_ex(PolyCtx *ctx, PolyUOp *x, int mode, PolyUOp **out_q, PolyUOp **out_r);
-PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-
-PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
-PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
-PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
-
-/* Tinygrad-style sort/topk composed helpers.
- * Return 0 on success and populate both outputs. */
-int poly_sort(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    int dim,
-    int descending,
-    PolyUOp **out_values,
-    PolyUOp **out_indices
-);
-PolyUOp *poly_argsort(PolyCtx *ctx, PolyUOp *x, int dim, int descending);
-int poly_topk(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    int64_t k,
-    int dim,
-    int largest,
-    int sorted,
-    PolyUOp **out_values,
-    PolyUOp **out_indices
-);
-
-/* Einsum */
-
-PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n_tensors);
-
-/* Rearrange (einops) */
-
-PolyUOp *poly_rearrange(
-    PolyCtx *ctx,
-    const char *formula,
-    PolyUOp *x,
-    const char *axis_names,
-    const int64_t *axis_values,
-    int n_axis_sizes
-);
-
-/* Gather (embedding lookup) */
-
-PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
-PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
-PolyUOp *poly_scatter(
-    PolyCtx *ctx,
-    PolyUOp *self,
-    int dim,
-    PolyUOp *index,
-    PolyUOp *src,
-    const char *reduce
-);
-PolyUOp *poly_scatter_reduce(
-    PolyCtx *ctx,
-    PolyUOp *self,
-    int dim,
-    PolyUOp *index,
-    PolyUOp *src,
-    const char *reduce,
-    int include_self
-);
-
-/* Additional composed ops */
-
-PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
-PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
-PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
-PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* POLY_TENSOR_H */
+#endif

@@ -71,17 +71,17 @@ static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
   if (n_ordinary > 0) {
     PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, ordinary, n_ordinary, poly_arg_none());
     int n_topo = 0;
-    PolyUOp **topo = sink ? poly_toposort_alloc(ctx, sink, &n_topo) : NULL;
+    PolyUOp **topo = sink ? poly_uop_toposort_alloc(ctx, sink, &n_topo) : NULL;
     flat = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*flat)) : NULL;
     if (!topo || n_topo <= 0 || !flat) {
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       free(flat);
       free(ordinary);
       free(backedge);
       return NULL;
     }
     n_flat = poly_uop_ranges(ctx, sink, flat, n_topo);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     if (n_flat < 0) {
       free(flat);
       free(ordinary);
@@ -138,16 +138,16 @@ PolyPatternMatcher *poly_pm_flatten_range(void) {
 
 static int count_divmod(PolyCtx *ctx, PolyUOp *u) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, u, &n_topo);
   if (!topo || n_topo <= 0) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return -1;
   }
   int n = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_FLOORDIV || topo[i]->op == POLY_OP_FLOORMOD) n++;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return n;
 }
 
@@ -192,9 +192,9 @@ static PolyUOp *simplify_merge_adjacent(PolyCtx *ctx, PolyUOp *root, const PolyB
   if (best_cost < 0) return NULL;
   int n_rng = root->n_src - off;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n_topo);
   if (!topo || n_topo <= 0) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
   for (int i = 0; i < n_rng; i++) {
@@ -222,7 +222,7 @@ static PolyUOp *simplify_merge_adjacent(PolyCtx *ctx, PolyUOp *root, const PolyB
       }
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return (best != root) ? best : NULL;
 }
 
@@ -327,17 +327,17 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   }
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, range_source, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, range_source, &n_topo);
   if (!topo || n_topo <= 0) {
     range_ctx_fail(state);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     poly_map_destroy(guards);
     return NULL;
   }
   PolyUOp **ranges = n_topo > 0 ? malloc((size_t)n_topo * sizeof(*ranges)) : NULL;
   if (!ranges) {
     range_ctx_fail(state);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     poly_map_destroy(guards);
     return NULL;
   }
@@ -345,7 +345,7 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   if (n_ranges < 0) {
     range_ctx_fail(state);
     free(ranges);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     poly_map_destroy(guards);
     return NULL;
   }
@@ -355,7 +355,7 @@ static PolyUOp *mark_gated(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
     if (!range_ctx_get(guards, ranges[i]) && ranges[i]->n_src > 0)
       range_ctx_set(state, ranges[i], ranges[i]->src[0]);
   free(ranges);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   poly_map_destroy(guards);
   return NULL;
 }
@@ -548,7 +548,7 @@ static bool is_external_leaf(PolyUOp *u) {
 /* CONST in a target dtype, value taken as a double and re-encoded into the
  * arg kind matching the dtype. Sole reason for existing: ensures we never
  * construct a CONST with mismatched dtype/arg.kind (the bug fixed in
- * upat.c:poly_const_like). */
+ * upat.c:poly_uop_const_like). */
 static PolyUOp *typed_const(PolyCtx *ctx, PolyDType dt, double v) {
   if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(v));
   if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(v != 0.0));
@@ -610,7 +610,7 @@ static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings
       PolyUOp *count = unparented[i]->src[0];
       /* Pinned reduce_unparented multiplies by the original weak count.
        * Converting it through double loses integers above 2^53. */
-      ret = poly_binop(ctx, comb, ret, count);
+      ret = poly_uop_binop(ctx, comb, ret, count);
     }
   }
   /* MAX: drop unparented ranges with no multiplier */
@@ -649,14 +649,14 @@ static PolyUOp *rule_collapse_lift_add_from_cmplt(
   /* or_casted: also accept CAST(ADD(x,y)) on lhs */
   if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  if (!poly_no_range(ctx, c)) return NULL;
+  if (!poly_uop_no_range(ctx, c)) return NULL;
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *x = lhs->src[swap];
     PolyUOp *y = lhs->src[swap ^ 1];
     /* UPat builds ADD as commutative and tries both source permutations.
      * Mirror that here so the range-bearing term can be either side. */
-    if (!poly_no_range(ctx, y)) continue;
-    PolyUOp *rhs_new = poly_sub(ctx, c, y);
+    if (!poly_uop_no_range(ctx, y)) continue;
+    PolyUOp *rhs_new = poly_uop_sub(ctx, c, y);
     return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs_new, poly_arg_none());
   }
   return NULL;
@@ -674,20 +674,20 @@ static PolyUOp *rule_collapse_lift_mul_from_cmplt(
   PolyUOp *lhs = cmplt->src[0];
   PolyUOp *c = cmplt->src[1];
   if (lhs->op != POLY_OP_MUL || lhs->n_src != 2) return NULL;
-  if (!poly_no_range(ctx, c)) return NULL;
+  if (!poly_uop_no_range(ctx, c)) return NULL;
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *x = lhs->src[swap];
     PolyUOp *y = lhs->src[swap ^ 1];
     /* Tinygrad's commutative UPat tries both x/y bindings for MUL. */
-    if (!poly_no_range(ctx, y)) continue;
+    if (!poly_uop_no_range(ctx, y)) continue;
     if (!poly_dtype_is_int(y->dtype)) continue;
     int64_t y_vmin, y_vmax;
     poly_uop_minmax(ctx, y, &y_vmin, &y_vmax);
     if (y_vmin <= 0) continue;
     /* x < ((c + y - 1) // y) */
-    PolyUOp *cy1 = poly_add(ctx, c, y);
-    PolyUOp *cy1m1 = poly_sub(ctx, cy1, poly_const_like_int(ctx, cy1, 1));
-    PolyUOp *div = poly_binop(ctx, POLY_OP_FLOORDIV, cy1m1, y);
+    PolyUOp *cy1 = poly_uop_add(ctx, c, y);
+    PolyUOp *cy1m1 = poly_uop_sub(ctx, cy1, poly_uop_const_like_int(ctx, cy1, 1));
+    PolyUOp *div = poly_uop_binop(ctx, POLY_OP_FLOORDIV, cy1m1, y);
     return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, div, poly_arg_none());
   }
   return NULL;
@@ -721,9 +721,10 @@ static bool match_where_cmplt_reduce(
 /* Pinned interval count: clamp in the count domain, then use ordinary
  * multiplication. Forcing counts through a value dtype can lose integers. */
 static PolyUOp *build_count_mul_val(PolyCtx *ctx, PolyUOp *N, PolyUOp *r, PolyUOp *val) {
-  PolyUOp *clamped =
-      poly_minimum(ctx, poly_maximum(ctx, N, poly_const_like_int(ctx, N, 0)), r->src[0]);
-  return poly_mul(ctx, clamped, val);
+  PolyUOp *clamped = poly_uop_minimum(
+      ctx, poly_uop_maximum(ctx, N, poly_uop_const_like_int(ctx, N, 0)), r->src[0]
+  );
+  return poly_uop_mul(ctx, clamped, val);
 }
 
 /* Rule 3: fold_range_below
@@ -738,8 +739,10 @@ static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red, const
   /* tval must be CONST(0); val = fval */
   if (!is_zero_const(tval)) return NULL;
   PolyUOp *val = fval;
-  if (!poly_no_range(ctx, val)) return NULL;
-  PolyUOp *N = poly_sub(ctx, r->src[0], poly_maximum(ctx, cut, poly_const_like_int(ctx, cut, 0)));
+  if (!poly_uop_no_range(ctx, val)) return NULL;
+  PolyUOp *N = poly_uop_sub(
+      ctx, r->src[0], poly_uop_maximum(ctx, cut, poly_uop_const_like_int(ctx, cut, 0))
+  );
   return build_count_mul_val(ctx, N, r, val);
 }
 
@@ -755,8 +758,9 @@ static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red, const
   /* fval must be CONST(0); val = tval */
   if (!is_zero_const(fval)) return NULL;
   PolyUOp *val = tval;
-  if (!poly_no_range(ctx, val)) return NULL;
-  PolyUOp *N = poly_sub(ctx, poly_minimum(ctx, cut, r->src[0]), poly_const_like_int(ctx, r, 0));
+  if (!poly_uop_no_range(ctx, val)) return NULL;
+  PolyUOp *N =
+      poly_uop_sub(ctx, poly_uop_minimum(ctx, cut, r->src[0]), poly_uop_const_like_int(ctx, r, 0));
   return build_count_mul_val(ctx, N, r, val);
 }
 
@@ -805,10 +809,10 @@ static PolyUOp *rule_collapse_fold_range_two_sided(
     }
   }
   if (!lower || !upper) return NULL;
-  if (!poly_no_range(ctx, val)) return NULL;
-  PolyUOp *N = poly_sub(
-      ctx, poly_minimum(ctx, upper, r->src[0]),
-      poly_maximum(ctx, lower, poly_const_like_int(ctx, lower, 0))
+  if (!poly_uop_no_range(ctx, val)) return NULL;
+  PolyUOp *N = poly_uop_sub(
+      ctx, poly_uop_minimum(ctx, upper, r->src[0]),
+      poly_uop_maximum(ctx, lower, poly_uop_const_like_int(ctx, lower, 0))
   );
   return build_count_mul_val(ctx, N, r, val);
 }
@@ -834,7 +838,7 @@ static PolyUOp *rule_collapse_invalid_guard(PolyCtx *ctx, PolyUOp *red, const Po
   if (!is_add_reduce(red) || red->n_src < 1) return NULL;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_WHERE || value->n_src != 3 || value->src[2]->op != POLY_OP_CONST ||
-      value->src[2]->arg.kind != POLY_ARG_INVALID || !poly_no_range(ctx, value->src[0]))
+      value->src[2]->arg.kind != POLY_ARG_INVALID || !poly_uop_no_range(ctx, value->src[0]))
     return NULL;
   PolyUOp *reduced = collapse_reduce_value(ctx, red, value->src[1]);
   return reduced ? poly_uop3(
@@ -860,7 +864,7 @@ static PolyUOp *rule_collapse_reduce_add_distribute(
   PolyUOp *y = value->src[1];
   PolyUOp *xred = collapse_reduce_value(ctx, red, x);
   PolyUOp *yred = collapse_reduce_value(ctx, red, y);
-  return xred && yred ? poly_add(ctx, xred, yred) : NULL;
+  return xred && yred ? poly_uop_add(ctx, xred, yred) : NULL;
 }
 
 /* Rule 7: and_on_where
@@ -891,7 +895,7 @@ static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const Pol
   /* New WHERE: y.where(c, fval) */
   PolyUOp *new_where = poly_uop3(ctx, POLY_OP_WHERE, where->dtype, y, c, fval, poly_arg_none());
   PolyUOp *new_red = collapse_reduce_value(ctx, red, new_where);
-  return new_red ? poly_mul(ctx, new_red, x) : NULL;
+  return new_red ? poly_uop_mul(ctx, new_red, x) : NULL;
 }
 
 /* Rule 8: mul_casted_bool
@@ -1047,9 +1051,9 @@ static PolyUOp *reduce_collapse(PolyCtx *ctx, PolyUOp *red, PolyUOp *u, PolyPatt
     if (dbg)
       fprintf(
           stderr, "  [reduce_collapse] n_repl=%d sink_op=%s no_range=%d\n", n_repl,
-          poly_op_name(sink->op), (int)poly_no_range_ex(ctx, sink, cache)
+          poly_op_name(sink->op), (int)poly_uop_no_range_ex(ctx, sink, cache)
       );
-    if (!poly_no_range_ex(ctx, sink, cache)) goto fail;
+    if (!poly_uop_no_range_ex(ctx, sink, cache)) goto fail;
     /* Substitute the original external expressions back after collapse. */
     u = collapse_substitute(ctx, sink, to_arr, from_arr, n_repl);
     if (!u) goto fail;
@@ -1160,14 +1164,14 @@ static PolyUOp *rule_lift_add_from_cmpne(PolyCtx *ctx, PolyUOp *cmpne, const Pol
   PolyUOp *c = cmpne->src[1];
   if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  if (!poly_no_range(ctx, c)) return NULL;
+  if (!poly_uop_no_range(ctx, c)) return NULL;
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *x = lhs->src[swap];
     PolyUOp *y = lhs->src[swap ^ 1];
     /* Same commutative UPat permutation behavior as tinygrad's load-collapse
      * `(x+y) != c` rule. */
-    if (!poly_no_range(ctx, y)) continue;
-    PolyUOp *rhs = poly_sub(ctx, poly_cast(ctx, c, y->dtype), y);
+    if (!poly_uop_no_range(ctx, y)) continue;
+    PolyUOp *rhs = poly_uop_sub(ctx, poly_uop_cast(ctx, c, y->dtype), y);
     return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
   }
   return NULL;
@@ -1195,7 +1199,7 @@ static PolyUOp *rule_reduce_gated_load_collapse(PolyCtx *ctx, PolyUOp *red, cons
   else
     return NULL;
 
-  PolyUOp *idx_cast = poly_cast(ctx, idx, r->dtype);
+  PolyUOp *idx_cast = poly_uop_cast(ctx, idx, r->dtype);
   PolyUOp *zero = typed_const(ctx, r->dtype, 0);
   PolyUOp *true_const = typed_const(ctx, POLY_BOOL, 1);
   PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, idx_cast, zero, poly_arg_none());
@@ -1264,7 +1268,7 @@ static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
 /* C traversal can fail: neither absence nor presence is then established. */
 static int no_load(PolyCtx *ctx, PolyUOp *u) {
   int n = 0;
-  PolyUOp **topo = simplify_operation_allowed() ? poly_toposort_alloc(ctx, u, &n) : NULL;
+  PolyUOp **topo = simplify_operation_allowed() ? poly_uop_toposort_alloc(ctx, u, &n) : NULL;
   if (!topo) return -1;
   bool ret = true;
   for (int i = 0; i < n; i++)
@@ -1272,7 +1276,7 @@ static int no_load(PolyCtx *ctx, PolyUOp *u) {
       ret = false;
       break;
     }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ret;
 }
 
@@ -1289,7 +1293,7 @@ static PolyUOp *undo_loaded_index_math(PolyCtx *ctx, PolyUOp *cmplt, const PolyB
      * across a fixed-width comparison would change overflow semantics. */
     if (!poly_dtype_eq(x->dtype, POLY_WEAKINT) || no_load(ctx, x) != 0 || no_load(ctx, y) != 1)
       continue;
-    return poly_alu2(ctx, POLY_OP_CMPLT, x, poly_sub(ctx, c, y));
+    return poly_uop_alu2(ctx, POLY_OP_CMPLT, x, poly_uop_sub(ctx, c, y));
   }
   return NULL;
 }

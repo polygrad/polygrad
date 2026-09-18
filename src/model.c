@@ -94,11 +94,11 @@ static PolyUOp *model_storage_view(
     PolyUOp **dims,
     int ndim
 ) {
-  PolyUOp *view = poly_reshape(ctx, buffer, (int64_t *)capacity, ndim);
+  PolyUOp *view = poly_uop_reshape(ctx, buffer, (int64_t *)capacity, ndim);
   PolyUOp *starts[POLY_IR_MAX_DIMS];
   for (int i = 0; i < ndim; i++)
     starts[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
-  return view ? poly_shrink_uop(ctx, view, starts, dims, ndim) : NULL;
+  return view ? poly_uop_shrink_symbolic(ctx, view, starts, dims, ndim) : NULL;
 }
 
 static PolyUOp *model_concrete_view(PolyCtx *ctx, const NamedBuf *b, const int64_t *shape) {
@@ -1496,9 +1496,9 @@ static PolyStatus snapshot_build_named_value(PolyModel *inst, BuildBinding *bind
    * publishing callify's becomes-map to any live Tensor. */
   if (!binding->initial_data_buffer && numel > 0) {
     int64_t flat[] = {numel};
-    PolyUOp *flat_value = poly_reshape(inst->ctx, binding->declared_physical_value, flat, 1);
-    PolyUOp *store = flat_value ? poly_store_val(inst->ctx, physical_buffer, flat_value) : NULL;
-    PolyUOp *sink = store ? poly_sink1(inst->ctx, store) : NULL;
+    PolyUOp *flat_value = poly_uop_reshape(inst->ctx, binding->declared_physical_value, flat, 1);
+    PolyUOp *store = flat_value ? poly_uop_store_val(inst->ctx, physical_buffer, flat_value) : NULL;
+    PolyUOp *sink = store ? poly_uop_sink1(inst->ctx, store) : NULL;
     if (!sink || poly_realize_sink(inst->ctx, sink) != 0) return POLY_STATUS_ERROR;
     binding->initial_data_buffer = physical_buffer;
   }
@@ -1637,8 +1637,9 @@ static PolyStatus validate_build_reachable_storage(PolyModel *inst) {
 
     BuildNamedValueGate gate = {build};
     int n_topo = 0;
-    PolyUOp **topo =
-        poly_toposort_ex_user_alloc(inst->ctx, root, &n_topo, build_named_value_gate, &gate, false);
+    PolyUOp **topo = poly_uop_toposort_ex_user_alloc(
+        inst->ctx, root, &n_topo, build_named_value_gate, &gate, false
+    );
     if (!topo && n_topo != 0) {
       poly_model_set_error(
           inst, POLY_STATUS_ERROR, __func__, "failed to walk output '%s' graph", out->name
@@ -1655,7 +1656,7 @@ static PolyStatus validate_build_reachable_storage(PolyModel *inst) {
       PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);
       if (leaf_tensor && poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_UNKNOWN &&
           poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_CONST_INIT) {
-        poly_toposort_free(topo);
+        poly_uop_toposort_free(topo);
         poly_model_set_error(
             inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound %s storage %s",
             out->name,
@@ -1665,14 +1666,14 @@ static PolyStatus validate_build_reachable_storage(PolyModel *inst) {
         );
         return POLY_STATUS_INVALID;
       }
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       poly_model_set_error(
           inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound storage %s",
           out->name, poly_op_name(u->op)
       );
       return POLY_STATUS_INVALID;
     }
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
   }
   return POLY_STATUS_OK;
 }
@@ -1856,12 +1857,12 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
       int64_t numel = poly_shape_numel_checked(out->shape, out->ndim);
       if (out->buffer->op == POLY_OP_BUFFER && !(out->ndim == 1 && out->shape[0] == numel)) {
         int64_t flat[] = {numel};
-        logical_value = poly_reshape(inst->ctx, logical_value, flat, 1);
+        logical_value = poly_uop_reshape(inst->ctx, logical_value, flat, 1);
       }
-      logical_stores[j] = poly_store_val(inst->ctx, out->buffer, logical_value);
+      logical_stores[j] = poly_uop_store_val(inst->ctx, out->buffer, logical_value);
     }
     eps[i].name = ep->name;
-    eps[i].sink = poly_sink_n(inst->ctx, logical_stores, n_stores);
+    eps[i].sink = poly_uop_sink_n(inst->ctx, logical_stores, n_stores);
     eps[i].inputs = (const char **)ep->inputs;
     eps[i].n_inputs = ep->n_inputs;
     eps[i].outputs = (const char **)ep->outputs;
@@ -2617,9 +2618,9 @@ static bool model_closed_initializer_op(PolyOps op) {
 static bool model_closed_initializer_graph(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_user_alloc(ctx, root, &n_topo, NULL, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_user_alloc(ctx, root, &n_topo, NULL, NULL, false);
   if (!topo || n_topo <= 0) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return false;
   }
   bool valid = true;
@@ -2628,7 +2629,7 @@ static bool model_closed_initializer_graph(PolyCtx *ctx, PolyUOp *root) {
       valid = false;
       break;
     }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return valid;
 }
 
@@ -2696,13 +2697,13 @@ static int model_initialize_closed_computed_state(PolyModel *inst, PolyDevice de
                           : NULL;
     if (!buffer || poly_uop_retain(inst->ctx, buffer) != 0) goto cleanup;
     realized[i] = buffer;
-    PolyUOp *value = poly_reshape(inst->ctx, placed[i], flat, 1);
-    PolyUOp *store = value ? poly_store_val(inst->ctx, buffer, value) : NULL;
+    PolyUOp *value = poly_uop_reshape(inst->ctx, placed[i], flat, 1);
+    PolyUOp *store = value ? poly_uop_store_val(inst->ctx, buffer, value) : NULL;
     if (!store) goto cleanup;
     roots[n_stores++] = store;
   }
   if (n_stores > 0) {
-    PolyUOp *sink = poly_sink_n(inst->ctx, roots, n_stores);
+    PolyUOp *sink = poly_uop_sink_n(inst->ctx, roots, n_stores);
     if (!sink || poly_realize_sink(inst->ctx, sink) != 0) goto cleanup;
   }
 
@@ -3905,7 +3906,7 @@ static PolyUOp *model_binding_source(PolyCtx *ctx, const NamedBuf *binding) {
 static PolyUOp *model_shaped_storage(PolyCtx *ctx, const NamedBuf *binding, PolyUOp *buffer) {
   if (!ctx || !binding || !buffer) return NULL;
   if (binding->ndim == 1 && binding->shape[0] == binding->numel) return buffer;
-  return poly_reshape(ctx, buffer, (int64_t *)binding->shape, binding->ndim);
+  return poly_uop_reshape(ctx, buffer, (int64_t *)binding->shape, binding->ndim);
 }
 
 static bool model_effect_gate(PolyUOp *u) {
@@ -3914,7 +3915,7 @@ static bool model_effect_gate(PolyUOp *u) {
 
 static bool model_portable_effects_valid(PolyModel *inst, PolyUOp *root) {
   int n = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(inst->ctx, root, &n, model_effect_gate, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(inst->ctx, root, &n, model_effect_gate, false);
   if (!topo) return false;
   bool valid = true;
   for (int i = 0; i < n && valid; i++) {
@@ -3995,7 +3996,7 @@ fail:
 
 static PolyUOp *model_binding_on_device_uop(PolyCtx *ctx, PolyUOp *logical, PolyUOp *device_uop) {
   if (!ctx || !model_is_portable_buffer(logical) ||
-      !poly_device_can_execute(poly_device_from_device_uop(device_uop)))
+      !poly_device_can_execute(poly_uop_device_from_device_uop(device_uop)))
     return NULL;
   /* Polygrad's portable binding owns the slot. Current UOp.new_buffer creates
    * the physical one-source BUFFER (uop/ops.py:811-817). */
@@ -4066,7 +4067,7 @@ static int model_publish_placement(
 
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target_bindings[i], NULL);
-    PolyDevice backend = poly_device_from_device_uop(device_uop);
+    PolyDevice backend = poly_uop_device_from_device_uop(device_uop);
     if (!device_uop || device_uop->arg.kind != POLY_ARG_STRING || !model_backend_available(backend))
       goto cleanup;
     target_existed[i] = poly_buffer_get(inst->ctx, target_bindings[i]) != NULL;
@@ -4100,7 +4101,7 @@ static int model_publish_placement(
     PolyUOp *old = inst->bufs[i].buffer;
     PolyUOp *target = target_bindings[i];
     PolyUOp *device_uop = poly_uop_device_uop_cached(inst->ctx, target, NULL);
-    PolyDevice backend = poly_device_from_device_uop(device_uop);
+    PolyDevice backend = poly_uop_device_from_device_uop(device_uop);
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (nbytes > 0 && target != old) {
       if (poly_buffer_ensure_device_allocated(inst->ctx, target, backend) != 0 ||
@@ -4139,7 +4140,7 @@ cleanup:
 }
 
 static int model_place_uniform_device(PolyModel *inst, PolyUOp *device_uop, bool set_preferred) {
-  PolyDevice device = poly_device_from_device_uop(device_uop);
+  PolyDevice device = poly_uop_device_from_device_uop(device_uop);
   if (!inst || !inst->ctx || inst->n_bufs <= 0 || inst->n_entrypoints <= 0 ||
       !poly_device_can_execute(device))
     return -1;
@@ -4290,7 +4291,7 @@ int poly_model_set_device_map_arrays(
 static int model_set_device_uop(PolyModel *inst, PolyUOp *device) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source) return -1;
   if (!device || !poly_uop_explicit_devices_supported(inst->ctx, device)) return -1;
-  PolyDevice resolved = poly_device_from_device_uop(device);
+  PolyDevice resolved = poly_uop_device_from_device_uop(device);
 
   /* Validate: backend must exist for this build */
   const PolyBackendDesc *backend = poly_backend_get(resolved);
@@ -4373,7 +4374,7 @@ static PolyTensor *model_result_storage(
 
 static int model_run_copies(PolyCtx *ctx, PolyUOp **stores, int n) {
   if (!n) return 0;
-  PolyUOp *sink = poly_sink_n(ctx, stores, n);
+  PolyUOp *sink = poly_uop_sink_n(ctx, stores, n);
   return sink ? poly_realize_sink(ctx, sink) : -1;
 }
 
@@ -4396,7 +4397,7 @@ static bool model_bound_dim(
 ) {
   if (poly_uop_const_i64(dim, value) == 0) return true;
   int n = 0, count = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, dim, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, dim, &n);
   PolyUOp **from = n > 0 ? calloc((size_t)n, sizeof(*from)) : NULL;
   PolyUOp **to = n > 0 ? calloc((size_t)n, sizeof(*to)) : NULL;
   bool ok = topo && from && to;
@@ -4423,7 +4424,7 @@ static bool model_bound_dim(
   }
   free(to);
   free(from);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ok;
 }
 
@@ -4714,7 +4715,8 @@ static int prepare_model_io(
     NamedBuf *b = &inst->bufs[bi];
     snapshots[ti] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
     if (!snapshots[ti]) goto cleanup;
-    stores[ti] = poly_store_val(inst->ctx, snapshots[ti]->uop_physical, io[i].tensor->uop_physical);
+    stores[ti] =
+        poly_uop_store_val(inst->ctx, snapshots[ti]->uop_physical, io[i].tensor->uop_physical);
     if (!stores[ti++]) goto cleanup;
   }
   if (model_run_copies(inst->ctx, stores, n_tensors) != 0) goto cleanup;
@@ -4723,7 +4725,7 @@ static int prepare_model_io(
     if (!io[i].tensor) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     NamedBuf *b = &inst->bufs[bi];
-    stores[ti] = poly_store_val(
+    stores[ti] = poly_uop_store_val(
         inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]), snapshots[ti]->uop_physical
     );
     if (!stores[ti++]) goto cleanup;
@@ -4897,7 +4899,7 @@ int poly_model_call_tensors(
     NamedBuf *b = &inst->bufs[bi];
     result[i] = model_result_storage(inst->ctx, b, inv.shapes[bi]);
     if (!result[i]) goto cleanup;
-    stores[i] = poly_store_val(
+    stores[i] = poly_uop_store_val(
         inst->ctx, result[i]->uop_physical, model_concrete_view(inst->ctx, b, inv.shapes[bi])
     );
     if (!stores[i]) goto cleanup;
@@ -5072,7 +5074,7 @@ static PolyUOp *model_sink_with_effects(PolyModel *inst, int ep_index, PolyUOp *
         break;
       }
   }
-  PolyUOp *sink = poly_sink_n(inst->ctx, roots, n);
+  PolyUOp *sink = poly_uop_sink_n(inst->ctx, roots, n);
   free(roots);
   return sink;
 }
@@ -5157,7 +5159,7 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
     free(param_bufs);
     return -1;
   }
-  if (poly_grad_many(inst->ctx, loss_value, NULL, param_bufs, inst->n_params, grads) != 0) {
+  if (poly_uop_grad_many(inst->ctx, loss_value, NULL, param_bufs, inst->n_params, grads) != 0) {
     fprintf(stderr, "poly_model: value_and_grad: autograd failed\n");
     free(grads);
     free(param_bufs);
@@ -5196,10 +5198,11 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
   PolyUOp *loss_flat = loss_value;
   if (uop_numel(inst->ctx, loss_value) != 1) {
     int64_t one_shape[1] = {1};
-    loss_flat = poly_reshape(inst->ctx, loss_value, one_shape, 1);
+    loss_flat = poly_uop_reshape(inst->ctx, loss_value, one_shape, 1);
   }
-  stores[0] =
-      poly_store_val(inst->ctx, vag->loss_out_buf, poly_cast(inst->ctx, loss_flat, POLY_FLOAT32));
+  stores[0] = poly_uop_store_val(
+      inst->ctx, vag->loss_out_buf, poly_uop_cast(inst->ctx, loss_flat, POLY_FLOAT32)
+  );
 
   /* Save raw gradient UOps for optimizer graph construction */
   for (int i = 0; i < inst->n_params; i++)
@@ -5224,10 +5227,11 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
     PolyShape gs = poly_uop_max_shape(inst->ctx, grads[i]);
     if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
       int64_t flat_shape[1] = {numel};
-      gflat = poly_reshape(inst->ctx, grads[i], flat_shape, 1);
+      gflat = poly_uop_reshape(inst->ctx, grads[i], flat_shape, 1);
     }
     if (gs.dims) free(gs.dims);
-    stores[i + 1] = poly_store_val(inst->ctx, gbuf, poly_cast(inst->ctx, gflat, POLY_FLOAT32));
+    stores[i + 1] =
+        poly_uop_store_val(inst->ctx, gbuf, poly_uop_cast(inst->ctx, gflat, POLY_FLOAT32));
 
     /* Allocate host storage for gradient data */
     NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
@@ -5366,12 +5370,12 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
   PolyUOp *loss_flat = vag->loss_value;
   if (uop_numel(ctx, vag->loss_value) != 1) {
     int64_t one_shape[1] = {1};
-    loss_flat = poly_reshape(ctx, vag->loss_value, one_shape, 1);
+    loss_flat = poly_uop_reshape(ctx, vag->loss_value, one_shape, 1);
   }
-  sink_srcs[0] = poly_store_val(ctx, named_loss, loss_flat);
+  sink_srcs[0] = poly_uop_store_val(ctx, named_loss, loss_flat);
   if (cast_loss)
     sink_srcs[n_sink_srcs - 1] =
-        poly_store_val(ctx, ts->loss_out_buf, poly_cast(ctx, loss_flat, POLY_FLOAT32));
+        poly_uop_store_val(ctx, ts->loss_out_buf, poly_uop_cast(ctx, loss_flat, POLY_FLOAT32));
 
   /* Allocate optimizer state buffers. */
   if (has_m_bufs) {
@@ -5459,7 +5463,7 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
     m_base = 1;
     param_base = 1 + np;
   }
-  PolyUOp *lr = poly_const_float(ctx, (double)o->lr);
+  PolyUOp *lr = poly_uop_const_float(ctx, (double)o->lr);
   if (!lr) {
     free(sink_srcs);
     train_free(ts, np);
@@ -5485,7 +5489,7 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
       PolyShape gs = poly_uop_max_shape(ctx, grad);
       if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != pb_opt->numel)) {
         int64_t flat[1] = {pb_opt->numel};
-        grad = poly_reshape(ctx, grad, flat, 1);
+        grad = poly_uop_reshape(ctx, grad, flat, 1);
       }
       if (gs.dims) free(gs.dims);
     }
@@ -5512,7 +5516,7 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
       train_free(ts, np);
       return -1;
     }
-    sink_srcs[param_base + i] = poly_store_buffer_update(ctx, param_buf, upd.param_new);
+    sink_srcs[param_base + i] = poly_uop_store_buffer_update(ctx, param_buf, upd.param_new);
     if (sgd_momentum) {
       sink_srcs[m_base + i] = upd.m_new;
     } else if (is_adam) {

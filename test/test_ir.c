@@ -40,7 +40,7 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   physical = poly_uop_tagged(
       ctx, physical->op, physical->dtype, physical->src, physical->n_src, physical->arg, 17
   );
-  PolyUOp *constant = poly_const_int(ctx, 7);
+  PolyUOp *constant = poly_uop_const_int(ctx, 7);
   PolyUOp *variable = poly_uop_variable(
       ctx, "import_extent", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
   );
@@ -51,7 +51,7 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
   /* Deliberately reuse a BUFFER tag's number for unrelated semantic metadata.
    * Relocation must classify by owner/op, not blindly rewrite integer fields. */
   PolyUOp *src[] = {logical, logical, physical, constant, variable, argument, tagged_constant};
-  PolyUOp *sink = poly_sink_n(ctx, src, 7);
+  PolyUOp *sink = poly_uop_sink_n(ctx, src, 7);
   ASSERT_INT_EQ(poly_uop_retain(ctx, sink), 0);
   const char *inputs[] = {"x"}, *outputs[] = {"y"};
   PolyIrEntrypoint ep = {
@@ -151,7 +151,7 @@ TEST(ir, import_into_freshens_storage_and_retains_aliases) {
 
 TEST(ir, import_metadata_allocation_failures_preserve_owner) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *live = poly_const_int(ctx, 19);
+  PolyUOp *live = poly_uop_const_int(ctx, 19);
   ASSERT_INT_EQ(poly_uop_retain(ctx, live), 0);
   for (int kind = 0; kind < 2; kind++) {
     PolyArg arg =
@@ -159,7 +159,7 @@ TEST(ir, import_metadata_allocation_failures_preserve_owner) {
              : (PolyArg
                ){.kind = POLY_ARG_RANGE, .range = {7, POLY_AXIS_REDUCE, (int64_t[]){2, 4}, 2}};
     PolyUOp *value = poly_uop1(ctx, POLY_OP_NOOP, POLY_VOID, live, arg);
-    PolyUOp *sink = poly_sink_n(ctx, &value, 1);
+    PolyUOp *sink = poly_uop_sink_n(ctx, &value, 1);
     PolyIrEntrypoint ep = {.name = "metadata", .sink = sink};
     PolyIrSpec spec = {.ctx = ctx, .entrypoints = &ep, .n_entrypoints = 1};
     int len = 0;
@@ -187,7 +187,7 @@ TEST(ir, import_metadata_allocation_failures_preserve_owner) {
       }
       ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
       ASSERT_INT_EQ(poly_map_len(ctx->cse), baseline);
-      ASSERT_PTR_EQ(poly_const_int(ctx, 19), live);
+      ASSERT_PTR_EQ(poly_uop_const_int(ctx, 19), live);
     }
     ASSERT_TRUE(failures >= 5 && successes > 0);
     for (int n = 0; n < len; n++) {
@@ -206,7 +206,7 @@ TEST(ir, import_metadata_allocation_failures_preserve_owner) {
 
 TEST(ir, export_rejects_failed_shared_root_traversal) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *sink = poly_sink1(ctx, poly_const_int(ctx, 3));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_const_int(ctx, 3));
   PolyIrEntrypoint eps[] = {{.name = "first", .sink = sink}, {.name = "second", .sink = sink}};
   PolyIrSpec spec = {.ctx = ctx, .entrypoints = eps, .n_entrypoints = 2};
   int len = -1;
@@ -236,7 +236,7 @@ TEST(ir, truncated_tensor_core_axes_release_partial_metadata) {
     arg.tensor_core.n_upcast_axes[d] = 1;
   }
   PolyUOp *value = poly_uop0(ctx, POLY_OP_WMMA, POLY_FLOAT32, arg);
-  PolyIrEntrypoint ep = {.name = "forward", .sink = poly_sink1(ctx, value)};
+  PolyIrEntrypoint ep = {.name = "forward", .sink = poly_uop_sink1(ctx, value)};
   PolyIrSpec spec = {.ctx = ctx, .entrypoints = &ep, .n_entrypoints = 1};
   int len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &len);
@@ -265,7 +265,7 @@ TEST(ir, ffi_buffer_uses_current_tinygrad_storage_topology) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
-  PolyUOp *buffer = poly_buffer_f32(ctx, 4);
+  PolyUOp *buffer = poly_uop_buffer_f32(ctx, 4);
   ASSERT_NOT_NULL(buffer);
   ASSERT_EQ(buffer->op, POLY_OP_BUFFER);
   ASSERT_INT_EQ(buffer->n_src, 1);
@@ -286,12 +286,12 @@ TEST(ir, round_trip_add) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* Build: out = a + b */
-  PolyUOp *a = poly_buffer_f32(ctx, 4);
-  PolyUOp *b = poly_buffer_f32(ctx, 4);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
-  PolyUOp *store = poly_store_val(ctx, out_buf, sum);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out_buf = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *store = poly_uop_store_val(ctx, out_buf, sum);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   int64_t shape4[] = {4};
   PolyIrBufEntry bufs[] = {
@@ -349,11 +349,11 @@ TEST(ir, round_trip_add) {
 TEST(ir, export_rewinds_scratch_root_toposorts) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 4);
-  PolyUOp *b = poly_buffer_f32(ctx, 4);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out_buf, sum));
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *out_buf = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out_buf, sum));
 
   PolyIrBufEntry bufs[] = {
       {.name = "a", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {4}, .ndim = 1},
@@ -387,12 +387,12 @@ TEST(ir, export_rewinds_scratch_root_toposorts) {
 TEST(ir, round_trip_const) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 4);
-  PolyUOp *two = poly_const_float(ctx, 2.0);
-  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, a, two);
-  PolyUOp *out = poly_buffer_f32(ctx, 4);
-  PolyUOp *store = poly_store_val(ctx, out, scaled);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *two = poly_uop_const_float(ctx, 2.0);
+  PolyUOp *scaled = poly_uop_alu2(ctx, POLY_OP_MUL, a, two);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *store = poly_uop_store_val(ctx, out, scaled);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {4}, .ndim = 1},
@@ -435,7 +435,7 @@ TEST(ir, round_trip_current_weak_dtype_and_cast_arg) {
   PolyUOp *weak = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKFLOAT, poly_arg_float(1.5));
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, weak, poly_arg_none());
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT32, 1);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, cast));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, cast));
   ASSERT_NOT_NULL(weak);
   ASSERT_NOT_NULL(cast);
   ASSERT_NOT_NULL(out);
@@ -461,7 +461,7 @@ TEST(ir, round_trip_current_weak_dtype_and_cast_arg) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_weak = NULL, *imported_cast = NULL;
   for (int i = 0; i < n_topo; i++) {
@@ -473,7 +473,7 @@ TEST(ir, round_trip_current_weak_dtype_and_cast_arg) {
   ASSERT_NOT_NULL(imported_cast);
   ASSERT_INT_EQ(imported_cast->arg.kind, POLY_ARG_DTYPE);
   ASSERT_TRUE(poly_dtype_eq(imported_cast->arg.dtype, POLY_FLOAT32));
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);
@@ -486,7 +486,7 @@ TEST(ir, round_trip_current_fp8_dtype) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_FP8E4M3, poly_arg_float(0.1015625));
-  PolyUOp *sink = poly_sink1(ctx, value);
+  PolyUOp *sink = poly_uop_sink1(ctx, value);
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
   PolyIrSpec spec = {
       .ctx = ctx,
@@ -524,7 +524,7 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   ASSERT_NOT_NULL(constant);
 
   PolyUOp *out = poly_test_buffer(ctx, POLY_UINT64, 1);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, constant));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, constant));
   PolyIrBufEntry bufs[] = {
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {1}, .ndim = 1},
   };
@@ -545,7 +545,7 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_big = NULL;
   for (int i = 0; i < n_topo; i++)
@@ -555,7 +555,7 @@ TEST(ir, round_trip_exact_bigint_arg_current_format) {
   char *decimal = poly_arg_integer_to_decimal(imported_big->arg);
   ASSERT_STR_EQ(decimal, "18446744073709550593");
   free(decimal);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);
@@ -583,7 +583,7 @@ TEST(ir, typed_param_bounds_roundtrip) {
       param = poly_uop(
           ctx, param->op, param->dtype, param->src, param->n_src, poly_arg_param(&metadata)
       );
-      PolyIrEntrypoint eps[] = {{.name = "forward", .sink = poly_sink1(ctx, param)}};
+      PolyIrEntrypoint eps[] = {{.name = "forward", .sink = poly_uop_sink1(ctx, param)}};
       if (mode)
         eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
       PolyIrSpec spec = {
@@ -604,7 +604,7 @@ TEST(ir, typed_param_bounds_roundtrip) {
           0
       );
       int count = 0, seen = 0;
-      PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &count);
+      PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &count);
       for (int i = 0; i < count; i++)
         if (topo[i]->op == POLY_OP_PARAM) {
           const PolyParamArg *arg = topo[i]->arg.param;
@@ -675,18 +675,18 @@ TEST(ir, round_trip_bufferize_opts_integer_identity) {
     bool program = k >= 4;
     int64_t id = ids[k % 4];
     PolyCtx *ctx = poly_ctx_new();
-    PolyUOp *input = poly_buffer_f32(ctx, 8);
+    PolyUOp *input = poly_uop_buffer_f32(ctx, 8);
     PolyUOp *stage = poly_uop1(
         ctx, POLY_OP_STAGE, POLY_FLOAT32, input,
         poly_arg_bufferize_opts_int(id, POLY_ADDR_LOCAL, false)
     );
-    PolyUOp *output = poly_buffer_f32(ctx, 8);
+    PolyUOp *output = poly_uop_buffer_f32(ctx, 8);
     PolyIrBufEntry bufs[] = {
         {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {8}, .ndim = 1},
         {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
     };
     PolyIrEntrypoint eps[] = {
-        {.name = "forward", .sink = poly_sink1(ctx, poly_store_val(ctx, output, stage))}};
+        {.name = "forward", .sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, stage))}};
     /* This is graph-codec coverage, not an executable PROGRAM fixture. */
     if (program)
       eps[0].sink = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, eps[0].sink, poly_arg_none());
@@ -708,7 +708,7 @@ TEST(ir, round_trip_bufferize_opts_integer_identity) {
         0
     );
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+    PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
     int n_stage = 0;
     for (int i = 0; i < n_topo; i++) {
       if (topo[i]->op != POLY_OP_STAGE) continue;
@@ -743,10 +743,10 @@ TEST(ir, round_trip_bufferize_opts_integer_identity) {
 TEST(ir, round_trip_bufferize_opts_arg) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 8);
   PolyUOp *device = poly_device_uop_from_name(ctx, "CPU:1");
-  PolyUOp *copy = poly_copy_to_device_uop(ctx, a, device);
-  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *copy = poly_uop_copy_to_device(ctx, a, device);
+  PolyUOp *bound = poly_uop_const_int(ctx, 8);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *bsrc[] = {copy, range};
@@ -754,9 +754,9 @@ TEST(ir, round_trip_bufferize_opts_arg) {
       ctx, POLY_OP_STAGE, POLY_FLOAT32, bsrc, 2,
       poly_arg_bufferize_opts("CPU:1", POLY_ADDR_GLOBAL, false)
   );
-  PolyUOp *out = poly_buffer_f32(ctx, 8);
-  PolyUOp *store = poly_store_val(ctx, out, bufferize);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *store = poly_uop_store_val(ctx, out, bufferize);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {8}, .ndim = 1},
@@ -780,7 +780,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   bool found = false, found_copy = false;
   for (int i = 0; i < n_topo; i++) {
@@ -814,8 +814,8 @@ TEST(ir, round_trip_bufferize_opts_tuple_device) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   const char *devices[] = {"CPU", "CPU:1"};
-  PolyUOp *input = poly_buffer_f32(ctx, 8);
-  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *input = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *bound = poly_uop_const_int(ctx, 8);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *stage_src[] = {input, range};
@@ -823,8 +823,8 @@ TEST(ir, round_trip_bufferize_opts_tuple_device) {
       ctx, POLY_OP_STAGE, POLY_FLOAT32, stage_src, 2,
       poly_arg_bufferize_opts_tuple(devices, 2, POLY_ADDR_GLOBAL, false)
   );
-  PolyUOp *output = poly_buffer_f32(ctx, 8);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, stage));
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, stage));
   PolyIrBufEntry bufs[] = {
       {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {8}, .ndim = 1},
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {8}, .ndim = 1},
@@ -846,7 +846,7 @@ TEST(ir, round_trip_bufferize_opts_tuple_device) {
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_stage = NULL;
   for (int i = 0; i < n_topo; i++)
@@ -874,10 +874,10 @@ TEST(ir, round_trip_tuple_device_arg) {
 
   const char *devices[] = {"CPU:0", "cpu:1"};
   PolyUOp *tuple_device = poly_device_uop_from_names(ctx, devices, 2);
-  PolyUOp *input = poly_buffer_f32(ctx, 4);
-  PolyUOp *copy = poly_copy_to_device_uop(ctx, input, tuple_device);
-  PolyUOp *output = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, output, copy));
+  PolyUOp *input = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *copy = poly_uop_copy_to_device(ctx, input, tuple_device);
+  PolyUOp *output = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, output, copy));
   PolyIrBufEntry bufs[] = {
       {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = input, .shape = {4}, .ndim = 1},
       {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = output, .shape = {4}, .ndim = 1},
@@ -898,7 +898,7 @@ TEST(ir, round_trip_tuple_device_arg) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_copy = NULL;
   for (int i = 0; i < n_topo; i++) {
@@ -924,7 +924,7 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *shape = poly_const_int(ctx, 4);
+  PolyUOp *shape = poly_uop_const_int(ctx, 4);
   PolyParamArg param_arg = {
       .slot = 3,
       .name = NULL,
@@ -932,7 +932,7 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
       .device = "CPU:1",
   };
   PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&param_arg));
-  PolyUOp *sink = poly_sink1(ctx, param);
+  PolyUOp *sink = poly_uop_sink1(ctx, param);
   ASSERT_NOT_NULL(param);
   ASSERT_NOT_NULL(sink);
 
@@ -952,7 +952,7 @@ TEST(ir, round_trip_paramarg_exact_device_identity) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_param = NULL;
   for (int i = 0; i < n_topo; i++)
@@ -978,7 +978,7 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *shape = poly_const_int(ctx, 4);
+  PolyUOp *shape = poly_uop_const_int(ctx, 4);
   const char *devices[] = {"CPU", "CPU:1"};
   const char *reversed[] = {"CPU:1", "CPU"};
   PolyParamArg tuple_arg = {
@@ -1009,15 +1009,15 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   ASSERT_PTR_EQ(param, same);
   ASSERT_TRUE(param != reverse);
   ASSERT_TRUE(param != scalar);
-  PolyUOp *device_range = poly_range(ctx, 2, -1, POLY_AXIS_DEVICE);
+  PolyUOp *device_range = poly_uop_range(ctx, 2, -1, POLY_AXIS_DEVICE);
   int64_t shard_axis = 0;
-  PolyUOp *multi = poly_unshard(ctx, param, &shard_axis, &device_range, 1);
+  PolyUOp *multi = poly_uop_unshard(ctx, param, &shard_axis, &device_range, 1);
   PolyShape multi_shape = poly_uop_max_shape(ctx, multi);
   ASSERT_INT_EQ(multi_shape.ndim, 1);
   ASSERT_INT_EQ(multi_shape.dims[0], 8);
   free(multi_shape.dims);
 
-  PolyUOp *sink = poly_sink1(ctx, param);
+  PolyUOp *sink = poly_uop_sink1(ctx, param);
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
   PolyIrSpec spec = {
       .ctx = ctx,
@@ -1034,7 +1034,7 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   PolyUOp *imported_param = NULL;
   for (int i = 0; i < n_topo; i++)
     if (topo[i]->op == POLY_OP_PARAM && topo[i]->arg.kind == POLY_ARG_PARAM)
@@ -1045,9 +1045,9 @@ TEST(ir, round_trip_paramarg_ordered_device_tuple) {
   ASSERT_INT_EQ(imported_param->arg.param->n_devices, 2);
   ASSERT_STR_EQ(imported_param->arg.param->devices[0], "CPU");
   ASSERT_STR_EQ(imported_param->arg.param->devices[1], "CPU:1");
-  PolyUOp *imported_device_range = poly_range(imported.ctx, 2, -1, POLY_AXIS_DEVICE);
+  PolyUOp *imported_device_range = poly_uop_range(imported.ctx, 2, -1, POLY_AXIS_DEVICE);
   PolyUOp *imported_multi =
-      poly_unshard(imported.ctx, imported_param, &shard_axis, &imported_device_range, 1);
+      poly_uop_unshard(imported.ctx, imported_param, &shard_axis, &imported_device_range, 1);
   PolyShape imported_shape = poly_uop_max_shape(imported.ctx, imported_multi);
   ASSERT_INT_EQ(imported_shape.ndim, 1);
   ASSERT_INT_EQ(imported_shape.dims[0], 8);
@@ -1070,7 +1070,7 @@ TEST(ir, round_trip_default_call_info) {
   PolyCallInfo info = {.name = "round_trip"};
   PolyUOp *function = poly_uop1(ctx, POLY_OP_FUNCTION, POLY_VOID, body, poly_arg_call_info(&info));
   PolyUOp *selected = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, function, poly_arg_int(0));
-  PolyUOp *sink = poly_sink1(ctx, selected);
+  PolyUOp *sink = poly_uop_sink1(ctx, selected);
   ASSERT_NOT_NULL(sink);
 
   PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
@@ -1088,7 +1088,7 @@ TEST(ir, round_trip_default_call_info) {
   PolyIrSpec imported;
   ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *imported_function = NULL;
   for (int i = 0; i < n_topo; i++)
@@ -1114,15 +1114,15 @@ TEST(ir, round_trip_default_call_info) {
 TEST(ir, round_trip_multi_entry) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *x = poly_buffer_f32(ctx, 4);
-  PolyUOp *fwd_out = poly_buffer_f32(ctx, 4);
-  PolyUOp *fwd_store = poly_store_val(ctx, fwd_out, x);
-  PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *fwd_out = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *fwd_store = poly_uop_store_val(ctx, fwd_out, x);
+  PolyUOp *fwd_sink = poly_uop_sink1(ctx, fwd_store);
 
-  PolyUOp *loss_out = poly_buffer_f32(ctx, 1);
-  PolyUOp *loss_val = poly_const_float(ctx, 0.0);
-  PolyUOp *loss_store = poly_store_val(ctx, loss_out, loss_val);
-  PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
+  PolyUOp *loss_out = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *loss_val = poly_uop_const_float(ctx, 0.0);
+  PolyUOp *loss_store = poly_uop_store_val(ctx, loss_out, loss_val);
+  PolyUOp *loss_sink = poly_uop_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = x, .shape = {4}, .ndim = 1},
@@ -1163,10 +1163,10 @@ TEST(ir, round_trip_multi_entry) {
 TEST(ir, import_reserves_unique_ids_for_future_buffers) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *x = poly_buffer_f32(ctx, 4);
-  PolyUOp *loss_out = poly_buffer_f32(ctx, 1);
-  PolyUOp *loss_store = poly_store_val(ctx, loss_out, poly_const_float(ctx, 0.0));
-  PolyUOp *sink = poly_sink1(ctx, loss_store);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *loss_out = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *loss_store = poly_uop_store_val(ctx, loss_out, poly_uop_const_float(ctx, 0.0));
+  PolyUOp *sink = poly_uop_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = x, .shape = {4}, .ndim = 1},
@@ -1203,16 +1203,16 @@ TEST(ir, import_reserves_unique_ids_for_future_buffers) {
 TEST(ir, round_trip_entrypoint_metadata) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *x = poly_buffer_f32(ctx, 4);
-  PolyUOp *y = poly_buffer_f32(ctx, 1);
-  PolyUOp *fwd_out = poly_buffer_f32(ctx, 4);
-  PolyUOp *fwd_store = poly_store_val(ctx, fwd_out, x);
-  PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *y = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *fwd_out = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *fwd_store = poly_uop_store_val(ctx, fwd_out, x);
+  PolyUOp *fwd_sink = poly_uop_sink1(ctx, fwd_store);
 
-  PolyUOp *loss_out = poly_buffer_f32(ctx, 1);
-  PolyUOp *loss_val = poly_const_float(ctx, 0.0);
-  PolyUOp *loss_store = poly_store_val(ctx, loss_out, loss_val);
-  PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
+  PolyUOp *loss_out = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *loss_val = poly_uop_const_float(ctx, 0.0);
+  PolyUOp *loss_store = poly_uop_store_val(ctx, loss_out, loss_val);
+  PolyUOp *loss_sink = poly_uop_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = x, .shape = {4}, .ndim = 1},
@@ -1288,12 +1288,12 @@ TEST(ir, round_trip_entrypoint_metadata) {
 TEST(ir, round_trip_roles) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *w = poly_buffer_f32(ctx, 6);
-  PolyUOp *x = poly_buffer_f32(ctx, 3);
-  PolyUOp *out = poly_buffer_f32(ctx, 2);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, w, x);
-  PolyUOp *store = poly_store_val(ctx, out, sum);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *w = poly_uop_buffer_f32(ctx, 6);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, 3);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 2);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, w, x);
+  PolyUOp *store = poly_uop_store_val(ctx, out, sum);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "layers.0.weight",
@@ -1394,7 +1394,7 @@ TEST(ir, import_truncated) {
 TEST(ir, import_rejects_zero_op_slot) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 1);
   PolyIrBufEntry row = {
       .name = "output",
       .role = POLY_IR_ROLE_OUTPUT,
@@ -1402,7 +1402,7 @@ TEST(ir, import_rejects_zero_op_slot) {
       .shape = {1},
       .ndim = 1,
   };
-  PolyIrEntrypoint ep = {.name = "forward", .sink = poly_sink1(ctx, out)};
+  PolyIrEntrypoint ep = {.name = "forward", .sink = poly_uop_sink1(ctx, out)};
   PolyIrSpec spec = {
       .ctx = ctx,
       .bufs = &row,
@@ -1436,8 +1436,8 @@ TEST(ir, import_rejects_zero_op_slot) {
 TEST(ir, interface_shape_capacity_is_enforced_on_export_and_import) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyUOp *value = poly_buffer_f32(ctx, 1);
-  PolyUOp *sink = poly_sink1(ctx, value);
+  PolyUOp *value = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_uop_sink1(ctx, value);
   int64_t rank_eight[] = {1, 1, 1, 1, 1, 1, 1, 1};
   PolyIrBufEntry row = {
       .name = "rank_boundary",
@@ -1499,12 +1499,12 @@ TEST(ir, interface_shape_capacity_is_enforced_on_export_and_import) {
 TEST(ir, round_trip_reshape) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 6);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 6);
   int64_t new_shape[] = {2, 3};
-  PolyUOp *reshaped = poly_reshape(ctx, a, new_shape, 2);
-  PolyUOp *out = poly_buffer_f32(ctx, 6);
-  PolyUOp *store = poly_store_val(ctx, out, reshaped);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *reshaped = poly_uop_reshape(ctx, a, new_shape, 2);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 6);
+  PolyUOp *store = poly_uop_store_val(ctx, out, reshaped);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
       {.name = "input", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {6}, .ndim = 1},

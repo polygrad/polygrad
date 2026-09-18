@@ -2,7 +2,7 @@
  * test_hf.c -- Tests for HuggingFace model loading infrastructure
  *
  * Covers: multi-dtype safetensors, PolyModelConfig, GPT-2 builder,
- *         HF loader, poly_gather, poly_layernorm, poly_linear.
+ *         HF loader, poly_uop_gather, poly_layernorm, poly_linear.
  */
 
 #include "test_harness.h"
@@ -755,7 +755,7 @@ TEST(hf, qwen3_gguf_zero_heads_rejects_before_division) {
   ASSERT_TRUE(desc->from_gguf_decoded(&g, &opts) == NULL);
   ASSERT_INT_EQ(poly_import_last_error_code(), POLY_IMPORT_ERR_PARSE);
   ASSERT_TRUE(strstr(poly_import_last_error_message(), "attention.head_count must be positive"));
-  ASSERT_NOT_NULL(poly_const_int(ctx, 42));
+  ASSERT_NOT_NULL(poly_uop_const_int(ctx, 42));
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -892,13 +892,13 @@ TEST(hf, poly_gather_basic) {
 
   /* table: (4, 3) weight matrix -- reshape buffer to give it a shape */
   int64_t table_shape[] = {4, 3};
-  PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 12), table_shape, 2);
+  PolyUOp *table = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 12), table_shape, 2);
 
   /* indices: (2,) -- reshape buffer to give it a shape */
   int64_t idx_shape[] = {2};
-  PolyUOp *indices = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 2), idx_shape, 1);
+  PolyUOp *indices = poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 2), idx_shape, 1);
 
-  PolyUOp *result = poly_gather(ctx, table, indices);
+  PolyUOp *result = poly_uop_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
   PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 2);
@@ -915,13 +915,13 @@ TEST(hf, poly_gather_2d_indices) {
 
   /* table: (10, 4) -- reshape buffer to give it a shape */
   int64_t table_shape[] = {10, 4};
-  PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 40), table_shape, 2);
+  PolyUOp *table = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 40), table_shape, 2);
 
   /* indices: (2, 3) -- batch of indices, reshape buffer to give it a shape */
   int64_t idx_shape[] = {2, 3};
-  PolyUOp *indices = poly_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 6), idx_shape, 2);
+  PolyUOp *indices = poly_uop_reshape(ctx, poly_test_buffer(ctx, POLY_INT32, 6), idx_shape, 2);
 
-  PolyUOp *result = poly_gather(ctx, table, indices);
+  PolyUOp *result = poly_uop_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
   PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
@@ -937,9 +937,9 @@ TEST(hf, poly_gather_2d_indices) {
 TEST(hf, poly_layernorm_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *x = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
 
-  PolyUOp *result = poly_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5);
+  PolyUOp *result = poly_uop_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5);
   ASSERT_NOT_NULL(result);
   PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
@@ -956,11 +956,11 @@ TEST(hf, poly_linear_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* x: (2, 3, 4), weight: (8, 4), bias: (8,) */
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
-  PolyUOp *w = poly_reshape(ctx, poly_buffer_f32(ctx, 32), (int64_t[]){8, 4}, 2);
-  PolyUOp *b = poly_reshape(ctx, poly_buffer_f32(ctx, 8), (int64_t[]){8}, 1);
+  PolyUOp *x = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *w = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 32), (int64_t[]){8, 4}, 2);
+  PolyUOp *b = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 8), (int64_t[]){8}, 1);
 
-  PolyUOp *result = poly_linear_apply(ctx, x, w, b);
+  PolyUOp *result = poly_uop_linear_apply(ctx, x, w, b);
   ASSERT_NOT_NULL(result);
 
   PolyShape s = poly_uop_max_shape(ctx, result);
@@ -977,10 +977,10 @@ TEST(hf, poly_linear_shape) {
 TEST(hf, poly_linear_no_bias) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 32), (int64_t[]){4, 8}, 2);
-  PolyUOp *w = poly_reshape(ctx, poly_buffer_f32(ctx, 128), (int64_t[]){16, 8}, 2);
+  PolyUOp *x = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 32), (int64_t[]){4, 8}, 2);
+  PolyUOp *w = poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 128), (int64_t[]){16, 8}, 2);
 
-  PolyUOp *result = poly_linear_apply(ctx, x, w, NULL);
+  PolyUOp *result = poly_uop_linear_apply(ctx, x, w, NULL);
   ASSERT_NOT_NULL(result);
 
   PolyShape s = poly_uop_max_shape(ctx, result);
@@ -996,7 +996,7 @@ TEST(hf, poly_linear_no_bias) {
 TEST(hf, poly_causal_mask_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *mask = poly_causal_mask(ctx, 5);
+  PolyUOp *mask = poly_uop_causal_mask(ctx, 5);
   ASSERT_NOT_NULL(mask);
   PolyShape s = poly_uop_max_shape(ctx, mask);
   ASSERT_INT_EQ(s.ndim, 2);

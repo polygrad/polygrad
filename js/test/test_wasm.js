@@ -291,10 +291,11 @@ async function runWasmOwnershipTests() {
       const loss = x.detach().sum()
       const core = pg._core
       const Module = core.Module
-      const originalGradMany = Module._poly_grad_many_ex
+      const originalGradMany = Module._poly_uop_grad_many_ex
+      if (typeof originalGradMany !== 'function') throw new Error('missing gradient export')
       const beforeBytes = core.heapU8().buffer.byteLength
 
-      Module._poly_grad_many_ex = (...args) => {
+      Module._poly_uop_grad_many_ex = (...args) => {
         const rc = originalGradMany(...args)
         grownPtr = Module._malloc(beforeBytes)
         return rc
@@ -302,11 +303,11 @@ async function runWasmOwnershipTests() {
 
       let result
       try {
-        result = core.ffi.poly_grad_many(
+        result = core.ffi.poly_uop_grad_many(
           core.ctx, loss.uopLogical.raw, 0, [x.uopLogical.raw]
         )
       } finally {
-        Module._poly_grad_many_ex = originalGradMany
+        Module._poly_uop_grad_many_ex = originalGradMany
       }
 
       const afterBytes = core.heapU8().buffer.byteLength
@@ -331,7 +332,7 @@ async function runWasmOwnershipTests() {
     const originalWrite = Module._poly_buffer_write
     const prefix = core.heapU8().slice(0, 16)
     try {
-      const buf = core.ffi.poly_buffer_by_id(core.ctx, core.dtypeIds.float32, 4)
+      const buf = core.ffi.poly_uop_buffer_by_id(core.ctx, core.dtypeIds.float32, 4)
       let writes = 0
       Module._malloc = () => 0
       Module._poly_buffer_write = () => { writes++; return -1 }
@@ -402,7 +403,7 @@ async function runWasmOwnershipTests() {
     const originalSet = Module._poly_buffer_set
     const originalWrite = Module._poly_buffer_write
     try {
-      const buf = cold.ffi.poly_buffer_on_device_by_id(cold.ctx, cold.dtypeIds.float32, 4, cold.deviceIds.webgpu)
+      const buf = cold.ffi.poly_uop_buffer_on_device_by_id(cold.ctx, cold.dtypeIds.float32, 4, cold.deviceIds.webgpu)
       cold.ffi.poly_uop_retain(cold.ctx, buf)
       cold.ffi.poly_ctx_reset_counters(cold.ctx)
       cold.ffi.poly_buffer_write(cold.ctx, buf, new Float32Array([1, 2, 3, 4]))

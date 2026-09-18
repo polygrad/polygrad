@@ -188,7 +188,7 @@ static bool threading_linear_has_only_expected_op(
     PolyOps other_op
 ) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, linear, &n_topo, NULL, true);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, linear, &n_topo, NULL, true);
   if (!topo) return false;
   bool has_expected = false, has_other = false;
   for (int i = 0; i < n_topo; i++) {
@@ -196,7 +196,7 @@ static bool threading_linear_has_only_expected_op(
     has_expected |= is_float32 && topo[i]->op == expected_op;
     has_other |= is_float32 && topo[i]->op == other_op;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return has_expected && !has_other;
 }
 

@@ -253,7 +253,7 @@ class UOp:
     # --- UOp-level op constructors (mirror tinygrad's UOp.contiguous / etc.) ---
 
     def contiguous(self):
-        raw = _ffi._lib.poly_contiguous(self.ctx, self.raw)
+        raw = _ffi._lib.poly_uop_contiguous(self.ctx, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     @staticmethod
@@ -266,7 +266,7 @@ class UOp:
 
     @staticmethod
     def range(ctx, bound, axis_id=0, axis_type=AxisType.WEAK):
-        raw = _ffi._lib.poly_uop_range(ctx, int(bound), int(axis_id), int(axis_type))
+        raw = _ffi._lib.poly_uop_range_by_id(ctx, int(bound), int(axis_id), int(axis_type))
         return UOp(ctx, raw) if raw else None
 
     def numel(self):
@@ -287,7 +287,7 @@ class UOp:
             if isinstance(x, UOp):
                 indices.append(x.raw)
             elif isinstance(x, int):
-                indices.append(_ffi._lib.poly_const_int(self.ctx, int(x)))
+                indices.append(_ffi._lib.poly_uop_const_int(self.ctx, int(x)))
             else:
                 raise TypeError(f'unsupported index type {type(x).__name__}')
         arr = (_ffi._ptr * len(indices))(*indices) if indices else None
@@ -365,11 +365,11 @@ class UOp:
             return value
         if isinstance(value, bool):
             dtype_id = _ffi._lib.poly_dtype_id_by_name(b'bool')
-            return UOp(self.ctx, _ffi._lib.poly_const_int_by_id(self.ctx, int(value), dtype_id))
+            return UOp(self.ctx, _ffi._lib.poly_uop_const_int_by_id(self.ctx, int(value), dtype_id))
         if isinstance(value, int):
-            return UOp(self.ctx, _ffi._lib.poly_const_int(self.ctx, value))
+            return UOp(self.ctx, _ffi._lib.poly_uop_const_int(self.ctx, value))
         if isinstance(value, float):
-            return UOp(self.ctx, _ffi._lib.poly_const_float(self.ctx, value))
+            return UOp(self.ctx, _ffi._lib.poly_uop_const_float(self.ctx, value))
         raise TypeError(f'cannot convert {type(value).__name__} to UOp')
 
     def _coerce_like(self, value, ref):
@@ -379,11 +379,11 @@ class UOp:
             raise TypeError(f'cannot convert {type(value).__name__} to UOp')
         dtype_id = _ffi._lib.poly_uop_dtype_id(ref.ctx, ref.raw) if ref and ref.raw else -1
         if dtype_id >= 0:
-            raw = _ffi._lib.poly_const_float_by_id(self.ctx, float(value), dtype_id)
+            raw = _ffi._lib.poly_uop_const_float_by_id(self.ctx, float(value), dtype_id)
             if raw:
                 return UOp(self.ctx, raw)
             if isinstance(value, int):
-                raw = _ffi._lib.poly_const_int_by_id(self.ctx, value, dtype_id)
+                raw = _ffi._lib.poly_uop_const_int_by_id(self.ctx, value, dtype_id)
                 if raw:
                     return UOp(self.ctx, raw)
         return self._coerce(value)
@@ -402,34 +402,34 @@ class UOp:
             dtype = to_dtype(dtype)
             dtype_name = INVERSE_DTYPES_DICT.get(dtype.name, dtype.name)
             dtype_id = _ffi._lib.poly_dtype_id_by_name(dtype_name.encode('utf-8'))
-            raw = (_ffi._lib.poly_const_int_by_id(ctx, value, dtype_id)
+            raw = (_ffi._lib.poly_uop_const_int_by_id(ctx, value, dtype_id)
                    if isinstance(value, int)
-                   else _ffi._lib.poly_const_float_by_id(ctx, float(value), dtype_id))
+                   else _ffi._lib.poly_uop_const_float_by_id(ctx, float(value), dtype_id))
             return UOp(ctx, raw) if raw else None
         if isinstance(value, bool):
             dtype_id = _ffi._lib.poly_dtype_id_by_name(b'bool')
-            return UOp(ctx, _ffi._lib.poly_const_int_by_id(ctx, int(value), dtype_id))
+            return UOp(ctx, _ffi._lib.poly_uop_const_int_by_id(ctx, int(value), dtype_id))
         if isinstance(value, int):
-            raw = (_ffi._lib.poly_const_int(ctx, value) if -(1 << 63) <= value < (1 << 63)
-                   else _ffi._lib.poly_const_int_decimal(ctx, str(value).encode()))
+            raw = (_ffi._lib.poly_uop_const_int(ctx, value) if -(1 << 63) <= value < (1 << 63)
+                   else _ffi._lib.poly_uop_const_int_decimal(ctx, str(value).encode()))
             return UOp(ctx, raw) if raw else None
         if isinstance(value, float):
-            return UOp(ctx, _ffi._lib.poly_const_float(ctx, value))
+            return UOp(ctx, _ffi._lib.poly_uop_const_float(ctx, value))
         raise TypeError(f'cannot convert {type(value).__name__} to UOp')
 
     def _alu1(self, op_name):
-        raw = _ffi._lib.poly_alu1(self.ctx, _ffi.OPS[op_name], self.raw)
+        raw = _ffi._lib.poly_uop_alu1(self.ctx, _ffi.OPS[op_name], self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def _alu2(self, op_name, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def _alu3(self, op_name, b, c):
         b = self._coerce_like(b, self)
         c = self._coerce_like(c, self)
-        raw = _ffi._lib.poly_alu3(self.ctx, _ffi.OPS[op_name], self.raw, b.raw, c.raw)
+        raw = _ffi._lib.poly_uop_alu3(self.ctx, _ffi.OPS[op_name], self.raw, b.raw, c.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def cast(self, dtype):
@@ -438,7 +438,7 @@ class UOp:
         dtype_id = _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8'))
         if dtype_id < 0:
             raise ValueError(f'unknown dtype {dtype}')
-        raw = _ffi._lib.poly_cast_by_id(self.ctx, self.raw, dtype_id)
+        raw = _ffi._lib.poly_uop_cast_by_id(self.ctx, self.raw, dtype_id)
         return UOp(self.ctx, raw) if raw else None
 
     def __add__(self, other):
@@ -446,7 +446,7 @@ class UOp:
 
     def __radd__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['ADD'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['ADD'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __sub__(self, other):
@@ -454,7 +454,7 @@ class UOp:
 
     def __rsub__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['SUB'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['SUB'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __mul__(self, other):
@@ -462,7 +462,7 @@ class UOp:
 
     def __rmul__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['MUL'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['MUL'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __truediv__(self, other):
@@ -470,7 +470,7 @@ class UOp:
 
     def __rtruediv__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FDIV'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['FDIV'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __neg__(self):
@@ -490,7 +490,7 @@ class UOp:
 
     def __rfloordiv__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FLOORDIV'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['FLOORDIV'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def floormod(self, other):
@@ -501,7 +501,7 @@ class UOp:
 
     def __rmod__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_binop(self.ctx, _ffi.OPS['FLOORMOD'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['FLOORMOD'], other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def mod(self, other):
@@ -554,7 +554,7 @@ class UOp:
 
     def logical_not(self):
         # Pinned tinygrad mixin/elementwise.py:39-49 casts to bool first, then
-        # compares against True. poly_cast returns self for an exact dtype.
+        # compares against True. poly_uop_cast returns self for an exact dtype.
         return self.cast(dtypes.bool).ne(True)
 
     def sqrt(self):
@@ -577,7 +577,7 @@ class UOp:
 
     def where(self, yes, no):
         yes, no = self._coerce(yes), self._coerce(no)
-        raw = _ffi._lib.poly_where_op(self.ctx, self.raw, yes.raw, no.raw)
+        raw = _ffi._lib.poly_uop_where(self.ctx, self.raw, yes.raw, no.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def mulacc(self, mul, acc):

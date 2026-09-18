@@ -36,7 +36,7 @@ static int count_ops(PolyUOp **lin, int n, PolyOps op) {
 
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, root, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i] && topo[i]->op == op) count++;
@@ -46,7 +46,7 @@ static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
 
 static int count_param_indices(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, root, &n_topo);
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
@@ -151,7 +151,7 @@ TEST(sched, direct_sink_store_uses_compute_call_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *src = poly_test_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *dst = poly_test_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, dst, src));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, dst, src));
 
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
@@ -183,7 +183,7 @@ TEST_COMMON(sched, realize_uops_reads_ctx_buffers) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
 
   float a_d[] = {1.0f, 2.0f, 3.0f, 4.0f};
   float b_d[] = {10.0f, 20.0f, 30.0f, 40.0f};
@@ -211,7 +211,7 @@ TEST_COMMON(sched, ctx_buffer_rebinding_overrides_previous_storage) {
 
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
 
   float a_ctx[] = {100.0f, 100.0f, 100.0f, 100.0f};
   float a_call[] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -260,7 +260,7 @@ TEST(sched, from_host_copy_precedes_vector_compute) {
   ASSERT_NOT_NULL(physical);
 
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CPU);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, physical));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, physical));
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
   ASSERT_INT_EQ(linear->n_src, 2);
@@ -301,7 +301,7 @@ TEST(sched, placement_computed_copy_source_materializes_before_copy) {
   ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
 
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CUDA);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, physical));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, physical));
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
 
@@ -317,7 +317,7 @@ TEST(sched, placement_computed_copy_source_materializes_before_copy) {
       ASSERT_INT_EQ(count_root_ops(ctx, poly_test_linear_call_body(linear, i), POLY_OP_COPY), 0);
       ASSERT_TRUE(poly_test_linear_call_n_buffers(linear, i) >= 1);
       ASSERT_INT_EQ(
-          poly_device_from_device_uop(
+          poly_uop_device_from_device_uop(
               poly_uop_device_uop_cached(ctx, poly_test_linear_call_buffer(linear, i, 0), NULL)
           ),
           POLY_DEVICE_CPU
@@ -352,7 +352,7 @@ TEST(sched, from_host_scalar_copy_precedes_compute_with_realized_peer) {
   ASSERT_NOT_NULL(sub_tensor);
   PolyUOp *sub = poly_tensor_uop_physical(sub_tensor);
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sub));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sub));
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
 
@@ -372,12 +372,12 @@ TEST(sched, from_host_scalar_copy_precedes_compute_with_realized_peer) {
 TEST(sched, max_reduce_tail_uses_value_typed_param_indices) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_test_buffer(ctx, POLY_FLOAT32, 6);
-  PolyUOp *xr = poly_reshape(ctx, x, (int64_t[]){2, 3}, 2);
-  PolyUOp *m = poly_reduce_axis(ctx, POLY_OP_MAX, xr, (int64_t[]){1}, 1);
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, m, (int64_t[]){0}, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, xr);
+  PolyUOp *xr = poly_uop_reshape(ctx, x, (int64_t[]){2, 3}, 2);
+  PolyUOp *m = poly_uop_reduce_axis(ctx, POLY_OP_MAX, xr, (int64_t[]){1}, 1);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, m, (int64_t[]){0}, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, xr);
   PolyUOp *out = poly_test_buffer(ctx, POLY_FLOAT32, 6);
-  PolyUOp *sink = poly_sink1(ctx, poly_test_store_to_buffer(ctx, out, gx));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_test_store_to_buffer(ctx, out, gx));
 
   PolyUOp *linear = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear);
@@ -527,14 +527,14 @@ TEST_COMMON(sched, 2d_e2e) {
 
   /* Reshape to 2D */
   int64_t dims[] = {4, 8};
-  PolyUOp *a2d = poly_reshape(ctx, a, dims, 2);
-  PolyUOp *b2d = poly_reshape(ctx, b, dims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, dims, 2);
+  PolyUOp *b2d = poly_uop_reshape(ctx, b, dims, 2);
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a2d, b2d, poly_arg_none());
 
   /* Flatten back for storage */
   int64_t flat[] = {32};
-  PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
+  PolyUOp *flat_result = poly_uop_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -579,19 +579,19 @@ TEST_COMMON(sched, expand_e2e) {
 
   /* Reshape a to (5,4) */
   int64_t a_dims[] = {5, 4};
-  PolyUOp *a = poly_reshape(ctx, a_buf, a_dims, 2);
+  PolyUOp *a = poly_uop_reshape(ctx, a_buf, a_dims, 2);
 
   /* Reshape b to (1,4), then expand to (5,4) */
   int64_t b_dims[] = {1, 4};
-  PolyUOp *b_r = poly_reshape(ctx, b_buf, b_dims, 2);
+  PolyUOp *b_r = poly_uop_reshape(ctx, b_buf, b_dims, 2);
   int64_t e_dims[] = {5, 4};
-  PolyUOp *b = poly_expand(ctx, b_r, e_dims, 2);
+  PolyUOp *b = poly_uop_expand(ctx, b_r, e_dims, 2);
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
 
   /* Flatten result for storage */
   int64_t flat[] = {20};
-  PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
+  PolyUOp *flat_result = poly_uop_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_buf, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -637,11 +637,11 @@ TEST_COMMON(sched, reshape_e2e) {
 
   /* Reshape a to (2,4), add 1.0, reshape back to (8) */
   int64_t dims[] = {2, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a_buf, dims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a_buf, dims, 2);
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a2d, one, poly_arg_none());
   int64_t flat[] = {8};
-  PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
+  PolyUOp *flat_result = poly_uop_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, b_buf, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -682,7 +682,7 @@ TEST(sched, reduce_sum_1d_ir) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 10);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -717,7 +717,7 @@ TEST_COMMON(sched, reduce_sum_1d_e2e) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -757,9 +757,9 @@ TEST_COMMON(sched, reduce_sum_axis0_e2e) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 3);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -800,9 +800,9 @@ TEST_COMMON(sched, reduce_sum_axis1_e2e) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 4);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -843,9 +843,9 @@ TEST_COMMON(sched, reduce_sum_all_e2e) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {0, 1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 2);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -884,7 +884,7 @@ TEST(sched, reduce_max_e2e) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *mx = poly_reduce_axis(ctx, POLY_OP_MAX, a, axes, 1);
+  PolyUOp *mx = poly_uop_reduce_axis(ctx, POLY_OP_MAX, a, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, mx, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -921,10 +921,10 @@ TEST_COMMON(sched, reduce_scalar_chain_e2e) {
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
-  PolyUOp *sum_scalar = poly_reshape(ctx, sum, NULL, 0);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum_scalar = poly_uop_reshape(ctx, sum, NULL, 0);
   ASSERT_PTR_EQ(sum_scalar, sum);
-  PolyUOp *add = poly_add(ctx, sum_scalar, b);
+  PolyUOp *add = poly_uop_add(ctx, sum_scalar, b);
   ASSERT_NOT_NULL(add);
   ASSERT_INT_EQ(count_root_ops(ctx, add, POLY_OP_RESHAPE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, add, POLY_OP_EXPAND), 0);
@@ -984,15 +984,15 @@ TEST_COMMON(sched, reduce_vector_chain_e2e) {
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t dims2d[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, dims2d, 2);
-  PolyUOp *b2d = poly_reshape(ctx, b, dims2d, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, dims2d, 2);
+  PolyUOp *b2d = poly_uop_reshape(ctx, b, dims2d, 2);
 
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1); /* shape (4) */
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1); /* shape (4) */
   int64_t keepdim[] = {4, 1};
-  PolyUOp *sum_keepdim = poly_reshape(ctx, sum, keepdim, 2);
+  PolyUOp *sum_keepdim = poly_uop_reshape(ctx, sum, keepdim, 2);
   int64_t expd[] = {4, 3};
-  PolyUOp *sum_exp = poly_expand(ctx, sum_keepdim, expd, 2); /* shape (4,3) */
+  PolyUOp *sum_exp = poly_uop_expand(ctx, sum_keepdim, expd, 2); /* shape (4,3) */
   ASSERT_NOT_NULL(sum_exp);
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum_exp, b2d, poly_arg_none());
@@ -1065,7 +1065,7 @@ TEST_COMMON(sched, shared_scalar_reduce_two_stores_e2e) {
   PolyUOp *e = poly_test_buffer_on_device(ctx, POLY_FLOAT32, N, device);
 
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum, c, poly_arg_none());
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, sum, e, poly_arg_none());
 
@@ -1145,10 +1145,10 @@ TEST(sched, permute_2d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 12);
 
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t perm[] = {1, 0};
-  PolyUOp *t = poly_permute(ctx, a2d, perm, 2);
-  PolyUOp *c2d = poly_reshape(ctx, c, (int64_t[]){4, 3}, 2);
+  PolyUOp *t = poly_uop_permute(ctx, a2d, perm, 2);
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, (int64_t[]){4, 3}, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, t, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1189,10 +1189,10 @@ TEST(sched, permute_3d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 24);
 
   int64_t rdims[] = {2, 3, 4};
-  PolyUOp *a3d = poly_reshape(ctx, a, rdims, 3);
+  PolyUOp *a3d = poly_uop_reshape(ctx, a, rdims, 3);
   int64_t perm[] = {2, 0, 1};
-  PolyUOp *t = poly_permute(ctx, a3d, perm, 3);
-  PolyUOp *c3d = poly_reshape(ctx, c, (int64_t[]){4, 2, 3}, 3);
+  PolyUOp *t = poly_uop_permute(ctx, a3d, perm, 3);
+  PolyUOp *c3d = poly_uop_reshape(ctx, c, (int64_t[]){4, 2, 3}, 3);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c3d, t, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1233,7 +1233,7 @@ TEST(sched, shrink_1d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 3);
 
   int64_t pairs[][2] = {{2, 5}};
-  PolyUOp *s = poly_shrink(ctx, a, pairs, 1);
+  PolyUOp *s = poly_uop_shrink(ctx, a, pairs, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, s, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1273,10 +1273,10 @@ TEST(sched, shrink_2d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 6);
 
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t pairs[][2] = {{1, 3}, {0, 3}};
-  PolyUOp *s = poly_shrink(ctx, a2d, pairs, 2);
-  PolyUOp *c2d = poly_reshape(ctx, c, (int64_t[]){2, 3}, 2);
+  PolyUOp *s = poly_uop_shrink(ctx, a2d, pairs, 2);
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, (int64_t[]){2, 3}, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, s, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1317,7 +1317,7 @@ TEST(sched, flip_1d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 5);
 
   int64_t axes[] = {0};
-  PolyUOp *f = poly_flip(ctx, a, axes, 1);
+  PolyUOp *f = poly_uop_flip(ctx, a, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, f, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1355,10 +1355,10 @@ TEST(sched, flip_2d_axis0_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 12);
 
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {0};
-  PolyUOp *f = poly_flip(ctx, a2d, axes, 1);
-  PolyUOp *c2d = poly_reshape(ctx, c, rdims, 2);
+  PolyUOp *f = poly_uop_flip(ctx, a2d, axes, 1);
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, rdims, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, f, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1398,10 +1398,10 @@ TEST(sched, flip_2d_both_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 12);
 
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {0, 1};
-  PolyUOp *f = poly_flip(ctx, a2d, axes, 2);
-  PolyUOp *c2d = poly_reshape(ctx, c, rdims, 2);
+  PolyUOp *f = poly_uop_flip(ctx, a2d, axes, 2);
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, rdims, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, f, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1441,7 +1441,7 @@ TEST(sched, pad_1d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 7);
 
   int64_t pairs[][2] = {{2, 2}};
-  PolyUOp *p = poly_pad(ctx, a, pairs, 1);
+  PolyUOp *p = poly_uop_pad(ctx, a, pairs, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, p, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1480,10 +1480,10 @@ TEST(sched, pad_2d_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 20);
 
   int64_t rdims[] = {2, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t pairs[][2] = {{1, 1}, {1, 1}};
-  PolyUOp *p = poly_pad(ctx, a2d, pairs, 2);
-  PolyUOp *c2d = poly_reshape(ctx, c, (int64_t[]){4, 5}, 2);
+  PolyUOp *p = poly_uop_pad(ctx, a2d, pairs, 2);
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, (int64_t[]){4, 5}, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, p, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1523,12 +1523,12 @@ TEST(sched, chain_permute_shrink_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 6);
 
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t perm[] = {1, 0};
-  PolyUOp *t = poly_permute(ctx, a2d, perm, 2); /* (4,3) */
+  PolyUOp *t = poly_uop_permute(ctx, a2d, perm, 2); /* (4,3) */
   int64_t pairs[][2] = {{0, 2}, {0, 3}};
-  PolyUOp *s = poly_shrink(ctx, t, pairs, 2); /* (2,3) */
-  PolyUOp *c2d = poly_reshape(ctx, c, (int64_t[]){2, 3}, 2);
+  PolyUOp *s = poly_uop_shrink(ctx, t, pairs, 2); /* (2,3) */
+  PolyUOp *c2d = poly_uop_reshape(ctx, c, (int64_t[]){2, 3}, 2);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c2d, s, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1569,9 +1569,9 @@ TEST(sched, chain_pad_flip_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 5);
 
   int64_t pad_pairs[][2] = {{1, 1}};
-  PolyUOp *p = poly_pad(ctx, a, pad_pairs, 1); /* 5 elements */
+  PolyUOp *p = poly_uop_pad(ctx, a, pad_pairs, 1); /* 5 elements */
   int64_t axes[] = {0};
-  PolyUOp *f = poly_flip(ctx, p, axes, 1);
+  PolyUOp *f = poly_uop_flip(ctx, p, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, f, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1609,7 +1609,7 @@ TEST(sched, movement_alu_chain_e2e) {
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, 4);
 
   int64_t axes[] = {0};
-  PolyUOp *f = poly_flip(ctx, a, axes, 1);
+  PolyUOp *f = poly_uop_flip(ctx, a, axes, 1);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, f, b, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1647,12 +1647,12 @@ TEST(sched, movement_alu_chain_e2e) {
 TEST(sched, realize_vecadd) {
   int N = 16;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *c = poly_buffer_f32(ctx, N);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, add);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, c, add);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float a_d[16], b_d[16], c_d[16];
   for (int i = 0; i < N; i++) {
@@ -1675,19 +1675,19 @@ TEST(sched, realize_vecadd) {
 TEST(sched, custom_kernel_call_after_executes) {
   int N = 4;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *c = poly_buffer_f32(ctx, N);
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
 
   PolyUOp *pc = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, c, 0));
   PolyUOp *pa = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, a, 1));
   PolyUOp *pb = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, b, 2));
-  PolyUOp *i = poly_uop_range(ctx, N, 0, POLY_AXIS_LOOP);
+  PolyUOp *i = poly_uop_range_by_id(ctx, N, 0, POLY_AXIS_LOOP);
   PolyUOp *idxs[1] = {i};
   PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1);
   PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1);
   PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, ai, bi);
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
   PolyUOp *sink = poly_uop_sink_ex(ctx, &body, 1, "custom_add_4", 1);
@@ -1716,19 +1716,19 @@ TEST(sched, custom_kernel_call_after_executes) {
 TEST(sched, custom_kernel_call_replays_after_input_mutation) {
   int N = 4;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *c = poly_buffer_f32(ctx, N);
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
 
   PolyUOp *pc = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, c, 0));
   PolyUOp *pa = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, a, 1));
   PolyUOp *pb = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, b, 2));
-  PolyUOp *i = poly_uop_range(ctx, N, 0, POLY_AXIS_LOOP);
+  PolyUOp *i = poly_uop_range_by_id(ctx, N, 0, POLY_AXIS_LOOP);
   PolyUOp *idxs[1] = {i};
   PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1);
   PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1);
   PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, ai, bi);
   PolyUOp *store = poly_uop_store(ctx, ci, sum);
   PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
   PolyUOp *sink = poly_uop_sink_ex(ctx, &body, 1, "custom_add_replay_4", 1);
@@ -1761,18 +1761,19 @@ TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
   const int candidates = 4;
   const int rows = 64;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *out = poly_buffer_f32(ctx, candidates);
-  PolyUOp *x = poly_buffer_f32(ctx, candidates * rows);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, candidates);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, candidates * rows);
 
   PolyUOp *pout = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, out, 0));
   PolyUOp *px = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, x, 1));
-  PolyUOp *c = poly_uop_range(ctx, candidates, 0, POLY_AXIS_LOOP);
-  PolyUOp *r = poly_uop_range(ctx, rows, 1, POLY_AXIS_REDUCE);
+  PolyUOp *c = poly_uop_range_by_id(ctx, candidates, 0, POLY_AXIS_LOOP);
+  PolyUOp *r = poly_uop_range_by_id(ctx, rows, 1, POLY_AXIS_REDUCE);
   PolyUOp *out_idx[1] = {c};
   /* Pinned `c * 64` coerces the scalar through c.const_like, so the complete
    * pre-lowering expression remains weak-derived until pm_lower_index_dtype. */
-  PolyUOp *rows_const = poly_const_typed(ctx, c->dtype, rows);
-  PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, rows_const), r);
+  PolyUOp *rows_const = poly_uop_const_typed(ctx, c->dtype, rows);
+  PolyUOp *offset =
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_alu2(ctx, POLY_OP_MUL, c, rows_const), r);
   PolyUOp *x_idx[1] = {offset};
   ASSERT_TRUE(poly_dtype_eq(c->dtype, POLY_WEAKINT));
   ASSERT_TRUE(c->n_src == 1 && poly_dtype_eq(c->src[0]->dtype, POLY_WEAKINT));
@@ -1780,11 +1781,11 @@ TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
   ASSERT_TRUE(poly_dtype_eq(offset->dtype, POLY_WEAKINT));
 
   PolyUOp *acc = poly_uop_set(
-      ctx, poly_uop_index(ctx, pout, out_idx, 1), poly_const_float(ctx, 0.0f), NULL, 0
+      ctx, poly_uop_index(ctx, pout, out_idx, 1), poly_uop_const_float(ctx, 0.0f), NULL, 0
   );
   ASSERT_NOT_NULL(acc);
   PolyUOp *acc_after_r = poly_uop_after(ctx, acc, r);
-  PolyUOp *sum = poly_alu2(
+  PolyUOp *sum = poly_uop_alu2(
       ctx, POLY_OP_ADD, poly_uop_index(ctx, acc_after_r, out_idx, 1),
       poly_uop_index(ctx, px, x_idx, 1)
   );
@@ -1824,12 +1825,12 @@ TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
 
 TEST(sched, realize_reduce_sum) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer_f32(ctx, 8);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, 8);
   int64_t ax[] = {0};
-  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, x, ax, 1);
-  PolyUOp *out = poly_buffer_f32(ctx, 1);
-  PolyUOp *store = poly_store_val(ctx, out, s);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *s = poly_uop_reduce_axis(ctx, POLY_OP_ADD, x, ax, 1);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *store = poly_uop_store_val(ctx, out, s);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float x_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[] = {0};
@@ -1846,16 +1847,16 @@ TEST(sched, realize_reduce_sum) {
 TEST(sched, realize_grad_chain) {
   int N = 4;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer_f32(ctx, N);
-  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, x, x);
+  PolyUOp *x = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *sq = poly_uop_alu2(ctx, POLY_OP_MUL, x, x);
   int64_t ax[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sq, ax, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, sq, ax, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   ASSERT_NOT_NULL(gx);
 
-  PolyUOp *out = poly_buffer_f32(ctx, N);
-  PolyUOp *store = poly_store_val(ctx, out, gx);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *store = poly_uop_store_val(ctx, out, gx);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float x_d[] = {1, 2, 3, 4};
   float gx_d[] = {0, 0, 0, 0};
@@ -1876,16 +1877,16 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   uint64_t ops = 0, lds = 0, mem = 0;
   PolyEstimates est = {0};
 
-  PolyUOp *one = poly_const_float(ctx, 1.0);
-  PolyUOp *two = poly_const_float(ctx, 2.0);
-  PolyUOp *three = poly_const_float(ctx, 3.0);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, one, two);
+  PolyUOp *one = poly_uop_const_float(ctx, 1.0);
+  PolyUOp *two = poly_uop_const_float(ctx, 2.0);
+  PolyUOp *three = poly_uop_const_float(ctx, 3.0);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, one, two);
   PolyUOp *add_uops[] = {add};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, add_uops, 1, false, &est), 0);
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
   ASSERT_TRUE(ops == 1 && lds == 0 && mem == 0);
 
-  PolyUOp *mulacc = poly_alu3(ctx, POLY_OP_MULACC, one, two, three);
+  PolyUOp *mulacc = poly_uop_alu3(ctx, POLY_OP_MULACC, one, two, three);
   PolyUOp *mulacc_uops[] = {mulacc};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, mulacc_uops, 1, false, &est), 0);
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
@@ -1897,7 +1898,7 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   PolyUOp *vb_src[] = {two, two, two, two};
   PolyUOp *va = poly_uop_stack(ctx, va_src, 4);
   PolyUOp *vb = poly_uop_stack(ctx, vb_src, 4);
-  PolyUOp *vadd = poly_alu2(ctx, POLY_OP_ADD, va, vb);
+  PolyUOp *vadd = poly_uop_alu2(ctx, POLY_OP_ADD, va, vb);
   PolyUOp *vadd_uops[] = {vadd};
   ASSERT_INT_EQ(poly_estimates_from_uops(ctx, vadd_uops, 1, false, &est), 0);
   ASSERT_INT_EQ(poly_estimates_infer(&est, NULL, 0, &ops, &lds, &mem), 0);
@@ -1921,7 +1922,8 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   ASSERT_TRUE(ops == 8);
 
   PolyUOp *param = poly_test_uop_param(ctx, POLY_FLOAT32, 8, 0, POLY_ADDR_GLOBAL);
-  PolyUOp *idx_add = poly_alu2(ctx, POLY_OP_ADD, poly_const_int(ctx, 1), poly_const_int(ctx, 2));
+  PolyUOp *idx_add =
+      poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_const_int(ctx, 1), poly_uop_const_int(ctx, 2));
   PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, idx_add, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, index, poly_arg_none());
   PolyUOp *index_uops[] = {idx_add, index, load};
@@ -1935,7 +1937,7 @@ TEST(sched, estimates_match_tinygrad_edge_semantics) {
   PolyUOp *range8 =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT64, eight, poly_arg_range(1, POLY_AXIS_LOOP));
   PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, range8, poly_arg_none());
-  PolyUOp *idx1_expr = poly_alu2(ctx, POLY_OP_ADD, range8, poly_const_int(ctx, 0));
+  PolyUOp *idx1_expr = poly_uop_alu2(ctx, POLY_OP_ADD, range8, poly_uop_const_int(ctx, 0));
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, idx1_expr, poly_arg_none());
   PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *load1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
@@ -1981,8 +1983,9 @@ TEST(sched, estimates_unbounded_range_does_not_scale_work) {
 
   PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
   PolyUOp *loop = poly_uop1(ctx, POLY_OP_RANGE, POLY_VOID, noop, poly_arg_range(0, POLY_AXIS_WEAK));
-  PolyUOp *add =
-      poly_alu2(ctx, POLY_OP_ADD, poly_const_float(ctx, 1.0), poly_const_float(ctx, 2.0));
+  PolyUOp *add = poly_uop_alu2(
+      ctx, POLY_OP_ADD, poly_uop_const_float(ctx, 1.0), poly_uop_const_float(ctx, 2.0)
+  );
   PolyUOp *condition = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
   PolyUOp *end_src[] = {add, loop, condition};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 3, poly_arg_none());

@@ -277,7 +277,7 @@ def test_raw_seed_factory_configured_defaults():
 
     shape = (ctypes.c_int64 * 1)(3)
     with Context(DEFAULT_FLOAT='float64'):
-        for name in ('poly_rand', 'poly_randn'):
+        for name in ('poly_uop_rand', 'poly_uop_randn'):
             factory = getattr(_ffi._lib, name)
             factory.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_uint64]
             factory.restype = ctypes.c_void_p
@@ -290,7 +290,7 @@ def test_raw_seed_randn_integer_output():
     from polygrad import _default_ctx
 
     shape = (ctypes.c_int64 * 1)(3)
-    raw = _ffi._lib.poly_randn_by_id(_default_ctx, shape, 1, 42, _ffi._lib.poly_dtype_id_by_name(b'int32'))
+    raw = _ffi._lib.poly_uop_randn_by_id(_default_ctx, shape, 1, 42, _ffi._lib.poly_dtype_id_by_name(b'int32'))
     assert raw
     assert UOp(_default_ctx, raw).dtype == dtypes.int32
 
@@ -2649,7 +2649,7 @@ class TestElementwise:
             ('expm1', np.expm1(np.asarray([-1e-6, 0.0, 1e-6, 0.25]))),
         ):
             actual = getattr(x, name)()
-            raw_fn = getattr(_ffi._lib, f'poly_{name}')
+            raw_fn = getattr(_ffi._lib, f'poly_uop_{name}')
             expected_logical = _uop_wrap(
                 x._ctx, raw_fn(x._ctx, x.uop_logical.raw)
             )
@@ -2663,7 +2663,7 @@ class TestElementwise:
         moved = Tensor.empty((4,), device='cpu').realize().to('cuda').to('cpu')
         for name in ('log1p', 'expm1'):
             actual = getattr(moved, name)()
-            raw_fn = getattr(_ffi._lib, f'poly_{name}')
+            raw_fn = getattr(_ffi._lib, f'poly_uop_{name}')
             expected_physical = _uop_wrap(
                 moved._ctx, raw_fn(moved._ctx, moved.uop.raw)
             )
@@ -2835,7 +2835,7 @@ class TestMovement:
     def test_movement_optional_shrink_and_zero_extent(self):
         t = Tensor([[0, 1, 2], [3, 4, 5]])
         y = t.shrink((None, (1, 3)))
-        expected = _ffi._lib.poly_shrink(t._ctx, t.uop_physical, (ctypes.c_int64 * 4)(0, 2, 1, 3), 2)
+        expected = _ffi._lib.poly_uop_shrink(t._ctx, t.uop_physical, (ctypes.c_int64 * 4)(0, 2, 1, 3), 2)
         assert y.uop_physical.raw == expected
         assert len(y.uop_physical.src) == 3
         assert y.tolist() == [[1, 2], [4, 5]]
@@ -2851,7 +2851,7 @@ class TestMovement:
         size_nodes = [UOp.const(1), extent, UOp.const(2)]
         starts = (ctypes.c_void_p * 3)(*(v.raw for v in start_nodes))
         sizes = (ctypes.c_void_p * 3)(*(v.raw for v in size_nodes))
-        expected = _ffi._lib.poly_shrink_uop(t._ctx, t.uop_physical, starts, sizes, 3)
+        expected = _ffi._lib.poly_uop_shrink_symbolic(t._ctx, t.uop_physical, starts, sizes, 3)
         assert y.uop_physical.raw == expected
         assert y.shape[1] == extent
         assert y.shrink((None, None, None)) is y
@@ -3523,11 +3523,11 @@ class TestSurfaceOwners:
         from polygrad import _ffi
         import ctypes
         lib = _ffi._lib
-        lib.poly_pad_circular.restype = ctypes.c_void_p
-        lib.poly_pad_circular.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        lib.poly_uop_pad_circular.restype = ctypes.c_void_p
+        lib.poly_uop_pad_circular.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
         x = Tensor([1., 2., 3., 4.])
         pairs = (ctypes.c_int64 * 2)(-1, 2)
-        assert lib.poly_pad_circular(x._ctx, x.uop.raw, pairs, 1)
+        assert lib.poly_uop_pad_circular(x._ctx, x.uop.raw, pairs, 1)
 
 
 class TestSpatialOwners:
@@ -3712,7 +3712,7 @@ class TestIndexedOwners:
             # Pinned backward cannot differentiate the pending AFTER. Once the
             # write is realized, z is a buffer leaf and x is no longer reachable.
             if not forward_first:
-                with pytest.raises(RuntimeError, match='poly_grad_many failed'):
+                with pytest.raises(RuntimeError, match='poly_uop_grad_many failed'):
                     z.sum().backward()
                 return
             np.testing.assert_array_equal(z.numpy(), [11, 22, 3, 4])
@@ -4195,10 +4195,10 @@ class TestMatmulAndLoss:
             a.uop_logical.raw, b.uop_logical.raw
         )
         physical_inputs = (_ffi._ptr * 2)(a.uop.raw, b.uop.raw)
-        expected_logical = _ffi._lib.poly_einsum(
+        expected_logical = _ffi._lib.poly_uop_einsum(
             a._ctx, b'ij,jk->ik', logical_inputs, 2
         )
-        expected_physical = _ffi._lib.poly_einsum(
+        expected_physical = _ffi._lib.poly_uop_einsum(
             a._ctx, b'ij,jk->ik', physical_inputs, 2
         )
         out = Tensor.einsum('ij,jk->ik', a, b)
@@ -4207,7 +4207,7 @@ class TestMatmulAndLoss:
         assert out.uop.raw == expected_physical
         np.testing.assert_allclose(out.numpy(), np.array([[19.0, 22.0], [43.0, 50.0]], dtype=np.float32))
 
-        with pytest.raises(RuntimeError, match='poly_einsum failed'):
+        with pytest.raises(RuntimeError, match='poly_uop_einsum failed'):
             Tensor.einsum('a->' + ('a' * 80), Tensor([1.0]))
 
         with Runtime(device='cpu') as runtime_a, Runtime(device='cpu') as runtime_b:
@@ -4226,14 +4226,14 @@ class TestMatmulAndLoss:
         out = source.rearrange('h w -> w h')
         expected_logical = _uop_wrap(
             source._ctx,
-            _ffi._lib.poly_rearrange(
+            _ffi._lib.poly_uop_rearrange(
                 source._ctx, b'h w -> w h', source.uop_logical.raw,
                 None, None, 0,
             ),
         )
         expected_physical = _uop_wrap(
             source._ctx,
-            _ffi._lib.poly_rearrange(
+            _ffi._lib.poly_uop_rearrange(
                 source._ctx, b'h w -> w h', source.uop.raw,
                 None, None, 0,
             ),
@@ -4247,7 +4247,7 @@ class TestMatmulAndLoss:
         moved_out = moved.rearrange('h w -> w h')
         expected_moved = _uop_wrap(
             moved._ctx,
-            _ffi._lib.poly_rearrange(
+            _ffi._lib.poly_uop_rearrange(
                 moved._ctx, b'h w -> w h', moved.uop.raw,
                 None, None, 0,
             ),
@@ -4257,7 +4257,7 @@ class TestMatmulAndLoss:
     def test_rearrange_rejects_malformed_formula(self):
         x = Tensor([1.0, 2.0, 3.0])
         for formula in ('invalid', 'a' * 300 + '->a', 'a->a->a', '((a))->a'):
-            with pytest.raises(ValueError, match='poly_rearrange failed'):
+            with pytest.raises(ValueError, match='poly_uop_rearrange failed'):
                 x.rearrange(formula)
 
     def test_matmul_shape_mismatch_raises(self):

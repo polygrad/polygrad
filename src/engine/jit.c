@@ -1,6 +1,7 @@
 /* jit.c -- tinygrad-style JIT capture/replay for raw Tensor realizes. */
 
 #include "engine/jit.h"
+#include "engine/realize.h"
 #include "engine/schedule.h"
 #include "uop/ops.h"
 #include "codegen/codegen.h"
@@ -186,7 +187,7 @@ PolyUOp *poly_create_graph_call(PolyCtx *ctx, PolyUOp **calls, int n_calls) {
     if (!call || call->op != POLY_OP_CALL || call->n_src < 1) goto fail;
     for (int j = 1; j < call->n_src; j++) {
       int n_topo = 0;
-      PolyUOp **topo = poly_toposort_alloc(ctx, call->src[j], &n_topo);
+      PolyUOp **topo = poly_uop_toposort_alloc(ctx, call->src[j], &n_topo);
       if (!topo) goto fail;
       bool ok = true;
       for (int k = 0; k < n_topo; k++)
@@ -195,7 +196,7 @@ PolyUOp *poly_create_graph_call(PolyCtx *ctx, PolyUOp **calls, int n_calls) {
           ok = false;
           break;
         }
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       if (!ok) goto fail;
     }
   }
@@ -338,7 +339,7 @@ static int poly_jit_prepare_input_view(
   if (poly_uop_substitute_many(jit->ctx, &root, 1, &buf, &noop, 1, &base_free) != 0) return -1;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(NULL, base_free, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(NULL, base_free, &n_topo);
   if (!topo) return -1;
   PolyUOp **from = malloc((size_t)(n_topo ? n_topo : 1) * sizeof(*from));
   PolyUOp **to = malloc((size_t)(n_topo ? n_topo : 1) * sizeof(*to));
@@ -372,7 +373,7 @@ static int poly_jit_prepare_input_view(
     unbound = poly_graph_rewrite(jit->ctx, unbound, poly_pm_jit_mop_cleanup());
   if (rc == 0 && !unbound) rc = -1;
 
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   free(from);
   free(to);
   if (rc != 0) {
@@ -581,7 +582,7 @@ int poly_jit_collect_held_bufs(
     PolyUOp *root = live_tensors[i] ? poly_tensor_uop(live_tensors[i]) : NULL;
     if (!root) continue;
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+    PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n_topo);
     if (!topo) {
       held.failed = true;
       break;
@@ -592,7 +593,7 @@ int poly_jit_collect_held_bufs(
         held.failed = true;
         break;
       }
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
   }
   if (held.failed) {
     free(held.items);
@@ -860,7 +861,7 @@ static int poly_jit_override_var_binding(
  * Build once, so ordinary replay only performs identity-set lookups. */
 static int poly_jit_written_uops(PolyJit *jit) {
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(jit->ctx, jit->captured_linear, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(jit->ctx, jit->captured_linear, &n);
   if (!topo) return -1;
   jit->written_uops = poly_map_new(16);
   int rc = -1;
@@ -889,7 +890,7 @@ static int poly_jit_written_uops(PolyJit *jit) {
   }
   rc = 0;
 done:
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return rc;
 }
 
@@ -903,7 +904,7 @@ static PolyUOp *poly_jit_copy_input(PolyJit *jit, PolyUOp *u) {
       ctx, device, poly_uop_numel(ctx, u), u->dtype, poly_ctx_next_unique_id(ctx)
   );
   if (!copy || poly_uop_retain(ctx, copy) != 0) return NULL;
-  PolyUOp *body = poly_copy_to_device_uop(ctx, u, device);
+  PolyUOp *body = poly_uop_copy_to_device(ctx, u, device);
   PolyUOp *args[] = {copy, u};
   PolyUOp *call = body ? poly_uop_call(ctx, body, args, 2) : NULL;
   PolyUOp *linear =

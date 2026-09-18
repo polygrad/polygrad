@@ -104,9 +104,9 @@ static HipTensorVecadd hip_make_tensor_vecadd(int n) {
   PolyUOp *a = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *b = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *c = poly_test_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, add);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, c, add);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   return (HipTensorVecadd){ctx, sink, a, b, c, n};
 }
 
@@ -173,7 +173,7 @@ TEST_BACKEND(hip, renderer_inlines_current_casted_literals) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
   int n = 0;
-  PolyUOp **uops = poly_toposort(ctx, sink, &n);
+  PolyUOp **uops = poly_uop_toposort(ctx, sink, &n);
   ASSERT_NOT_NULL(uops);
   char *source = poly_render_hip(ctx, uops, n, "casted_const", 1, "gfx1100");
   ASSERT_NOT_NULL(source);
@@ -417,9 +417,9 @@ TEST_BACKEND(hip, e2e_neg) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, buf_a);
-  PolyUOp *store = poly_store_val(ctx, buf_c, neg);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *neg = poly_uop_alu1(ctx, POLY_OP_NEG, buf_a);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, neg);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float *c_cpu = calloc(n, sizeof(float));
@@ -456,9 +456,9 @@ TEST_BACKEND(hip, e2e_exp2) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *exp = poly_alu1(ctx, POLY_OP_EXP2, buf_a);
-  PolyUOp *store = poly_store_val(ctx, buf_c, exp);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *exp = poly_uop_alu1(ctx, POLY_OP_EXP2, buf_a);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, exp);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float *c_cpu = calloc(n, sizeof(float));
@@ -496,9 +496,9 @@ TEST_BACKEND(hip, e2e_reduce_sum) {
   PolyUOp *buf_a = poly_test_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *buf_c = poly_test_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
-  PolyUOp *store = poly_store_val(ctx, buf_c, red);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *red = poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, red);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float c_cpu = 0, c_gpu = 0;
@@ -680,11 +680,11 @@ TEST_BACKEND(hip, instance_hip_roundtrip) {
   PASS();
 }
 
-/* Regression: realize_ex with poly_full + an ALU BUFFER shape variable on GPU. */
+/* Regression: realize_ex with poly_uop_full + an ALU BUFFER shape variable on GPU. */
 /* Originally landed (pre-Phase-B) as a guard for the const-registry buffer
- * migration path: poly_full used to malloc a host buffer and stash it via
+ * migration path: poly_uop_full used to malloc a host buffer and stash it via
  * g_const_bindings, which only worked on GPU after the realize-time
- * migrated_consts[64] copy. Phase B (commit 6044282) rewrote poly_full as
+ * migrated_consts[64] copy. Phase B (commit 6044282) rewrote poly_uop_full as
  * a pure UOp (CONST -> reshape -> expand), and Phase E deleted the
  * const-registry entirely, so this test now exercises a different code
  * path entirely: the only HIP smoke that runs poly_test_realize_buffer_views_vars with a
@@ -697,10 +697,10 @@ TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   PolyUOp *N =
       poly_uop_variable(ctx, "N", poly_arg_int(1), poly_arg_int(16), POLY_WEAKINT, 1, false);
   int64_t shape_max[] = {16};
-  PolyUOp *fill = poly_full(ctx, shape_max, 1, 3.14);
+  PolyUOp *fill = poly_uop_full(ctx, shape_max, 1, 3.14);
   PolyUOp *buf_a = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
   PolyUOp *buf_out = poly_test_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, fill, buf_a);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, fill, buf_a);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_out, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -844,7 +844,7 @@ TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
   PolyUOp *rewritten = poly_rewrite_hip(ctx, sink);
   ASSERT_NOT_NULL(rewritten);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &n_topo);
   ASSERT_NOT_NULL(topo);
   PolyUOp *rewritten_wmma = NULL;
   int n_wmma = 0;
@@ -1055,25 +1055,25 @@ TEST_BACKEND(hip, tc_auto_matmul_e2e) {
 
   /* A: [M*K] -> [M, 1, K] -> expand [M, N, K] */
   int64_t a_3d[] = {M, 1, K};
-  PolyUOp *ar = poly_reshape(ctx, buf_a, a_3d, 3);
+  PolyUOp *ar = poly_uop_reshape(ctx, buf_a, a_3d, 3);
   int64_t a_exp[] = {M, N, K};
-  PolyUOp *ae = poly_expand(ctx, ar, a_exp, 3);
+  PolyUOp *ae = poly_uop_expand(ctx, ar, a_exp, 3);
 
   /* B: [K*N] -> [K, N] -> permute(1,0) -> [N, K] -> [1, N, K] -> expand [M, N, K] */
   int64_t b_2d[] = {K, N};
-  PolyUOp *br = poly_reshape(ctx, buf_b, b_2d, 2);
+  PolyUOp *br = poly_uop_reshape(ctx, buf_b, b_2d, 2);
   int64_t b_perm[] = {1, 0};
-  PolyUOp *bp = poly_permute(ctx, br, b_perm, 2);
+  PolyUOp *bp = poly_uop_permute(ctx, br, b_perm, 2);
   int64_t b_3d[] = {1, N, K};
-  PolyUOp *br2 = poly_reshape(ctx, bp, b_3d, 3);
+  PolyUOp *br2 = poly_uop_reshape(ctx, bp, b_3d, 3);
   int64_t b_exp[] = {M, N, K};
-  PolyUOp *be = poly_expand(ctx, br2, b_exp, 3);
+  PolyUOp *be = poly_uop_expand(ctx, br2, b_exp, 3);
 
   /* MUL in f16, CAST to f32, REDUCE(ADD) on axis 2 (K) */
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, ae, be, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
   int64_t red_axes[] = {2};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1164,23 +1164,23 @@ TEST_BACKEND(hip, tc_auto_matmul_unique_values) {
 
   /* Same matmul graph as tc_auto_matmul_e2e */
   int64_t a_3d[] = {M, 1, K};
-  PolyUOp *ar = poly_reshape(ctx, buf_a, a_3d, 3);
+  PolyUOp *ar = poly_uop_reshape(ctx, buf_a, a_3d, 3);
   int64_t a_exp[] = {M, N, K};
-  PolyUOp *ae = poly_expand(ctx, ar, a_exp, 3);
+  PolyUOp *ae = poly_uop_expand(ctx, ar, a_exp, 3);
 
   int64_t b_2d[] = {K, N};
-  PolyUOp *br = poly_reshape(ctx, buf_b, b_2d, 2);
+  PolyUOp *br = poly_uop_reshape(ctx, buf_b, b_2d, 2);
   int64_t b_perm[] = {1, 0};
-  PolyUOp *bp = poly_permute(ctx, br, b_perm, 2);
+  PolyUOp *bp = poly_uop_permute(ctx, br, b_perm, 2);
   int64_t b_3d[] = {1, N, K};
-  PolyUOp *br2 = poly_reshape(ctx, bp, b_3d, 3);
+  PolyUOp *br2 = poly_uop_reshape(ctx, bp, b_3d, 3);
   int64_t b_exp[] = {M, N, K};
-  PolyUOp *be = poly_expand(ctx, br2, b_exp, 3);
+  PolyUOp *be = poly_uop_expand(ctx, br2, b_exp, 3);
 
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, ae, be, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
   int64_t red_axes[] = {2};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());

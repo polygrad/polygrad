@@ -34,13 +34,13 @@ static PolyUOp *frontend_new_buffer(
              : NULL;
 }
 
-PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
+PolyUOp *poly_uop_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
   return frontend_new_buffer(ctx, dt, size, POLY_DEVICE_AUTO);
 }
 
-PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id) {
+PolyUOp *poly_uop_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id) {
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
   PolyDevice device = (PolyDevice)device_id;
@@ -48,15 +48,15 @@ PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, i
   return frontend_new_buffer(ctx, dt, size, device);
 }
 
-PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
+PolyUOp *poly_uop_buffer_f32(PolyCtx *ctx, int64_t size) {
   return frontend_new_buffer(ctx, POLY_FLOAT32, size, POLY_DEVICE_AUTO);
 }
 
-PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
+PolyUOp *poly_uop_buffer_f64(PolyCtx *ctx, int64_t size) {
   return frontend_new_buffer(ctx, POLY_FLOAT64, size, POLY_DEVICE_AUTO);
 }
 
-PolyUOp *poly_const_int_decimal(PolyCtx *ctx, const char *value) {
+PolyUOp *poly_uop_const_int_decimal(PolyCtx *ctx, const char *value) {
   PolyInt integer = {0};
   if (!ctx || !value || !poly_int_from_decimal(&integer, value)) {
     poly_int_free(&integer);
@@ -133,7 +133,7 @@ PolyTensor *poly_tensor_from_host_by_id(
 }
 
 PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id, int device_id) {
-  PolyUOp *value_uop = poly_const_int_by_id(ctx, value, dtype_id);
+  PolyUOp *value_uop = poly_uop_const_int_by_id(ctx, value, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -146,7 +146,7 @@ PolyTensor *poly_tensor_const_uint_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *uop = poly_const_uint_by_id(ctx, value, dtype_id);
+  PolyUOp *uop = poly_uop_const_uint_by_id(ctx, value, dtype_id);
   return uop ? poly_tensor_create_with_roots(
                    ctx, uop, uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
                )
@@ -154,7 +154,7 @@ PolyTensor *poly_tensor_const_uint_by_id(
 }
 
 PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id) {
-  PolyUOp *value_uop = poly_const_float_by_id(ctx, value, dtype_id);
+  PolyUOp *value_uop = poly_uop_const_float_by_id(ctx, value, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -171,7 +171,7 @@ PolyTensor *poly_tensor_full_int_by_id(
     bool dtype_explicit,
     bool buffer
 ) {
-  PolyUOp *value_uop = poly_full_int_by_id(ctx, dims, ndim, value, dtype_id);
+  PolyUOp *value_uop = poly_uop_full_int_by_id(ctx, dims, ndim, value, dtype_id);
   return poly_tensor_full_from_value(
       ctx, value_uop, dims, ndim, (PolyDevice)device_id, value_uop ? value_uop->dtype : POLY_VOID,
       dtype_explicit, buffer
@@ -188,7 +188,7 @@ PolyTensor *poly_tensor_full_uint_by_id(
     bool dtype_explicit,
     bool buffer
 ) {
-  PolyUOp *uop = poly_full_uint_by_id(ctx, dims, ndim, value, dtype_id);
+  PolyUOp *uop = poly_uop_full_uint_by_id(ctx, dims, ndim, value, dtype_id);
   return poly_tensor_full_from_value(
       ctx, uop, dims, ndim, (PolyDevice)device_id, uop ? uop->dtype : POLY_VOID, dtype_explicit,
       buffer
@@ -205,7 +205,7 @@ PolyTensor *poly_tensor_full_invalid_by_id(
 ) {
   PolyDType dtype;
   if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
-  PolyUOp *value = poly_full_invalid_by_id(ctx, dims, ndim, dtype_id);
+  PolyUOp *value = poly_uop_full_invalid_by_id(ctx, dims, ndim, dtype_id);
   return poly_tensor_full_from_value(
       ctx, value, dims, ndim, (PolyDevice)device_id, dtype, true, buffer
   );
@@ -221,7 +221,7 @@ PolyTensor *poly_tensor_full_float_by_id(
     bool dtype_explicit,
     bool buffer
 ) {
-  PolyUOp *value_uop = poly_full_float_by_id(ctx, dims, ndim, value, dtype_id);
+  PolyUOp *value_uop = poly_uop_full_float_by_id(ctx, dims, ndim, value, dtype_id);
   return poly_tensor_full_from_value(
       ctx, value_uop, dims, ndim, (PolyDevice)device_id, value_uop ? value_uop->dtype : POLY_VOID,
       dtype_explicit, buffer
@@ -236,7 +236,7 @@ PolyTensor *poly_tensor_arange_int_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *value_uop = poly_arange_int_by_id(ctx, start, stop, step, dtype_id);
+  PolyUOp *value_uop = poly_uop_arange_int_by_id(ctx, start, stop, step, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -251,7 +251,7 @@ PolyTensor *poly_tensor_arange_float_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *value_uop = poly_arange_float_by_id(ctx, start, stop, step, dtype_id);
+  PolyUOp *value_uop = poly_uop_arange_float_by_id(ctx, start, stop, step, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -266,7 +266,7 @@ PolyTensor *poly_tensor_linspace_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *value_uop = poly_linspace_by_id(ctx, start, stop, steps, dtype_id);
+  PolyUOp *value_uop = poly_uop_linspace_by_id(ctx, start, stop, steps, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -274,7 +274,7 @@ PolyTensor *poly_tensor_linspace_by_id(
 }
 
 PolyTensor *poly_tensor_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id, int device_id) {
-  PolyUOp *value_uop = poly_eye_by_id(ctx, n, m, dtype_id);
+  PolyUOp *value_uop = poly_uop_eye_by_id(ctx, n, m, dtype_id);
   if (!value_uop) return NULL;
   return poly_tensor_create_with_roots(
       ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
@@ -312,40 +312,40 @@ uint32_t poly_uop_call_grad_fxn_key(PolyUOp *u) {
   return u->arg.call_info->grad_fxn_key;
 }
 
-PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
+PolyUOp *poly_uop_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
   PolyDType target;
-  return poly_dtype_by_id(dtype_id, &target) ? poly_cast(ctx, x, target) : NULL;
+  return poly_dtype_by_id(dtype_id, &target) ? poly_uop_cast(ctx, x, target) : NULL;
 }
 
-PolyUOp *poly_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
+PolyUOp *poly_uop_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
   PolyDType target;
   if (!ctx || !x || !poly_dtype_by_id(dtype_id, &target)) return NULL;
-  return poly_bitcast(ctx, x, target);
+  return poly_uop_bitcast(ctx, x, target);
 }
 
-PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type) {
+PolyUOp *poly_uop_range_by_id(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type) {
   return axis_type >= POLY_AXIS_DEVICE && axis_type <= POLY_AXIS_LOOP
-             ? poly_range(ctx, bound, axis_id, (PolyAxisType)axis_type)
+             ? poly_uop_range(ctx, bound, axis_id, (PolyAxisType)axis_type)
              : NULL;
 }
 
 /* Dtype-ID conversion only; construction policy belongs to tensor.c. */
-PolyUOp *poly_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id) {
+PolyUOp *poly_uop_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_const_int_dtype(ctx, value, dtype) : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_const_int_dtype(ctx, value, dtype) : NULL;
 }
 
-PolyUOp *poly_const_uint_by_id(PolyCtx *ctx, uint64_t value, int dtype_id) {
+PolyUOp *poly_uop_const_uint_by_id(PolyCtx *ctx, uint64_t value, int dtype_id) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_const_uint_dtype(ctx, value, dtype) : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_const_uint_dtype(ctx, value, dtype) : NULL;
 }
 
-PolyUOp *poly_const_float_by_id(PolyCtx *ctx, double value, int dtype_id) {
+PolyUOp *poly_uop_const_float_by_id(PolyCtx *ctx, double value, int dtype_id) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_const_float_dtype(ctx, value, dtype) : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_const_float_dtype(ctx, value, dtype) : NULL;
 }
 
-PolyUOp *poly_full_int_by_id(
+PolyUOp *poly_uop_full_int_by_id(
     PolyCtx *ctx,
     const int64_t *shape,
     int ndim,
@@ -354,11 +354,11 @@ PolyUOp *poly_full_int_by_id(
 ) {
   PolyDType dtype;
   return poly_dtype_by_id(dtype_id, &dtype)
-             ? poly_full_int_dtype(ctx, shape, ndim, fill_value, dtype)
+             ? poly_uop_full_int_dtype(ctx, shape, ndim, fill_value, dtype)
              : NULL;
 }
 
-PolyUOp *poly_full_uint_by_id(
+PolyUOp *poly_uop_full_uint_by_id(
     PolyCtx *ctx,
     const int64_t *shape,
     int ndim,
@@ -366,11 +366,12 @@ PolyUOp *poly_full_uint_by_id(
     int dtype_id
 ) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_full_uint_dtype(ctx, shape, ndim, value, dtype)
-                                            : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_uop_full_uint_dtype(ctx, shape, ndim, value, dtype)
+             : NULL;
 }
 
-PolyUOp *poly_full_float_by_id(
+PolyUOp *poly_uop_full_float_by_id(
     PolyCtx *ctx,
     const int64_t *shape,
     int ndim,
@@ -379,17 +380,17 @@ PolyUOp *poly_full_float_by_id(
 ) {
   PolyDType dtype;
   return poly_dtype_by_id(dtype_id, &dtype)
-             ? poly_full_float_dtype(ctx, shape, ndim, fill_value, dtype)
+             ? poly_uop_full_float_dtype(ctx, shape, ndim, fill_value, dtype)
              : NULL;
 }
 
-PolyUOp *poly_full_invalid_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, int dtype_id) {
+PolyUOp *poly_uop_full_invalid_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, int dtype_id) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_full_invalid_dtype(ctx, shape, ndim, dtype)
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_full_invalid_dtype(ctx, shape, ndim, dtype)
                                             : NULL;
 }
 
-PolyUOp *poly_arange_int_by_id(
+PolyUOp *poly_uop_arange_int_by_id(
     PolyCtx *ctx,
     int64_t start,
     int64_t stop,
@@ -397,11 +398,12 @@ PolyUOp *poly_arange_int_by_id(
     int dtype_id
 ) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_arange_int_dtype(ctx, start, stop, step, dtype)
-                                            : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_uop_arange_int_dtype(ctx, start, stop, step, dtype)
+             : NULL;
 }
 
-PolyUOp *poly_arange_float_by_id(
+PolyUOp *poly_uop_arange_float_by_id(
     PolyCtx *ctx,
     double start,
     double stop,
@@ -409,22 +411,30 @@ PolyUOp *poly_arange_float_by_id(
     int dtype_id
 ) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_arange_float_dtype(ctx, start, stop, step, dtype)
-                                            : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_uop_arange_float_dtype(ctx, start, stop, step, dtype)
+             : NULL;
 }
 
-PolyUOp *poly_linspace_by_id(PolyCtx *ctx, double start, double stop, int64_t steps, int dtype_id) {
+PolyUOp *poly_uop_linspace_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    int64_t steps,
+    int dtype_id
+) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_linspace_dtype(ctx, start, stop, steps, dtype)
-                                            : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_uop_linspace_dtype(ctx, start, stop, steps, dtype)
+             : NULL;
 }
 
-PolyUOp *poly_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id) {
+PolyUOp *poly_uop_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_eye_dtype(ctx, n, m, dtype) : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_eye_dtype(ctx, n, m, dtype) : NULL;
 }
 
-PolyUOp *poly_rand_by_id(
+PolyUOp *poly_uop_rand_by_id(
     PolyCtx *ctx,
     const int64_t *shape,
     int ndim,
@@ -432,10 +442,11 @@ PolyUOp *poly_rand_by_id(
     int dtype_id
 ) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_rand_dtype(ctx, shape, ndim, seed, dtype) : NULL;
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_rand_dtype(ctx, shape, ndim, seed, dtype)
+                                            : NULL;
 }
 
-PolyUOp *poly_randn_by_id(
+PolyUOp *poly_uop_randn_by_id(
     PolyCtx *ctx,
     const int64_t *shape,
     int ndim,
@@ -443,7 +454,7 @@ PolyUOp *poly_randn_by_id(
     int dtype_id
 ) {
   PolyDType dtype;
-  return poly_dtype_by_id(dtype_id, &dtype) ? poly_randn_dtype(ctx, shape, ndim, seed, dtype)
+  return poly_dtype_by_id(dtype_id, &dtype) ? poly_uop_randn_dtype(ctx, shape, ndim, seed, dtype)
                                             : NULL;
 }
 
@@ -458,4 +469,97 @@ int poly_can_run_op(
   PolyDType dtype;
   if (!poly_dtype_by_id(dtype_id, &dtype)) return -1;
   return poly_can_compile_op(ctx, (PolyDevice)device_id, op, dtype, shape, n_shape);
+}
+
+PolyTensor *poly_tensor_sum_dtype_by_id(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    int dtype_id
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_sum_dtype(ctx, src, axes, n_axes, keepdim, &dtype);
+}
+
+PolyTensor *poly_tensor_dot_dtype_by_id(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    int dtype_id
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_dot_dtype(ctx, src, weight, &dtype);
+}
+
+PolyTensor *poly_tensor_conv2d_dtype_by_id(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding,
+    int dtype_id
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_conv2d_dtype(
+      ctx, src, weight, bias, groups, stride, dilation, padding, n_padding, &dtype
+  );
+}
+
+PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_cast(ctx, src, dtype);
+}
+
+PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_bitcast(ctx, src, dtype);
+}
+
+PolyTensor *poly_tensor_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device,
+    int contiguous
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_rand(ctx, dims, ndim, dtype, device, contiguous);
+}
+
+PolyTensor *poly_tensor_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int dtype_id,
+    PolyDevice device
+) {
+  PolyDType dtype;
+  if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
+  return poly_tensor_randn(ctx, dims, ndim, dtype, device);
+}
+
+PolyUOp *poly_register_buffer_by_id(
+    PolyCtx *ctx,
+    int role,
+    int dtype_id,
+    const int64_t *shape,
+    int ndim,
+    const char *name
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_register_buffer(ctx, role, dt, shape, ndim, name);
 }

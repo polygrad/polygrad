@@ -241,8 +241,8 @@ TEST(registry, entrypoint_register_and_retrieve) {
   /* Build a trivial SINK (just a store of a const into a buffer) */
   PolyUOp *buf = poly_param(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, "w");
   PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
-  PolyUOp *st = poly_store_val(ctx, buf, val);
-  PolyUOp *sink = poly_sink1(ctx, st);
+  PolyUOp *st = poly_uop_store_val(ctx, buf, val);
+  PolyUOp *sink = poly_uop_sink1(ctx, st);
 
   ASSERT_INT_EQ(poly_register_entrypoint(ctx, "forward", sink), 0);
 
@@ -370,10 +370,11 @@ TEST(registry, instance_from_ctx_basic) {
   PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
 
   /* Build graph: output = w * x */
-  PolyUOp *prod =
-      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
-  PolyUOp *store = poly_store_val(ctx, out, prod);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *prod = poly_uop_alu2(
+      ctx, POLY_OP_MUL, poly_uop_reshape(ctx, w, s, 1), poly_uop_reshape(ctx, x, s, 1)
+  );
+  PolyUOp *store = poly_uop_store_val(ctx, out, prod);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   poly_register_entrypoint(ctx, "forward", sink);
 
   /* Create instance */
@@ -415,10 +416,11 @@ TEST(registry, instance_from_ctx_execute) {
   PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
   PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
 
-  PolyUOp *prod =
-      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
-  PolyUOp *store = poly_store_val(ctx, out, prod);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *prod = poly_uop_alu2(
+      ctx, POLY_OP_MUL, poly_uop_reshape(ctx, w, s, 1), poly_uop_reshape(ctx, x, s, 1)
+  );
+  PolyUOp *store = poly_uop_store_val(ctx, out, prod);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   poly_register_entrypoint(ctx, "forward", sink);
 
   PolyModel *inst = poly_model_from_ctx(ctx);
@@ -458,8 +460,8 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
 
   /* Read PARAM state into an output; authored PARAM writes are not permitted. */
   PolyUOp *output = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
-  PolyUOp *store = poly_store_val(ctx, output, emb);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *store = poly_uop_store_val(ctx, output, emb);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   poly_register_entrypoint(ctx, "init", sink);
 
   PolyModel *inst = poly_model_from_ctx(ctx);
@@ -492,8 +494,8 @@ TEST(registry, instance_from_ctx_unreachable_excluded) {
   poly_aux(ctx, POLY_FLOAT32, s, 1, "unused_aux"); /* not in graph */
 
   PolyUOp *output = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
-  PolyUOp *store = poly_store_val(ctx, output, poly_mul(ctx, w, x));
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *store = poly_uop_store_val(ctx, output, poly_uop_mul(ctx, w, x));
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   poly_register_entrypoint(ctx, "copy", sink);
 
   PolyModel *inst = poly_model_from_ctx(ctx);
@@ -534,7 +536,8 @@ TEST(registry, model_from_ctx_enforces_authored_state_roles) {
       break;
     }
     poly_register_entrypoint(
-        ctx, "write", poly_sink1(ctx, poly_store_val(ctx, state, poly_const_float(ctx, 1)))
+        ctx, "write",
+        poly_uop_sink1(ctx, poly_uop_store_val(ctx, state, poly_uop_const_float(ctx, 1)))
     );
     PolyModel *model = poly_model_from_ctx(ctx);
     bool admitted = model != NULL;
@@ -553,9 +556,10 @@ TEST(registry, instance_from_ctx_reachability_scan_rewinds_scratch) {
   PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
   PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
 
-  PolyUOp *mul =
-      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, mul));
+  PolyUOp *mul = poly_uop_alu2(
+      ctx, POLY_OP_MUL, poly_uop_reshape(ctx, w, s, 1), poly_uop_reshape(ctx, x, s, 1)
+  );
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, mul));
   poly_register_entrypoint(ctx, "forward", sink);
 
   size_t scratch_before = poly_arena_used(ctx->scratch);
@@ -591,10 +595,11 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *wa = poly_param(ctx_a, POLY_FLOAT32, s, 1, "w");
   PolyUOp *xa = poly_input(ctx_a, POLY_FLOAT32, s, 1, "x");
   PolyUOp *oa = poly_output(ctx_a, POLY_FLOAT32, s, 1, "output");
-  PolyUOp *prod_a =
-      poly_alu2(ctx_a, POLY_OP_MUL, poly_reshape(ctx_a, wa, s, 1), poly_reshape(ctx_a, xa, s, 1));
-  PolyUOp *st_a = poly_store_val(ctx_a, oa, prod_a);
-  PolyUOp *sink_a = poly_sink1(ctx_a, st_a);
+  PolyUOp *prod_a = poly_uop_alu2(
+      ctx_a, POLY_OP_MUL, poly_uop_reshape(ctx_a, wa, s, 1), poly_uop_reshape(ctx_a, xa, s, 1)
+  );
+  PolyUOp *st_a = poly_uop_store_val(ctx_a, oa, prod_a);
+  PolyUOp *sink_a = poly_uop_sink1(ctx_a, st_a);
   poly_register_entrypoint(ctx_a, "forward", sink_a);
   PolyModel *inst_a = poly_model_from_ctx(ctx_a);
   ASSERT_TRUE(inst_a != NULL);
@@ -604,9 +609,9 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *wb = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
   PolyUOp *xb = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
   PolyUOp *ob = poly_uop_new_logical_buffer(ctx_b, POLY_FLOAT32, N);
-  PolyUOp *prod_b = poly_alu2(ctx_b, POLY_OP_MUL, wb, xb);
-  PolyUOp *st_b = poly_store_val(ctx_b, ob, prod_b);
-  PolyUOp *sink_b = poly_sink1(ctx_b, st_b);
+  PolyUOp *prod_b = poly_uop_alu2(ctx_b, POLY_OP_MUL, wb, xb);
+  PolyUOp *st_b = poly_uop_store_val(ctx_b, ob, prod_b);
+  PolyUOp *sink_b = poly_uop_sink1(ctx_b, st_b);
   PolyIrBufEntry bufs_b[] = {
       {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = wb, .shape = {N}, .ndim = 1},
       {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = xb, .shape = {N}, .ndim = 1},

@@ -13,12 +13,12 @@ extern "C" {
 
 /* Linear: x @ w.T + b */
 
-PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b);
+PolyUOp *poly_uop_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b);
 PolyTensor *poly_tensor_linear_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, PolyTensor *b);
 
 /* LayerNorm: (x - mean) / sqrt(var + eps), optionally * w + b */
 
-PolyUOp *poly_layernorm_apply(
+PolyUOp *poly_uop_layernorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -34,7 +34,7 @@ PolyTensor *poly_tensor_layernorm_apply(
     int axis,
     double eps
 );
-PolyUOp *poly_layernorm_axes_apply(
+PolyUOp *poly_uop_layernorm_axes_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -52,7 +52,7 @@ PolyTensor *poly_tensor_layernorm_axes_apply(
     int n_axes,
     double eps
 );
-PolyUOp *poly_groupnorm_apply(
+PolyUOp *poly_uop_groupnorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -94,9 +94,9 @@ PolyTensor *poly_tensor_batchnorm_apply(
 
 /* RMSNorm: x * rsqrt(mean(x^2) + eps) * w */
 
-PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
+PolyUOp *poly_uop_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
 PolyTensor *poly_tensor_rmsnorm_apply(PolyCtx *ctx, PolyTensor *x, PolyTensor *w, double eps);
-PolyUOp *poly_instancenorm_apply(
+PolyUOp *poly_uop_instancenorm_apply(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *w,
@@ -115,14 +115,14 @@ PolyTensor *poly_tensor_instancenorm_apply(
 
 /* Embedding: gather(table, tokens) */
 
-PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table);
+PolyUOp *poly_uop_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table);
 PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTensor *table);
 
 /* Transformer building blocks */
 
 /* nn.LSTMCell: explicit caller-owned weights/state; both state inputs may be
  * NULL for a zero initial state. Successful outputs are caller-owned handles. */
-int poly_lstm_cell(
+int poly_uop_lstm_cell(
     PolyCtx *ctx,
     PolyUOp *x,
     PolyUOp *h,
@@ -148,7 +148,7 @@ int poly_tensor_lstm_cell(
 );
 
 /* Causal attention mask: (T, T), 0 where allowed, -1e9 where masked. */
-PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T);
+PolyUOp *poly_uop_causal_mask(PolyCtx *ctx, int64_t T);
 PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T);
 
 /* Multi-Head Attention */
@@ -156,7 +156,7 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T);
 /* RandMixin.dropout. Returns an owned reference, including identity results. */
 PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int training);
 /* Inference SDPA; Tensor SDPA additionally owns training dropout/RNG. */
-PolyUOp *poly_sdpa(
+PolyUOp *poly_uop_sdpa(
     PolyCtx *ctx,
     PolyUOp *q,
     PolyUOp *k,

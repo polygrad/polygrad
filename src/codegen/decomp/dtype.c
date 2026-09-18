@@ -412,7 +412,7 @@ static PolyUOp *long_define(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   PolyUOp *sz = poly_bind(b, "sz");
   if (!sz || !l2i_is_long(x->dtype) || x->arg.kind != POLY_ARG_PARAM || !x->arg.param) return NULL;
   PolyUOp *shape =
-      l2i_binary(ctx, POLY_OP_MUL, sz->dtype, sz, poly_const_like(ctx, sz, poly_arg_int(2)));
+      l2i_binary(ctx, POLY_OP_MUL, sz->dtype, sz, poly_uop_const_like(ctx, sz, poly_arg_int(2)));
   if (!shape) return NULL;
   PolyParamArg arg = *x->arg.param;
   arg.dtype = l2i_dt(x->dtype);

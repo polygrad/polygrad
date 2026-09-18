@@ -186,7 +186,7 @@ TEST(qwen3, model_build_and_load) {
 
   poly_model_free(inst);
   /* The generic loader borrows the caller's context, even after model disposal. */
-  ASSERT_NOT_NULL(poly_const_int(ctx, 42));
+  ASSERT_NOT_NULL(poly_uop_const_int(ctx, 42));
   poly_ctx_destroy(ctx);
   PASS();
 }

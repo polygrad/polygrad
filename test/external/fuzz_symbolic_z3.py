@@ -229,11 +229,11 @@ def load_lib() -> ctypes.CDLL:
     # stop here until the declarations are reviewed, not corrupt ctypes calls.
     lib.poly_abi_version.restype = ctypes.c_int
     lib.poly_abi_version.argtypes = []
-    # ABI99 exposes Tensor.cat without changing these layouts;
+    # ABI100 scopes graph names and headers without changing these layouts;
     # test_api_parity compares every mirrored
     # top-level field offset and size against the compiled C header.
-    if (abi := lib.poly_abi_version()) != 99:
-        raise SystemExit(f"Z3 harness requires reviewed ABI99 layouts; core has ABI{abi}")
+    if (abi := lib.poly_abi_version()) != 100:
+        raise SystemExit(f"Z3 harness requires reviewed ABI100 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []
@@ -246,8 +246,8 @@ def load_lib() -> ctypes.CDLL:
     lib.poly_free.restype = None
     lib.poly_free.argtypes = [ctypes.c_void_p]
 
-    lib.poly_const_int.restype = PolyUOpPtr
-    lib.poly_const_int.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+    lib.poly_uop_const_int.restype = PolyUOpPtr
+    lib.poly_uop_const_int.argtypes = [ctypes.c_void_p, ctypes.c_int64]
     lib.poly_dtype_id_by_name.restype = ctypes.c_int
     lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]
     lib.poly_uop_variable_by_id.restype = PolyUOpPtr
@@ -255,12 +255,12 @@ def load_lib() -> ctypes.CDLL:
         ctypes.c_void_p, ctypes.c_char_p, PolyUOpPtr, PolyUOpPtr,
         ctypes.c_int, ctypes.c_int64, ctypes.c_bool,
     ]
-    lib.poly_alu1.restype = PolyUOpPtr
-    lib.poly_alu1.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr]
-    lib.poly_alu2.restype = PolyUOpPtr
-    lib.poly_alu2.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr, PolyUOpPtr]
-    lib.poly_alu3.restype = PolyUOpPtr
-    lib.poly_alu3.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr, PolyUOpPtr, PolyUOpPtr]
+    lib.poly_uop_alu1.restype = PolyUOpPtr
+    lib.poly_uop_alu1.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr]
+    lib.poly_uop_alu2.restype = PolyUOpPtr
+    lib.poly_uop_alu2.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr, PolyUOpPtr]
+    lib.poly_uop_alu3.restype = PolyUOpPtr
+    lib.poly_uop_alu3.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr, PolyUOpPtr, PolyUOpPtr]
     lib.poly_uop1.restype = PolyUOpPtr
     lib.poly_uop1.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyDType, PolyUOpPtr, PolyArg]
     lib.poly_uop0.restype = PolyUOpPtr
@@ -308,7 +308,7 @@ class Poly:
             self.ctx = None
 
     def const(self, value: int) -> PolyUOpPtr:
-        return self.lib.poly_const_int(self.ctx, int(value))
+        return self.lib.poly_uop_const_int(self.ctx, int(value))
 
     def const_typed(self, dtype: PolyDType, value: int) -> PolyUOpPtr:
         return self.lib.poly_uop0(self.ctx, self.ops["CONST"], dtype, arg_int(value))
@@ -333,13 +333,13 @@ class Poly:
         )
 
     def alu1(self, op: str, a: PolyUOpPtr) -> PolyUOpPtr:
-        return self.lib.poly_alu1(self.ctx, self.ops[op], a)
+        return self.lib.poly_uop_alu1(self.ctx, self.ops[op], a)
 
     def alu2(self, op: str, a: PolyUOpPtr, b: PolyUOpPtr) -> PolyUOpPtr:
-        return self.lib.poly_alu2(self.ctx, self.ops[op], a, b)
+        return self.lib.poly_uop_alu2(self.ctx, self.ops[op], a, b)
 
     def alu3(self, op: str, a: PolyUOpPtr, b: PolyUOpPtr, c: PolyUOpPtr) -> PolyUOpPtr:
-        return self.lib.poly_alu3(self.ctx, self.ops[op], a, b, c)
+        return self.lib.poly_uop_alu3(self.ctx, self.ops[op], a, b, c)
 
     def rewrite(self, u: PolyUOpPtr) -> PolyUOpPtr:
         return self.lib.poly_graph_rewrite(self.ctx, u, self.lib.poly_symbolic())

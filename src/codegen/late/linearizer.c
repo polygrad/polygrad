@@ -948,9 +948,9 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (!ctx || !sink) return NULL;
   /* 1. Standard toposort */
   int n;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
   if (!topo || n <= 0) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
 
@@ -1174,7 +1174,7 @@ cleanup:
   free(tuplize_rank);
   free(ideal);
   free(nkey);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
 
   return result;
 }
@@ -1212,7 +1212,7 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
       srcs[n_range_srcs++] = end->src[i];
   PolyUOp *range_sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_range_srcs, poly_arg_none());
   int n_topo = 0;
-  PolyUOp **range_topo = poly_toposort_alloc(ctx, range_sink, &n_topo);
+  PolyUOp **range_topo = poly_uop_toposort_alloc(ctx, range_sink, &n_topo);
   if (!range_topo || n_topo <= 0) {
     free(range_topo);
     free(srcs);

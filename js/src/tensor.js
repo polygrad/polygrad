@@ -493,10 +493,10 @@ function createBoundTensorClass(runtime) {
   const gradManyRaw = (ctx, root, initialGrad, wrts) => {
     const clean = wrts.map(rawUop).filter(Boolean)
     if (!clean.length) return { grads: [], present: [] }
-    const out = ffi.poly_grad_many(ctx, rawUop(root) || 0, rawUop(initialGrad) || 0, clean)
+    const out = ffi.poly_uop_grad_many(ctx, rawUop(root) || 0, rawUop(initialGrad) || 0, clean)
     if (!out || !Array.isArray(out.grads) || !Array.isArray(out.present) ||
         out.grads.length !== clean.length || out.present.length !== clean.length) {
-      throw new Error('poly_grad_many failed')
+      throw new Error('poly_uop_grad_many failed')
     }
     return out
   }
@@ -568,7 +568,7 @@ function createBoundTensorClass(runtime) {
     const nxt = rawUop(next)
     if (!cur) return nxt
     if (!nxt) return cur
-    return ffi.poly_alu2(ctx, ops.ADD, cur, nxt)
+    return ffi.poly_uop_alu2(ctx, ops.ADD, cur, nxt)
   }
   const usesAsyncHostBridge = () => {
     const caps = _runtime && _runtime._core && _runtime._core.caps
@@ -3006,7 +3006,7 @@ function createBoundTensorClass(runtime) {
       )
       if (!core) {
         throw new Error(
-          `poly_pool failed for shape=${JSON.stringify(this.shape)}, ` +
+          `poly_uop_pool failed for shape=${JSON.stringify(this.shape)}, ` +
           `kernel=${JSON.stringify(k)}, stride=${JSON.stringify(strideTuple)}, ` +
           `dilation=${JSON.stringify(dilationTuple)}`
         )
@@ -3028,7 +3028,7 @@ function createBoundTensorClass(runtime) {
       const indices = Boolean(opts.returnIndices || opts.return_indices)
       const core = this._rt._core.ffi.poly_tensor_max_pool2d(
         ...this._pool2dArgs(kernelSize, opts), Boolean(opts.ceilMode || opts.ceil_mode), indices)
-      if (!core) throw new Error('poly_max_pool2d failed')
+      if (!core) throw new Error('poly_uop_max_pool2d failed')
       if (indices) return core.map(ptr => this._makeResultFromCore(ptr))
       return this._makeResultFromCore(core)
     }
@@ -3131,7 +3131,7 @@ function createBoundTensorClass(runtime) {
           if (dtypeId === undefined) throw new Error(`unsupported dtype: ${opts.dtype}`)
           core = this._rt._core.ffi.poly_tensor_conv2d_dtype_by_id(...args, dtypeId)
         }
-        if (!core) throw new Error('poly_conv2d failed')
+        if (!core) throw new Error('poly_uop_conv2d failed')
         return this._makeResultFromCore(core)
       })
     }
@@ -3147,7 +3147,7 @@ function createBoundTensorClass(runtime) {
         bias ? bias._tensor : null,
         mean._tensor, invstd._tensor, axes, axes.length
       )
-      if (!core) throw new Error('poly_batchnorm failed')
+      if (!core) throw new Error('poly_uop_batchnorm failed')
       const inputs = [this, mean, invstd]
       if (weight) inputs.push(weight)
       if (bias) inputs.push(bias)
@@ -3261,8 +3261,8 @@ function createBoundTensorClass(runtime) {
           else if (step < 0) [start, stop] = [stop+1, start+1]
         }
         kinds.push(kind)
-        starts.push(ffi.poly_const_int_by_id(this._ctx, start, DTYPE_ID.weakint))
-        sizes.push(ffi.poly_const_int_by_id(this._ctx, stop-start, DTYPE_ID.weakint))
+        starts.push(ffi.poly_uop_const_int_by_id(this._ctx, start, DTYPE_ID.weakint))
+        sizes.push(ffi.poly_uop_const_int_by_id(this._ctx, stop-start, DTYPE_ID.weakint))
         steps.push(step)
         tensors.push(tensor ? tensor._tensor : null)
       }
@@ -3313,7 +3313,7 @@ function createBoundTensorClass(runtime) {
       const core = ffi.poly_tensor_einsum(
         ctx, formula, operands.map(t => t._tensor)
       )
-      if (!core) throw new Error(`poly_einsum failed for formula: ${formula}`)
+      if (!core) throw new Error(`poly_uop_einsum failed for formula: ${formula}`)
       return t0._makeResultFromCore(core)
     }
 
@@ -3323,7 +3323,7 @@ function createBoundTensorClass(runtime) {
       if (!kwargs) kwargs = {}
       const { ffi } = this._rt._core
       const core = ffi.poly_tensor_rearrange(this._ctx, formula, this._tensor, kwargs)
-      if (!core) throw new Error(`poly_rearrange failed for formula: ${formula}`)
+      if (!core) throw new Error(`poly_uop_rearrange failed for formula: ${formula}`)
       return this._makeResultFromCore(core)
     }
 
@@ -3435,7 +3435,7 @@ function createBoundTensorClass(runtime) {
       for (let i = 0; i < gradLeaves.length; i++) {
         const leaf = gradLeaves[i]
         const gradUop = gradUops[i]
-        if (!gradUop) throw new Error('poly_grad_many returned NULL for a leaf tensor')
+        if (!gradUop) throw new Error('poly_uop_grad_many returned NULL for a leaf tensor')
         const gradHandle = tensorCreateResultLike(
           this._ctx, leaf._tensor, tensorUopLogical(leaf._tensor) ? gradUop : null,
           gradUop, POLY_TENSOR_VALUE, leaf._device
@@ -3830,7 +3830,7 @@ function createBoundTensorClass(runtime) {
       )
       const tensor = tensorDevice.startsWith('disk:') || shape.some(x => x instanceof UOp)
         ? ffi.poly_tensor_empty_uop_name_by_id(
-          ctx, dtypeId, shape.map(x => x instanceof UOp ? x.raw : ffi.poly_const_int(ctx, x)), shape.length, tensorDevice)
+          ctx, dtypeId, shape.map(x => x instanceof UOp ? x.raw : ffi.poly_uop_const_int(ctx, x)), shape.length, tensorDevice)
         : ffi.poly_tensor_empty_by_id(ctx, dtypeId, shape, shape.length, deviceId(tensorDevice))
       if (!tensor) throw new Error('poly_tensor_empty_by_id failed')
       return new Tensor(null, {

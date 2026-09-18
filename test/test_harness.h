@@ -158,8 +158,8 @@ static inline PolyUOp *poly_test_store_to_buffer(PolyCtx *ctx, PolyUOp *buffer, 
     shape[i] = poly_uop_shape_dim(ctx, value, i);
     if (!shape[i]) return NULL;
   }
-  PolyUOp *target = poly_reshape_uop(ctx, buffer, shape, ndim);
-  return target ? poly_store_val(ctx, target, value) : NULL;
+  PolyUOp *target = poly_uop_reshape_symbolic(ctx, buffer, shape, ndim);
+  return target ? poly_uop_store_val(ctx, target, value) : NULL;
 }
 
 /* Current Tinygrad compiler kernels require SINK(arg=KernelInfo). */
@@ -194,7 +194,7 @@ static inline PolyUOp *poly_test_uop_param(
     PolyAddrSpace addrspace
 ) {
   PolyUOp *shape = numel < 0 ? poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none())
-                             : poly_const_int(ctx, numel);
+                             : poly_uop_const_int(ctx, numel);
   PolyParamArg arg = {.slot = slot, .dtype = dtype, .addrspace = addrspace};
   PolyOps op = addrspace == POLY_ADDR_GLOBAL ? POLY_OP_PARAM : POLY_OP_BUFFER;
   return shape ? poly_uop1(ctx, op, dtype, shape, poly_arg_param(&arg)) : NULL;

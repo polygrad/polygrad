@@ -145,9 +145,9 @@ static PolyUOp *arena_view(
     PolyDType dtype
 ) {
   if (offset > INT64_MAX || nbytes > INT64_MAX) return NULL;
-  PolyUOp *start = poly_const_int(ctx, (int64_t)offset);
-  PolyUOp *size = poly_const_int(ctx, (int64_t)nbytes);
-  PolyUOp *slice = start && size ? poly_shrink_uop(ctx, arena, &start, &size, 1) : NULL;
+  PolyUOp *start = poly_uop_const_int(ctx, (int64_t)offset);
+  PolyUOp *size = poly_uop_const_int(ctx, (int64_t)nbytes);
+  PolyUOp *slice = start && size ? poly_uop_shrink_symbolic(ctx, arena, &start, &size, 1) : NULL;
   return slice ? poly_uop1(ctx, POLY_OP_BITCAST, dtype, slice, poly_arg_none()) : NULL;
 }
 

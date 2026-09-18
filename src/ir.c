@@ -37,7 +37,8 @@ static PolyUOp **ir_toposort(PolyCtx *ctx, PolyUOp *root, int *count, bool scrat
   }
   if (ir_topo_fail_after > 0) ir_topo_fail_after--;
 #endif
-  return scratch ? poly_toposort_scratch(ctx, root, count) : poly_toposort_alloc(ctx, root, count);
+  return scratch ? poly_toposort_scratch(ctx, root, count)
+                 : poly_uop_toposort_alloc(ctx, root, count);
 }
 
 typedef struct {
@@ -537,18 +538,18 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
       int n_dep = 0;
       PolyUOp **dep = ir_toposort(ctx, refs[r], &n_dep, false);
       if (!dep || n_dep <= 0) {
-        poly_toposort_free(dep);
+        poly_uop_toposort_free(dep);
         free(refs);
         goto fail;
       }
       for (int j = 0; j < n_dep; j++) {
         if (!node_list_append_unique(&ordered, &n_ordered, &cap_ordered, dep[j])) {
-          poly_toposort_free(dep);
+          poly_uop_toposort_free(dep);
           free(refs);
           goto fail;
         }
       }
-      poly_toposort_free(dep);
+      poly_uop_toposort_free(dep);
     }
     free(refs);
   }
@@ -568,16 +569,16 @@ static bool program_topo_with_metadata(PolyCtx *ctx, PolyUOp ***topo_io, int *n_
       int n_dep = 0;
       PolyUOp **dep = ir_toposort(ctx, refs[r], &n_dep, false);
       if (!dep || n_dep <= 0) {
-        poly_toposort_free(dep);
+        poly_uop_toposort_free(dep);
         goto fail;
       }
       for (int j = 0; j < n_dep; j++) {
         if (!node_list_append_unique(&ordered, &n_ordered, &cap_ordered, dep[j])) {
-          poly_toposort_free(dep);
+          poly_uop_toposort_free(dep);
           goto fail;
         }
       }
-      poly_toposort_free(dep);
+      poly_uop_toposort_free(dep);
     }
   }
   for (int i = 0; i < n_old; i++)

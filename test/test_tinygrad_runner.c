@@ -99,8 +99,8 @@ static PolyUOp *parity_store(PolyCtx *ctx, PolyUOp *buffer, PolyUOp *value) {
     return NULL;
   PolyUOp *target = buffer;
   if (!poly_shape_eq(buffer_shape, value_shape))
-    target = poly_reshape(ctx, buffer, value_shape.dims, value_shape.ndim);
-  return target ? poly_store_val(ctx, target, value) : NULL;
+    target = poly_uop_reshape(ctx, buffer, value_shape.dims, value_shape.ndim);
+  return target ? poly_uop_store_val(ctx, target, value) : NULL;
 }
 
 /* tinygrad can schedule pure movement outputs as COPY-only calls with no SINK
@@ -118,7 +118,7 @@ static int linear_is_copy_only(PolyUOp *linear) {
 
 static int graph_has_compute_ops(PolyCtx *ctx, PolyUOp *tensor_sink) {
   int n = 0;
-  PolyUOp **nodes = poly_toposort(ctx, tensor_sink, &n);
+  PolyUOp **nodes = poly_uop_toposort(ctx, tensor_sink, &n);
   for (int i = 0; i < n; i++) {
     PolyOps op = nodes[i]->op;
     if (poly_opset_has(POLY_GROUP_ALU, op)) return 1;
@@ -136,7 +136,7 @@ static int graph_reads_input_binding(
 ) {
   if (!bindings || n_bindings <= 1) return 0;
   int n = 0;
-  PolyUOp **nodes = poly_toposort(ctx, tensor_sink, &n);
+  PolyUOp **nodes = poly_uop_toposort(ctx, tensor_sink, &n);
   for (int i = 0; i < n; i++) {
     for (int j = 1; j < n_bindings; j++) {
       if (nodes[i] == bindings[j].buffer) return 1;
@@ -479,9 +479,9 @@ static int case_reduce_sum_axis1(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 4);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   PolyUOp *store = parity_store(ctx, c, sum);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -505,7 +505,7 @@ static int case_reduce_scalar_chain(void) {
   PolyUOp *b = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, N);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum, b, poly_arg_none());
   PolyUOp *store = parity_store(ctx, c, add);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -530,14 +530,14 @@ static int case_reduce_vector_chain(void) {
   PolyUOp *b = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, N);
   int64_t dims2d[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, dims2d, 2);
-  PolyUOp *b2d = poly_reshape(ctx, b, dims2d, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, dims2d, 2);
+  PolyUOp *b2d = poly_uop_reshape(ctx, b, dims2d, 2);
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   int64_t keepdim[] = {4, 1};
-  PolyUOp *sum_keepdim = poly_reshape(ctx, sum, keepdim, 2);
+  PolyUOp *sum_keepdim = poly_uop_reshape(ctx, sum, keepdim, 2);
   int64_t expd[] = {4, 3};
-  PolyUOp *sum_exp = poly_expand(ctx, sum_keepdim, expd, 2);
+  PolyUOp *sum_exp = poly_uop_expand(ctx, sum_keepdim, expd, 2);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum_exp, b2d, poly_arg_none());
   PolyUOp *store = parity_store(ctx, c, add);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -568,7 +568,7 @@ static int case_shared_scalar_reduce_branches(void) {
   PolyUOp *oc = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *oe = parity_buffer(ctx, POLY_FLOAT32, N);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum, c0, poly_arg_none());
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, sum, e0, poly_arg_none());
   PolyUOp *store_c = parity_store(ctx, oc, add);
@@ -593,9 +593,9 @@ static int case_permute_2d(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 12);
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t perm[] = {1, 0};
-  PolyUOp *t = poly_permute(ctx, a2d, perm, 2);
+  PolyUOp *t = poly_uop_permute(ctx, a2d, perm, 2);
   PolyUOp *store = parity_store(ctx, c, t);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -616,9 +616,9 @@ static int case_shrink_2d(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 6);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t pairs[][2] = {{1, 3}, {0, 3}};
-  PolyUOp *s = poly_shrink(ctx, a2d, pairs, 2);
+  PolyUOp *s = poly_uop_shrink(ctx, a2d, pairs, 2);
   PolyUOp *store = parity_store(ctx, c, s);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -638,9 +638,9 @@ static int case_pad_2d(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 6);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 20);
   int64_t rdims[] = {2, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t pairs[][2] = {{1, 1}, {1, 1}};
-  PolyUOp *p = poly_pad(ctx, a2d, pairs, 2);
+  PolyUOp *p = poly_uop_pad(ctx, a2d, pairs, 2);
   PolyUOp *store = parity_store(ctx, c, p);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -658,9 +658,9 @@ static int case_chain_pad_flip(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 5);
   int64_t pad_pairs[][2] = {{1, 1}};
-  PolyUOp *p = poly_pad(ctx, a, pad_pairs, 1);
+  PolyUOp *p = poly_uop_pad(ctx, a, pad_pairs, 1);
   int64_t axes[] = {0};
-  PolyUOp *f = poly_flip(ctx, p, axes, 1);
+  PolyUOp *f = poly_uop_flip(ctx, p, axes, 1);
   PolyUOp *store = parity_store(ctx, c, f);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -684,8 +684,8 @@ static int case_grad_mul_sum(void) {
   PolyUOp *x = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, x, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, mul, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, mul, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -705,8 +705,8 @@ static int case_grad_exp2_sum(void) {
   PolyUOp *x = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *e = poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT32, x, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, e, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, e, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -728,8 +728,8 @@ static int case_grad_fdiv_sum_x(void) {
   PolyUOp *y = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *q = poly_uop2(ctx, POLY_OP_FDIV, POLY_FLOAT32, x, y, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, q, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, q, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -751,8 +751,8 @@ static int case_grad_fdiv_sum_y(void) {
   PolyUOp *y = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *q = poly_uop2(ctx, POLY_OP_FDIV, POLY_FLOAT32, x, y, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, q, axes, 1);
-  PolyUOp *gy = poly_grad(ctx, loss, y);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, q, axes, 1);
+  PolyUOp *gy = poly_uop_grad(ctx, loss, y);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gy);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -776,10 +776,10 @@ static int case_grad_chain_movement(void) {
   int64_t rshape[] = {2, 3};
   int64_t perm[] = {1, 0};
   int64_t axes[] = {0, 1};
-  PolyUOp *xr = poly_reshape(ctx, x, rshape, 2);
-  PolyUOp *xp = poly_permute(ctx, xr, perm, 2);
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, xp, axes, 2);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *xr = poly_uop_reshape(ctx, x, rshape, 2);
+  PolyUOp *xp = poly_uop_permute(ctx, xr, perm, 2);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, xp, axes, 2);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -907,7 +907,7 @@ static int case_reduce_sum_all(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
   PolyUOp *store = parity_store(ctx, c, sum);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -927,7 +927,7 @@ static int case_reduce_max_1d(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 1);
   int64_t axes[] = {0};
-  PolyUOp *mx = poly_reduce_axis(ctx, POLY_OP_MAX, a, axes, 1);
+  PolyUOp *mx = poly_uop_reduce_axis(ctx, POLY_OP_MAX, a, axes, 1);
   PolyUOp *store = parity_store(ctx, c, mx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -948,9 +948,9 @@ static int case_reshape_reduce(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 4);
   int64_t rdims[] = {4, 3};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   PolyUOp *store = parity_store(ctx, c, sum);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -972,12 +972,12 @@ static int case_expand_alu_reduce(void) {
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 4);
   int64_t dims[] = {4, 3};
   int64_t a_dims[] = {4, 1};
-  PolyUOp *a2d = poly_reshape(ctx, a, a_dims, 2);
-  PolyUOp *a_exp = poly_expand(ctx, a2d, dims, 2);
-  PolyUOp *b2d = poly_reshape(ctx, b, dims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, a_dims, 2);
+  PolyUOp *a_exp = poly_uop_expand(ctx, a2d, dims, 2);
+  PolyUOp *b2d = poly_uop_reshape(ctx, b, dims, 2);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a_exp, b2d, poly_arg_none());
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, add, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, add, axes, 1);
   PolyUOp *store = parity_store(ctx, c, sum);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -998,13 +998,13 @@ static int case_multi_movement(void) {
   PolyUOp *a = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 6);
   int64_t rdims[] = {3, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, rdims, 2);
   int64_t perm[] = {1, 0};
-  PolyUOp *p = poly_permute(ctx, a2d, perm, 2);
+  PolyUOp *p = poly_uop_permute(ctx, a2d, perm, 2);
   int64_t pairs[][2] = {{0, 2}, {0, 3}};
-  PolyUOp *s = poly_shrink(ctx, p, pairs, 2);
+  PolyUOp *s = poly_uop_shrink(ctx, p, pairs, 2);
   int64_t faxes[] = {0};
-  PolyUOp *f = poly_flip(ctx, s, faxes, 1);
+  PolyUOp *f = poly_uop_flip(ctx, s, faxes, 1);
   PolyUOp *store = parity_store(ctx, c, f);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1025,8 +1025,8 @@ static int case_grad_log2_sum(void) {
   PolyUOp *x = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *l = poly_uop1(ctx, POLY_OP_LOG2, POLY_FLOAT32, x, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, l, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, l, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1046,8 +1046,8 @@ static int case_grad_sqrt_sum(void) {
   PolyUOp *x = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *s = poly_uop1(ctx, POLY_OP_SQRT, POLY_FLOAT32, x, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, s, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, s, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1070,8 +1070,8 @@ static int case_grad_where_sum(void) {
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, x, poly_arg_none());
   PolyUOp *relu = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, cmp, x, zero, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, relu, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, relu, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1094,8 +1094,8 @@ static int case_grad_multi_use(void) {
   PolyUOp *x2 = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, two, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, xx, x2, poly_arg_none());
   int64_t axes[] = {0};
-  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, add, axes, 1);
-  PolyUOp *gx = poly_grad(ctx, loss, x);
+  PolyUOp *loss = poly_uop_reduce_axis(ctx, POLY_OP_ADD, add, axes, 1);
+  PolyUOp *gx = poly_uop_grad(ctx, loss, x);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *store = parity_store(ctx, out, gx);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1120,22 +1120,22 @@ static int case_matmul_small(void) {
   PolyUOp *c = parity_buffer(ctx, POLY_FLOAT32, 4);
 
   int64_t a_shape[] = {2, 1, 3};
-  PolyUOp *ar = poly_reshape(ctx, a, a_shape, 3);
+  PolyUOp *ar = poly_uop_reshape(ctx, a, a_shape, 3);
   int64_t a_exp_shape[] = {2, 2, 3};
-  PolyUOp *ae = poly_expand(ctx, ar, a_exp_shape, 3);
+  PolyUOp *ae = poly_uop_expand(ctx, ar, a_exp_shape, 3);
 
   int64_t b_2d[] = {3, 2};
-  PolyUOp *br = poly_reshape(ctx, b, b_2d, 2);
+  PolyUOp *br = poly_uop_reshape(ctx, b, b_2d, 2);
   int64_t b_perm[] = {1, 0};
-  PolyUOp *bp = poly_permute(ctx, br, b_perm, 2);
+  PolyUOp *bp = poly_uop_permute(ctx, br, b_perm, 2);
   int64_t b_3d[] = {1, 2, 3};
-  PolyUOp *br2 = poly_reshape(ctx, bp, b_3d, 3);
+  PolyUOp *br2 = poly_uop_reshape(ctx, bp, b_3d, 3);
   int64_t b_exp[] = {2, 2, 3};
-  PolyUOp *be = poly_expand(ctx, br2, b_exp, 3);
+  PolyUOp *be = poly_uop_expand(ctx, br2, b_exp, 3);
 
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ae, be, poly_arg_none());
   int64_t red_axes[] = {2};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, mul, red_axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, mul, red_axes, 1);
 
   PolyUOp *store = parity_store(ctx, c, sum);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -1157,10 +1157,10 @@ static int case_matmul_broadcast(void) {
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 8);
 
   /* v2 API: shape lives on the UOp via reshape */
-  PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){2, 2, 2}, 3);
-  PolyUOp *b = poly_reshape(ctx, b_buf, (int64_t[]){1, 2, 2}, 3);
+  PolyUOp *a = poly_uop_reshape(ctx, a_buf, (int64_t[]){2, 2, 2}, 3);
+  PolyUOp *b = poly_uop_reshape(ctx, b_buf, (int64_t[]){1, 2, 2}, 3);
 
-  PolyUOp *dot = poly_dot(ctx, a, b);
+  PolyUOp *dot = poly_uop_dot(ctx, a, b);
   PolyUOp *store = parity_store(ctx, out, dot);
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1183,12 +1183,12 @@ static int case_cross_entropy_nonlast_axis(void) {
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 1);
 
   /* v2 API: shape lives on the UOp via reshape */
-  PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
-  PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2, 2}, 2);
+  PolyUOp *logits = poly_uop_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
+  PolyUOp *target = poly_uop_reshape(ctx, target_buf, (int64_t[]){2, 2}, 2);
 
-  PolyUOp *loss = poly_cross_entropy(ctx, logits, target, -2);
+  PolyUOp *loss = poly_uop_cross_entropy(ctx, logits, target, -2);
   PolyUOp *store = parity_store(ctx, out, loss);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   ParityBinding bindings[] = {{out, out_d}, {logits_buf, logits_d}, {target_buf, target_d}};
   int ok = run_and_report(ctx, sink, bindings, 3, out_d, 1);
@@ -1205,9 +1205,9 @@ static int case_full_1d(void) {
   float out_d[5] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_full(ctx, (int64_t[]){5}, 1, 7.5);
+  PolyUOp *val = poly_uop_full(ctx, (int64_t[]){5}, 1, 7.5);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
   poly_ctx_destroy(ctx);
@@ -1219,9 +1219,9 @@ static int case_full_2d(void) {
   float out_d[12] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *val = poly_full(ctx, (int64_t[]){3, 4}, 2, -2.0);
+  PolyUOp *val = poly_uop_full(ctx, (int64_t[]){3, 4}, 2, -2.0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report(ctx, sink, b, 1, out_d, 12);
   poly_ctx_destroy(ctx);
@@ -1233,9 +1233,9 @@ static int case_arange_simple(void) {
   float out_d[5] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_arange(ctx, 0.0, 5.0, 1.0);
+  PolyUOp *val = poly_uop_arange(ctx, 0.0, 5.0, 1.0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 5, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
@@ -1247,9 +1247,9 @@ static int case_arange_start_step(void) {
   float out_d[2] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 2);
-  PolyUOp *val = poly_arange(ctx, 2.0, 8.0, 3.0);
+  PolyUOp *val = poly_uop_arange(ctx, 2.0, 8.0, 3.0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 2, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
@@ -1261,9 +1261,9 @@ static int case_eye_3(void) {
   float out_d[9] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 9);
-  PolyUOp *val = poly_eye(ctx, 3);
+  PolyUOp *val = poly_uop_eye(ctx, 3);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 9, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
@@ -1277,10 +1277,10 @@ static int case_tril_3x4_diag0(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in_buf = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *in = poly_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
-  PolyUOp *val = poly_tril(ctx, in, 0);
+  PolyUOp *in = poly_uop_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
+  PolyUOp *val = poly_uop_tril(ctx, in, 0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in_buf, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
   poly_ctx_destroy(ctx);
@@ -1294,10 +1294,10 @@ static int case_triu_3x4_diag0(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in_buf = parity_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *in = poly_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
-  PolyUOp *val = poly_triu(ctx, in, 0);
+  PolyUOp *in = poly_uop_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
+  PolyUOp *val = poly_uop_triu(ctx, in, 0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in_buf, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
   poly_ctx_destroy(ctx);
@@ -1309,9 +1309,9 @@ static int case_linspace_5(void) {
   float out_d[5] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_linspace(ctx, 0.0, 10.0, 5);
+  PolyUOp *val = poly_uop_linspace(ctx, 0.0, 10.0, 5);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
   int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 5, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
@@ -1324,9 +1324,9 @@ static int case_repeat_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *val = poly_repeat(ctx, in, (int64_t[]){4}, 1);
+  PolyUOp *val = poly_uop_repeat(ctx, in, (int64_t[]){4}, 1);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
   poly_ctx_destroy(ctx);
@@ -1339,9 +1339,9 @@ static int case_pool_1d_k3(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 9);
-  PolyUOp *val = poly_pool(ctx, in, (int64_t[]){3}, 1, NULL, NULL);
+  PolyUOp *val = poly_uop_pool(ctx, in, (int64_t[]){3}, 1, NULL, NULL);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 9);
   poly_ctx_destroy(ctx);
@@ -1356,9 +1356,9 @@ static int case_cat_1d(void) {
   PolyUOp *b = parity_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *parts[2] = {a, b};
-  PolyUOp *val = poly_cat(ctx, parts, 2, 0);
+  PolyUOp *val = poly_uop_cat(ctx, parts, 2, 0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding bd[] = {{out, out_d}, {a, a_d}, {b, b_d}};
   int ok = run_and_report(ctx, sink, bd, 3, out_d, 5);
   poly_ctx_destroy(ctx);
@@ -1372,9 +1372,9 @@ static int case_pad_value_1d(void) {
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 6);
   int64_t pads[1][2] = {{2, 1}};
-  PolyUOp *val = poly_pad_value(ctx, in, pads, 1, 9.0);
+  PolyUOp *val = poly_uop_pad_value(ctx, in, pads, 1, 9.0);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 6);
   poly_ctx_destroy(ctx);
@@ -1388,9 +1388,9 @@ static int case_pad_circular_1d(void) {
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 3);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 6);
   int64_t pads[1][2] = {{1, 2}};
-  PolyUOp *val = poly_pad_circular(ctx, in, pads, 1);
+  PolyUOp *val = poly_uop_pad_circular(ctx, in, pads, 1);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 6);
   poly_ctx_destroy(ctx);
@@ -1404,9 +1404,9 @@ static int case_pad_reflect_1d(void) {
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 7);
   int64_t pads[1][2] = {{2, 1}};
-  PolyUOp *val = poly_pad_reflect(ctx, in, pads, 1);
+  PolyUOp *val = poly_uop_pad_reflect(ctx, in, pads, 1);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 7);
   poly_ctx_destroy(ctx);
@@ -1420,9 +1420,9 @@ static int case_pad_replicate_1d(void) {
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 7);
   int64_t pads[1][2] = {{2, 1}};
-  PolyUOp *val = poly_pad_replicate(ctx, in, pads, 1);
+  PolyUOp *val = poly_uop_pad_replicate(ctx, in, pads, 1);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 7);
   poly_ctx_destroy(ctx);
@@ -1435,9 +1435,9 @@ static int case_cumsum_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_ADD);
+  PolyUOp *val = poly_uop_cumalu(ctx, in, 0, POLY_OP_ADD);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 5);
   poly_ctx_destroy(ctx);
@@ -1450,9 +1450,9 @@ static int case_cumprod_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MUL);
+  PolyUOp *val = poly_uop_cumalu(ctx, in, 0, POLY_OP_MUL);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 4);
   poly_ctx_destroy(ctx);
@@ -1465,9 +1465,9 @@ static int case_cummax_1d(void) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = parity_buffer(ctx, POLY_FLOAT32, 5);
   PolyUOp *out = parity_buffer(ctx, POLY_FLOAT32, 5);
-  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MAX);
+  PolyUOp *val = poly_uop_cumalu(ctx, in, 0, POLY_OP_MAX);
   PolyUOp *store = parity_store(ctx, out, val);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}, {in, in_d}};
   int ok = run_and_report(ctx, sink, b, 2, out_d, 5);
   poly_ctx_destroy(ctx);

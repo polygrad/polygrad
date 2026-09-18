@@ -97,9 +97,9 @@ static TensorVecadd make_tensor_vecadd(int n, PolyDevice device) {
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, device);
   PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, device);
   PolyUOp *c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, device);
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, add);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_uop_store_val(ctx, c, add);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
   return (TensorVecadd){ctx, sink, a, b, c, n};
 }
 
@@ -298,7 +298,7 @@ TEST_BACKEND(cuda, devectorizer_keeps_aligned_float4_store_like_tinygrad) {
   PolyUOp *rewritten = poly_rewrite_cuda(ctx, sink);
   ASSERT_NOT_NULL(rewritten);
   int n = 0, n_store = 0, n_group = 0;
-  PolyUOp **topo = poly_toposort(ctx, rewritten, &n);
+  PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &n);
   PolyUOp *final_store = NULL;
   for (int i = 0; i < n; i++) {
     if (topo[i]->op == POLY_OP_STORE) n_store++, final_store = topo[i];
@@ -350,7 +350,7 @@ TEST_BACKEND(cuda, raw_cross_dtype_store_does_not_invent_late_cast) {
   PolyUOp *rewritten = poly_rewrite_cuda(ctx, sink);
   ASSERT_NOT_NULL(rewritten);
   int n_topo = 0, invented_casts = 0;
-  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &n_topo);
   ASSERT_NOT_NULL(topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
@@ -550,7 +550,7 @@ TEST_BACKEND(cuda, render_muladd_matches_pinned_cudastyle) {
   PolyUOp *p1 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
   PolyUOp *p2 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 2);
   PolyUOp *p3 = poly_test_program_param(ctx, POLY_FLOAT32, 4, 3);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *idx0 = poly_uop_index(ctx, p0, &range, 1);
@@ -592,7 +592,7 @@ TEST_BACKEND(cuda, render_half_reciprocal_and_single_consumer_match_pinned) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *pin = poly_test_program_param(ctx, POLY_FLOAT16, 4, 0);
   PolyUOp *pout = poly_test_program_param(ctx, POLY_FLOAT16, 4, 1);
-  PolyUOp *bound = poly_const_int(ctx, 4);
+  PolyUOp *bound = poly_uop_const_int(ctx, 4);
   PolyUOp *range =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_WEAK));
   PolyUOp *in_idx = poly_uop_index(ctx, pin, &range, 1);
@@ -665,7 +665,7 @@ TEST_BACKEND(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp *pout0 = poly_test_program_param(ctx, POLY_FLOAT32, 1, 1);
   PolyUOp *pout1 = poly_test_program_param(ctx, POLY_FLOAT32, 1, 2);
 
-  PolyUOp *bound = poly_const_int(ctx, 1024);
+  PolyUOp *bound = poly_uop_const_int(ctx, 1024);
   PolyUOp *r0 =
       poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
 
@@ -679,7 +679,7 @@ TEST_BACKEND(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp *mx =
       poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red1_srcs, 2, poly_arg_reduce(POLY_OP_MAX, 0));
 
-  PolyUOp *zero = poly_const_int(ctx, 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
   PolyUOp *out0_idx = poly_uop_index(ctx, pout0, &zero, 1);
   PolyUOp *out1_idx = poly_uop_index(ctx, pout1, &zero, 1);
   PolyUOp *st0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out0_idx, sum, poly_arg_none());
@@ -996,9 +996,9 @@ TEST_BACKEND(cuda, e2e_neg) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf_a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, buf_a);
-  PolyUOp *store = poly_store_val(ctx, buf_c, neg);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *neg = poly_uop_alu1(ctx, POLY_OP_NEG, buf_a);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, neg);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float *c_gpu = calloc(n, sizeof(float));
@@ -1027,10 +1027,10 @@ TEST_BACKEND(cuda, e2e_chain) {
   PolyUOp *buf_b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   /* c = (a + b) * a */
-  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, buf_a, buf_b);
-  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, add, buf_a);
-  PolyUOp *store = poly_store_val(ctx, buf_c, mul);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *add = poly_uop_alu2(ctx, POLY_OP_ADD, buf_a, buf_b);
+  PolyUOp *mul = poly_uop_alu2(ctx, POLY_OP_MUL, add, buf_a);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, mul);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float *b = malloc(n * sizeof(float));
@@ -1062,9 +1062,9 @@ TEST_BACKEND(cuda, e2e_exp2) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf_a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
-  PolyUOp *exp = poly_alu1(ctx, POLY_OP_EXP2, buf_a);
-  PolyUOp *store = poly_store_val(ctx, buf_c, exp);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *exp = poly_uop_alu1(ctx, POLY_OP_EXP2, buf_a);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, exp);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float *c_gpu = calloc(n, sizeof(float));
@@ -1092,9 +1092,9 @@ TEST_BACKEND(cuda, e2e_reduce_sum) {
   PolyUOp *buf_a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
   int64_t axes[] = {0};
-  PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
-  PolyUOp *store = poly_store_val(ctx, buf_c, red);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *red = poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, red);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float c_gpu = 0;
@@ -1121,9 +1121,9 @@ TEST_BACKEND(cuda, e2e_reduce_sum_parallel) {
   PolyUOp *buf_a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
   int64_t axes[] = {0};
-  PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
-  PolyUOp *store = poly_store_val(ctx, buf_c, red);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *red = poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, red);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float c_gpu = 0;
@@ -1217,8 +1217,8 @@ TEST_BACKEND(cuda, device_less_constant_copy_matches_pinned_single_call_schedule
   ASSERT_NOT_NULL(ctx);
   select_cuda_for_cuda_phase(ctx);
 
-  PolyUOp *ones = poly_full(ctx, (int64_t[]){4}, 1, 1.0);
-  PolyUOp *contiguous = poly_contiguous(ctx, ones);
+  PolyUOp *ones = poly_uop_full(ctx, (int64_t[]){4}, 1, 1.0);
+  PolyUOp *contiguous = poly_uop_contiguous(ctx, ones);
   ASSERT_NOT_NULL(ones);
   ASSERT_NOT_NULL(contiguous);
 
@@ -1226,7 +1226,7 @@ TEST_BACKEND(cuda, device_less_constant_copy_matches_pinned_single_call_schedule
    * self for device-free values. Direct UOp.copy_to_device still constructs
    * one scheduled SINK call and does not materialize a separate producer. */
   PolyUOp *physical =
-      poly_copy_to_device_uop(ctx, contiguous, poly_device_uop(ctx, POLY_DEVICE_CUDA));
+      poly_uop_copy_to_device(ctx, contiguous, poly_device_uop(ctx, POLY_DEVICE_CUDA));
   ASSERT_NOT_NULL(physical);
   ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
 
@@ -1284,9 +1284,9 @@ TEST_BACKEND(cuda, realize_unified_reduce) {
   PolyUOp *buf_a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, n, POLY_DEVICE_CUDA);
   PolyUOp *buf_c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
   int64_t axes[] = {0};
-  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
-  PolyUOp *store = poly_store_val(ctx, buf_c, s);
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *s = poly_uop_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
+  PolyUOp *store = poly_uop_store_val(ctx, buf_c, s);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float c_gpu = 0;
@@ -1368,14 +1368,15 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   ASSERT_NOT_NULL(b1_tensor);
 
   PolyUOp *x = poly_tensor_uop(x_tensor);
-  x = poly_linear_apply(ctx, x, poly_tensor_uop(w0_tensor), poly_tensor_uop(b0_tensor));
+  x = poly_uop_linear_apply(ctx, x, poly_tensor_uop(w0_tensor), poly_tensor_uop(b0_tensor));
   ASSERT_NOT_NULL(x);
-  x = poly_relu(ctx, x);
+  x = poly_uop_relu(ctx, x);
   ASSERT_NOT_NULL(x);
-  PolyUOp *pred = poly_linear_apply(ctx, x, poly_tensor_uop(w1_tensor), poly_tensor_uop(b1_tensor));
+  PolyUOp *pred =
+      poly_uop_linear_apply(ctx, x, poly_tensor_uop(w1_tensor), poly_tensor_uop(b1_tensor));
   ASSERT_NOT_NULL(pred);
   PolyUOp *target = poly_tensor_uop(y_tensor);
-  PolyUOp *loss = poly_mse_loss(ctx, pred, target);
+  PolyUOp *loss = poly_uop_mse_loss(ctx, pred, target);
   ASSERT_NOT_NULL(loss);
 
   PolyUOp *param_bufs[4] = {
@@ -1398,7 +1399,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
 
   PolyUOp *grads[4] = {0};
   uint8_t grad_present[4] = {0};
-  ASSERT_INT_EQ(poly_grad_many_ex(ctx, loss, NULL, wrts, 4, grads, grad_present), 0);
+  ASSERT_INT_EQ(poly_uop_grad_many_ex(ctx, loss, NULL, wrts, 4, grads, grad_present), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_INT_EQ(grad_present[i], 1);
 
@@ -1408,9 +1409,9 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   PolyUOp *loss_flat = loss;
   if (test_uop_numel(ctx, loss) != 1) {
     int64_t one_shape[1] = {1};
-    loss_flat = poly_reshape(ctx, loss, one_shape, 1);
+    loss_flat = poly_uop_reshape(ctx, loss, one_shape, 1);
   }
-  stores[0] = poly_store_val(ctx, loss_out, loss_flat);
+  stores[0] = poly_uop_store_val(ctx, loss_out, loss_flat);
   ASSERT_NOT_NULL(stores[0]);
 
   PolyOptimConfig cfg = {
@@ -1419,7 +1420,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
       .weight_decay = 0.0f,
       .classic = false,
   };
-  PolyUOp *lr = poly_const_float(ctx, 0.01);
+  PolyUOp *lr = poly_uop_const_float(ctx, 0.01);
   ASSERT_NOT_NULL(lr);
   for (int i = 0; i < 4; i++) {
     ASSERT_NOT_NULL(grads[i]);
@@ -1427,7 +1428,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
     PolyShape gs = poly_uop_max_shape(ctx, grad);
     if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != param_numels[i])) {
       int64_t flat[1] = {param_numels[i]};
-      grad = poly_reshape(ctx, grad, flat, 1);
+      grad = poly_uop_reshape(ctx, grad, flat, 1);
     }
     if (gs.dims) free(gs.dims);
 
@@ -1438,11 +1439,11 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
         ),
         0
     );
-    stores[i + 1] = poly_store_buffer_update(ctx, param_bufs[i], upd.param_new);
+    stores[i + 1] = poly_uop_store_buffer_update(ctx, param_bufs[i], upd.param_new);
     ASSERT_NOT_NULL(stores[i + 1]);
   }
 
-  PolyUOp *sink = poly_sink_n(ctx, stores, 5);
+  PolyUOp *sink = poly_uop_sink_n(ctx, stores, 5);
   ASSERT_NOT_NULL(sink);
   PolyUOp *sched = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(sched);
@@ -1455,7 +1456,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   PolyUOp *first_body = poly_test_linear_call_body(sched, 0);
   ASSERT_NOT_NULL(first_body);
   int n_first = 0;
-  PolyUOp **first_topo = poly_toposort(ctx, first_body, &n_first);
+  PolyUOp **first_topo = poly_uop_toposort(ctx, first_body, &n_first);
   ASSERT_NOT_NULL(first_topo);
   ASSERT_INT_EQ(n_first, 29);
   ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_SINK), 1);
@@ -1485,7 +1486,7 @@ TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   for (int i = 0; i < sched->n_src; i++) {
     if (poly_test_linear_call_is_copy(sched, i)) continue;
     int n_body = 0;
-    PolyUOp **body_topo = poly_toposort(ctx, poly_test_linear_call_body(sched, i), &n_body);
+    PolyUOp **body_topo = poly_uop_toposort(ctx, poly_test_linear_call_body(sched, i), &n_body);
     ASSERT_NOT_NULL(body_topo);
     ASSERT_INT_EQ(count_lin_ops(body_topo, n_body, POLY_OP_BUFFER), 0);
     int n_lin = 0;
@@ -2250,7 +2251,9 @@ TEST_BACKEND(cuda, compiled_schedule_preserves_mixed_call_devices) {
   ASSERT_NOT_NULL(third_info);
   ASSERT_INT_EQ(poly_device_by_name(first_info->target), POLY_DEVICE_INTERP);
   ASSERT_INT_EQ(
-      poly_device_from_device_uop(poly_uop_device_uop_cached(ctx, compiled->src[1]->src[0], NULL)),
+      poly_uop_device_from_device_uop(
+          poly_uop_device_uop_cached(ctx, compiled->src[1]->src[0], NULL)
+      ),
       POLY_DEVICE_CUDA
   );
   ASSERT_INT_EQ(poly_device_by_name(third_info->target), POLY_DEVICE_CUDA);

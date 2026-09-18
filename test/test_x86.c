@@ -114,12 +114,12 @@ TEST_BACKEND(x86, isclose_nonfinite_under_register_pressure) {
       float data[16];
       for (int i = 0; i < n; i++)
         data[i] = nan ? NAN : INFINITY;
-      PolyUOp *a = poly_buffer_f32(ctx, n), *b = poly_buffer_f32(ctx, n);
+      PolyUOp *a = poly_uop_buffer_f32(ctx, n), *b = poly_uop_buffer_f32(ctx, n);
       poly_buffer_set(ctx, a, data, (size_t)n * sizeof(float), POLY_DEVICE_CPU);
       poly_buffer_set(ctx, b, data, (size_t)n * sizeof(float), POLY_DEVICE_CPU);
       for (int equal_nan = 0; equal_nan <= 1; equal_nan++) {
-        PolyUOp *close = poly_isclose(
-            ctx, a, b, poly_const_float(ctx, 1e-5), poly_const_float(ctx, 1e-8), equal_nan
+        PolyUOp *close = poly_uop_isclose(
+            ctx, a, b, poly_uop_const_float(ctx, 1e-5), poly_uop_const_float(ctx, 1e-8), equal_nan
         );
         PolyUOp *realized = NULL;
         int rc = poly_realize_uops(ctx, &close, 1, &realized);
@@ -173,7 +173,7 @@ TEST_BACKEND(x86, pre_isel_eliminates_current_gated_load) {
       ctx, POLY_OP_STORE, POLY_VOID,
       poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, zero, poly_arg_none()), load, poly_arg_none()
   );
-  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyUOp *sink = poly_uop_sink1(ctx, store);
 
   int n_lin = 0;
   PolyUOp **lin = poly_linearize_x86_rewritten(ctx, sink, &n_lin);
@@ -239,7 +239,7 @@ TEST_BACKEND(x86, gated_vector_load_selects_one_scalar_address) {
         poly_arg_none()
     );
     int n_lin = 0;
-    PolyUOp **lin = poly_linearize_x86_rewritten(ctx, poly_sink1(ctx, store), &n_lin);
+    PolyUOp **lin = poly_linearize_x86_rewritten(ctx, poly_uop_sink1(ctx, store), &n_lin);
     ASSERT_NOT_NULL(lin);
     int cmovs = 0;
     for (int i = 0; i < n_lin; i++) {
@@ -358,8 +358,9 @@ TEST_BACKEND(x86, isel_complex_address_scales_current_index) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop_variable(ctx, "a", poly_arg_int(0), poly_arg_int(0), POLY_INT32, 1, false);
   PolyUOp *param = poly_test_program_param(ctx, POLY_INT32, 16, 0);
-  PolyUOp *one =
-      poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, poly_const_int(ctx, 1), poly_arg_dtype(POLY_INT32));
+  PolyUOp *one = poly_uop1(
+      ctx, POLY_OP_CAST, POLY_INT32, poly_uop_const_int(ctx, 1), poly_arg_dtype(POLY_INT32)
+  );
   PolyUOp *index = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, one, poly_arg_none());
   PolyUOp *addr = poly_uop_index(ctx, param, &index, 1);
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, addr, poly_arg_none());
@@ -383,11 +384,11 @@ TEST_BACKEND(x86, to_program_attaches_linear_source_hex_and_binary_children) {
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
   poly_program_source_render_count_reset();
 
-  PolyUOp *a = poly_buffer_f32(ctx, 8);
-  PolyUOp *b = poly_buffer_f32(ctx, 8);
-  PolyUOp *out = poly_buffer_f32(ctx, 8);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *a = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *out = poly_uop_buffer_f32(ctx, 8);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   PolyUOp *linear_schedule = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear_schedule);
@@ -436,7 +437,7 @@ TEST_BACKEND(x86, to_program_allows_f16_after_x86_extra_legalization) {
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT16, 4, POLY_DEVICE_X86);
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, a, a, poly_arg_none());
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT16, mul, a, poly_arg_none());
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum));
 
   PolyUOp *linear_schedule = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear_schedule);
@@ -460,11 +461,11 @@ TEST_BACKEND(x86, schedule_runtime_vecadd_uses_x86_device) {
   }
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
   poly_buffer_set(ctx, a, a_data, sizeof(a_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, b, b_data, sizeof(b_data), POLY_DEVICE_CPU);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *realized = NULL;
   ASSERT_INT_EQ(poly_realize_uops(ctx, &sum, 1, &realized), 0);
   ASSERT_NOT_NULL(realized);
@@ -484,12 +485,12 @@ TEST_BACKEND(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class
     a_data[i] = (float)i;
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
-  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
   poly_buffer_set(ctx, a, a_data, sizeof(a_data), POLY_DEVICE_CPU);
   int64_t shape[] = {4, 4};
-  PolyUOp *a2d = poly_reshape(ctx, a, shape, 2);
+  PolyUOp *a2d = poly_uop_reshape(ctx, a, shape, 2);
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
+  PolyUOp *sum = poly_uop_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);
   PolyUOp *realized = NULL;
   ASSERT_INT_EQ(poly_realize_uops(ctx, &sum, 1, &realized), 0);
   ASSERT_NOT_NULL(realized);
@@ -510,14 +511,14 @@ TEST_BACKEND(x86, schedule_runtime_dot_matches_tinygrad_probe_class) {
   float out[OUT] = {0};
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
-  PolyUOp *xb = poly_buffer_f32(ctx, XN);
-  PolyUOp *wb = poly_buffer_f32(ctx, WN);
+  PolyUOp *xb = poly_uop_buffer_f32(ctx, XN);
+  PolyUOp *wb = poly_uop_buffer_f32(ctx, WN);
   poly_buffer_set(ctx, xb, x_data, sizeof(x_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, wb, w_data, sizeof(w_data), POLY_DEVICE_CPU);
-  PolyUOp *x = poly_reshape(ctx, xb, (int64_t[]){2, 4}, 2);
-  PolyUOp *w = poly_reshape(ctx, wb, (int64_t[]){2, 4}, 2);
-  PolyUOp *wt = poly_permute(ctx, w, (int64_t[]){1, 0}, 2);
-  PolyUOp *dot = poly_dot(ctx, x, wt);
+  PolyUOp *x = poly_uop_reshape(ctx, xb, (int64_t[]){2, 4}, 2);
+  PolyUOp *w = poly_uop_reshape(ctx, wb, (int64_t[]){2, 4}, 2);
+  PolyUOp *wt = poly_uop_permute(ctx, w, (int64_t[]){1, 0}, 2);
+  PolyUOp *dot = poly_uop_dot(ctx, x, wt);
   ASSERT_NOT_NULL(dot);
   PolyUOp *realized = NULL;
   ASSERT_INT_EQ(poly_realize_uops(ctx, &dot, 1, &realized), 0);
@@ -550,11 +551,11 @@ TEST_BACKEND(x86, threaded_vecadd_program_core_id_shards_match_tinygrad_cpu_x86)
 
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
-  PolyUOp *abuf = poly_buffer_f32(ctx, N);
-  PolyUOp *bbuf = poly_buffer_f32(ctx, N);
-  PolyUOp *obuf = poly_buffer_f32(ctx, N);
-  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, abuf, bbuf);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, obuf, sum));
+  PolyUOp *abuf = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *bbuf = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *obuf = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, abuf, bbuf);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, obuf, sum));
   PolyUOp *linear_schedule = poly_test_create_linear(ctx, sink);
   ASSERT_NOT_NULL(linear_schedule);
   ASSERT_INT_EQ(linear_schedule->n_src, 1);
@@ -605,14 +606,14 @@ TEST_BACKEND(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_liv
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
-  PolyUOp *logits_buf = poly_buffer_f32(ctx, 12);
-  PolyUOp *target_buf = poly_buffer_f32(ctx, 12);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
-  PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
-  PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2, 3, 2}, 3);
-  PolyUOp *loss = poly_cross_entropy(ctx, logits, target, 1);
+  PolyUOp *logits_buf = poly_uop_buffer_f32(ctx, 12);
+  PolyUOp *target_buf = poly_uop_buffer_f32(ctx, 12);
+  PolyUOp *out_buf = poly_uop_buffer_f32(ctx, 1);
+  PolyUOp *logits = poly_uop_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
+  PolyUOp *target = poly_uop_reshape(ctx, target_buf, (int64_t[]){2, 3, 2}, 3);
+  PolyUOp *loss = poly_uop_cross_entropy(ctx, logits, target, 1);
   ASSERT_NOT_NULL(loss);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out_buf, loss));
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out_buf, loss));
 
   float logits_data[12] = {0};
   float target_data[12] = {
@@ -679,15 +680,15 @@ TEST_BACKEND(x86, schedule_runtime_computed_log2_keeps_loop_live_ins_like_tinygr
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
-  PolyUOp *obuf = poly_buffer_f32(ctx, N);
-  PolyUOp *rf = poly_arange(ctx, 0.0, (double)N, 1.0);
+  PolyUOp *obuf = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *rf = poly_uop_arange(ctx, 0.0, (double)N, 1.0);
   ASSERT_NOT_NULL(rf);
-  PolyUOp *x = poly_alu2(
-      ctx, POLY_OP_FDIV, poly_alu2(ctx, POLY_OP_ADD, rf, poly_const_float(ctx, 1.0)),
-      poly_const_float(ctx, 17.0)
+  PolyUOp *x = poly_uop_alu2(
+      ctx, POLY_OP_FDIV, poly_uop_alu2(ctx, POLY_OP_ADD, rf, poly_uop_const_float(ctx, 1.0)),
+      poly_uop_const_float(ctx, 17.0)
   );
-  PolyUOp *y = poly_alu1(ctx, POLY_OP_LOG2, x);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, obuf, y));
+  PolyUOp *y = poly_uop_alu1(ctx, POLY_OP_LOG2, x);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, obuf, y));
   PolyTestBufferView view = POLY_TEST_HOST_VIEW(obuf, out);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, &view, 1), 0);
 
@@ -707,21 +708,21 @@ TEST_BACKEND(x86, schedule_runtime_pow_const_exponents_match_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
-  PolyUOp *a = poly_buffer_f32(ctx, N);
-  PolyUOp *oi = poly_buffer_f32(ctx, N);
-  PolyUOp *oh = poly_buffer_f32(ctx, N);
-  PolyUOp *on = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *oi = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *oh = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *on = poly_uop_buffer_f32(ctx, N);
   poly_buffer_set(ctx, a, in, sizeof(in), POLY_DEVICE_CPU);
 
-  PolyUOp *pow_i = poly_alu2(ctx, POLY_OP_POW, a, poly_const_float(ctx, 2.0));
-  PolyUOp *pow_h = poly_alu2(ctx, POLY_OP_POW, a, poly_const_float(ctx, 1.5));
-  PolyUOp *pow_n = poly_alu2(ctx, POLY_OP_POW, a, poly_const_float(ctx, -1.0));
+  PolyUOp *pow_i = poly_uop_alu2(ctx, POLY_OP_POW, a, poly_uop_const_float(ctx, 2.0));
+  PolyUOp *pow_h = poly_uop_alu2(ctx, POLY_OP_POW, a, poly_uop_const_float(ctx, 1.5));
+  PolyUOp *pow_n = poly_uop_alu2(ctx, POLY_OP_POW, a, poly_uop_const_float(ctx, -1.0));
   PolyUOp *stores[3] = {
-      poly_store_val(ctx, oi, pow_i),
-      poly_store_val(ctx, oh, pow_h),
-      poly_store_val(ctx, on, pow_n),
+      poly_uop_store_val(ctx, oi, pow_i),
+      poly_uop_store_val(ctx, oh, pow_h),
+      poly_uop_store_val(ctx, on, pow_n),
   };
-  PolyUOp *sink = poly_sink_n(ctx, stores, 3);
+  PolyUOp *sink = poly_uop_sink_n(ctx, stores, 3);
 
   PolyTestBufferView views[] = {
       POLY_TEST_HOST_VIEW(oi, out_i),
@@ -747,14 +748,14 @@ TEST_BACKEND(x86, schedule_runtime_pow_dynamic_exponent_uses_xpow_like_tinygrad)
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
-  PolyUOp *b = poly_buffer_f32(ctx, N);
-  PolyUOp *e = poly_buffer_f32(ctx, N);
-  PolyUOp *o = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *e = poly_uop_buffer_f32(ctx, N);
+  PolyUOp *o = poly_uop_buffer_f32(ctx, N);
   poly_buffer_set(ctx, b, base, sizeof(base), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, e, expv, sizeof(expv), POLY_DEVICE_CPU);
 
-  PolyUOp *pow = poly_alu2(ctx, POLY_OP_POW, b, e);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, o, pow));
+  PolyUOp *pow = poly_uop_alu2(ctx, POLY_OP_POW, b, e);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, o, pow));
   PolyTestBufferView view = POLY_TEST_HOST_VIEW(o, out);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, &view, 1), 0);
 
@@ -785,8 +786,8 @@ TEST_BACKEND(x86, schedule_runtime_integer_pow_matches_current_tinygrad_bits) {
   poly_buffer_set(ctx, b, base, sizeof(base), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, e, expv, sizeof(expv), POLY_DEVICE_CPU);
 
-  PolyUOp *pow = poly_alu2(ctx, POLY_OP_POW, b, e);
-  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, o, pow));
+  PolyUOp *pow = poly_uop_alu2(ctx, POLY_OP_POW, b, e);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, o, pow));
   PolyTestBufferView view = POLY_TEST_HOST_VIEW(o, out);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, &view, 1), 0);
 
@@ -844,23 +845,24 @@ TEST_BACKEND(x86, schedule_runtime_qwen_ffn_fused_large_matches_tinygrad_probe_c
 
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
-  PolyUOp *xb = poly_buffer_f32(ctx, D);
-  PolyUOp *wgb = poly_buffer_f32(ctx, (int64_t)H * D);
-  PolyUOp *wub = poly_buffer_f32(ctx, (int64_t)H * D);
-  PolyUOp *wdb = poly_buffer_f32(ctx, (int64_t)D * H);
+  PolyUOp *xb = poly_uop_buffer_f32(ctx, D);
+  PolyUOp *wgb = poly_uop_buffer_f32(ctx, (int64_t)H * D);
+  PolyUOp *wub = poly_uop_buffer_f32(ctx, (int64_t)H * D);
+  PolyUOp *wdb = poly_uop_buffer_f32(ctx, (int64_t)D * H);
   poly_buffer_set(ctx, xb, x, (size_t)D * sizeof(float), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, wgb, wg, (size_t)H * D * sizeof(float), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, wub, wu, (size_t)H * D * sizeof(float), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, wdb, wd, (size_t)D * H * sizeof(float), POLY_DEVICE_CPU);
 
-  PolyUOp *x2 = poly_reshape(ctx, xb, (int64_t[]){1, D}, 2);
-  PolyUOp *wg2 = poly_reshape(ctx, wgb, (int64_t[]){H, D}, 2);
-  PolyUOp *wu2 = poly_reshape(ctx, wub, (int64_t[]){H, D}, 2);
-  PolyUOp *wd2 = poly_reshape(ctx, wdb, (int64_t[]){D, H}, 2);
-  PolyUOp *gate = poly_silu(ctx, poly_dot(ctx, x2, poly_permute(ctx, wg2, (int64_t[]){1, 0}, 2)));
-  PolyUOp *up = poly_dot(ctx, x2, poly_permute(ctx, wu2, (int64_t[]){1, 0}, 2));
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, gate, up);
-  PolyUOp *res = poly_dot(ctx, prod, poly_permute(ctx, wd2, (int64_t[]){1, 0}, 2));
+  PolyUOp *x2 = poly_uop_reshape(ctx, xb, (int64_t[]){1, D}, 2);
+  PolyUOp *wg2 = poly_uop_reshape(ctx, wgb, (int64_t[]){H, D}, 2);
+  PolyUOp *wu2 = poly_uop_reshape(ctx, wub, (int64_t[]){H, D}, 2);
+  PolyUOp *wd2 = poly_uop_reshape(ctx, wdb, (int64_t[]){D, H}, 2);
+  PolyUOp *gate =
+      poly_uop_silu(ctx, poly_uop_dot(ctx, x2, poly_uop_permute(ctx, wg2, (int64_t[]){1, 0}, 2)));
+  PolyUOp *up = poly_uop_dot(ctx, x2, poly_uop_permute(ctx, wu2, (int64_t[]){1, 0}, 2));
+  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, gate, up);
+  PolyUOp *res = poly_uop_dot(ctx, prod, poly_uop_permute(ctx, wd2, (int64_t[]){1, 0}, 2));
   PolyUOp *realized = NULL;
   ASSERT_INT_EQ(poly_realize_uops(ctx, &res, 1, &realized), 0);
   ASSERT_NOT_NULL(realized);

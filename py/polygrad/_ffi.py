@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 99
+POLYGRAD_ABI_VERSION = 100
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -307,46 +307,46 @@ def _declare_signatures(lib):
     lib.poly_dtype_can_lossless_cast.argtypes = [PolyDType, PolyDType]
 
     # --- Frontend helpers (frontend.h) ---
-    lib.poly_const_float.restype = _ptr
-    lib.poly_const_float.argtypes = [_ptr, ctypes.c_double]
+    lib.poly_uop_const_float.restype = _ptr
+    lib.poly_uop_const_float.argtypes = [_ptr, ctypes.c_double]
 
-    lib.poly_const_double.restype = _ptr
-    lib.poly_const_double.argtypes = [_ptr, ctypes.c_double]
+    lib.poly_uop_const_double.restype = _ptr
+    lib.poly_uop_const_double.argtypes = [_ptr, ctypes.c_double]
 
-    lib.poly_const_int.restype = _ptr
-    lib.poly_const_int.argtypes = [_ptr, ctypes.c_int64]
-    lib.poly_const_int_decimal.restype = _ptr
-    lib.poly_const_int_decimal.argtypes = [_ptr, ctypes.c_char_p]
+    lib.poly_uop_const_int.restype = _ptr
+    lib.poly_uop_const_int.argtypes = [_ptr, ctypes.c_int64]
+    lib.poly_uop_const_int_decimal.restype = _ptr
+    lib.poly_uop_const_int_decimal.argtypes = [_ptr, ctypes.c_char_p]
 
-    lib.poly_contiguous.restype = _ptr
-    lib.poly_contiguous.argtypes = [_ptr, _ptr]
+    lib.poly_uop_contiguous.restype = _ptr
+    lib.poly_uop_contiguous.argtypes = [_ptr, _ptr]
 
-    lib.poly_alu1.restype = _ptr
-    lib.poly_alu1.argtypes = [_ptr, ctypes.c_int, _ptr]
+    lib.poly_uop_alu1.restype = _ptr
+    lib.poly_uop_alu1.argtypes = [_ptr, ctypes.c_int, _ptr]
 
-    lib.poly_alu2.restype = _ptr
-    lib.poly_alu2.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr]
+    lib.poly_uop_alu2.restype = _ptr
+    lib.poly_uop_alu2.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr]
 
-    lib.poly_binop.restype = _ptr
-    lib.poly_binop.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr]
+    lib.poly_uop_binop.restype = _ptr
+    lib.poly_uop_binop.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr]
 
-    lib.poly_alu3.restype = _ptr
-    lib.poly_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
+    lib.poly_uop_alu3.restype = _ptr
+    lib.poly_uop_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
 
-    lib.poly_store_val.restype = _ptr
-    lib.poly_store_val.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_store_val.restype = _ptr
+    lib.poly_uop_store_val.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_sink1.restype = _ptr
-    lib.poly_sink1.argtypes = [_ptr, _ptr]
+    lib.poly_uop_sink1.restype = _ptr
+    lib.poly_uop_sink1.argtypes = [_ptr, _ptr]
 
-    lib.poly_sink_n.restype = _ptr
-    lib.poly_sink_n.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+    lib.poly_uop_sink_n.restype = _ptr
+    lib.poly_uop_sink_n.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_uop_placeholder_like.restype = _ptr
     lib.poly_uop_placeholder_like.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_uop_range.restype = _ptr
-    lib.poly_uop_range.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_range_by_id.restype = _ptr
+    lib.poly_uop_range_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
 
     lib.poly_uop_index.restype = _ptr
     lib.poly_uop_index.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
@@ -397,19 +397,19 @@ def _declare_signatures(lib):
         _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int, ctypes.c_char_p, ctypes.c_bool
     ]
 
-    lib.poly_buffer_by_id.restype = _ptr
-    lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
+    lib.poly_uop_buffer_by_id.restype = _ptr
+    lib.poly_uop_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
 
-    lib.poly_buffer_on_device_by_id.restype = _ptr
-    lib.poly_buffer_on_device_by_id.argtypes = [
+    lib.poly_uop_buffer_on_device_by_id.restype = _ptr
+    lib.poly_uop_buffer_on_device_by_id.argtypes = [
         _ptr, ctypes.c_int, ctypes.c_int64, ctypes.c_int,
     ]
 
-    lib.poly_buffer_f32.restype = _ptr
-    lib.poly_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
+    lib.poly_uop_buffer_f32.restype = _ptr
+    lib.poly_uop_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
 
-    lib.poly_buffer_f64.restype = _ptr
-    lib.poly_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
+    lib.poly_uop_buffer_f64.restype = _ptr
+    lib.poly_uop_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
 
     lib.poly_tensor_empty_by_id.restype = _ptr
     lib.poly_tensor_empty_by_id.argtypes = [
@@ -504,160 +504,160 @@ def _declare_signatures(lib):
     lib.poly_uop_dtype_id.restype = ctypes.c_int
     lib.poly_uop_dtype_id.argtypes = [_ptr, _ptr]
 
-    lib.poly_cast_by_id.restype = _ptr
-    lib.poly_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_cast_by_id.restype = _ptr
+    lib.poly_uop_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_bitcast_by_id.restype = _ptr
-    lib.poly_bitcast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_bitcast_by_id.restype = _ptr
+    lib.poly_uop_bitcast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     # --- Composed elementwise ops (shape-free) ---
-    for n in ['poly_exp', 'poly_log', 'poly_log1p', 'poly_expm1',
-              'poly_sin', 'poly_cos', 'poly_tan',
-              'poly_erf', 'poly_erfc', 'poly_erfinv', 'poly_ndtri',
-              'poly_digamma', 'poly_lgamma',
-              'poly_sigmoid', 'poly_tanh_act', 'poly_abs', 'poly_sign',
-              'poly_square', 'poly_rsqrt', 'poly_ceil', 'poly_floor',
-              'poly_round_f', 'poly_isinf', 'poly_isnan',
-              'poly_relu', 'poly_relu6', 'poly_gelu', 'poly_quick_gelu',
-              'poly_silu', 'poly_mish', 'poly_hardswish', 'poly_hardsigmoid']:
+    for n in ['poly_uop_exp', 'poly_uop_log', 'poly_uop_log1p', 'poly_uop_expm1',
+              'poly_uop_sin', 'poly_uop_cos', 'poly_uop_tan',
+              'poly_uop_erf', 'poly_uop_erfc', 'poly_uop_erfinv', 'poly_uop_ndtri',
+              'poly_uop_digamma', 'poly_uop_lgamma',
+              'poly_uop_sigmoid', 'poly_uop_tanh', 'poly_uop_abs', 'poly_uop_sign',
+              'poly_uop_square', 'poly_uop_rsqrt', 'poly_uop_ceil', 'poly_uop_floor',
+              'poly_uop_round', 'poly_uop_isinf', 'poly_uop_isnan',
+              'poly_uop_relu', 'poly_uop_relu6', 'poly_uop_gelu', 'poly_uop_quick_gelu',
+              'poly_uop_silu', 'poly_uop_mish', 'poly_uop_hardswish', 'poly_uop_hardsigmoid']:
         _unary(lib, n)
 
-    for n in ['poly_leaky_relu', 'poly_elu', 'poly_softplus']:
+    for n in ['poly_uop_leaky_relu', 'poly_uop_elu', 'poly_uop_softplus']:
         _unary_d(lib, n)
 
-    _unary_dd(lib, 'poly_hardtanh')
+    _unary_dd(lib, 'poly_uop_hardtanh')
 
     # Comparisons
-    for n in ['poly_eq', 'poly_ne', 'poly_gt', 'poly_ge', 'poly_le',
-              'poly_maximum', 'poly_minimum']:
+    for n in ['poly_uop_eq', 'poly_uop_ne', 'poly_uop_gt', 'poly_uop_ge', 'poly_uop_le',
+              'poly_uop_maximum', 'poly_uop_minimum']:
         _binary(lib, n)
 
-    lib.poly_where_op.restype = _ptr
-    lib.poly_where_op.argtypes = [_ptr, _ptr, _ptr, _ptr]
+    lib.poly_uop_where.restype = _ptr
+    lib.poly_uop_where.argtypes = [_ptr, _ptr, _ptr, _ptr]
 
-    lib.poly_clamp.restype = _ptr
-    lib.poly_clamp.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_double]
+    lib.poly_uop_clamp.restype = _ptr
+    lib.poly_uop_clamp.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_double]
 
-    lib.poly_detach.restype = _ptr
-    lib.poly_detach.argtypes = [_ptr, _ptr]
+    lib.poly_uop_detach.restype = _ptr
+    lib.poly_uop_detach.argtypes = [_ptr, _ptr]
 
-    lib.poly_rand.restype = _ptr
-    lib.poly_rand.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
+    lib.poly_uop_rand.restype = _ptr
+    lib.poly_uop_rand.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
 
-    lib.poly_randn.restype = _ptr
-    lib.poly_randn.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
+    lib.poly_uop_randn.restype = _ptr
+    lib.poly_uop_randn.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
 
-    lib.poly_rand_by_id.restype = _ptr
-    lib.poly_rand_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
+    lib.poly_uop_rand_by_id.restype = _ptr
+    lib.poly_uop_rand_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
 
-    lib.poly_randn_by_id.restype = _ptr
-    lib.poly_randn_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
+    lib.poly_uop_randn_by_id.restype = _ptr
+    lib.poly_uop_randn_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
 
-    lib.poly_arange.restype = _ptr
-    lib.poly_arange.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+    lib.poly_uop_arange.restype = _ptr
+    lib.poly_uop_arange.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double]
 
-    lib.poly_arange_int_by_id.restype = _ptr
-    lib.poly_arange_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_arange_int_by_id.restype = _ptr
+    lib.poly_uop_arange_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
 
-    lib.poly_arange_float_by_id.restype = _ptr
-    lib.poly_arange_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
+    lib.poly_uop_arange_float_by_id.restype = _ptr
+    lib.poly_uop_arange_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
 
-    lib.poly_eye.restype = _ptr
-    lib.poly_eye.argtypes = [_ptr, ctypes.c_int64]
+    lib.poly_uop_eye.restype = _ptr
+    lib.poly_uop_eye.argtypes = [_ptr, ctypes.c_int64]
 
-    lib.poly_eye_by_id.restype = _ptr
-    lib.poly_eye_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_eye_by_id.restype = _ptr
+    lib.poly_uop_eye_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
 
-    lib.poly_linspace.restype = _ptr
-    lib.poly_linspace.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64]
+    lib.poly_uop_linspace.restype = _ptr
+    lib.poly_uop_linspace.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64]
 
-    lib.poly_linspace_by_id.restype = _ptr
-    lib.poly_linspace_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_linspace_by_id.restype = _ptr
+    lib.poly_uop_linspace_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64, ctypes.c_int]
 
-    lib.poly_full.restype = _ptr
-    lib.poly_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
+    lib.poly_uop_full.restype = _ptr
+    lib.poly_uop_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
 
-    lib.poly_const_int_by_id.restype = _ptr
-    lib.poly_const_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_const_int_by_id.restype = _ptr
+    lib.poly_uop_const_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int]
 
-    lib.poly_const_float_by_id.restype = _ptr
-    lib.poly_const_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_int]
+    lib.poly_uop_const_float_by_id.restype = _ptr
+    lib.poly_uop_const_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_int]
 
-    lib.poly_full_int_by_id.restype = _ptr
-    lib.poly_full_int_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_int64, ctypes.c_int]
+    lib.poly_uop_full_int_by_id.restype = _ptr
+    lib.poly_uop_full_int_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_int64, ctypes.c_int]
 
-    lib.poly_full_float_by_id.restype = _ptr
-    lib.poly_full_float_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double, ctypes.c_int]
+    lib.poly_uop_full_float_by_id.restype = _ptr
+    lib.poly_uop_full_float_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double, ctypes.c_int]
 
-    lib.poly_tril.restype = _ptr
-    lib.poly_tril.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_tril.restype = _ptr
+    lib.poly_uop_tril.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_triu.restype = _ptr
-    lib.poly_triu.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_triu.restype = _ptr
+    lib.poly_uop_triu.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_cholesky.restype = _ptr
-    lib.poly_cholesky.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_cholesky.restype = _ptr
+    lib.poly_uop_cholesky.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_cholesky_solve.restype = _ptr
-    lib.poly_cholesky_solve.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_cholesky_solve.restype = _ptr
+    lib.poly_uop_cholesky_solve.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
-    lib.poly_triangular_solve.restype = _ptr
-    lib.poly_triangular_solve.argtypes = [
+    lib.poly_uop_triangular_solve.restype = _ptr
+    lib.poly_uop_triangular_solve.argtypes = [
         _ptr, _ptr, _ptr,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
 
     # --- Shape-aware composed ops (shape read from UOp) ---
-    lib.poly_sum_reduce.restype = _ptr
-    lib.poly_sum_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_sum_reduce.restype = _ptr
+    lib.poly_uop_sum_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_max_reduce.restype = _ptr
-    lib.poly_max_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_max_reduce.restype = _ptr
+    lib.poly_uop_max_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_mean_reduce.restype = _ptr
-    lib.poly_mean_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_mean_reduce.restype = _ptr
+    lib.poly_uop_mean_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_var_reduce.restype = _ptr
-    lib.poly_var_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_var_reduce.restype = _ptr
+    lib.poly_uop_var_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_logsumexp.restype = _ptr
-    lib.poly_logsumexp.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_logsumexp.restype = _ptr
+    lib.poly_uop_logsumexp.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_dot.restype = _ptr
-    lib.poly_dot.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_dot.restype = _ptr
+    lib.poly_uop_dot.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_qr.restype = ctypes.c_int
-    lib.poly_qr.argtypes = [_ptr, _ptr, _ptrp, _ptrp]
+    lib.poly_uop_qr.restype = ctypes.c_int
+    lib.poly_uop_qr.argtypes = [_ptr, _ptr, _ptrp, _ptrp]
 
-    lib.poly_qr_ex.restype = ctypes.c_int
-    lib.poly_qr_ex.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
+    lib.poly_uop_qr_ex.restype = ctypes.c_int
+    lib.poly_uop_qr_ex.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
 
-    lib.poly_solve.restype = _ptr
-    lib.poly_solve.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_solve.restype = _ptr
+    lib.poly_uop_solve.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_lstsq.restype = _ptr
-    lib.poly_lstsq.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_lstsq.restype = _ptr
+    lib.poly_uop_lstsq.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_cross_entropy.restype = _ptr
-    lib.poly_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_cross_entropy.restype = _ptr
+    lib.poly_uop_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
-    lib.poly_softmax.restype = _ptr
-    lib.poly_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_softmax.restype = _ptr
+    lib.poly_uop_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_log_softmax.restype = _ptr
-    lib.poly_log_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_uop_log_softmax.restype = _ptr
+    lib.poly_uop_log_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_gather.restype = _ptr
-    lib.poly_gather.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_gather.restype = _ptr
+    lib.poly_uop_gather.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_gather_dim.restype = _ptr
-    lib.poly_gather_dim.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
+    lib.poly_uop_gather_dim.restype = _ptr
+    lib.poly_uop_gather_dim.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
 
-    lib.poly_scatter.restype = _ptr
-    lib.poly_scatter.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p]
+    lib.poly_uop_scatter.restype = _ptr
+    lib.poly_uop_scatter.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p]
 
-    lib.poly_scatter_reduce.restype = _ptr
-    lib.poly_scatter_reduce.argtypes = [
+    lib.poly_uop_scatter_reduce.restype = _ptr
+    lib.poly_uop_scatter_reduce.argtypes = [
         _ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p, ctypes.c_int
     ]
 
@@ -676,70 +676,70 @@ def _declare_signatures(lib):
     lib.poly_uop_is_bound_var.argtypes = [_ptr]
 
     # --- Sched helpers (sched.h) ---
-    lib.poly_reshape.restype = _ptr
-    lib.poly_reshape.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+    lib.poly_uop_reshape.restype = _ptr
+    lib.poly_uop_reshape.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
-    lib.poly_expand.restype = _ptr
-    lib.poly_expand.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
-    lib.poly_expand_uop.restype = _ptr
-    lib.poly_expand_uop.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+    lib.poly_uop_expand.restype = _ptr
+    lib.poly_uop_expand.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+    lib.poly_uop_expand_symbolic.restype = _ptr
+    lib.poly_uop_expand_symbolic.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
-    lib.poly_reduce_axis.restype = _ptr
-    lib.poly_reduce_axis.argtypes = [_ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int]
+    lib.poly_uop_reduce_axis.restype = _ptr
+    lib.poly_uop_reduce_axis.argtypes = [_ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int]
 
-    lib.poly_permute.restype = _ptr
-    lib.poly_permute.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+    lib.poly_uop_permute.restype = _ptr
+    lib.poly_uop_permute.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
-    lib.poly_shrink.restype = _ptr
-    lib.poly_shrink.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
-    lib.poly_shrink_uop.restype = _ptr
-    lib.poly_shrink_uop.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr), ctypes.c_int]
+    lib.poly_uop_shrink.restype = _ptr
+    lib.poly_uop_shrink.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
+    lib.poly_uop_shrink_symbolic.restype = _ptr
+    lib.poly_uop_shrink_symbolic.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr), ctypes.c_int]
 
-    lib.poly_flip.restype = _ptr
-    lib.poly_flip.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+    lib.poly_uop_flip.restype = _ptr
+    lib.poly_uop_flip.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
-    lib.poly_pad.restype = _ptr
-    lib.poly_pad.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
+    lib.poly_uop_pad.restype = _ptr
+    lib.poly_uop_pad.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
 
-    lib.poly_pad_value.restype = _ptr
-    lib.poly_pad_value.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
+    lib.poly_uop_pad_value.restype = _ptr
+    lib.poly_uop_pad_value.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
 
-    lib.poly_pool.restype = _ptr
-    lib.poly_pool.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p]
+    lib.poly_uop_pool.restype = _ptr
+    lib.poly_uop_pool.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p]
 
-    lib.poly_max_pool2d.restype = _ptr
-    lib.poly_max_pool2d.argtypes = [
+    lib.poly_uop_max_pool2d.restype = _ptr
+    lib.poly_uop_max_pool2d.argtypes = [
         _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
     ]
 
-    lib.poly_conv2d.restype = _ptr
-    lib.poly_conv2d.argtypes = [
+    lib.poly_uop_conv2d.restype = _ptr
+    lib.poly_uop_conv2d.argtypes = [
         _ptr, _ptr, _ptr, _ptr, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
     ]
 
-    lib.poly_batchnorm.restype = _ptr
-    lib.poly_batchnorm.argtypes = [
+    lib.poly_uop_batchnorm.restype = _ptr
+    lib.poly_uop_batchnorm.argtypes = [
         _ptr, _ptr, _ptr, _ptr, _ptr, _ptr, _i64p, ctypes.c_int,
     ]
 
-    lib.poly_one_hot.restype = _ptr
-    lib.poly_one_hot.argtypes = [_ptr, _ptr, ctypes.c_int64]
+    lib.poly_uop_one_hot.restype = _ptr
+    lib.poly_uop_one_hot.argtypes = [_ptr, _ptr, ctypes.c_int64]
 
-    lib.poly_index_select.restype = _ptr
-    lib.poly_index_select.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
+    lib.poly_uop_index_select.restype = _ptr
+    lib.poly_uop_index_select.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
 
     # --- Autograd ---
-    lib.poly_grad.restype = _ptr
-    lib.poly_grad.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_grad.restype = _ptr
+    lib.poly_uop_grad.argtypes = [_ptr, _ptr, _ptr]
 
     lib.poly_uop_substitute.restype = _ptr
     lib.poly_uop_substitute.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr), ctypes.c_int]
 
-    lib.poly_grad_many.restype = ctypes.c_int
-    lib.poly_grad_many.argtypes = [_ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
+    lib.poly_uop_grad_many.restype = ctypes.c_int
+    lib.poly_uop_grad_many.argtypes = [_ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
 
-    lib.poly_grad_many_ex.restype = ctypes.c_int
-    lib.poly_grad_many_ex.argtypes = [
+    lib.poly_uop_grad_many_ex.restype = ctypes.c_int
+    lib.poly_uop_grad_many_ex.argtypes = [
         _ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int,
         ctypes.POINTER(_ptr), ctypes.POINTER(ctypes.c_uint8),
     ]
@@ -1309,16 +1309,16 @@ def _declare_signatures(lib):
     ]
 
     # --- Einsum ---
-    lib.poly_einsum.restype = _ptr
-    lib.poly_einsum.argtypes = [
+    lib.poly_uop_einsum.restype = _ptr
+    lib.poly_uop_einsum.argtypes = [
         _ptr, ctypes.c_char_p,
         ctypes.POINTER(_ptr),
         ctypes.c_int,
     ]
 
     # --- Rearrange ---
-    lib.poly_rearrange.restype = _ptr
-    lib.poly_rearrange.argtypes = [
+    lib.poly_uop_rearrange.restype = _ptr
+    lib.poly_uop_rearrange.argtypes = [
         _ptr, ctypes.c_char_p, _ptr,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
@@ -1545,36 +1545,36 @@ def _declare_signatures(lib):
     lib.poly_uop_bind_value.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int64)]
 
     # --- Additional composed ops (shape read from UOp) ---
-    lib.poly_rmsnorm_apply.restype = _ptr
-    lib.poly_rmsnorm_apply.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
+    lib.poly_uop_rmsnorm_apply.restype = _ptr
+    lib.poly_uop_rmsnorm_apply.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
 
-    lib.poly_sdpa.restype = _ptr
-    lib.poly_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_int] * 2
+    lib.poly_uop_sdpa.restype = _ptr
+    lib.poly_uop_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_int] * 2
 
-    lib.poly_rope.restype = _ptr
-    lib.poly_rope.argtypes = [_ptr, _ptr, _ptr, _ptr]
+    lib.poly_uop_rope.restype = _ptr
+    lib.poly_uop_rope.argtypes = [_ptr, _ptr, _ptr, _ptr]
 
-    lib.poly_repeat_interleave.restype = _ptr
-    lib.poly_repeat_interleave.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_repeat_interleave.restype = _ptr
+    lib.poly_uop_repeat_interleave.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_argmax.restype = _ptr
-    lib.poly_argmax.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_argmax.restype = _ptr
+    lib.poly_uop_argmax.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_sort.restype = ctypes.c_int
-    lib.poly_sort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, _ptrp, _ptrp]
+    lib.poly_uop_sort.restype = ctypes.c_int
+    lib.poly_uop_sort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, _ptrp, _ptrp]
 
-    lib.poly_argsort.restype = _ptr
-    lib.poly_argsort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+    lib.poly_uop_argsort.restype = _ptr
+    lib.poly_uop_argsort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_topk.restype = ctypes.c_int
-    lib.poly_topk.argtypes = [_ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+    lib.poly_uop_topk.restype = ctypes.c_int
+    lib.poly_uop_topk.argtypes = [_ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
                               ctypes.c_int, _ptrp, _ptrp]
 
-    lib.poly_mse_loss.restype = _ptr
-    lib.poly_mse_loss.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_mse_loss.restype = _ptr
+    lib.poly_uop_mse_loss.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_mae_loss.restype = _ptr
-    lib.poly_mae_loss.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_mae_loss.restype = _ptr
+    lib.poly_uop_mae_loss.argtypes = [_ptr, _ptr, _ptr]
 
     # --- CUDA helpers (conditional) ---
     has_cuda = hasattr(lib, 'poly_cuda_available')

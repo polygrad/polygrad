@@ -29,9 +29,9 @@ TEST(placement, bounded_views_preserve_launch_metadata_and_store_shape) {
   PolyUOp *var = poly_uop_variable(
       ctx, "placement_n", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
   );
-  PolyUOp *dim = poly_uop_bind(ctx, var, 17), *zero = poly_const_int(ctx, 0);
-  PolyUOp *view = poly_shrink_uop(ctx, logical, &zero, &dim, 1);
-  PolyUOp *root = poly_sink1(ctx, poly_store_val(ctx, view, poly_add(ctx, view, view)));
+  PolyUOp *dim = poly_uop_bind(ctx, var, 17), *zero = poly_uop_const_int(ctx, 0);
+  PolyUOp *view = poly_uop_shrink_symbolic(ctx, logical, &zero, &dim, 1);
+  PolyUOp *root = poly_uop_sink1(ctx, poly_uop_store_val(ctx, view, poly_uop_add(ctx, view, view)));
   PolyUOp *placed = NULL;
   ASSERT_EQ(poly_place_roots(ctx, &root, 1, &logical, &physical, 1, &placed), 0);
   ASSERT_NOT_NULL(placed);
@@ -40,7 +40,7 @@ TEST(placement, bounded_views_preserve_launch_metadata_and_store_shape) {
   ASSERT_EQ(poly_uop_base(placed->src[0]->src[0]), physical);
   ASSERT_EQ(poly_uop_shape_dim(ctx, placed->src[0]->src[0], 0), dim);
   /* A naked scalar STORE is not a bound-variable metadata node. */
-  PolyUOp *invalid = poly_store_val(ctx, var, poly_const_int(ctx, 3));
+  PolyUOp *invalid = poly_uop_store_val(ctx, var, poly_uop_const_int(ctx, 3));
   PolyUOp *sentinel = placed;
   ASSERT_EQ(poly_place_roots(ctx, &invalid, 1, &logical, &physical, 1, &placed), -1);
   ASSERT_EQ(placed, sentinel);
@@ -60,13 +60,14 @@ TEST(placement, logical_bindings_reproduce_eager_value_and_instance_sink) {
   ASSERT_NOT_NULL(physical_in);
   ASSERT_NOT_NULL(physical_out);
 
-  PolyUOp *logical_value = poly_add(ctx, logical_in, logical_in);
+  PolyUOp *logical_value = poly_uop_add(ctx, logical_in, logical_in);
   int64_t shape[2] = {2, 2};
-  logical_value = poly_reshape(ctx, logical_value, shape, 2);
-  PolyUOp *eager_value = poly_reshape(ctx, poly_add(ctx, physical_in, physical_in), shape, 2);
-  PolyUOp *logical_store = poly_store_val(ctx, logical_out, logical_value);
-  PolyUOp *logical_sink = poly_sink1(ctx, logical_store);
-  PolyUOp *eager_sink = poly_sink1(ctx, poly_store_val(ctx, physical_out, eager_value));
+  logical_value = poly_uop_reshape(ctx, logical_value, shape, 2);
+  PolyUOp *eager_value =
+      poly_uop_reshape(ctx, poly_uop_add(ctx, physical_in, physical_in), shape, 2);
+  PolyUOp *logical_store = poly_uop_store_val(ctx, logical_out, logical_value);
+  PolyUOp *logical_sink = poly_uop_sink1(ctx, logical_store);
+  PolyUOp *eager_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, physical_out, eager_value));
   ASSERT_NOT_NULL(logical_sink);
   ASSERT_NOT_NULL(eager_sink);
 
@@ -96,12 +97,12 @@ TEST(placement, logical_placement_does_not_consume_bound_copy_history) {
 
   PolyUOp *cuda_device = poly_device_uop(ctx, POLY_DEVICE_CUDA);
   PolyUOp *cpu_device = poly_device_uop(ctx, POLY_DEVICE_CPU);
-  PolyUOp *to_cuda = poly_copy_to_device_uop(ctx, base_cpu, cuda_device);
-  PolyUOp *roundtrip = poly_copy_to_device_uop(ctx, to_cuda, cpu_device);
-  PolyUOp *roundtrip_template = poly_add(ctx, base_cpu, roundtrip);
+  PolyUOp *to_cuda = poly_uop_copy_to_device(ctx, base_cpu, cuda_device);
+  PolyUOp *roundtrip = poly_uop_copy_to_device(ctx, to_cuda, cpu_device);
+  PolyUOp *roundtrip_template = poly_uop_add(ctx, base_cpu, roundtrip);
   ASSERT_NOT_NULL(roundtrip_template);
 
-  PolyUOp *logical_roots[1] = {poly_add(ctx, logical_base, logical_base)};
+  PolyUOp *logical_roots[1] = {poly_uop_add(ctx, logical_base, logical_base)};
   PolyUOp *logical_bindings[1] = {logical_base};
   PolyUOp *target_bindings[1] = {base_interp};
   PolyUOp *placed[1] = {NULL};
@@ -125,8 +126,8 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
   PolyUOp *physical = placement_buffer(ctx, 4, POLY_DEVICE_INTERP);
   ASSERT_NOT_NULL(logical);
   ASSERT_NOT_NULL(physical);
-  PolyUOp *effect = poly_uop_after(ctx, logical, poly_store_val(ctx, logical, logical));
-  PolyUOp *sentinel = poly_const_int(ctx, 77);
+  PolyUOp *effect = poly_uop_after(ctx, logical, poly_uop_store_val(ctx, logical, logical));
+  PolyUOp *sentinel = poly_uop_const_int(ctx, 77);
   PolyUOp *out[1] = {sentinel};
   PolyUOp *roots[1] = {effect};
   PolyUOp *from[1] = {logical};
@@ -134,13 +135,13 @@ TEST(placement, logical_missing_occurrence_evidence_fails_atomically) {
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
-  roots[0] = poly_copy_to_device_uop(ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA));
+  roots[0] = poly_uop_copy_to_device(ctx, logical, poly_device_uop(ctx, POLY_DEVICE_CUDA));
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
   ASSERT_EQ(out[0], sentinel);
 
   /* A second logical storage identity requires its own named binding. */
   PolyUOp *unbound = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
-  roots[0] = poly_add(ctx, logical, unbound);
+  roots[0] = poly_uop_add(ctx, logical, unbound);
   ASSERT_NOT_NULL(unbound);
   ASSERT_NOT_NULL(roots[0]);
   ASSERT_INT_EQ(poly_place_roots(ctx, roots, 1, from, to, 1, out), -1);
@@ -161,10 +162,10 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
   ASSERT_NOT_NULL(b);
   ASSERT_NOT_NULL(target);
   ASSERT_NOT_NULL(wrong_shape);
-  PolyUOp *root = poly_add(ctx, a, b);
+  PolyUOp *root = poly_uop_add(ctx, a, b);
   PolyUOp *roots[1] = {root};
   PolyUOp *from[2] = {a, b};
-  PolyUOp *sentinel = poly_const_int(ctx, 99);
+  PolyUOp *sentinel = poly_uop_const_int(ctx, 99);
   PolyUOp *out[1] = {sentinel};
 
   PolyUOp *wrong_targets[2] = {target, wrong_shape};
@@ -182,7 +183,7 @@ TEST(placement, invalid_binding_shape_or_alias_fails_atomically) {
 
   /* COPY is physical transport, never a portable logical binding. */
   PolyUOp *interp_device = poly_device_uop(ctx, POLY_DEVICE_INTERP);
-  PolyUOp *copy = poly_copy_to_device_uop(ctx, target, interp_device);
+  PolyUOp *copy = poly_uop_copy_to_device(ctx, target, interp_device);
   PolyUOp *copy_binding[1] = {copy};
   ASSERT_NOT_NULL(copy);
   PolyUOp *copy_roots[1] = {copy};
@@ -201,9 +202,9 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   PolyUOp *lw0 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
   PolyUOp *lw1 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
   PolyUOp *lout = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
-  PolyUOp *module0 = poly_add(ctx, lx, lw0);
-  PolyUOp *module1 = poly_mul(ctx, module0, lw1);
-  PolyUOp *logical_sink = poly_sink1(ctx, poly_store_val(ctx, lout, module1));
+  PolyUOp *module0 = poly_uop_add(ctx, lx, lw0);
+  PolyUOp *module1 = poly_uop_mul(ctx, module0, lw1);
+  PolyUOp *logical_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, lout, module1));
   ASSERT_NOT_NULL(lx);
   ASSERT_NOT_NULL(lw0);
   ASSERT_NOT_NULL(lw1);
@@ -242,10 +243,10 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
   ASSERT_PTR_EQ(target_bindings[1], pw0);
   ASSERT_PTR_EQ(target_bindings[2], pw1);
   ASSERT_PTR_EQ(target_bindings[3], pout);
-  PolyUOp *expected_module0 = poly_add(ctx, px, pw0);
-  PolyUOp *expected_cut = poly_copy_to_device_uop(ctx, expected_module0, modules[1].device);
-  PolyUOp *expected_module1 = poly_mul(ctx, expected_cut, pw1);
-  PolyUOp *expected_sink = poly_sink1(ctx, poly_store_val(ctx, pout, expected_module1));
+  PolyUOp *expected_module0 = poly_uop_add(ctx, px, pw0);
+  PolyUOp *expected_cut = poly_uop_copy_to_device(ctx, expected_module0, modules[1].device);
+  PolyUOp *expected_module1 = poly_uop_mul(ctx, expected_cut, pw1);
+  PolyUOp *expected_sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, pout, expected_module1));
   ASSERT_PTR_EQ(placed[0], expected_sink);
   ASSERT_PTR_EQ(placed[1], expected_module1);
   ASSERT_PTR_EQ(placed[2], expected_module0);
@@ -307,9 +308,9 @@ TEST(placement, explicit_module_map_inserts_exact_cross_device_cut) {
 TEST(placement, explicit_module_map_preserves_reshaped_input_cut) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *input = placement_buffer(ctx, 4, POLY_DEVICE_AUTO);
-  PolyUOp *x = poly_reshape(ctx, input, (int64_t[]){2, 2}, 2);
-  PolyUOp *h = poly_add(ctx, x, poly_const_like(ctx, x, poly_arg_float(3)));
-  PolyUOp *y = poly_mul(ctx, h, poly_const_like(ctx, h, poly_arg_float(2)));
+  PolyUOp *x = poly_uop_reshape(ctx, input, (int64_t[]){2, 2}, 2);
+  PolyUOp *h = poly_uop_add(ctx, x, poly_uop_const_like(ctx, x, poly_arg_float(3)));
+  PolyUOp *y = poly_uop_mul(ctx, h, poly_uop_const_like(ctx, h, poly_arg_float(2)));
   PolyUOp *first_inputs[] = {x}, *second_inputs[] = {h};
   PolyPlaceModule modules[] = {
       {"stem", h, first_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_CPU)},
@@ -319,10 +320,10 @@ TEST(placement, explicit_module_map_preserves_reshaped_input_cut) {
   int rc = poly_place_module_map(ctx, &y, 1, &input, 1, modules, 2, &target, &placed);
   bool correct = rc == 0;
   if (correct) {
-    PolyUOp *px = poly_reshape(ctx, target, (int64_t[]){2, 2}, 2);
-    PolyUOp *ph = poly_add(ctx, px, poly_const_like(ctx, px, poly_arg_float(3)));
-    PolyUOp *cut = poly_copy_to_device_uop(ctx, ph, modules[1].device);
-    PolyUOp *expected = poly_mul(ctx, cut, poly_const_like(ctx, cut, poly_arg_float(2)));
+    PolyUOp *px = poly_uop_reshape(ctx, target, (int64_t[]){2, 2}, 2);
+    PolyUOp *ph = poly_uop_add(ctx, px, poly_uop_const_like(ctx, px, poly_arg_float(3)));
+    PolyUOp *cut = poly_uop_copy_to_device(ctx, ph, modules[1].device);
+    PolyUOp *expected = poly_uop_mul(ctx, cut, poly_uop_const_like(ctx, cut, poly_arg_float(2)));
     correct = placed == expected;
   }
   poly_ctx_destroy(ctx);
@@ -336,8 +337,8 @@ TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
   PolyUOp *lx = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
   PolyUOp *lw0 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
   PolyUOp *lw1 = placement_buffer(ctx, 2, POLY_DEVICE_AUTO);
-  PolyUOp *module0 = poly_add(ctx, lx, lw0);
-  PolyUOp *module1 = poly_mul(ctx, module0, lw1);
+  PolyUOp *module0 = poly_uop_add(ctx, lx, lw0);
+  PolyUOp *module1 = poly_uop_mul(ctx, module0, lw1);
   PolyUOp *logical_bindings[3] = {lx, lw0, lw1};
   PolyUOp *target_bindings[3] = {NULL, NULL, NULL};
   PolyUOp *module0_inputs[1] = {lx};
@@ -347,7 +348,7 @@ TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
       {"layers.1", module1, module1_inputs, 1, poly_device_uop(ctx, POLY_DEVICE_INTERP)},
   };
   PolyUOp *roots[1] = {module1};
-  PolyUOp *sentinel = poly_const_int(ctx, 73);
+  PolyUOp *sentinel = poly_uop_const_int(ctx, 73);
   PolyUOp *out[1] = {sentinel};
 
   PolyPlaceModule missing_cut[2] = {modules[0], modules[1]};
@@ -361,7 +362,7 @@ TEST(placement, explicit_module_map_rejects_ambiguous_regions_atomically) {
   );
   ASSERT_PTR_EQ(out[0], sentinel);
 
-  PolyUOp *conflict1 = poly_mul(ctx, module0, lw0);
+  PolyUOp *conflict1 = poly_uop_mul(ctx, module0, lw0);
   PolyUOp *conflict1_inputs[1] = {module0};
   PolyPlaceModule conflicting_owner[2] = {
       modules[0],

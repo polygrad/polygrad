@@ -1163,7 +1163,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
           continue;
         }
       } else {
-        PolyDType rebuilt_dtype = poly_rebuild_dtype(new_n, new_src);
+        PolyDType rebuilt_dtype = poly_uop_rebuild_dtype(new_n, new_src);
         PolyArg rebuilt_arg = (new_n->op == POLY_OP_CAST || new_n->op == POLY_OP_BITCAST)
                                   ? poly_arg_dtype(rebuilt_dtype)
                                   : new_n->arg;
@@ -1308,7 +1308,7 @@ PolyUOp *poly_graph_walk_rewrite(
 
       PolyUOp *new_n;
       if (changed) {
-        PolyDType rebuilt_dtype = poly_rebuild_dtype(n, new_src);
+        PolyDType rebuilt_dtype = poly_uop_rebuild_dtype(n, new_src);
         PolyArg rebuilt_arg = (n->op == POLY_OP_CAST || n->op == POLY_OP_BITCAST)
                                   ? poly_arg_dtype(rebuilt_dtype)
                                   : n->arg;

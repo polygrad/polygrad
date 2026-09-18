@@ -323,7 +323,7 @@ done:
 PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (!ctx || !sink || sink->arg.kind == POLY_ARG_NONE) return sink;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n_topo);
   PolyUOp *ret = NULL;
   PolyUOp **storage = NULL, **subs = NULL;
   GpuDimExpr *dims = NULL;
@@ -388,7 +388,7 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     PolyUOp *core_id = poly_uop_variable(
         ctx, "core_id", poly_arg_int(0), poly_arg_int(global_dims[0].max - 1), POLY_INT32, 1, true
     );
-    global_idxs[0] = poly_cast(ctx, core_id, POLY_WEAKINT);
+    global_idxs[0] = poly_uop_cast(ctx, core_id, POLY_WEAKINT);
     if (!global_idxs[0]) goto done;
   } else {
     if (no_locals && n_local) goto done;
@@ -428,8 +428,9 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     PolyUOp *gate = NULL;
     for (int g = 0; g < n_local; g++) {
       if (poly_uop_in_ranges(ctx, idx, local_ranges[g])) continue;
-      PolyUOp *eq = poly_eq(ctx, local_ranges[g], poly_const_like_int(ctx, local_ranges[g], 0));
-      gate = gate ? poly_alu2(ctx, POLY_OP_AND, gate, eq) : eq;
+      PolyUOp *eq =
+          poly_uop_eq(ctx, local_ranges[g], poly_uop_const_like_int(ctx, local_ranges[g], 0));
+      gate = gate ? poly_uop_alu2(ctx, POLY_OP_AND, gate, eq) : eq;
       if (!gate) goto done;
     }
     if (!gate) continue;
@@ -461,7 +462,7 @@ done:
   free(storage);
   free(subs);
   free(dims);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ret;
 }
 

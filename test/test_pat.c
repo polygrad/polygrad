@@ -575,10 +575,10 @@ TEST(pat, const_like_preserves_reference_shape) {
   /* Current UOp.const_like creates one typed scalar CONST and raw-prefix
    * EXPANDs it directly to the reference shape (uop/ops.py:581-583). */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *ref = poly_reshape(
+  PolyUOp *ref = poly_uop_reshape(
       ctx, poly_test_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU), (int64_t[]){2, 0, 3}, 3
   );
-  PolyUOp *like = poly_const_like_int(ctx, ref, -7);
+  PolyUOp *like = poly_uop_const_like_int(ctx, ref, -7);
   ASSERT_NOT_NULL(like);
   ASSERT_EQ(like->op, POLY_OP_EXPAND);
   ASSERT_INT_EQ(like->n_src, 2);
@@ -603,14 +603,14 @@ TEST(pat, const_like_preserves_vector_and_symbolic_shape) {
   PolyUOp *lane = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *vector_src[] = {lane, lane, lane, lane};
   PolyUOp *vector_ref = poly_uop_stack(ctx, vector_src, 4);
-  PolyUOp *vector_like = poly_const_like_int(ctx, vector_ref, 0);
+  PolyUOp *vector_like = poly_uop_const_like_int(ctx, vector_ref, 0);
   ASSERT_NOT_NULL(vector_like);
   ASSERT_EQ(vector_like->op, POLY_OP_EXPAND);
   ASSERT_TRUE(poly_dtype_eq(vector_like->dtype, POLY_FLOAT32));
   ASSERT_INT_EQ(poly_uop_max_numel(ctx, vector_like), 4);
 
   PolyUOp *shaped_ref = poly_test_uop_param(ctx, POLY_FLOAT32, 7, 0, POLY_ADDR_GLOBAL);
-  PolyUOp *shaped_like = poly_const_like_int(ctx, shaped_ref, 0);
+  PolyUOp *shaped_like = poly_uop_const_like_int(ctx, shaped_ref, 0);
   ASSERT_NOT_NULL(shaped_like);
   ASSERT_EQ(shaped_like->op, POLY_OP_EXPAND);
   ASSERT_TRUE(poly_dtype_eq(shaped_like->dtype, POLY_FLOAT32));
@@ -622,7 +622,7 @@ TEST(pat, const_like_preserves_vector_and_symbolic_shape) {
       ctx, "const_like_n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false
   );
   PolyUOp *dynamic = poly_test_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
-  PolyUOp *dynamic_like = poly_const_like_int(ctx, dynamic, 3);
+  PolyUOp *dynamic_like = poly_uop_const_like_int(ctx, dynamic, 3);
   ASSERT_NOT_NULL(dynamic_like);
   ASSERT_EQ(dynamic_like->op, POLY_OP_EXPAND);
   shape = poly_uop_max_shape_cached(ctx, dynamic_like);
@@ -677,7 +677,7 @@ TEST(pat, matcher_concat_empty_preserves_rules) {
 }
 
 static PolyUOp *test_rewrite_div_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_const_like_int(ctx, poly_bind(b, "x"), 1);
+  return poly_uop_const_like_int(ctx, poly_bind(b, "x"), 1);
 }
 
 TEST(pat, pm_concat) {

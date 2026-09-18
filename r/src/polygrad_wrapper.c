@@ -11,6 +11,7 @@
 #include <string.h>
 
 /* Include polygrad headers */
+#include "../../src/polygrad.h"
 #include "../../src/frontend.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -68,48 +69,48 @@ SEXP C_poly_op_name(SEXP op) {
 
 SEXP C_poly_const_float(SEXP ctx_ptr, SEXP value) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_const_float(ctx, asReal(value)));
+  return wrap_ptr(poly_uop_const_float(ctx, asReal(value)));
 }
 
 /* ── Buffer ──────────────────────────────────────────────────────────── */
 
 SEXP C_poly_buffer_f32(SEXP ctx_ptr, SEXP size) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_buffer_f32(ctx, (int64_t)asReal(size)));
+  return wrap_ptr(poly_uop_buffer_f32(ctx, (int64_t)asReal(size)));
 }
 
 /* ── ALU ops ─────────────────────────────────────────────────────────── */
 
 SEXP C_poly_alu1(SEXP ctx_ptr, SEXP op, SEXP src) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_alu1(ctx, asInteger(op), unwrap_ptr(src)));
+  return wrap_ptr(poly_uop_alu1(ctx, asInteger(op), unwrap_ptr(src)));
 }
 
 SEXP C_poly_alu2(SEXP ctx_ptr, SEXP op, SEXP a, SEXP b) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_alu2(ctx, asInteger(op), unwrap_ptr(a), unwrap_ptr(b)));
+  return wrap_ptr(poly_uop_alu2(ctx, asInteger(op), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
 SEXP C_poly_contiguous(SEXP ctx_ptr, SEXP x) {
-  return wrap_ptr(poly_contiguous(unwrap_ptr(ctx_ptr), unwrap_ptr(x)));
+  return wrap_ptr(poly_uop_contiguous(unwrap_ptr(ctx_ptr), unwrap_ptr(x)));
 }
 
 /* ── Broadcasting binary ops ─────────────────────────────────────────── */
 
 SEXP C_poly_add(SEXP ctx_ptr, SEXP a, SEXP b) {
-  return wrap_ptr(poly_add(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+  return wrap_ptr(poly_uop_add(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
 SEXP C_poly_sub(SEXP ctx_ptr, SEXP a, SEXP b) {
-  return wrap_ptr(poly_sub(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+  return wrap_ptr(poly_uop_sub(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
 SEXP C_poly_mul(SEXP ctx_ptr, SEXP a, SEXP b) {
-  return wrap_ptr(poly_mul(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+  return wrap_ptr(poly_uop_mul(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
 SEXP C_poly_div(SEXP ctx_ptr, SEXP a, SEXP b) {
-  return wrap_ptr(poly_div(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+  return wrap_ptr(poly_uop_div(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
 /* ── Movement ops ────────────────────────────────────────────────────── */
@@ -119,7 +120,7 @@ SEXP C_poly_reshape(SEXP ctx_ptr, SEXP src, SEXP dims) {
   int n = length(dims);
   int64_t d[8];
   for (int i = 0; i < n && i < 8; i++) d[i] = (int64_t)REAL(dims)[i];
-  return wrap_ptr(poly_reshape(ctx, unwrap_ptr(src), d, n));
+  return wrap_ptr(poly_uop_reshape(ctx, unwrap_ptr(src), d, n));
 }
 
 SEXP C_poly_permute(SEXP ctx_ptr, SEXP src, SEXP perm) {
@@ -127,7 +128,7 @@ SEXP C_poly_permute(SEXP ctx_ptr, SEXP src, SEXP perm) {
   int n = length(perm);
   int64_t p[8];
   for (int i = 0; i < n && i < 8; i++) p[i] = (int64_t)REAL(perm)[i];
-  return wrap_ptr(poly_permute(ctx, unwrap_ptr(src), p, n));
+  return wrap_ptr(poly_uop_permute(ctx, unwrap_ptr(src), p, n));
 }
 
 SEXP C_poly_flip(SEXP ctx_ptr, SEXP src, SEXP axes) {
@@ -135,7 +136,7 @@ SEXP C_poly_flip(SEXP ctx_ptr, SEXP src, SEXP axes) {
   int n = length(axes);
   int64_t a[8];
   for (int i = 0; i < n && i < 8; i++) a[i] = (int64_t)REAL(axes)[i];
-  return wrap_ptr(poly_flip(ctx, unwrap_ptr(src), a, n));
+  return wrap_ptr(poly_uop_flip(ctx, unwrap_ptr(src), a, n));
 }
 
 SEXP C_poly_pad(SEXP ctx_ptr, SEXP src, SEXP pairs_flat, SEXP ndim) {
@@ -146,7 +147,7 @@ SEXP C_poly_pad(SEXP ctx_ptr, SEXP src, SEXP pairs_flat, SEXP ndim) {
     pairs[i][0] = (int64_t)REAL(pairs_flat)[i * 2];
     pairs[i][1] = (int64_t)REAL(pairs_flat)[i * 2 + 1];
   }
-  return wrap_ptr(poly_pad(ctx, unwrap_ptr(src), pairs, n));
+  return wrap_ptr(poly_uop_pad(ctx, unwrap_ptr(src), pairs, n));
 }
 
 SEXP C_poly_shrink(SEXP ctx_ptr, SEXP src, SEXP pairs_flat, SEXP ndim) {
@@ -157,7 +158,7 @@ SEXP C_poly_shrink(SEXP ctx_ptr, SEXP src, SEXP pairs_flat, SEXP ndim) {
     pairs[i][0] = (int64_t)REAL(pairs_flat)[i * 2];
     pairs[i][1] = (int64_t)REAL(pairs_flat)[i * 2 + 1];
   }
-  return wrap_ptr(poly_shrink(ctx, unwrap_ptr(src), pairs, n));
+  return wrap_ptr(poly_uop_shrink(ctx, unwrap_ptr(src), pairs, n));
 }
 
 SEXP C_poly_expand(SEXP ctx_ptr, SEXP src, SEXP dims) {
@@ -165,7 +166,7 @@ SEXP C_poly_expand(SEXP ctx_ptr, SEXP src, SEXP dims) {
   int n = length(dims);
   int64_t d[8];
   for (int i = 0; i < n && i < 8; i++) d[i] = (int64_t)REAL(dims)[i];
-  return wrap_ptr(poly_expand(ctx, unwrap_ptr(src), d, n));
+  return wrap_ptr(poly_uop_expand(ctx, unwrap_ptr(src), d, n));
 }
 
 /* ── Reduce ──────────────────────────────────────────────────────────── */
@@ -175,26 +176,26 @@ SEXP C_poly_reduce_axis(SEXP ctx_ptr, SEXP op, SEXP src, SEXP axes) {
   int n = length(axes);
   int64_t a[8];
   for (int i = 0; i < n && i < 8; i++) a[i] = (int64_t)REAL(axes)[i];
-  return wrap_ptr(poly_reduce_axis(ctx, asInteger(op), unwrap_ptr(src), a, n));
+  return wrap_ptr(poly_uop_reduce_axis(ctx, asInteger(op), unwrap_ptr(src), a, n));
 }
 
 /* ── Graph construction ──────────────────────────────────────────────── */
 
 SEXP C_poly_store_val(SEXP ctx_ptr, SEXP buf, SEXP value) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_store_val(ctx, unwrap_ptr(buf), unwrap_ptr(value)));
+  return wrap_ptr(poly_uop_store_val(ctx, unwrap_ptr(buf), unwrap_ptr(value)));
 }
 
 SEXP C_poly_sink1(SEXP ctx_ptr, SEXP store) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_sink1(ctx, unwrap_ptr(store)));
+  return wrap_ptr(poly_uop_sink1(ctx, unwrap_ptr(store)));
 }
 
 /* ── Autograd ────────────────────────────────────────────────────────── */
 
 SEXP C_poly_grad(SEXP ctx_ptr, SEXP loss, SEXP wrt_buffer) {
   PolyCtx *ctx = unwrap_ptr(ctx_ptr);
-  return wrap_ptr(poly_grad(ctx, unwrap_ptr(loss), unwrap_ptr(wrt_buffer)));
+  return wrap_ptr(poly_uop_grad(ctx, unwrap_ptr(loss), unwrap_ptr(wrt_buffer)));
 }
 
 /* ── Realize ─────────────────────────────────────────────────────────── */

@@ -1,7 +1,7 @@
 /*
  * mixin/gradient.c — Reverse-mode autodiff for tensor-level UOp graphs
  *
- * Provides poly_grad(loss, wrt): builds a gradient expression graph for
+ * Provides poly_uop_grad(loss, wrt): builds a gradient expression graph for
  * d(loss)/d(wrt) using reverse-mode accumulation on the UOp DAG.
  *
  * Current scope:
@@ -31,7 +31,7 @@
  * promoted literal weak (mixin/gradient.py:49-62,
  * mixin/elementwise.py:18-29). */
 static PolyUOp *ufix_like(PolyCtx *ctx, PolyUOp *ref, double value) {
-  return ref ? poly_const_typed(ctx, poly_dtype_weak(ref->dtype), value) : NULL;
+  return ref ? poly_uop_const_typed(ctx, poly_dtype_weak(ref->dtype), value) : NULL;
 }
 
 static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
@@ -52,7 +52,7 @@ static PolyUOp *broadcast_to_uop_shape(PolyCtx *ctx, PolyUOp *value, PolyUOp *ta
   PolyUOp *shape[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++)
     if (!(shape[i] = poly_uop_shape_dim(ctx, target, i))) return NULL;
-  return poly_expand_uop(ctx, value, shape, ndim);
+  return poly_uop_expand_symbolic(ctx, value, shape, ndim);
 }
 
 static PolyUOp *grad_get(PolyMap *grads, PolyUOp *u) {
@@ -84,18 +84,18 @@ static PolyUOp *shape_gradient_edge(PolyCtx *ctx, PolyUOp *source, PolyUOp *grad
   if (!poly_sum_acc_dtype(original_dtype, &acc_dtype)) return NULL;
   grad = cast_to(ctx, grad, acc_dtype);
   int axes[POLY_MAX_DIMS];
-  int n_axes = poly_broadcast_axes(ctx, source, grad, axes, POLY_MAX_DIMS);
+  int n_axes = poly_uop_broadcast_axes(ctx, source, grad, axes, POLY_MAX_DIMS);
   if (n_axes < 0) return NULL;
   int64_t reduce_axes[POLY_MAX_DIMS];
   for (int i = 0; i < n_axes; i++)
     reduce_axes[i] = axes[i];
-  grad = poly_reduce_axis(ctx, POLY_OP_ADD, grad, reduce_axes, n_axes);
+  grad = poly_uop_reduce_axis(ctx, POLY_OP_ADD, grad, reduce_axes, n_axes);
   if (!grad) return NULL;
   if (!shaped_edge_equal(ctx, source, grad)) {
     PolyUOp *target_shape[POLY_MAX_DIMS];
     for (int i = 0; i < source_ndim; i++)
       if (!(target_shape[i] = poly_uop_shape_dim(ctx, source, i))) return NULL;
-    grad = poly_reshape_uop(ctx, grad, target_shape, source_ndim);
+    grad = poly_uop_reshape_symbolic(ctx, grad, target_shape, source_ndim);
   }
   return grad ? cast_to(ctx, grad, original_dtype) : NULL;
 }
@@ -116,7 +116,7 @@ static bool grad_add(PolyCtx *ctx, PolyMap *grads, PolyUOp *u, PolyUOp *g) {
     if (old->n_src && !parts) return false;
     for (int i = 0; i < old->n_src; i++) {
       PolyUOp *p = old->src[i], *n = g->src[i];
-      parts[i] = p->op == POLY_OP_NOOP ? n : n->op == POLY_OP_NOOP ? p : poly_add(ctx, p, n);
+      parts[i] = p->op == POLY_OP_NOOP ? n : n->op == POLY_OP_NOOP ? p : poly_uop_add(ctx, p, n);
       if (!parts[i]) {
         free(parts);
         return false;
@@ -125,7 +125,7 @@ static bool grad_add(PolyCtx *ctx, PolyMap *grads, PolyUOp *u, PolyUOp *g) {
     sum = poly_uop(ctx, POLY_OP_TUPLE, POLY_VOID, parts, old->n_src, poly_arg_none());
     free(parts);
   } else {
-    sum = poly_add(ctx, old, g);
+    sum = poly_uop_add(ctx, old, g);
   }
   if (!sum) return false;
   poly_map_set(grads, poly_ptr_hash(u), u, sum, poly_ptr_eq);
@@ -135,7 +135,7 @@ static bool grad_add(PolyCtx *ctx, PolyMap *grads, PolyUOp *u, PolyUOp *g) {
 static PolyUOp *const_like(PolyCtx *ctx, PolyUOp *u, double value) {
   /* Current UOp.const_like is shared core behavior, not an autograd-specific
    * constructor (uop/ops.py:581-583). */
-  return poly_const_like_float(ctx, u, value);
+  return poly_uop_const_like_float(ctx, u, value);
 }
 
 static PolyUOp *ones_like(PolyCtx *ctx, PolyUOp *u) {
@@ -158,8 +158,8 @@ static PolyUOp *mul_grad(PolyCtx *ctx, PolyUOp *g, PolyUOp *x, PolyDType dt) {
  * shape broadcasting implicit in UOp shape inference (elementwise.py:19-29).
  * POW has no public raw-UOp helper, so retain the exact local spelling here. */
 static PolyUOp *pow_grad(PolyCtx *ctx, PolyUOp *base, PolyUOp *exponent) {
-  if (!poly_broadcasted_pair(ctx, &base, &exponent)) return NULL;
-  return poly_alu2(ctx, POLY_OP_POW, base, exponent);
+  if (!poly_uop_broadcasted_pair(ctx, &base, &exponent)) return NULL;
+  return poly_uop_alu2(ctx, POLY_OP_POW, base, exponent);
 }
 
 /* Target-pruned walk (port of tinygrad _deepwalk) */
@@ -270,10 +270,10 @@ static bool compact_params(
   *out_n_args = 0;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, body, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, body, &n_topo, NULL, false);
   PolyUOp **by_slot = n_all_args > 0 ? calloc((size_t)n_all_args, sizeof(*by_slot)) : NULL;
   if (!topo || (n_all_args > 0 && !by_slot)) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     free(by_slot);
     return false;
   }
@@ -282,7 +282,7 @@ static bool compact_params(
     if (!u || u->op != POLY_OP_PARAM || u->arg.kind != POLY_ARG_PARAM || !u->arg.param) continue;
     int64_t slot = u->arg.param->slot;
     if (slot < 0 || slot >= n_all_args) {
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       free(by_slot);
       return false;
     }
@@ -297,7 +297,7 @@ static bool compact_params(
   PolyUOp **to = n_used > 0 ? malloc((size_t)n_used * sizeof(*to)) : NULL;
   PolyUOp **args = n_used > 0 ? malloc((size_t)n_used * sizeof(*args)) : NULL;
   if (n_used > 0 && (!from || !temporary || !to || !args)) {
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     free(by_slot);
     free(from);
     free(temporary);
@@ -313,7 +313,7 @@ static bool compact_params(
     to[at] = grad_param_replace_slot(ctx, by_slot[i], at);
     args[at] = all_args[i];
     if (!temporary[at] || !to[at] || !args[at]) {
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       free(by_slot);
       free(from);
       free(temporary);
@@ -334,7 +334,7 @@ static bool compact_params(
       n_used == 0 ||
       (poly_uop_substitute_many(ctx, &body, 1, from, temporary, n_used, &staged) == 0 &&
        poly_uop_substitute_many(ctx, &staged, 1, temporary, to, n_used, &compacted) == 0);
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   free(by_slot);
   free(from);
   free(temporary);
@@ -498,9 +498,9 @@ static PolyMap *compute_gradient(
       PolyUOp **params_by_slot =
           n_args > 0 ? calloc((size_t)n_args, sizeof(*params_by_slot)) : NULL;
       int n_body_topo = 0;
-      PolyUOp **body_topo = poly_toposort_ex_alloc(ctx, u->src[0], &n_body_topo, NULL, false);
+      PolyUOp **body_topo = poly_uop_toposort_ex_alloc(ctx, u->src[0], &n_body_topo, NULL, false);
       if (!body_topo || (n_args > 0 && !params_by_slot)) {
-        poly_toposort_free(body_topo);
+        poly_uop_toposort_free(body_topo);
         free(params_by_slot);
         GRAD_REVERSE_FAIL();
       }
@@ -511,7 +511,7 @@ static PolyMap *compute_gradient(
         int64_t slot = p->arg.param->slot;
         if (slot >= 0 && slot < n_args) params_by_slot[slot] = p;
       }
-      poly_toposort_free(body_topo);
+      poly_uop_toposort_free(body_topo);
 
       PolyUOp **needed_params = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_params)) : NULL;
       int *needed_slots = n_args > 0 ? malloc((size_t)n_args * sizeof(*needed_slots)) : NULL;
@@ -718,7 +718,7 @@ static PolyMap *compute_gradient(
       /* pm_gradient: COPY sends the gradient back to the input device.
        * Keep exact device identity, not just its backend implementation. */
       PolyUOp *device = poly_uop_device_uop_cached(ctx, u->src[0], NULL);
-      PolyUOp *gx = device ? poly_copy_to_device_uop(ctx, g, device)
+      PolyUOp *gx = device ? poly_uop_copy_to_device(ctx, g, device)
                            : poly_uop1(ctx, POLY_OP_COPY, g->dtype, g, poly_arg_none());
       GRAD_ADD(u->src[0], gx);
     } break;
@@ -797,7 +797,7 @@ static PolyMap *compute_gradient(
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *gx = mul_grad(ctx, g0, u, u->dtype);
       PolyUOp *ln2 = ufix_like(ctx, gx, 0.69314718055994530942);
-      gx = ln2 ? poly_mul(ctx, gx, ln2) : NULL;
+      gx = ln2 ? poly_uop_mul(ctx, gx, ln2) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
 
@@ -807,8 +807,8 @@ static PolyMap *compute_gradient(
       /* Current pm_gradient: ctx / (ret.src[0] * math.log(2)). */
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *ln2 = ufix_like(ctx, u->src[0], 0.69314718055994530942);
-      PolyUOp *denominator = ln2 ? poly_mul(ctx, u->src[0], ln2) : NULL;
-      PolyUOp *gx = denominator ? poly_div(ctx, g0, denominator) : NULL;
+      PolyUOp *denominator = ln2 ? poly_uop_mul(ctx, u->src[0], ln2) : NULL;
+      PolyUOp *gx = denominator ? poly_uop_div(ctx, g0, denominator) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
 
@@ -818,8 +818,8 @@ static PolyMap *compute_gradient(
       /* Current pm_gradient: ctx / (ret * 2). */
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *two = ufix_like(ctx, u, 2.0);
-      PolyUOp *denominator = two ? poly_mul(ctx, u, two) : NULL;
-      PolyUOp *gx = denominator ? poly_div(ctx, g0, denominator) : NULL;
+      PolyUOp *denominator = two ? poly_uop_mul(ctx, u, two) : NULL;
+      PolyUOp *gx = denominator ? poly_uop_div(ctx, g0, denominator) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
 
@@ -830,9 +830,9 @@ static PolyMap *compute_gradient(
        * left-associated; ElementwiseMixin.neg is ctx * weak(-1). */
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *neg_one = ufix_like(ctx, g0, -1.0);
-      PolyUOp *gx = neg_one ? poly_mul(ctx, g0, neg_one) : NULL;
-      gx = gx ? poly_mul(ctx, gx, u) : NULL;
-      gx = gx ? poly_mul(ctx, gx, u) : NULL;
+      PolyUOp *gx = neg_one ? poly_uop_mul(ctx, g0, neg_one) : NULL;
+      gx = gx ? poly_uop_mul(ctx, gx, u) : NULL;
+      gx = gx ? poly_uop_mul(ctx, gx, u) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
 
@@ -843,10 +843,10 @@ static PolyMap *compute_gradient(
        * tinygrad: (math.pi/2 - ret.src[0]).sin() * ctx */
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half_pi = ufix_like(ctx, u->src[0], 1.5707963267948966);
-      PolyUOp *shifted = half_pi ? poly_sub(ctx, half_pi, u->src[0]) : NULL;
+      PolyUOp *shifted = half_pi ? poly_uop_sub(ctx, half_pi, u->src[0]) : NULL;
       PolyUOp *cos_x =
           shifted ? poly_uop1(ctx, POLY_OP_SIN, u->dtype, shifted, poly_arg_none()) : NULL;
-      PolyUOp *gx = cos_x ? poly_mul(ctx, cos_x, g0) : NULL;
+      PolyUOp *gx = cos_x ? poly_uop_mul(ctx, cos_x, g0) : NULL;
       if (!gx) GRAD_REVERSE_FAIL();
       GRAD_ADD(u->src[0], gx);
 
@@ -860,7 +860,7 @@ static PolyMap *compute_gradient(
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half = ufix_like(ctx, g0, 0.5);
       PolyUOp *zero = ufix_like(ctx, g0, 0.0);
-      PolyUOp *half_g = half ? poly_mul(ctx, g0, half) : NULL;
+      PolyUOp *half_g = half ? poly_uop_mul(ctx, g0, half) : NULL;
       if (!half_g || !zero) GRAD_REVERSE_FAIL();
 
       /* x > y is CMPLT(y, x) */
@@ -872,11 +872,11 @@ static PolyMap *compute_gradient(
       PolyUOp *true_c = poly_uop0(ctx, POLY_OP_CONST, bdt, poly_arg_bool(true));
       PolyUOp *eq_mask = poly_uop2(ctx, POLY_OP_CMPNE, bdt, neq, true_c, poly_arg_none());
 
-      PolyUOp *eq_part = poly_where_op(ctx, eq_mask, half_g, zero);
+      PolyUOp *eq_part = poly_uop_where(ctx, eq_mask, half_g, zero);
       /* ga = WHERE(x>y, g, eq_part) */
-      PolyUOp *ga = poly_where_op(ctx, x_gt_y, g0, eq_part);
+      PolyUOp *ga = poly_uop_where(ctx, x_gt_y, g0, eq_part);
       /* gb = WHERE(x<y, g, eq_part) */
-      PolyUOp *gb = poly_where_op(ctx, x_lt_y, g0, eq_part);
+      PolyUOp *gb = poly_uop_where(ctx, x_lt_y, g0, eq_part);
       if (!eq_part || !ga || !gb) GRAD_REVERSE_FAIL();
 
       GRAD_ADD(u->src[0], ga);
@@ -895,35 +895,35 @@ static PolyMap *compute_gradient(
       PolyUOp *b = u->src[0], *e = u->src[1];
       PolyDType dt = u->dtype;
 
-      PolyUOp *zero = poly_const_typed(ctx, POLY_WEAKINT, 0.0);
-      PolyUOp *b_eq_0 = zero ? poly_eq(ctx, b, zero) : NULL;
-      PolyUOp *e_eq_0 = zero ? poly_eq(ctx, e, zero) : NULL;
+      PolyUOp *zero = poly_uop_const_typed(ctx, POLY_WEAKINT, 0.0);
+      PolyUOp *b_eq_0 = zero ? poly_uop_eq(ctx, b, zero) : NULL;
+      PolyUOp *e_eq_0 = zero ? poly_uop_eq(ctx, e, zero) : NULL;
 
-      PolyUOp *one = poly_const_typed(ctx, POLY_WEAKINT, 1.0);
-      PolyUOp *em1 = one ? poly_sub(ctx, e, one) : NULL;
+      PolyUOp *one = poly_uop_const_typed(ctx, POLY_WEAKINT, 1.0);
+      PolyUOp *em1 = one ? poly_uop_sub(ctx, e, one) : NULL;
       PolyUOp *bpem1 = em1 ? pow_grad(ctx, b, em1) : NULL;
-      PolyUOp *normal_db = bpem1 ? poly_mul(ctx, e, bpem1) : NULL;
-      PolyUOp *db = e_eq_0 && normal_db ? poly_where_op(ctx, e_eq_0, e, normal_db) : NULL;
-      PolyUOp *ga = db ? poly_mul(ctx, g0, db) : NULL;
+      PolyUOp *normal_db = bpem1 ? poly_uop_mul(ctx, e, bpem1) : NULL;
+      PolyUOp *db = e_eq_0 && normal_db ? poly_uop_where(ctx, e_eq_0, e, normal_db) : NULL;
+      PolyUOp *ga = db ? poly_uop_mul(ctx, g0, db) : NULL;
       if (!ga) GRAD_REVERSE_FAIL();
       GRAD_ADD(b, ga);
 
       PolyUOp *log2_b = poly_uop1(ctx, POLY_OP_LOG2, dt, b, poly_arg_none());
-      PolyUOp *ret_log2_b = log2_b ? poly_mul(ctx, u, log2_b) : NULL;
+      PolyUOp *ret_log2_b = log2_b ? poly_uop_mul(ctx, u, log2_b) : NULL;
       PolyUOp *ln2 =
-          ret_log2_b ? poly_const_typed(ctx, POLY_WEAKFLOAT, 0.69314718055994530942) : NULL;
-      PolyUOp *normal_de = ln2 ? poly_mul(ctx, ret_log2_b, ln2) : NULL;
+          ret_log2_b ? poly_uop_const_typed(ctx, POLY_WEAKFLOAT, 0.69314718055994530942) : NULL;
+      PolyUOp *normal_de = ln2 ? poly_uop_mul(ctx, ret_log2_b, ln2) : NULL;
       PolyUOp *e_cmp = e, *lt_zero = zero;
-      PolyUOp *e_lt_0 = zero && poly_broadcasted_pair(ctx, &e_cmp, &lt_zero)
-                            ? poly_alu2(ctx, POLY_OP_CMPLT, e_cmp, lt_zero)
+      PolyUOp *e_lt_0 = zero && poly_uop_broadcasted_pair(ctx, &e_cmp, &lt_zero)
+                            ? poly_uop_alu2(ctx, POLY_OP_CMPLT, e_cmp, lt_zero)
                             : NULL;
       PolyUOp *neg_inf = const_like(ctx, u, -1.0 / 0.0);
       PolyUOp *b_zero_case =
-          e_lt_0 && neg_inf && zero ? poly_where_op(ctx, e_lt_0, neg_inf, zero) : NULL;
+          e_lt_0 && neg_inf && zero ? poly_uop_where(ctx, e_lt_0, neg_inf, zero) : NULL;
       PolyUOp *de = b_eq_0 && b_zero_case && normal_de
-                        ? poly_where_op(ctx, b_eq_0, b_zero_case, normal_de)
+                        ? poly_uop_where(ctx, b_eq_0, b_zero_case, normal_de)
                         : NULL;
-      PolyUOp *gb = de ? poly_mul(ctx, g0, de) : NULL;
+      PolyUOp *gb = de ? poly_uop_mul(ctx, g0, de) : NULL;
       if (!gb) GRAD_REVERSE_FAIL();
       GRAD_ADD(e, gb);
 
@@ -956,8 +956,8 @@ static PolyMap *compute_gradient(
       sizes[0] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
       for (int i = 0; i < u->n_src; i++) {
         starts[0] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(i));
-        PolyUOp *slice = poly_shrink_uop(ctx, g, starts, sizes, ndim);
-        PolyUOp *gx = slice ? poly_reshape_uop(ctx, slice, sizes + 1, ndim - 1) : NULL;
+        PolyUOp *slice = poly_uop_shrink_symbolic(ctx, g, starts, sizes, ndim);
+        PolyUOp *gx = slice ? poly_uop_reshape_symbolic(ctx, slice, sizes + 1, ndim - 1) : NULL;
         GRAD_ADD(u->src[i], gx);
       }
     } break;
@@ -970,7 +970,7 @@ static PolyMap *compute_gradient(
       PolyUOp *dims[POLY_MAX_DIMS];
       for (int i = 0; i < ndim; i++)
         if (!(dims[i] = poly_uop_shape_dim(ctx, u->src[0], i))) GRAD_REVERSE_FAIL();
-      PolyUOp *gx = poly_reshape_uop(ctx, g, dims, ndim);
+      PolyUOp *gx = poly_uop_reshape_symbolic(ctx, g, dims, ndim);
       GRAD_ADD(u->src[0], gx);
 
     } break;
@@ -994,7 +994,7 @@ static PolyMap *compute_gradient(
         inv[i] = i;
       for (int i = 0; i < n; i++)
         inv[u->arg.int_tuple.vals[i]] = i;
-      PolyUOp *gx = poly_permute(ctx, g, inv, n);
+      PolyUOp *gx = poly_uop_permute(ctx, g, inv, n);
       GRAD_ADD(u->src[0], gx);
     } break;
 
@@ -1016,7 +1016,7 @@ static PolyMap *compute_gradient(
           sizes[i] = shape_dim_node(ctx, u->src[0], in_shape, i);
           if (!sizes[i]) GRAD_REVERSE_FAIL();
         }
-        gx = poly_shrink_uop(ctx, g, offsets, sizes, n);
+        gx = poly_uop_shrink_symbolic(ctx, g, offsets, sizes, n);
       } else {
         fprintf(stderr, "polygrad: autograd: PAD unsupported form\n");
         GRAD_REVERSE_FAIL();
@@ -1044,7 +1044,7 @@ static PolyMap *compute_gradient(
           sizes[i] = shape_dim_node(ctx, u->src[0], in_shape, i);
           if (!sizes[i]) GRAD_REVERSE_FAIL();
         }
-        gx = poly_pad_uop(ctx, g, starts, sizes, n);
+        gx = poly_uop_pad_symbolic(ctx, g, starts, sizes, n);
       } else {
         fprintf(stderr, "polygrad: autograd: SHRINK unsupported form\n");
         GRAD_REVERSE_FAIL();
@@ -1081,9 +1081,9 @@ static PolyMap *compute_gradient(
         int64_t axes[POLY_MAX_DIMS];
         for (int i = 0; i < n_axes; i++)
           axes[i] = i;
-        PolyUOp *mask = poly_eq(ctx, u->src[0], u);
+        PolyUOp *mask = poly_uop_eq(ctx, u->src[0], u);
         PolyUOp *fmask = mask ? cast_to(ctx, mask, g->dtype) : NULL;
-        PolyUOp *count = fmask ? poly_reduce_axis(ctx, POLY_OP_ADD, fmask, axes, n_axes) : NULL;
+        PolyUOp *count = fmask ? poly_uop_reduce_axis(ctx, POLY_OP_ADD, fmask, axes, n_axes) : NULL;
         PolyUOp *reciprocal =
             count ? poly_uop1(ctx, POLY_OP_RECIPROCAL, count->dtype, count, poly_arg_none()) : NULL;
         PolyUOp *scaled_mask =
@@ -1104,20 +1104,20 @@ static PolyMap *compute_gradient(
         for (int i = 0; i < n_axes; i++)
           axes[i] = i;
         PolyUOp *x = u->src[0];
-        PolyUOp *is_zero = poly_eq(ctx, x, ufix_like(ctx, x, 0));
-        PolyUOp *safe_x = is_zero ? poly_where_op(ctx, is_zero, ufix_like(ctx, x, 1), x) : NULL;
+        PolyUOp *is_zero = poly_uop_eq(ctx, x, ufix_like(ctx, x, 0));
+        PolyUOp *safe_x = is_zero ? poly_uop_where(ctx, is_zero, ufix_like(ctx, x, 1), x) : NULL;
         PolyDType count_dtype;
         if (!safe_x || !poly_sum_acc_dtype(POLY_BOOL, &count_dtype)) GRAD_REVERSE_FAIL();
         PolyUOp *count = cast_to(ctx, is_zero, count_dtype);
-        count = count ? poly_reduce_axis(ctx, POLY_OP_ADD, count, axes, n_axes) : NULL;
-        PolyUOp *single_zero = count ? poly_eq(ctx, count, ufix_like(ctx, count, 1)) : NULL;
-        PolyUOp *others = poly_reduce_axis(ctx, POLY_OP_MUL, safe_x, axes, n_axes);
+        count = count ? poly_uop_reduce_axis(ctx, POLY_OP_ADD, count, axes, n_axes) : NULL;
+        PolyUOp *single_zero = count ? poly_uop_eq(ctx, count, ufix_like(ctx, count, 1)) : NULL;
+        PolyUOp *others = poly_uop_reduce_axis(ctx, POLY_OP_MUL, safe_x, axes, n_axes);
         PolyUOp *at_zero = single_zero && others
-                               ? poly_where_op(ctx, single_zero, others, ufix_like(ctx, others, 0))
+                               ? poly_uop_where(ctx, single_zero, others, ufix_like(ctx, others, 0))
                                : NULL;
-        PolyUOp *nonzero = poly_div(ctx, u, safe_x);
-        PolyUOp *local = at_zero && nonzero ? poly_where_op(ctx, is_zero, at_zero, nonzero) : NULL;
-        PolyUOp *gx = local ? poly_mul(ctx, g, local) : NULL;
+        PolyUOp *nonzero = poly_uop_div(ctx, u, safe_x);
+        PolyUOp *local = at_zero && nonzero ? poly_uop_where(ctx, is_zero, at_zero, nonzero) : NULL;
+        PolyUOp *gx = local ? poly_uop_mul(ctx, g, local) : NULL;
         if (!gx) GRAD_REVERSE_FAIL();
         GRAD_ADD(x, gx);
       } else {
@@ -1147,7 +1147,7 @@ static PolyMap *compute_gradient(
   return grads;
 }
 
-PolyUOp *poly_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt) {
+PolyUOp *poly_uop_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt) {
   if (!ctx || !loss || !wrt) return NULL;
 
   PolyMap *grads = compute_gradient(ctx, loss, ones_like(ctx, loss), &wrt, 1);
@@ -1160,7 +1160,7 @@ PolyUOp *poly_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt) {
   return out;
 }
 
-int poly_grad_many_ex(
+int poly_uop_grad_many_ex(
     PolyCtx *ctx,
     PolyUOp *loss,
     PolyUOp *initial_grad,
@@ -1186,7 +1186,7 @@ int poly_grad_many_ex(
   return 0;
 }
 
-int poly_grad_many(
+int poly_uop_grad_many(
     PolyCtx *ctx,
     PolyUOp *loss,
     PolyUOp *initial_grad,
@@ -1194,5 +1194,5 @@ int poly_grad_many(
     int n,
     PolyUOp **out_grads
 ) {
-  return poly_grad_many_ex(ctx, loss, initial_grad, wrts, n, out_grads, NULL);
+  return poly_uop_grad_many_ex(ctx, loss, initial_grad, wrts, n, out_grads, NULL);
 }

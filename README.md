@@ -990,16 +990,19 @@ lifetime control, not a new graph-identity implementation.
 The C core owns graph construction, scheduling, placement, runtime caches, and
 backend dispatch. Frontends are thin wrappers over the same concepts.
 
-For C embedding, `polygrad.h` exposes context controls and ABI lookup;
-`tensor.h` adds typed creation/composition APIs. `frontend.h` is the language-
-binding adapter surface: dtype IDs, scalar arguments and opaque-handle access.
-Core implementations do not call these FFI adapters.
+For C embedding, `polygrad.h` is the convenience umbrella. Its domain headers
+also work independently: `core.h` owns shared types and context controls,
+`tensor.h` owns `poly_tensor_*` operations, and `uop/` and `mixin/` headers own
+`poly_uop_*` graph construction and composition. Include `model.h` or `nn/nn.h`
+when using those APIs. `frontend.h` is separate: it adapts dtype IDs, flattened
+arguments and opaque handles for language bindings. Core implementations do
+not call these adapters.
 
 Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-The 0.5.2 candidate requires C ABI97 and graph formats PGIR19/PGPM10; incompatible
+The 0.5.2 candidate requires C ABI100 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

@@ -90,9 +90,9 @@ static PolyUOp *memory_coalescing_offset(
 PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (!ctx || !sink || poly_getenv_flag("DMC")) return sink;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n_topo);
   if (!topo || n_topo <= 0) {
-    if (topo) poly_toposort_free(topo);
+    if (topo) poly_uop_toposort_free(topo);
     return sink;
   }
 
@@ -103,7 +103,7 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
     free(records);
     free(from);
     free(to);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return NULL;
   }
 
@@ -118,7 +118,7 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
       free(records);
       free(from);
       free(to);
-      poly_toposort_free(topo);
+      poly_uop_toposort_free(topo);
       return NULL;
     }
     PolyUOp *buf = u->src[0]->src[0], *coord = u->src[0]->src[1];
@@ -155,7 +155,7 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
     }
     records[n_records++] = r;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   if (n_records == 0) {
     free(records);
     free(from);
@@ -518,13 +518,13 @@ static int drop_valid_stmts(
         int64_t lo = 0, hi = 0;
         poly_uop_minmax(ctx, terms[j], &lo, &hi);
         if (!poly_opset_has(POLY_GROUP_IRREDUCIBLE, terms[j]->op) || lo != 0) simplex = false;
-        if (zeros) zeros[j] = poly_const_like_int(ctx, terms[j], 0);
+        if (zeros) zeros[j] = poly_uop_const_like_int(ctx, terms[j], 0);
       }
       if (simplex && zeros) {
         PolyUOp *test = poly_uop_substitute(ctx, idx, terms, zeros, n_terms);
         test = test ? poly_graph_rewrite(ctx, test, poly_symbolic()) : NULL;
-        PolyUOp *zero = test ? poly_const_int(ctx, 0) : NULL;
-        PolyUOp *one = test ? poly_const_int(ctx, 1) : NULL;
+        PolyUOp *zero = test ? poly_uop_const_int(ctx, 0) : NULL;
+        PolyUOp *one = test ? poly_uop_const_int(ctx, 1) : NULL;
         PolyUOp *x = test ? poly_uop_index(ctx, test, &zero, 1) : NULL;
         PolyUOp *y = test ? poly_uop_index(ctx, test, &one, 1) : NULL;
         int64_t xlo = 0, xhi = 0, ylo = 0, yhi = 0;
@@ -547,7 +547,7 @@ static int drop_valid_stmts(
       PolyUOp *fake =
           poly_uop_variable(ctx, name, poly_arg_int(lo), poly_arg_int(hi), expr->dtype, 1, true);
       if (fake) {
-        PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
+        PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
         PolyUOp *x = poly_uop_index(ctx, idx, &zero, 1);
         PolyUOp *y = poly_uop_index(ctx, idx, &one, 1);
         if (image_coord_out_of_bounds(ctx, x, expr, fake, width) ||
@@ -630,8 +630,8 @@ static PolyUOp *poly_simplify_valid_image_load(
   PolyUOp *valid = gated_y->src[0];
   PolyUOp *idx_y = gated_y->src[1], *idx_x = gated_x->src[1];
   if (!poly_dtype_eq(idx_x->dtype, idx_y->dtype)) {
-    idx_x = poly_cast(ctx, idx_x, POLY_INT32);
-    idx_y = poly_cast(ctx, idx_y, POLY_INT32);
+    idx_x = poly_uop_cast(ctx, idx_x, POLY_INT32);
+    idx_y = poly_uop_cast(ctx, idx_y, POLY_INT32);
   }
   PolyUOp *start_src[2] = {idx_x, idx_y};
   PolyUOp *start = poly_uop_stack(ctx, start_src, 2);
@@ -653,7 +653,7 @@ static PolyUOp *poly_simplify_valid_image_load(
   }
 
   PolyUOp *new_valid = valid_and(ctx, clauses, dropped, n_clauses);
-  PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
   idx_x = poly_uop_index(ctx, simplified, &zero, 1);
   idx_y = poly_uop_index(ctx, simplified, &one, 1);
   PolyUOp *coords[2] = {valid_coord(ctx, idx_y, new_valid), valid_coord(ctx, idx_x, new_valid)};
@@ -729,9 +729,9 @@ static bool image_target_supported(const char *device) {
 
 static PolyUOp *image_coordinate(PolyCtx *ctx, PolyUOp *x, int64_t width) {
   if (!x || width <= 0 || width > INT64_MAX / 4) return NULL;
-  PolyUOp *four = poly_const_like_int(ctx, x, 4);
-  PolyUOp *row_width = poly_const_like_int(ctx, x, 4 * width);
-  PolyUOp *width_uop = poly_const_like_int(ctx, x, width);
+  PolyUOp *four = poly_uop_const_like_int(ctx, x, 4);
+  PolyUOp *row_width = poly_uop_const_like_int(ctx, x, 4 * width);
+  PolyUOp *width_uop = poly_uop_const_like_int(ctx, x, width);
   PolyUOp *x_div_four = poly_uop2(ctx, POLY_OP_FLOORDIV, x->dtype, x, four, poly_arg_none());
   PolyUOp *coord_x =
       poly_uop2(ctx, POLY_OP_FLOORMOD, x->dtype, x_div_four, width_uop, poly_arg_none());
@@ -741,13 +741,13 @@ static PolyUOp *image_coordinate(PolyCtx *ctx, PolyUOp *x, int64_t width) {
 }
 
 static int image_index_complexity(PolyCtx *ctx, PolyUOp *idx) {
-  PolyUOp *one = poly_const_int(ctx, 1);
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
   PolyUOp *y = poly_uop_index(ctx, idx, &one, 1);
   y = y ? poly_graph_rewrite(ctx, y, poly_symbolic()) : NULL;
   int count = 0;
-  PolyUOp **topo = y ? poly_toposort_alloc(ctx, y, &count) : NULL;
+  PolyUOp **topo = y ? poly_uop_toposort_alloc(ctx, y, &count) : NULL;
   bool ok = topo != NULL;
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return ok ? count : INT_MAX;
 }
 
@@ -814,11 +814,12 @@ static PolyUOp *poly_transform_to_image(
   if (!best_idx || !image_ctx_store(image_ctx, slot, best_height, best_width)) return NULL;
 
   PolyUOp *shape_src[3] = {
-      poly_const_int(ctx, best_height), poly_const_int(ctx, best_width), poly_const_int(ctx, 4)};
+      poly_uop_const_int(ctx, best_height), poly_uop_const_int(ctx, best_width),
+      poly_uop_const_int(ctx, 4)};
   PolyUOp *shape = poly_shape_to_shape_arg(ctx, shape_src, 3);
   PolyUOp *param_src[1] = {shape};
   PolyUOp *image_buf = rebuild_preserve_tag(ctx, buf, buf->dtype, param_src, 1);
-  PolyUOp *zero = poly_const_int(ctx, 0), *one = poly_const_int(ctx, 1);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
   PolyUOp *idx_x = poly_uop_index(ctx, best_idx, &zero, 1);
   PolyUOp *idx_y = poly_uop_index(ctx, best_idx, &one, 1);
   if (!const_true(valid)) {
@@ -840,7 +841,7 @@ static PolyUOp *poly_image_load_to_float(
       !poly_dtype_eq(load->src[0]->dtype, POLY_FLOAT32))
     return NULL;
   PolyUOp *float_load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, load->src[0], poly_arg_none());
-  return float_load ? poly_cast(ctx, float_load, POLY_FLOAT16) : NULL;
+  return float_load ? poly_uop_cast(ctx, float_load, POLY_FLOAT16) : NULL;
 }
 
 static PolyUOp *poly_image_store_to_float(
@@ -853,8 +854,8 @@ static PolyUOp *poly_image_store_to_float(
       store->src[0]->op != POLY_OP_INDEX || !poly_dtype_eq(store->src[0]->dtype, POLY_FLOAT32) ||
       !poly_dtype_eq(store->src[1]->dtype, POLY_FLOAT16))
     return NULL;
-  PolyUOp *value = poly_cast(ctx, store->src[1], POLY_FLOAT32);
-  return value ? poly_store_val(ctx, store->src[0], value) : NULL;
+  PolyUOp *value = poly_uop_cast(ctx, store->src[1], POLY_FLOAT32);
+  return value ? poly_uop_store_val(ctx, store->src[0], value) : NULL;
 }
 
 static PolyUOp *poly_remove_image_cast_roundtrip(

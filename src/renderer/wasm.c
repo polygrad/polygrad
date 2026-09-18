@@ -596,7 +596,7 @@ static int dt_v128_elem_bits(PolyDType dt) {
 
 static bool wasm_graph_uses_f64(PolyCtx *ctx, PolyUOp *sink) {
   int n = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
   if (!topo) return false;
   bool uses_f64 = false;
   for (int i = 0; i < n; i++) {
@@ -606,7 +606,7 @@ static bool wasm_graph_uses_f64(PolyCtx *ctx, PolyUOp *sink) {
       break;
     }
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return uses_f64;
 }
 
@@ -2764,7 +2764,7 @@ static void build_code_scalar(
       /* Push operands (WHERE needs special order for WASM select).
        *
        * WASM select: (val_true, val_false, i32_cond).
-       * The condition may be f32 (e.g. from poly_eq which returns a
+       * The condition may be f32 (e.g. from poly_uop_eq which returns a
        * float mask via WHERE(cmplt, 0.0, 1.0)). Convert to i32 via
        * f32.ne 0.0 before select. Same for f64 and i64 conditions. */
       if (vector_alu) {

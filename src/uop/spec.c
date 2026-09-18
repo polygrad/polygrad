@@ -193,7 +193,7 @@ static bool verify_program_uop(PolyCtx *ctx, PolyUOp *u) {
 static bool type_verify(PolyCtx *ctx, PolyUOp *root, bool (*verify)(PolyCtx *, PolyUOp *)) {
   if (!ctx || !root || !verify) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &n_topo);
   if (!topo) return false;
   for (int i = 0; i < n_topo; i++) {
     if (poly_ctx_owns_ptr(ctx, topo[i]) && verify(ctx, topo[i])) continue;
@@ -209,10 +209,10 @@ static bool type_verify(PolyCtx *ctx, PolyUOp *root, bool (*verify)(PolyCtx *, P
           topo[i]->src[j]->dtype.bitsize
       );
     fprintf(stderr, "  self dtype=(%d,%u)\n", topo[i]->dtype.priority, topo[i]->dtype.bitsize);
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return false;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return true;
 }
 
@@ -428,7 +428,7 @@ static bool verify_kernel_graph_uop(PolyCtx *ctx, PolyUOp *u) {
 bool poly_type_verify_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, root, &n_topo, NULL, false);
   if (!topo) return false;
   for (int i = 0; i < n_topo; i++) {
     if (verify_kernel_graph_uop(ctx, topo[i])) continue;
@@ -436,9 +436,9 @@ bool poly_type_verify_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
         stderr, "polygrad: UOp verification failed at %d on %s %s %d\n", i,
         poly_op_name(topo[i]->op), poly_dtype_name(topo[i]->dtype), topo[i]->n_src
     );
-    poly_toposort_free(topo);
+    poly_uop_toposort_free(topo);
     return false;
   }
-  poly_toposort_free(topo);
+  poly_uop_toposort_free(topo);
   return true;
 }
