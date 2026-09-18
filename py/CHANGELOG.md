@@ -6,6 +6,8 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Preserve wide integer UOp constants converted from floats without an
+  overflowing int64 cast in the core or dtype-ID adapter.
 - Cache shared-core CUDA graph estimates while preserving changing symbolic
   bindings, reducing JIT replay overhead without changing Tensor or Model APIs.
 - Preserve Python >=3.9 for quantized GGUF decoding and require a Python3.9

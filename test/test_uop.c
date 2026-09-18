@@ -22,6 +22,7 @@
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/codegen/codegen.h"
 #include "../src/interp.h"
+#include <float.h>
 
 static bool content_keys_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   size_t na = 0, nb = 0;
@@ -1588,6 +1589,52 @@ TEST(uop, default_literal_helpers_match_current_uop_const) {
   ASSERT_PTR_EQ(sum->src[0], strong);
   ASSERT_TRUE(poly_dtype_eq(sum->src[1]->dtype, POLY_WEAKFLOAT));
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, float_integer_constants_preserve_python_int_range) {
+  /* UOp.const -> DType.const uses Python int, without dtype-width wrapping. */
+  const double values[] = {
+      0x1p63, -0x1.0000000000001p63, 0x1p64, 0x1p100, 0x1.fffffffffffffp62, -0x1p63, 1.75, -1.75};
+  const char *integers[] = {
+      "9223372036854775808",
+      "-9223372036854777856",
+      "18446744073709551616",
+      "1267650600228229401496703205376",
+      "9223372036854774784",
+      "-9223372036854775808",
+      "1",
+      "-1"};
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  const PolyDType dtypes[] = {POLY_INT64, POLY_UINT64, POLY_WEAKINT, POLY_INT32};
+  for (size_t d = 0; d < sizeof(dtypes) / sizeof(*dtypes); d++) {
+    for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
+      PolyUOp *u = poly_uop_const_typed(ctx, dtypes[d], values[i]);
+      PolyInt exact = {0};
+      ASSERT_TRUE(poly_int_from_decimal(&exact, integers[i]));
+      PolyUOp *expected = poly_uop_const(ctx, poly_int_as_arg(&exact), dtypes[d]);
+      poly_int_free(&exact);
+      ASSERT_NOT_NULL(u);
+      ASSERT_PTR_EQ(u, expected);
+      ASSERT_PTR_EQ(poly_uop_const_float_dtype(ctx, values[i], dtypes[d]), expected);
+      ASSERT_INT_EQ(u->op, POLY_OP_CONST);
+      ASSERT_INT_EQ(u->n_src, 0);
+      ASSERT_TRUE(poly_dtype_eq(u->dtype, dtypes[d]));
+    }
+  }
+  /* Largest finite double is (2**53-1) << 971. The UOp copies stack limbs. */
+  uint32_t limbs[32] = {0};
+  limbs[30] = UINT32_C(0xfffff800);
+  limbs[31] = UINT32_MAX;
+  for (int sign = -1; sign <= 1; sign += 2) {
+    PolyUOp *expected = poly_uop_const(ctx, poly_arg_bigint(sign, limbs, 32), POLY_WEAKINT);
+    ASSERT_PTR_EQ(poly_uop_const_typed(ctx, POLY_WEAKINT, sign * DBL_MAX), expected);
+  }
+  ASSERT_TRUE(poly_uop_const_typed(ctx, POLY_INT64, INFINITY) == NULL);
+  ASSERT_TRUE(poly_uop_const_typed(ctx, POLY_INT64, -INFINITY) == NULL);
+  ASSERT_TRUE(poly_uop_const_typed(ctx, POLY_INT64, NAN) == NULL);
   poly_ctx_destroy(ctx);
   PASS();
 }

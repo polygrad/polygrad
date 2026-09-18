@@ -147,6 +147,7 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_identity_and_ownership
 	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_symbolic_consumers
 	$(SAN_RUN) $(NODE) $< --require-no-skips uop.typed_param_bounds_long_repr
+	$(SAN_RUN) $(NODE) $< --require-no-skips uop.float_integer_constants_preserve_python_int_range
 	$(SAN_RUN) $(NODE) $< --require-no-skips ir.typed_param_bounds_roundtrip
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_launch_admission
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.execution_owner_lane_binding_capacity

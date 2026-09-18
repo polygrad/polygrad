@@ -14,6 +14,7 @@
 #include "schedule/rangeify.h"
 #include "uop/ops.h"
 #include <limits.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -3535,6 +3536,17 @@ PolyUOp *poly_uop_const(PolyCtx *ctx, PolyArg val, PolyDType dtype) {
       /* DType.const raises for NaN/Inf-to-int. C has no exception carrier, so
        * retain the original ALU by declining that rewrite. */
       if (val.kind == POLY_ARG_FLOAT && !isfinite(val.f)) return NULL;
+      if (val.kind == POLY_ARG_FLOAT && (val.f >= 0x1p63 || val.f < -0x1p63)) {
+        /* DType.const uses Python int, even beyond the target dtype's range.
+         * Split the binary float into exact base-2**32 limbs instead of an
+         * overflowing int64 cast. poly_uop0 copies this temporary payload. */
+        uint32_t limbs[(DBL_MAX_EXP + 31) / 32];
+        size_t n = 0;
+        for (double magnitude = trunc(fabs(val.f)); magnitude >= 1;
+             magnitude = floor(magnitude / 0x1p32))
+          limbs[n++] = (uint32_t)fmod(magnitude, 0x1p32);
+        return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_bigint(val.f < 0 ? -1 : 1, limbs, n));
+      }
       PolyArg ival = val.kind == POLY_ARG_BIGINT ? val
                                                  : poly_arg_int(
                                                        val.kind == POLY_ARG_INT    ? val.i

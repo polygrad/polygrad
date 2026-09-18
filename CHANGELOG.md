@@ -6,6 +6,8 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Preserve exact integer UOp constants converted from finite floats beyond
+  signed 64-bit range, matching Tinygrad without an overflowing C cast.
 - Cache simplified CUDA graph estimates without freezing variable bindings.
   Fixed-shape replay avoids repeated expression walks; counters, COPY accounting
   and graph execution are unchanged.

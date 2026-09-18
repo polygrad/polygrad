@@ -4783,10 +4783,9 @@ PolyUOp *poly_uop_const_float_dtype(PolyCtx *ctx, double value, PolyDType suppli
   PolyDType dt = supplied_dtype;
   if (poly_dtype_is_float(dt)) return poly_uop_const_exact_float(ctx, dt, value);
   if (poly_dtype_is_bool(dt)) return poly_uop_const_exact_int(ctx, dt, value != 0.0);
-  if (!poly_dtype_is_int(dt) || !isfinite(value) || value < (double)INT64_MIN ||
-      value > (double)INT64_MAX)
-    return NULL;
-  return poly_uop_const_exact_int(ctx, dt, (int64_t)value);
+  /* Keep DType.const's exact integer conversion in the UOp owner, including
+   * values beyond int64; casting here would overflow before interning. */
+  return poly_dtype_is_int(dt) ? poly_uop_const(ctx, poly_arg_float(value), dt) : NULL;
 }
 
 PolyUOp *poly_uop_full_int_dtype(

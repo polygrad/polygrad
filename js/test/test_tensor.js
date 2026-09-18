@@ -373,6 +373,20 @@ async function runTensorTests(pg, createRuntime) {
     await zero.dispose(); await n.dispose()
   })
 
+  await test('wide float integer constants preserve Python int values', async () => {
+    for (const value of [2**63, -(2**64), 2**100, Number.MAX_VALUE]) {
+      const actual = pg.uop.constant(value, 'weakint')
+      const expected = pg.uop.constant(BigInt(value))
+      try {
+        assert(actual && expected, 'constant construction failed')
+        assert(actual.toString() === expected.toString(), 'wide integer value changed')
+      } finally {
+        if (actual) await actual.dispose()
+        if (expected) await expected.dispose()
+      }
+    }
+  })
+
   await test('typed PARAM bounds preserve scalar values and ownership', async () => {
     const cases = [[.25, .75, 'float32'], [-Infinity, Infinity, 'float32'],
       [2n**63n, 2n**64n-1n, 'uint64'], [2n**130n, 2n**131n, 'weakint'],

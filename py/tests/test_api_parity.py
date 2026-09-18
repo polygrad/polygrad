@@ -353,6 +353,15 @@ def test_uop_literals_and_binary_promotion_match_current_tinygrad():
     assert UOp.const(2, dtypes.bool, ctx=ctx).dtype is dtypes.bool
 
 
+@pytest.mark.parametrize('value', [2.0**63, -2.0**64, 2.0**100, sys.float_info.max])
+def test_uop_float_to_integer_preserves_wide_constant(value):
+    # Both routes must intern the same exact Python-int value, not wrap to int64.
+    actual = UOp.const(value, dtypes.weakint)
+    expected = UOp.const(int(value))
+    assert actual == expected
+    assert actual.op_name == 'CONST' and actual.src == ()
+
+
 def test_uop_contiguous_folds_device_free_value_like_current_tinygrad():
     # Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61 returns a
     # device-free UOp unchanged because it has no storage to materialize.
