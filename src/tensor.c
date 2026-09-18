@@ -20,6 +20,9 @@
 #include <string.h>
 #include <math.h>
 
+static PolyUOp *pointwise_loss_reduce(PolyCtx *, PolyUOp *, int);
+static PolyUOp *cross_entropy(PolyCtx *, PolyUOp *, PolyUOp *, int, int, double);
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -7477,6 +7480,36 @@ PolyTensor *poly_tensor_binary_crossentropy(
   return tensor_composite_result(ctx, l, p, inputs, 2);
 }
 
+/* Tensor wrappers own runtime admission and both graph roots; model builders
+ * and frontends must not reconstruct one side of these loss programs. */
+PolyTensor *poly_tensor_cross_entropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int axis,
+    int reduction,
+    double smoothing
+) {
+  PolyTensor *inputs[] = {x, target};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (logical < 0) return NULL;
+  PolyUOp *p =
+      cross_entropy(ctx, x->uop_physical, target->uop_physical, axis, reduction, smoothing);
+  PolyUOp *l =
+      logical ? cross_entropy(ctx, x->uop_logical, target->uop_logical, axis, reduction, smoothing)
+              : NULL;
+  return tensor_composite_result(ctx, l, p, inputs, 2);
+}
+
+PolyTensor *poly_tensor_mse_loss(PolyCtx *ctx, PolyTensor *x, PolyTensor *target) {
+  PolyTensor *inputs[] = {x, target};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (logical < 0) return NULL;
+  PolyUOp *p = poly_mse_loss(ctx, x->uop_physical, target->uop_physical);
+  PolyUOp *l = logical ? poly_mse_loss(ctx, x->uop_logical, target->uop_logical) : NULL;
+  return tensor_composite_result(ctx, l, p, inputs, 2);
+}
+
 PolyTensor *poly_tensor_binary_crossentropy_logits(
     PolyCtx *ctx,
     PolyTensor *x,
@@ -7980,14 +8013,25 @@ PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis) {
   return tensor_unary_result(ctx, src, logical, physical);
 }
 
-PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis) {
-  if (!ctx || !logits || !target) return NULL;
+static PolyUOp *cross_entropy(
+    PolyCtx *ctx,
+    PolyUOp *logits,
+    PolyUOp *target,
+    int axis,
+    int reduction,
+    double smoothing
+) {
+  if (!ctx || !logits || !target || reduction < 0 || reduction > 2 || !isfinite(smoothing) ||
+      smoothing < 0 || smoothing > 1)
+    return NULL;
   int64_t logits_shape[POLY_MAX_DIMS], target_shape[POLY_MAX_DIMS];
   int ndim = uop_shape(ctx, logits, logits_shape),
       target_ndim = uop_shape(ctx, target, target_shape);
   if (ndim < 1 || target_ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
   if (axis < 0 || axis >= ndim) return NULL;
+  /* Tinygrad rejects the smoothing division when there are no classes. */
+  if (logits_shape[axis] == 0) return NULL;
   bool dense = poly_shape_equal(logits_shape, ndim, target_shape, target_ndim);
   if (!dense && !shape_equal_except_axis(logits_shape, ndim, target_shape, target_ndim, axis))
     return NULL;
@@ -7999,15 +8043,17 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
                          : one_hot_along_dim(
                                ctx, poly_unsqueeze_axis(ctx, target, axis), logits_shape[axis], axis
                            );
-  weights = poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, 1.0), weights);
-  weights = poly_add(ctx, weights, poly_const_typed(ctx, POLY_WEAKFLOAT, 0.0));
+  weights = poly_mul(ctx, poly_const_typed(ctx, POLY_WEAKFLOAT, 1.0 - smoothing), weights);
+  weights = poly_add(
+      ctx, weights, poly_const_typed(ctx, POLY_WEAKFLOAT, smoothing / (double)logits_shape[axis])
+  );
   PolyUOp *weighted = poly_mul(ctx, poly_log_softmax(ctx, logits, axis), weights);
   PolyUOp *per_sample = poly_sum_reduce(ctx, weighted, axis, 0);
-  int64_t axes[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim - 1; i++)
-    axes[i] = i;
-  PolyUOp *mean = poly_mean_axes(ctx, per_sample, axes, ndim - 1, false);
-  return poly_mul(ctx, mean, poly_const_int(ctx, -1));
+  return poly_elementwise_neg(ctx, pointwise_loss_reduce(ctx, per_sample, reduction));
+}
+
+PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis) {
+  return cross_entropy(ctx, logits, target, axis, 2, 0);
 }
 
 static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis) {
@@ -10098,25 +10144,11 @@ PolyTensor *poly_tensor_bitwise_not(PolyCtx *ctx, PolyTensor *src) {
 }
 
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim;
-  ndim = uop_shape(ctx, pred, shape);
-  if (ndim < 0) return NULL;
-  PolyUOp *diff = poly_alu2(ctx, POLY_OP_SUB, pred, target);
-  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
-  int64_t out_shape[POLY_MAX_DIMS];
-  int out_ndim;
-  PolyUOp *r = sq;
-  for (int i = ndim - 1; i >= 0; i--) {
-    int64_t s[POLY_MAX_DIMS];
-    int sn;
-    sn = uop_shape(ctx, r, s);
-    r = do_reduce(ctx, POLY_OP_ADD, r, s, sn, i, 0, out_shape, &out_ndim);
-  }
-  int64_t numel = 1;
-  for (int i = 0; i < ndim; i++)
-    numel *= shape[i];
-  return poly_alu2(ctx, POLY_OP_FDIV, r, poly_const_float(ctx, (double)numel));
+  /* Tensor expression (pred-target).square().mean(), including broadcast
+   * shape and invocation-bound symbolic extents rather than allocation size. */
+  if (!ctx || !pred || !target) return NULL;
+  PolyUOp *diff = poly_sub(ctx, pred, target);
+  return diff ? pointwise_loss_reduce(ctx, poly_mul(ctx, diff, diff), 2) : NULL;
 }
 
 /* Current CreationMixin.full keeps its value expression unchanged and makes

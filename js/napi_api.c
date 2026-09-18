@@ -2226,6 +2226,23 @@ static napi_value napi_poly_tensor_isclose(napi_env env, napi_callback_info info
   );
 }
 
+static napi_value napi_poly_tensor_cross_entropy(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int32_t axis, reduction;
+  double smoothing;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &axis));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &reduction));
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &smoothing));
+  return make_external(
+      env, poly_tensor_cross_entropy(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               axis, reduction, smoothing
+           )
+  );
+}
+
 static napi_value napi_poly_tensor_binary_crossentropy(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -7200,6 +7217,7 @@ NAPI_MODULE_INIT() {
           "poly_tensor_binary_crossentropy_logits", napi_poly_tensor_binary_crossentropy_logits
       ),
       DECLARE_NAPI_METHOD("poly_tensor_nll_loss", napi_poly_tensor_nll_loss),
+      DECLARE_NAPI_METHOD("poly_tensor_cross_entropy", napi_poly_tensor_cross_entropy),
       DECLARE_NAPI_METHOD("poly_tensor_expm1", napi_poly_tensor_expm1),
       DECLARE_NAPI_METHOD("poly_tensor_prod", napi_poly_tensor_prod),
       DECLARE_NAPI_METHOD("poly_tensor_logsumexp", napi_poly_tensor_logsumexp),

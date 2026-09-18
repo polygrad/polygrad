@@ -4014,8 +4014,10 @@ async function runTensorTests(pg, createRuntime) {
             logits.shape[classesDim], classesDim
           )
         }
-        target = target.mul(1 - labelSmoothing).add(
-          labelSmoothing / target.shape[classesDim]
+        // Tinygrad spells (1 - smoothing) * Y, with Python float scalars even
+        // when smoothing is zero. JS Number inference alone produces weakint.
+        target = new Tensor(1 - labelSmoothing, { dtype: 'weakfloat' }).mul(target).add(
+          new Tensor(labelSmoothing / target.shape[classesDim], { dtype: 'weakfloat' })
         )
         const reduced = logits.logSoftmax(classesDim).mul(target).sum(classesDim)
         if (reduction === 'none') return reduced.neg()
@@ -4082,6 +4084,16 @@ async function runTensorTests(pg, createRuntime) {
     const loss = await logits.crossEntropy(target, 'mean', 0, 1)
     assertShape(loss.shape, [])
     assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy rejects empty class dimension', async () => {
+    const logits = Tensor.empty([2, 0])
+    const target = Tensor.empty([2, 0])
+    let rejected = false
+    try { logits.crossEntropy(target) } catch (_) { rejected = true }
+    assert(rejected, 'zero classes must fail before constructing a NaN loss')
+    logits.dispose()
+    target.dispose()
   })
 
   await test('crossEntropy shape mismatch throws', async () => {

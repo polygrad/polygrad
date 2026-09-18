@@ -232,8 +232,8 @@ def load_lib() -> ctypes.CDLL:
     # ABI95 adds symbolic Model bindings/shared components without changing these layouts;
     # test_api_parity compares every mirrored
     # top-level field offset and size against the compiled C header.
-    if (abi := lib.poly_abi_version()) != 95:
-        raise SystemExit(f"Z3 harness requires reviewed ABI95 layouts; core has ABI{abi}")
+    if (abi := lib.poly_abi_version()) != 96:
+        raise SystemExit(f"Z3 harness requires reviewed ABI96 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []

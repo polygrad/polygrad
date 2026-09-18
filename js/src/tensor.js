@@ -3157,36 +3157,27 @@ function createBoundTensorClass(runtime) {
     // --- Loss functions ---
 
     crossEntropy(target, reduction = 'mean', labelSmoothing = 0.0, axis) {
-      if (labelSmoothing < 0.0 || labelSmoothing > 1.0) {
+      if (!Number.isFinite(labelSmoothing) || labelSmoothing < 0.0 || labelSmoothing > 1.0) {
         throw new Error('label_smoothing must be in [0.0, 1.0]')
       }
-      if (!(target instanceof Tensor)) target = new Tensor(target)
       let classesDim = axis === undefined
         ? (this.shape.length === 1 ? 0 : 1)
         : Number(axis)
       if (classesDim < 0) classesDim += this.ndim
-      if (classesDim < 0 || classesDim >= this.ndim) {
+      if (!Number.isInteger(classesDim) || classesDim < 0 || classesDim >= this.ndim) {
         throw new Error(`axis=${axis} out of range`)
       }
-      if (!arraysEqual(this.shape, target.shape)) {
-        const expected = this.shape.filter((_, i) => i !== classesDim)
-        if (!arraysEqual(expected, target.shape)) {
-          throw new Error(`shape mismatch: self.shape=${JSON.stringify(this.shape)}, target.shape=${JSON.stringify(target.shape)}`)
+      return this._withTensorOperands([target], target => {
+        if (!arraysEqual(this.shape, target.shape)) {
+          const expected = this.shape.filter((_, i) => i !== classesDim)
+          if (!arraysEqual(expected, target.shape)) {
+            throw new Error(`shape mismatch: self.shape=${JSON.stringify(this.shape)}, target.shape=${JSON.stringify(target.shape)}`)
+          }
         }
-        target = target.unsqueeze(classesDim)._oneHotAlongDim(
-          this.shape[classesDim], classesDim
-        )
-      }
-      target = target.mul(1 - labelSmoothing).add(
-        labelSmoothing / Number(target.shape[classesDim])
-      )
-      const reduced = this.logSoftmax(classesDim).mul(target).sum(classesDim)
-      if (reduction === 'none') return reduced.neg()
-      if (reduction === 'sum') return reduced.sum().neg()
-      if (reduction === 'mean') return reduced.mean().neg()
-      throw new Error(
-        `reduction=${JSON.stringify(reduction)} must be one of ('none', 'sum', 'mean')`
-      )
+        return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_cross_entropy(
+          this._ctx, this._tensor, target._tensor, classesDim, this._lossReductionId(reduction), labelSmoothing
+        ))
+      })
     }
 
     sparseCategoricalCrossentropy(target, { ignoreIndex = -1, labelSmoothing = 0, reduction = 'mean' } = {}) {

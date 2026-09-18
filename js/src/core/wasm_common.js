@@ -1268,6 +1268,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_isclose(ctx, x, other, rtol, atol, equal_nan ? 1 : 0),
     poly_tensor_binary_crossentropy: (ctx, x, target, reduction) =>
       Module._poly_tensor_binary_crossentropy(ctx, x, target, reduction),
+    poly_tensor_cross_entropy: (ctx, x, target, axis, reduction, smoothing) =>
+      Module._poly_tensor_cross_entropy(ctx, x, target, axis, reduction, smoothing),
     poly_tensor_binary_crossentropy_logits: (ctx, x, target, weight, reduction) =>
       Module._poly_tensor_binary_crossentropy_logits(ctx, x, target, weight || 0, reduction),
     poly_tensor_nll_loss: (ctx, x, target, weight, ignore_index, reduction) =>
@@ -2052,7 +2054,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 95
+  const EXPECTED_ABI = 96
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

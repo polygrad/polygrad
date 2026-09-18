@@ -29,6 +29,41 @@ from polygrad.nn.state import safe_load, safe_load_metadata, torch_load
 
 # ── Helpers ──
 
+def test_cross_entropy_rejects_zero_classes():
+    x, target = Tensor.empty(2, 0), Tensor.empty(2, 0)
+    with pytest.raises(RuntimeError):
+        x.cross_entropy(target)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+@pytest.mark.parametrize('dense', [False, True])
+@pytest.mark.parametrize('reduction', ['none', 'sum', 'mean'])
+@pytest.mark.parametrize('smoothing', [0., .2])
+def test_cross_entropy_shared_core_options_and_gradient(monkeypatch, device, dense, reduction, smoothing):
+    import polygrad as pg
+    core = _ffi.get_lib().poly_tensor_cross_entropy
+    calls = []
+    def traced(*args):
+        calls.append(args)
+        return core(*args)
+    monkeypatch.setattr(_ffi.get_lib(), 'poly_tensor_cross_entropy', traced)
+    values = np.array([[.1, .7, -.3], [1.1, -.2, .4]], np.float32)
+    labels = np.eye(3, dtype=np.float32)[[1, 2]]
+    expected_y = (1 - smoothing) * labels + smoothing / 3
+    probabilities = np.exp(values - values.max(axis=1, keepdims=True))
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    expected_loss = -(expected_y * np.log(probabilities)).sum(axis=1)
+    expected_grad = (probabilities - expected_y) / (2 if reduction == 'mean' else 1)
+    with pg.create(device=device) as rt:
+        x = rt.Tensor(values)
+        y = rt.Tensor(labels if dense else np.array([1, 2], np.int32))
+        loss = x.cross_entropy(y, reduction=reduction, label_smoothing=smoothing)
+        loss.sum().backward()
+        expected = expected_loss if reduction == 'none' else getattr(expected_loss, reduction)()
+        np.testing.assert_allclose(loss.numpy(), expected, rtol=2e-6, atol=2e-7)
+        np.testing.assert_allclose(x.grad.numpy(), expected_grad, rtol=3e-6, atol=2e-7)
+        assert len(calls) == 1
+
 @pytest.fixture(autouse=True)
 def _existing_nn_runtime_lane(request, monkeypatch):
     """Run existing numerical/gradient assertions unchanged on explicit owners."""
@@ -921,7 +956,7 @@ class TestModelExport:
         np.testing.assert_array_equal(
             result["typed_out"], np.array([0, 1, 2], dtype=np.float32)
         )
-        with pytest.raises(RuntimeError, match=r"call\('forward'\) failed"):
+        with pytest.raises(RuntimeError, match=r"input 'typed_x': expected int32, received float32"):
             inst.forward(typed_x=np.array([0, 1, 2], dtype=np.float32))
 
     def test_functional_model_exports_selected_forward_entrypoint(self):

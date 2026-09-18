@@ -766,6 +766,22 @@ def case_mlp_dense_cross_entropy():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_shared_cross_entropy(dense, reduction, smoothing, integer=False):
+    x = Tensor.empty(2, 3, device="CPU", dtype=dtypes.int32 if integer else dtypes.float32).realize()
+    y = Tensor.empty(*((2, 3) if dense else (2,)), device="CPU",
+                     dtype=dtypes.float32 if dense and not integer else dtypes.int32).realize()
+    out = x.cross_entropy(y, reduction=reduction, label_smoothing=smoothing)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_shared_mse():
+    x = Tensor.empty(2, 3, device="CPU").realize()
+    y = Tensor.empty(1, 3, device="CPU").realize()
+    out = (x-y).square().mean() if ENGINE == 'tinygrad' else x._make_result_from_core(
+        _ffi._lib.poly_tensor_mse_loss(x._ctx, x._tensor, y._tensor), None)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_bound_dense_cross_entropy():
     logits = realized_input(8, 10)
     labels = realized_input(8, 10)
@@ -2102,6 +2118,12 @@ CASES = {
     "dropout_stateful_rng": ("tensor", case_dropout_stateful_rng),
     "relu_float32": ("tensor", case_relu_float32),
     "mlp_dense_cross_entropy": ("tensor", case_mlp_dense_cross_entropy),
+    "shared_mse": ("tensor", case_shared_mse),
+    "shared_ce_integer_dense": ("tensor", lambda: case_shared_cross_entropy(True, 'mean', 0., True)),
+    "shared_ce_integer_sparse": ("tensor", lambda: case_shared_cross_entropy(False, 'mean', 0., True)),
+    **{f"shared_cross_entropy_{dense}_{reduction}_{smoothing}":
+       ("tensor", lambda d=dense, r=reduction, s=smoothing: case_shared_cross_entropy(d, r, s))
+       for dense in (False, True) for reduction in ("none", "sum", "mean") for smoothing in (0., .2)},
     "bound_dense_cross_entropy": ("tensor", case_bound_dense_cross_entropy),
     "mlp_linear_relu": ("tensor", case_mlp_linear_relu),
     "mlp_mse": ("tensor", case_mlp_mse),

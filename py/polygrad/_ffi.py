@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 95
+POLYGRAD_ABI_VERSION = 96
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -940,6 +940,10 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_binary_crossentropy.restype = _ptr
     lib.poly_tensor_binary_crossentropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+    lib.poly_tensor_cross_entropy.restype = _ptr
+    lib.poly_tensor_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int, ctypes.c_double]
+    lib.poly_tensor_mse_loss.restype = _ptr
+    lib.poly_tensor_mse_loss.argtypes = [_ptr, _ptr, _ptr]
 
     lib.poly_tensor_binary_crossentropy_logits.restype = _ptr
     lib.poly_tensor_binary_crossentropy_logits.argtypes = [_ptr, _ptr, _ptr, _ptr, ctypes.c_int]

@@ -3291,23 +3291,11 @@ class Tensor:
                 raise RuntimeError(
                     f"shape mismatch: self.shape={self.shape}, target.shape={target.shape}"
                 )
-            target = target.unsqueeze(classes_dim)._one_hot_along_dim(
-                num_classes=self.shape[classes_dim], dim=classes_dim
-            )
-        target = (
-            (1 - label_smoothing) * target
-            + label_smoothing / int(target.shape[classes_dim])
+        core = _ffi._lib.poly_tensor_cross_entropy(
+            self._ctx, self._tensor, target._tensor, classes_dim,
+            self._loss_reduction_id(reduction), float(label_smoothing)
         )
-        reduced = self.log_softmax(classes_dim).mul(target).sum(classes_dim)
-        if reduction == "none":
-            return -reduced
-        if reduction == "sum":
-            return -reduced.sum()
-        if reduction == "mean":
-            return -reduced.mean()
-        raise ValueError(
-            f"reduction={reduction!r} must be one of ('none', 'sum', 'mean')"
-        )
+        return self._make_result_from_core(core, None)
 
     def sparse_categorical_crossentropy(self, target, ignore_index=-1, label_smoothing=0.0, reduction='mean'):
         """Pinned sparse loss uses the last class axis, unlike cross_entropy."""

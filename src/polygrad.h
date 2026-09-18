@@ -10,7 +10,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 95
+#define POLYGRAD_ABI_VERSION 96
 
 #include <stdint.h>
 #include <stddef.h>
@@ -1029,6 +1029,17 @@ PolyTensor *poly_tensor_binary_crossentropy(
     PolyTensor *target,
     int reduction
 );
+/* Cross-entropy follows Tensor.cross_entropy; class axis is explicit in C.
+ * Reduction: 0=none, 1=sum, 2=mean. Weight/ignore_index belong to nll_loss. */
+PolyTensor *poly_tensor_cross_entropy(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *target,
+    int axis,
+    int reduction,
+    double smoothing
+);
+PolyTensor *poly_tensor_mse_loss(PolyCtx *ctx, PolyTensor *x, PolyTensor *target);
 PolyTensor *poly_tensor_binary_crossentropy_logits(
     PolyCtx *ctx,
     PolyTensor *x,

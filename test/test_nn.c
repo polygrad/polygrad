@@ -633,6 +633,46 @@ TEST(nn, matmul_invalid_broadcast_returns_null) {
   PASS();
 }
 
+TEST(nn, tensor_losses_shared_roots_and_ownership) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  for (int policy = 0; policy < 3; policy++) {
+    poly_ctx_set_logical_policy(ctx, policy);
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
+    PolyTensor *y = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
+    PolyTensor *foreign =
+        poly_tensor_empty(other, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(x);
+    ASSERT_NOT_NULL(y);
+    ASSERT_NOT_NULL(foreign);
+    ASSERT_TRUE(poly_tensor_cross_entropy(ctx, x, foreign, 1, 2, 0) == NULL);
+    ASSERT_TRUE(poly_tensor_mse_loss(ctx, x, foreign) == NULL);
+    ASSERT_TRUE(poly_tensor_cross_entropy(ctx, x, y, 1, 3, 0) == NULL);
+    ASSERT_TRUE(poly_tensor_cross_entropy(ctx, x, y, 1, 2, NAN) == NULL);
+    PolyTensor *ce = poly_tensor_cross_entropy(ctx, x, y, 1, 2, 0);
+    PolyTensor *mse = poly_tensor_mse_loss(ctx, x, y);
+    ASSERT_NOT_NULL(ce);
+    ASSERT_NOT_NULL(mse);
+    ASSERT_TRUE(
+        poly_tensor_uop_physical(ce) ==
+        poly_cross_entropy(ctx, poly_tensor_uop_physical(x), poly_tensor_uop_physical(y), 1)
+    );
+    ASSERT_TRUE(
+        poly_tensor_uop_physical(mse) ==
+        poly_mse_loss(ctx, poly_tensor_uop_physical(x), poly_tensor_uop_physical(y))
+    );
+    ASSERT_TRUE((poly_tensor_uop_logical(ce) != NULL) == (policy != POLY_LOGICAL_NEVER));
+    ASSERT_TRUE((poly_tensor_uop_logical(mse) != NULL) == (policy != POLY_LOGICAL_NEVER));
+    poly_tensor_release(ce);
+    poly_tensor_release(mse);
+    poly_tensor_release(foreign);
+    poly_tensor_release(y);
+    poly_tensor_release(x);
+  }
+  poly_ctx_destroy(other);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, cross_entropy_sparse_targets) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logits_buf = poly_buffer_f32(ctx, 6);
