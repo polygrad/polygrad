@@ -28,11 +28,7 @@
 
 static bool napi_is_nullish(napi_env env, napi_value value);
 #include "models/mlp.h"
-#include "models/compose.h"
 #include "models/models.h"
-#include "models/llama.h"
-#include "models/tabm.h"
-#include "models/nam.h"
 #include "engine/schedule.h"
 #include "engine/realize.h"
 

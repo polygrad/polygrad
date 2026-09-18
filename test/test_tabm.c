@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/models/tabm.h"
+#include "../src/models/models.h"
 #include "../src/model.h"
 #include <string.h>
 #include <stdlib.h>
@@ -22,8 +22,9 @@ static const char *ce_tabm_spec =
 /* Tests */
 
 TEST(tabm, create_simple) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* 2 layers * 4 params = 8 params (weight + r + s + b per layer) */
@@ -72,8 +73,9 @@ TEST(tabm, create_simple) {
 }
 
 TEST(tabm, staged_builder_does_not_use_ctx_registry) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
   poly_model_free(inst);
@@ -81,8 +83,9 @@ TEST(tabm, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(tabm, init_values) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* r should be initialized to ones */
@@ -115,10 +118,12 @@ TEST(tabm, init_values) {
 }
 
 TEST(tabm, deterministic_init) {
-  PolyModel *inst1 =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
-  PolyModel *inst2 =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst1 = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
+  PolyModel *inst2 = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -136,8 +141,9 @@ TEST(tabm, deterministic_init) {
 }
 
 TEST(tabm, forward_produces_output) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -167,8 +173,9 @@ TEST(tabm, forward_produces_output) {
 }
 
 TEST(tabm, forward_deterministic) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -204,8 +211,9 @@ TEST(tabm, forward_deterministic) {
 }
 
 TEST(tabm, train_mse_loss_decreases) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -235,7 +243,9 @@ TEST(tabm, train_mse_loss_decreases) {
 }
 
 TEST(tabm, train_cross_entropy_loss_decreases) {
-  PolyModel *inst = poly_tabm_from_json(ce_tabm_spec, (int)strlen(ce_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", ce_tabm_spec, (int)strlen(ce_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -265,8 +275,9 @@ TEST(tabm, train_cross_entropy_loss_decreases) {
 }
 
 TEST(tabm, save_load_roundtrip) {
-  PolyModel *inst =
-      poly_tabm_from_json(simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "tabm", simple_tabm_spec, (int)strlen(simple_tabm_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* Run a few training steps */
@@ -332,14 +343,22 @@ TEST(tabm, save_load_roundtrip) {
 }
 
 TEST(tabm, null_and_invalid) {
-  ASSERT_TRUE(poly_tabm_from_json(NULL, 0, POLY_DEVICE_AUTO) == NULL);
-  ASSERT_TRUE(poly_tabm_from_json("{}", 2, POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "tabm", NULL, 0, POLY_DEVICE_AUTO, NULL) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "tabm", "{}", 2, POLY_DEVICE_AUTO, NULL) == NULL);
 
   const char *no_layers = "{\"activation\":\"relu\",\"n_ensemble\":4}";
-  ASSERT_TRUE(poly_tabm_from_json(no_layers, (int)strlen(no_layers), POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(
+      poly_model_from_config(
+          NULL, "tabm", no_layers, (int)strlen(no_layers), POLY_DEVICE_AUTO, NULL
+      ) == NULL
+  );
 
   const char *one_layer = "{\"layers\":[4],\"n_ensemble\":4}";
-  ASSERT_TRUE(poly_tabm_from_json(one_layer, (int)strlen(one_layer), POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(
+      poly_model_from_config(
+          NULL, "tabm", one_layer, (int)strlen(one_layer), POLY_DEVICE_AUTO, NULL
+      ) == NULL
+  );
 
   PASS();
 }

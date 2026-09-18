@@ -8,6 +8,7 @@
 #ifdef POLY_HAS_HIP
 
 #include "test_harness.h"
+#include "../src/models/models.h"
 #include "../src/codegen/codegen.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
@@ -536,7 +537,7 @@ static PolyModel *hip_make_test_mlp(int n_in, int n_out) {
       "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}",
       n_in, n_out
   );
-  return poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  return poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
 }
 
 TEST_BACKEND(hip, instance_set_device_hip) {

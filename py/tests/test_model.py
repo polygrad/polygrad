@@ -1819,6 +1819,33 @@ class TestCompiledProgramExport:
 
 
 class TestMLPCreate:
+    @pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+    def test_distilgpt2_registry_extension(self, device):
+        import polygrad as pg
+        spec = dict(vocab_size=8, n_embd=4, n_head=2, n_positions=2)
+        with pg.create(device=device) as rt:
+            # A new C preset must appear without a Python-specific factory.
+            preset = rt.models.DistilGPT2(spec)
+            explicit = rt.models.GPT2({**spec, 'n_layer': 6})
+            try:
+                assert preset.param_count == explicit.param_count == 76
+                for i in range(preset.param_count):
+                    name = preset.param_name(i)
+                    assert name == explicit.param_name(i)
+                    count = int(np.prod(preset.param_shape(i)))
+                    values = (np.arange(count, dtype=np.float32) % 11 - 5) / 16
+                    preset.write_buffer(name, values)
+                    explicit.write_buffer(name, values)
+                # Same graph, state, signatures and canonical identities.
+                assert preset.save() == explicit.save()
+                inputs = dict(x=np.array([[1, 2]], dtype=np.int32),
+                              positions=np.array([[0, 1]], dtype=np.int32))
+                np.testing.assert_array_equal(preset.forward(**inputs)['output'],
+                                              explicit.forward(**inputs)['output'])
+            finally:
+                preset.dispose()
+                explicit.dispose()
+
     def test_model_type_capabilities(self):
         import polygrad as pg
         available = {entry['name']: entry for entry in pg.models.list()}

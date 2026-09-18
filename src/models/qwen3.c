@@ -220,18 +220,10 @@ fail_pre_build:
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
-static PolyModel *qwen3_create(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device) {
+PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
   return model_factory_end(&scope, qwen3_build(scope.ctx, cfg));
-}
-
-PolyModel *poly_qwen3(const Qwen3Config *cfg, PolyDevice device) {
-  return qwen3_create(NULL, cfg, device);
-}
-
-PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device) {
-  return ctx ? qwen3_create(ctx, cfg, device) : NULL;
 }
 
 /* GGUF import */
@@ -317,7 +309,7 @@ static PolyModel *qwen3_from_gguf_decoded(
       cfg.head_dim, cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm
   );
 
-  PolyModel *inst = ctx ? poly_qwen3_into(ctx, &cfg, device) : poly_qwen3(&cfg, device);
+  PolyModel *inst = poly_qwen3_into(ctx, &cfg, device);
   if (!inst) return NULL;
 
   /* Precompute RoPE frequencies and fill the input buffers */

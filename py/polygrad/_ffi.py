@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 96
+POLYGRAD_ABI_VERSION = 97
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1342,10 +1342,6 @@ def _declare_signatures(lib):
     lib.poly_model_type_capabilities.argtypes = [ctypes.c_int]
     lib.poly_model_last_error.restype = ctypes.POINTER(PolyModelError)
     lib.poly_model_last_error.argtypes = [_ptr]
-    for name in ('poly_sequential_from_json', 'poly_graph_from_json', 'poly_llama_from_json'):
-        factory = getattr(lib, name)
-        factory.restype = _ptr
-        factory.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(PolyModelError)]
     lib.poly_model_from_ir.restype = _ptr
     lib.poly_model_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
     lib.poly_model_from_ir_into.restype = _ptr
@@ -1514,18 +1510,6 @@ def _declare_signatures(lib):
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_bool, ctypes.c_bool]
-
-    # MLP family builder (model_mlp.h)
-    lib.poly_mlp_from_json_into.restype = _ptr
-    lib.poly_mlp_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-
-    # TabM family builder (model_tabm.h)
-    lib.poly_tabm_from_json_into.restype = _ptr
-    lib.poly_tabm_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-
-    # NAM family builder (model_nam.h)
-    lib.poly_nam_from_json_into.restype = _ptr
-    lib.poly_nam_from_json_into.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
 
     # HF/model loaders (src/models/*.c)
     lib.poly_hf_load_into.restype = _ptr

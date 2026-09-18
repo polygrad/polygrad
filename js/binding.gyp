@@ -68,6 +68,7 @@
         "csrc/src/models/registry.c",
         "csrc/src/models/hf_loader.c",
         "csrc/src/models/gpt2.c",
+        "csrc/src/models/distilgpt2.c",
         "csrc/src/models/qwen3.c",
         "csrc/src/models/llama.c",
         "csrc/src/loaders/decoded.c",

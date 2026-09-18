@@ -3,7 +3,7 @@
 
 #include "mlp.h"
 #include "gpt2.h"
-#include "llama.h"
+#include "qwen3.h"
 #include "hf_loader.h"
 
 #ifdef __cplusplus

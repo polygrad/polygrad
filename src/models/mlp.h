@@ -27,11 +27,9 @@ typedef struct {
 } MLPConfig;
 
 MLPConfig poly_mlp_config_default(void);
-PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device);
-/* Borrows ctx; construction restores its defaults on success and failure. */
+/* Borrows ctx and restores its defaults on every exit. Explicit NULL ctx
+ * requests a standalone Model that owns its context. */
 PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device);
-PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device);
-PolyModel *poly_mlp_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device);
 
 #ifdef __cplusplus
 }

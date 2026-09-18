@@ -10,7 +10,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "tabm.h"
+#include "models.h"
 #include "factory.h"
 #include <limits.h>
 
@@ -36,7 +36,7 @@ static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
 
 /* TabM Builder */
 
-PolyModel *model_tabm_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_tabm_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   if (!(model_config_training(root, err) &&
         model_config_sizes(root, "layers", 2, INT_MAX, true, err) &&
         model_config_integer(root, "n_ensemble", 1, INT_MAX, false, err) &&
@@ -230,14 +230,3 @@ fail_no_ctx:
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
-static PolyModel *tabm_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return poly_model_from_config(ctx, "tabm", json, len, device, NULL);
-}
-
-PolyModel *poly_tabm_from_json(const char *json, int len, PolyDevice device) {
-  return tabm_create(NULL, json, len, device);
-}
-
-PolyModel *poly_tabm_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return ctx ? tabm_create(ctx, json, len, device) : NULL;
-}

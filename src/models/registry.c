@@ -174,15 +174,17 @@ bool model_config_training(const cJSON *root, PolyModelError *err) {
 }
 
 static const PolyModelType model_types[] = {
-    {"MLP", "mlp", model_mlp_build, NULL, NULL},
-    {"TabM", "tabm", model_tabm_build, NULL, NULL},
-    {"NAM", "nam", model_nam_build, NULL, NULL},
-    {"GPT2", "gpt2", model_gpt2_build, poly_gpt2_from_hf_decoded_generic,
+    {"MLP", "mlp", model_mlp_from_config, NULL, NULL},
+    {"TabM", "tabm", model_tabm_from_config, NULL, NULL},
+    {"NAM", "nam", model_nam_from_config, NULL, NULL},
+    {"GPT2", "gpt2", model_gpt2_from_config, poly_gpt2_from_hf_decoded_generic,
      poly_gpt2_from_gguf_decoded_generic},
-    {"Sequential", "sequential", model_sequential_build, NULL, NULL},
-    {"Graph", "graph", model_graph_build, NULL, NULL},
-    {"Llama", "llama", model_llama_build, poly_llama_from_hf_decoded_generic, NULL},
+    {"Sequential", "sequential", model_sequential_from_config, NULL, NULL},
+    {"Graph", "graph", model_graph_from_config, NULL, NULL},
+    {"Llama", "llama", model_llama_from_config, poly_llama_from_hf_decoded_generic, NULL},
     {"Qwen3", "qwen3", NULL, NULL, poly_qwen3_from_gguf_decoded_generic},
+    {"DistilGPT2", "distilgpt2", model_distilgpt2_from_config, poly_gpt2_from_hf_decoded_generic,
+     poly_gpt2_from_gguf_decoded_generic},
 };
 
 const char *poly_model_type_name(int index) {

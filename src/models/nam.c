@@ -14,7 +14,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "nam.h"
+#include "models.h"
 #include "factory.h"
 #include <limits.h>
 
@@ -29,7 +29,7 @@
 
 /* NAM Builder */
 
-PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   if (!(model_config_training(root, err) &&
         model_config_integer(root, "n_features", 1, INT_MAX, true, err) &&
         model_config_integer(root, "n_outputs", 1, INT_MAX, false, err) &&
@@ -229,14 +229,3 @@ fail_no_instance:
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
-static PolyModel *nam_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return poly_model_from_config(ctx, "nam", json, len, device, NULL);
-}
-
-PolyModel *poly_nam_from_json(const char *json, int len, PolyDevice device) {
-  return nam_create(NULL, json, len, device);
-}
-
-PolyModel *poly_nam_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return ctx ? nam_create(ctx, json, len, device) : NULL;
-}

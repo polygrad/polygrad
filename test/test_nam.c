@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/models/nam.h"
+#include "../src/models/models.h"
 #include "../src/model.h"
 #include <string.h>
 #include <stdlib.h>
@@ -25,8 +25,9 @@ static const char *ce_nam_spec =
 /* Tests */
 
 TEST(nam, create_simple) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* intercept (1) + 2 features * (weight + bias per layer) = 1 + 2*(2*2) = 9 */
@@ -68,8 +69,9 @@ TEST(nam, create_simple) {
 }
 
 TEST(nam, staged_builder_does_not_use_ctx_registry) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
   poly_model_free(inst);
@@ -77,7 +79,9 @@ TEST(nam, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(nam, create_exu) {
-  PolyModel *inst = poly_nam_from_json(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* With ExU, hidden layers get extra exu.weight + exu.bias params.
@@ -97,8 +101,9 @@ TEST(nam, create_exu) {
 }
 
 TEST(nam, init_values) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* Intercept should be zero */
@@ -125,7 +130,9 @@ TEST(nam, init_values) {
 }
 
 TEST(nam, exu_init_values) {
-  PolyModel *inst = poly_nam_from_json(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* ExU weight should be zero (exp(0) = 1) */
@@ -146,10 +153,12 @@ TEST(nam, exu_init_values) {
 }
 
 TEST(nam, deterministic_init) {
-  PolyModel *inst1 =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
-  PolyModel *inst2 =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst1 = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
+  PolyModel *inst2 = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -167,8 +176,9 @@ TEST(nam, deterministic_init) {
 }
 
 TEST(nam, forward_produces_output) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -198,8 +208,9 @@ TEST(nam, forward_produces_output) {
 }
 
 TEST(nam, forward_deterministic) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -235,8 +246,9 @@ TEST(nam, forward_deterministic) {
 }
 
 TEST(nam, train_mse_loss_decreases) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -266,7 +278,9 @@ TEST(nam, train_mse_loss_decreases) {
 }
 
 TEST(nam, train_exu_loss_decreases) {
-  PolyModel *inst = poly_nam_from_json(exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", exu_nam_spec, (int)strlen(exu_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -296,7 +310,9 @@ TEST(nam, train_exu_loss_decreases) {
 }
 
 TEST(nam, train_cross_entropy_loss_decreases) {
-  PolyModel *inst = poly_nam_from_json(ce_nam_spec, (int)strlen(ce_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", ce_nam_spec, (int)strlen(ce_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -326,8 +342,9 @@ TEST(nam, train_cross_entropy_loss_decreases) {
 }
 
 TEST(nam, save_load_roundtrip) {
-  PolyModel *inst =
-      poly_nam_from_json(simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* Train a few steps */
@@ -393,11 +410,15 @@ TEST(nam, save_load_roundtrip) {
 }
 
 TEST(nam, null_and_invalid) {
-  ASSERT_TRUE(poly_nam_from_json(NULL, 0, POLY_DEVICE_AUTO) == NULL);
-  ASSERT_TRUE(poly_nam_from_json("{}", 2, POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "nam", NULL, 0, POLY_DEVICE_AUTO, NULL) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "nam", "{}", 2, POLY_DEVICE_AUTO, NULL) == NULL);
 
   const char *no_features = "{\"hidden_sizes\":[4],\"n_outputs\":1}";
-  ASSERT_TRUE(poly_nam_from_json(no_features, (int)strlen(no_features), POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(
+      poly_model_from_config(
+          NULL, "nam", no_features, (int)strlen(no_features), POLY_DEVICE_AUTO, NULL
+      ) == NULL
+  );
 
   PASS();
 }

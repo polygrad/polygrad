@@ -548,7 +548,7 @@ TEST(hf, gpt2_build_tiny) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Check param count: wte + wpe + 1 layer (12 params) + ln_f (2) = 16 */
@@ -596,7 +596,7 @@ TEST(hf, gpt2_build_multi_layer) {
       .batch_size = 2,
       .norm_eps = 1e-5f};
 
-  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* 2 (wte+wpe) + 3*12 (layers) + 2 (ln_f) = 40 params */
@@ -629,7 +629,7 @@ TEST(hf, qwen3_build_tiny_staged) {
   cfg.batch_size = 1;
   cfg.qk_norm = 0;
 
-  PolyModel *inst = poly_qwen3(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_qwen3_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
 
@@ -667,7 +667,7 @@ static bool bind_allocation_rejected(int after) {
   cfg.vocab_size = 4;
   cfg.max_seq_len = 2;
   cfg.batch_size = 1;
-  PolyModel *model = poly_gpt2(&cfg, POLY_DEVICE_CPU);
+  PolyModel *model = poly_gpt2_into(NULL, &cfg, POLY_DEVICE_CPU);
   if (!model) return false;
   poly_test_bind_alloc_fail_after(after);
   PolyBindIndex *idx = poly_bind_index_create(model);
@@ -951,7 +951,7 @@ TEST(hf, gpt2_forward_e2e) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
@@ -1064,7 +1064,7 @@ TEST(hf, gpt2_training_loss_decreases) {
       .batch_size = 1,
       .norm_eps = 1e-5f};
 
-  PolyModel *inst = poly_gpt2(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_gpt2_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */

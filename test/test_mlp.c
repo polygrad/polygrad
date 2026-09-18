@@ -95,8 +95,9 @@ static void mlp_restore_env(MlpEnvSave *s) {
 /* Tests */
 
 TEST(mlp, create_simple) {
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* 2 weights + 2 biases = 4 params */
@@ -135,8 +136,9 @@ TEST(mlp, create_simple) {
 }
 
 TEST(mlp, staged_builder_retains_complete_physical_template) {
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_INTERP);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_INTERP, NULL
+  );
 
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_get_preferred_device(poly_model_ctx(inst)), POLY_DEVICE_INTERP);
@@ -159,8 +161,9 @@ TEST(mlp, staged_builder_retains_complete_physical_template) {
 }
 
 TEST(mlp, staged_builder_does_not_use_ctx_registry) {
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
   poly_model_free(inst);
@@ -168,7 +171,9 @@ TEST(mlp, staged_builder_does_not_use_ctx_registry) {
 }
 
 TEST(mlp, create_no_bias) {
-  PolyModel *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", no_bias_spec, (int)strlen(no_bias_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* 1 weight, no bias */
@@ -187,10 +192,12 @@ TEST(mlp, create_no_bias) {
 
 TEST(mlp, deterministic_init) {
   /* Same seed should produce identical weights */
-  PolyModel *inst1 =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
-  PolyModel *inst2 =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst1 = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
+  PolyModel *inst2 = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -211,9 +218,12 @@ TEST(mlp, cross_seed_divergence) {
   const char *spec_seed99 = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                             "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
 
-  PolyModel *inst1 =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
-  PolyModel *inst2 = poly_mlp_from_json(spec_seed99, (int)strlen(spec_seed99), POLY_DEVICE_AUTO);
+  PolyModel *inst1 = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
+  PolyModel *inst2 = poly_model_from_config(
+      NULL, "mlp", spec_seed99, (int)strlen(spec_seed99), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -238,8 +248,9 @@ TEST(mlp, cross_seed_divergence) {
 
 TEST(mlp, kaiming_bounds) {
   /* Kaiming init: values should be within [-sqrt(6/fan_in), +sqrt(6/fan_in)] */
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   /* Layer 0 weight: fan_in = 2, bound = sqrt(6/2) = sqrt(3) ~ 1.732 */
@@ -261,8 +272,9 @@ TEST(mlp, kaiming_bounds) {
 }
 
 TEST(mlp, forward_produces_output) {
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -294,8 +306,9 @@ TEST(mlp, forward_produces_output) {
 
 TEST(mlp, forward_deterministic) {
   /* Same instance, same input -> same output */
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
 
   float x[] = {1.0f, 2.0f};
@@ -339,8 +352,9 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
   setenv("POLY_PCACHE", "1", 1);
   setenv("SCACHE", "1", 1);
 
-  PolyModel *inst =
-      poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_model_from_config(
+      NULL, "mlp", simple_mlp_spec, (int)strlen(simple_mlp_spec), POLY_DEVICE_AUTO, NULL
+  );
   ASSERT_NOT_NULL(inst);
   PolyCtx *ctx = poly_model_ctx(inst);
   ASSERT_NOT_NULL(ctx);
@@ -409,18 +423,26 @@ TEST(mlp, forward_and_train_replay_stats_plateau) {
 
 TEST(mlp, null_and_invalid) {
   /* NULL input */
-  ASSERT_TRUE(poly_mlp_from_json(NULL, 0, POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "mlp", NULL, 0, POLY_DEVICE_AUTO, NULL) == NULL);
 
   /* Empty JSON */
-  ASSERT_TRUE(poly_mlp_from_json("{}", 2, POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(poly_model_from_config(NULL, "mlp", "{}", 2, POLY_DEVICE_AUTO, NULL) == NULL);
 
   /* Missing layers */
   const char *no_layers = "{\"activation\":\"relu\"}";
-  ASSERT_TRUE(poly_mlp_from_json(no_layers, (int)strlen(no_layers), POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(
+      poly_model_from_config(
+          NULL, "mlp", no_layers, (int)strlen(no_layers), POLY_DEVICE_AUTO, NULL
+      ) == NULL
+  );
 
   /* Too few layers */
   const char *one_layer = "{\"layers\":[4]}";
-  ASSERT_TRUE(poly_mlp_from_json(one_layer, (int)strlen(one_layer), POLY_DEVICE_AUTO) == NULL);
+  ASSERT_TRUE(
+      poly_model_from_config(
+          NULL, "mlp", one_layer, (int)strlen(one_layer), POLY_DEVICE_AUTO, NULL
+      ) == NULL
+  );
 
   PASS();
 }
@@ -430,7 +452,8 @@ TEST(mlp, train_single_layer) {
   const char *spec = "{\"layers\":[2,1],\"activation\":\"none\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -470,7 +493,8 @@ TEST(mlp, train_multi_layer) {
   const char *spec = "{\"layers\":[1,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -506,7 +530,8 @@ TEST(mlp, train_cross_entropy) {
   const char *spec = "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
 
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -541,7 +566,8 @@ TEST(mlp, train_batch2_mse) {
   const char *spec = "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
                      "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
 
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -568,7 +594,8 @@ TEST(mlp, train_batch4_cross_entropy) {
   const char *spec = "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
 
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 

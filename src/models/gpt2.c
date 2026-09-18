@@ -221,21 +221,22 @@ fail_pre_build:
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
-static PolyModel *gpt2_create(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
+PolyModel *poly_gpt2_into(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
   return model_factory_end(&scope, gpt2_build(scope.ctx, cfg, NULL));
 }
 
-PolyModel *poly_gpt2(const GPT2Config *cfg, PolyDevice device) {
-  return gpt2_create(NULL, cfg, device);
+PolyModel *model_gpt2_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  return model_gpt2_configure(ctx, root, poly_gpt2_config_default(), err);
 }
 
-PolyModel *poly_gpt2_into(PolyCtx *ctx, const GPT2Config *cfg, PolyDevice device) {
-  return ctx ? gpt2_create(ctx, cfg, device) : NULL;
-}
-
-PolyModel *model_gpt2_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_gpt2_configure(
+    PolyCtx *ctx,
+    const cJSON *root,
+    GPT2Config cfg,
+    PolyModelError *err
+) {
   const char *keys[] = {"vocab_size", "n_embd", "n_head", "n_layer", "n_positions", "batch_size"};
   for (size_t i = 0; i < sizeof(keys) / sizeof(*keys); i++)
     if (!model_config_integer(root, keys[i], 1, INT_MAX, false, err)) return NULL;
@@ -245,7 +246,6 @@ PolyModel *model_gpt2_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err
     model_factory_error(err, "layer_norm_epsilon", "expected a positive finite float32 value");
     return NULL;
   }
-  GPT2Config cfg = poly_gpt2_config_default();
   cJSON *v;
   if ((v = cJSON_GetObjectItem(root, "vocab_size"))) cfg.vocab_size = v->valueint;
   if ((v = cJSON_GetObjectItem(root, "n_embd"))) cfg.n_embd = v->valueint;
@@ -256,14 +256,6 @@ PolyModel *model_gpt2_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err
   if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon"))) cfg.norm_eps = (float)v->valuedouble;
 
   return gpt2_build(ctx, &cfg, err);
-}
-
-PolyModel *poly_gpt2_from_json(const char *json, int len, PolyDevice device) {
-  return poly_model_from_config(NULL, "gpt2", json, len, device, NULL);
-}
-
-PolyModel *poly_gpt2_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return ctx ? poly_model_from_config(ctx, "gpt2", json, len, device, NULL) : NULL;
 }
 
 /* HF import (model-specific) */
@@ -324,7 +316,7 @@ static PolyModel *gpt2_from_hf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
+  PolyModel *inst = poly_gpt2_into(ctx, &cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);
@@ -490,7 +482,7 @@ static PolyModel *gpt2_from_gguf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  PolyModel *inst = ctx ? poly_gpt2_into(ctx, &cfg, device) : poly_gpt2(&cfg, device);
+  PolyModel *inst = poly_gpt2_into(ctx, &cfg, device);
   if (!inst) return NULL;
 
   PolyBindIndex *idx = poly_bind_index_create(inst);

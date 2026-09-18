@@ -2,7 +2,7 @@
  * existing Tensor operations and seal one Model. No definition survives sealing.
  * Math is owned by Tensor/nn (not this parser); sharing means reusing the same
  * parameter Tensor, as multiple calls to one tinygrad.nn.Linear do. */
-#include "compose.h"
+#include "models.h"
 #include "factory.h"
 #include "layers.h"
 #include "../nn/nn.h"
@@ -56,8 +56,7 @@ typedef struct {
 static bool def_error(Definition *d, const char *path, const char *fmt, ...) {
   if (!d->err->code) {
     d->err->code = POLY_STATUS_INVALID;
-    d->err->func =
-        !strcmp(d->family, "sequential") ? "poly_sequential_from_json" : "poly_graph_from_json";
+    d->err->func = "poly_model_from_config";
     int n = snprintf(d->err->message, sizeof(d->err->message), "%s: ", path);
     if (n < 0 || n >= (int)sizeof(d->err->message)) return false;
     va_list ap;
@@ -858,18 +857,10 @@ done:
   return result;
 }
 
-PolyModel *poly_sequential_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  return poly_model_from_config(ctx, "sequential", json, len, POLY_DEVICE_AUTO, err);
-}
-
-PolyModel *poly_graph_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  return poly_model_from_config(ctx, "graph", json, len, POLY_DEVICE_AUTO, err);
-}
-
-PolyModel *model_sequential_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_sequential_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   return compose_build(ctx, root, err, "sequential");
 }
 
-PolyModel *model_graph_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_graph_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   return compose_build(ctx, root, err, "graph");
 }

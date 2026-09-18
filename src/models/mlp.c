@@ -2,8 +2,7 @@
  * poly_model_mlp.c -- MLP family builder for PolyModel
  *
  * Two entry points:
- *   poly_mlp(cfg, device) -- builds from MLPConfig struct on the requested device
- *   poly_mlp_from_json(json,len,device) -- FFI wrapper that parses JSON then calls build
+ * Typed C and registered JSON construction share the same topology builder.
  *
  * Deterministic weight init via SplitMix64.
  */
@@ -115,23 +114,15 @@ fail_pre_build:
 
 /* Standalone C callers own a context through the returned Model; frontends
  * use the context-taking form so Runtime disposal reaches every family. */
-static PolyModel *mlp_create(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
+PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
   return model_factory_end(&scope, mlp_build(scope.ctx, cfg, NULL));
 }
 
-PolyModel *poly_mlp(const MLPConfig *cfg, PolyDevice device) {
-  return mlp_create(NULL, cfg, device);
-}
-
-PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
-  return ctx ? mlp_create(ctx, cfg, device) : NULL;
-}
-
 /* FFI wrapper (JSON -> config -> build) */
 
-PolyModel *model_mlp_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_mlp_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   if (!model_config_sizes(root, "layers", 2, POLY_MLP_MAX_LAYERS, true, err) ||
       !model_config_training(root, err) ||
       !model_config_choice(root, "activation", "|relu|gelu|silu|tanh|sigmoid|none|", err))
@@ -153,16 +144,4 @@ PolyModel *model_mlp_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err)
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
   return mlp_build(ctx, &cfg, err);
-}
-
-static PolyModel *mlp_json_create(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return poly_model_from_config(ctx, "mlp", json, len, device, NULL);
-}
-
-PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device) {
-  return mlp_json_create(NULL, json, len, device);
-}
-
-PolyModel *poly_mlp_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device) {
-  return ctx ? mlp_json_create(ctx, json, len, device) : NULL;
 }

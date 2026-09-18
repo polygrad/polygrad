@@ -5,6 +5,7 @@
 #include "../model.h"
 #include "../device.h"
 #include "../tensor.h"
+#include "gpt2.h"
 #include "../../vendor/cjson/cJSON.h"
 
 bool model_factory_error(PolyModelError *err, const char *path, const char *fmt, ...);
@@ -37,24 +38,18 @@ PolyTensor *model_activation(PolyCtx *ctx, PolyTensor *x, const char *name);
 /* fan_in > 0 selects the existing seed/name-keyed Kaiming initializer;
  * fan_in == 0 fills a constant. Publish through Model writes on any placement. */
 int model_init_param(PolyModel *model, const char *name, uint64_t seed, int64_t fan_in, float fill);
-PolyModel *poly_model_from_config(
-    PolyCtx *ctx,
-    const char *family,
-    const char *json,
-    int len,
-    PolyDevice device,
-    PolyModelError *err
-);
-
 /* Private family callbacks share a parsed, validated JSON object and a scoped
  * context. They publish one ordinary Model, not an execution wrapper. */
-PolyModel *model_mlp_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_tabm_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_nam_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_gpt2_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_llama_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_sequential_build(PolyCtx *, const cJSON *, PolyModelError *);
-PolyModel *model_graph_build(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_mlp_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_tabm_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_nam_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_gpt2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+/* GPT-2 variants supply defaults, not a second topology or checkpoint mapping. */
+PolyModel *model_gpt2_configure(PolyCtx *, const cJSON *, GPT2Config, PolyModelError *);
+PolyModel *model_distilgpt2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_llama_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_sequential_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_graph_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 
 /* C-only Model construction scope. Families borrow an idle caller context or
  * create a standalone one; only a successfully built standalone Model owns it.

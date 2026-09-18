@@ -8,6 +8,7 @@
 #ifdef POLY_HAS_CUDA
 
 #include "test_harness.h"
+#include "../src/models/models.h"
 #include "../src/bigint.h"
 #include "../src/codegen/codegen.h"
 #include "../src/ctx.h"
@@ -1326,7 +1327,7 @@ static PolyModel *make_test_mlp(int n_in, int n_out) {
       "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}",
       n_in, n_out
   );
-  return poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  return poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
 }
 
 TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
@@ -1903,7 +1904,8 @@ TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
 
   const char *spec = "{\"layers\":[128,256,64],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":32,\"seed\":42}";
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
   ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);
   ASSERT_INT_EQ(poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f), 0);
@@ -1932,7 +1934,8 @@ TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) 
 
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
 
   ASSERT_INT_EQ(poly_model_set_device(inst, POLY_DEVICE_CUDA), 0);

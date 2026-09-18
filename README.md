@@ -223,7 +223,7 @@ C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
 and browsers without model-specific source compilation or an authoring callback.
 `Model(config)` / `new Model(config)` selects these same factories when the object
 declares `format: "poly.modeldef@1"` and a registered `type`: `mlp`, `tabm`, `nam`,
-`gpt2`, `llama`, `sequential` or `graph`. Named factories, including `models.GPT2`,
+`gpt2`, `distilgpt2`, `llama`, `sequential` or `graph`. Named factories, including `models.GPT2`,
 use that same C dispatch and accept untagged configurations.
 `models.list()` in Python and `pg.models.list()` in JS expose construction,
 HF and GGUF capabilities from this same C table. Qwen3 is currently GGUF-only
@@ -268,10 +268,16 @@ const model = pg.models.Sequential(config) // Node/native or synchronous Wasm
 // Graph and GraphAsync accept the connected form described below.
 ```
 
-C exposes `poly_sequential_from_json(ctx, json, len, &error)` and
-`poly_graph_from_json(...)` in `models/compose.h`. The context is borrowed and
-must outlive the returned Model; normal Model disposal/training/export apply.
-The context must allow logical construction (`always` or `until_realize`).
+C exposes `poly_model_from_config(ctx, "sequential", json, len, device, &error)`
+in `models/models.h`; use `"graph"` for connected models. A non-NULL context is
+borrowed and must outlive the Model; explicit NULL requests an owned context.
+Construction scopes logical retention and restores the caller's policy.
+Typed C callers use `poly_mlp_into`, `poly_gpt2_into` or `poly_qwen3_into`.
+
+`models.DistilGPT2(config)` (JS: `pg.models.DistilGPT2(config)`) is a six-block
+GPT-2 preset using the same builder and checkpoint names. Config fields can
+override defaults. Like GPT-2, it requires weights before execution or export;
+HF DistilGPT-2 checkpoints still declare `model_type: "gpt2"` and load normally.
 
 The initial component catalogue is deliberately bounded:
 
@@ -980,7 +986,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-The 0.5.2 candidate requires C ABI96 and graph formats PGIR19/PGPM10; incompatible
+The 0.5.2 candidate requires C ABI97 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

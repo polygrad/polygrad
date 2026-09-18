@@ -4,11 +4,9 @@
 
 #include "test_harness.h"
 #include "../src/model.h"
-#include "../src/models/compose.h"
+#include "../src/models/models.h"
 #include "../src/models/layers.h"
 #include "../src/models/mlp.h"
-#include "../src/models/tabm.h"
-#include "../src/models/nam.h"
 #include "../src/models/gpt2.h"
 #include "../src/models/qwen3.h"
 #include "../src/codegen/codegen.h"
@@ -292,12 +290,7 @@ TEST(model, tensor_io_owns_outputs_and_rejects_invalid_bindings) {
 }
 
 TEST(model, family_factories_borrow_context_and_restore_defaults) {
-  PolyModel *(*factories[])(PolyCtx *, const char *, int, PolyDevice) = {
-      poly_mlp_from_json_into,
-      poly_tabm_from_json_into,
-      poly_nam_from_json_into,
-      poly_gpt2_from_json_into,
-  };
+  const char *types[] = {"mlp", "tabm", "nam", "gpt2"};
   const char *configs[] = {
       "{\"layers\":[2,3,1]}",
       "{\"layers\":[2,3,1],\"n_ensemble\":2}",
@@ -308,8 +301,12 @@ TEST(model, family_factories_borrow_context_and_restore_defaults) {
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
   poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_NEVER);
   for (int i = 0; i < 4; i++) {
-    PolyModel *a = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
-    PolyModel *b = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
+    PolyModel *a = poly_model_from_config(
+        ctx, types[i], configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP, NULL
+    );
+    PolyModel *b = poly_model_from_config(
+        ctx, types[i], configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP, NULL
+    );
     ASSERT_NOT_NULL(a);
     ASSERT_NOT_NULL(b);
     ASSERT_PTR_EQ(poly_model_ctx(a), ctx);
@@ -320,10 +317,16 @@ TEST(model, family_factories_borrow_context_and_restore_defaults) {
     ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_CPU);
     ASSERT_INT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
     ctx->execution_depth++;
-    ASSERT_TRUE(factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP) == NULL);
+    ASSERT_TRUE(
+        poly_model_from_config(
+            ctx, types[i], configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP, NULL
+        ) == NULL
+    );
     ctx->execution_depth--;
     poly_model_test_fail_residency_roots_after(0);
-    PolyModel *failed = factories[i](ctx, configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP);
+    PolyModel *failed = poly_model_from_config(
+        ctx, types[i], configs[i], (int)strlen(configs[i]), POLY_DEVICE_INTERP, NULL
+    );
     poly_model_test_fail_residency_roots_after(-1);
     ASSERT_TRUE(failed == NULL);
     ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_CPU);
@@ -371,7 +374,8 @@ TEST(model, composition_sequential_topology_and_cleanup) {
   PolyCtx *ctx = poly_ctx_new();
   PolyModelError err = {0};
   for (int repeat = 0; repeat < 3; repeat++) {
-    PolyModel *model = poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+    PolyModel *model =
+        poly_model_from_config(ctx, "sequential", json, (int)strlen(json), POLY_DEVICE_AUTO, &err);
     ASSERT_NOT_NULL(model);
     ASSERT_INT_EQ(poly_model_param_count(model), 4);
     PolyUOp *sink = poly_model_get_sink(model, "forward");
@@ -416,7 +420,8 @@ TEST(model, composition_invalid_cleanup) {
     char json[2048];
     snprintf(json, sizeof(json), "%s%s],\"output\":\"prediction\"}", prefix, bad[i]);
     PolyModelError err = {0};
-    PolyModel *model = poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+    PolyModel *model =
+        poly_model_from_config(ctx, "sequential", json, (int)strlen(json), POLY_DEVICE_AUTO, &err);
     ASSERT_TRUE(model == NULL);
     ASSERT_TRUE(err.code != 0 && err.message[0]);
     ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
@@ -435,7 +440,8 @@ TEST(model, composition_typed_bounded_mean) {
                      "\"layers\":[{\"name\":\"average\",\"type\":\"mean\"}],\"output\":\"y\"}";
   PolyCtx *ctx = poly_ctx_new();
   PolyModelError err = {0};
-  PolyModel *model = poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+  PolyModel *model =
+      poly_model_from_config(ctx, "sequential", json, (int)strlen(json), POLY_DEVICE_AUTO, &err);
   ASSERT_NOT_NULL(model);
   int64_t lo[2], hi[2], shape[] = {4, 2};
   ASSERT_EQ(poly_model_buf_shape_bounds(model, 0, lo, hi, 2), 2);
@@ -497,12 +503,21 @@ TEST(model, composition_shape_validation_returns_before_using_dimensions) {
             shapes[i]
         );
       PolyModelError err = {0};
-      PolyModel *model = graph ? poly_graph_from_json(ctx, json, (int)strlen(json), &err)
-                               : poly_sequential_from_json(ctx, json, (int)strlen(json), &err);
+      PolyModel *model =
+          graph ? poly_model_from_config(
+                      ctx, "graph", json, (int)strlen(json), POLY_DEVICE_AUTO, &err
+                  )
+                : poly_model_from_config(
+                      ctx, "sequential", json, (int)strlen(json), POLY_DEVICE_AUTO, &err
+                  );
       ASSERT_TRUE(model == NULL);
       ASSERT_TRUE(err.code != 0 && err.message[0]);
-      model = graph ? poly_graph_from_json(ctx, json, (int)strlen(json), NULL)
-                    : poly_sequential_from_json(ctx, json, (int)strlen(json), NULL);
+      model = graph ? poly_model_from_config(
+                          ctx, "graph", json, (int)strlen(json), POLY_DEVICE_AUTO, NULL
+                      )
+                    : poly_model_from_config(
+                          ctx, "sequential", json, (int)strlen(json), POLY_DEVICE_AUTO, NULL
+                      );
       ASSERT_TRUE(model == NULL);
       ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
       PolyCtxStats stats = {0};
@@ -526,7 +541,8 @@ TEST(model, definition_shared_graph) {
       "\"outputs\":{\"prediction\":\"residual\"}}";
   PolyCtx *ctx = poly_ctx_new();
   PolyModelError err = {0};
-  PolyModel *model = poly_graph_from_json(ctx, json, (int)strlen(json), &err);
+  PolyModel *model =
+      poly_model_from_config(ctx, "graph", json, (int)strlen(json), POLY_DEVICE_AUTO, &err);
   if (!model) {
     fprintf(stderr, "%s\n", err.message);
     poly_ctx_destroy(ctx);

@@ -67,12 +67,33 @@ async function checkFamilyRegistry(pg) {
   assert(types.Qwen3.gguf && !types.Qwen3.hf && !types.Qwen3.constructible, 'Qwen3 capabilities')
   assert(!pg.models.Qwen3, 'import-only type must not expose a config constructor')
   const configs = {MLP:{layers:[2,1]}, TabM:{layers:[2,1],n_ensemble:2},
-    NAM:{n_features:2,hidden_sizes:[2]}, GPT2:{vocab_size:8,n_embd:4,n_head:2,n_layer:1,n_positions:2}}
+    NAM:{n_features:2,hidden_sizes:[2]}, GPT2:{vocab_size:8,n_embd:4,n_head:2,n_layer:1,n_positions:2},
+    DistilGPT2:{vocab_size:8,n_embd:4,n_head:2,n_positions:2}}
   for (const [family, config] of Object.entries(configs)) {
     assert(typeof pg.models[family] === 'function', `missing ${family}`)
     const tagged = {format:'poly.modeldef@1',type:family.toLowerCase(),...config}
     const model = pg.device === 'webgpu' ? await pg.models[family+'Async'](tagged) : new pg.Model(tagged)
-    try { assert(model.bindings().length > 0, `empty ${family}`) }
+    try {
+      assert(model.bindings().length > 0, `empty ${family}`)
+      if (family === 'DistilGPT2') {
+        const explicit = await pg.models.GPT2Async({...config,n_layer:6})
+        try {
+          assert(model.paramCount === 76 && explicit.paramCount === 76, 'six-block preset')
+          for (let i = 0; i < model.paramCount; i++) {
+            const name = model.paramName(i)
+            const count = model.paramShape(i).reduce((a,b)=>a*b,1)
+            const values = Float32Array.from({length:count},(_,j)=>(j%11-5)/16)
+            await model.writeBufferAsync(name,values)
+            await explicit.writeBufferAsync(name,values)
+          }
+          const a = await model.saveAsync(), b = await explicit.saveAsync()
+          assert(a.length === b.length && a.every((v,i)=>v===b[i]), 'preset changed bundle bytes')
+          const inputs = {x:new Int32Array([1,2]),positions:new Int32Array([0,1])}
+          assertClose((await model.forwardAsync(inputs)).output,
+            (await explicit.forwardAsync(inputs)).output,0)
+        } finally { await explicit.dispose() }
+      }
+    }
     finally { await model.dispose() }
   }
   let message = ''

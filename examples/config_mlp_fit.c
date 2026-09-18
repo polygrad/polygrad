@@ -21,13 +21,14 @@ int main(void) {
   cfg.batch_size = 1;
   cfg.seed = 42;
 
-  PolyModel *inst = poly_mlp(&cfg, POLY_DEVICE_AUTO);
+  PolyModel *inst = poly_mlp_into(NULL, &cfg, POLY_DEVICE_AUTO);
   if (!inst) return 1;
 
   poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);
   float x[] = {1.0f, 2.0f};
   float y[] = {4.0f};
-  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("x", x, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("y", y, POLY_FLOAT32)};
 
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 12; step++) {

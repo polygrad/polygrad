@@ -3,6 +3,7 @@
  */
 
 #include "test_harness.h"
+#include "../src/models/models.h"
 #include "../src/bundle.h"
 #include "../src/ir.h"
 #include "../src/model.h"
@@ -109,7 +110,8 @@ TEST(bundle, instance_save_load_roundtrip) {
   /* Create MLP instance */
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
-  PolyModel *inst = poly_mlp_from_json(spec, (int)strlen(spec), POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_model_from_config(NULL, "mlp", spec, (int)strlen(spec), POLY_DEVICE_AUTO, NULL);
   ASSERT_NOT_NULL(inst);
 
   /* Set some non-zero weight values */

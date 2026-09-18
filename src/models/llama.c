@@ -1,4 +1,4 @@
-#include "llama.h"
+#include "models.h"
 #include "factory.h"
 #include "layers.h"
 #include "../nn/nn.h"
@@ -216,11 +216,7 @@ static PolyModel *llama_create(
   return model_factory_end(&scope, llama_build(scope.ctx, c, err));
 }
 
-PolyModel *poly_llama_from_json(PolyCtx *ctx, const char *json, int len, PolyModelError *err) {
-  return poly_model_from_config(ctx, "llama", json, len, POLY_DEVICE_AUTO, err);
-}
-
-PolyModel *model_llama_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+PolyModel *model_llama_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   LlamaConfig c;
   return llama_config(root, &c, err) ? llama_build(ctx, &c, err) : NULL;
 }

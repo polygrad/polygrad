@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h", "models/models.h")
 OWNERS = ("mixin/elementwise.h", "uop/ops.h", "placer.h", "device.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
-          "models/mlp.h", "models/tabm.h", "models/nam.h", "models/gpt2.h",
-          "models/qwen3.h", "models/llama.h", "models/hf_loader.h", "loaders/gguf_loader.h")
+          "models/mlp.h", "models/gpt2.h", "models/qwen3.h",
+          "models/hf_loader.h", "loaders/gguf_loader.h")
 
 
 def main():
@@ -44,6 +44,11 @@ int main(void) {
         assert first and first == subprocess.check_output([executable]), 'process-dependent UOp key'
     sources = {p: p.read_text() for p in (ROOT / "src").rglob("*")
                if p.suffix in (".c", ".h")}
+    # One generic JSON entry; typed constructors make context choice explicit.
+    model_headers = '\n'.join(s for p, s in sources.items()
+                              if p.parent.name == 'models' and p.suffix == '.h')
+    for kind in ('mlp', 'tabm', 'nam', 'gpt2', 'qwen3', 'llama', 'sequential', 'graph'):
+        assert not re.search(r'\bpoly_' + kind + r'(?:_from_json(?:_into)?)?\s*\(', model_headers), kind
     for path, source in sources.items():
         if path.name not in ("frontend.c", "frontend.h"):
             assert not re.search(r'#\s*include\s*["<](?:[^">]*/)?frontend(?:_internal)?\.h[">]', source), path
