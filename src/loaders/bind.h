@@ -20,6 +20,8 @@ typedef struct PolyBindIndex PolyBindIndex;
 
 PolyBindIndex *poly_bind_index_create(PolyModel *inst);
 void poly_bind_index_destroy(PolyBindIndex *idx);
+/* Buffer index, or -1 if absent. Used for duplicate/role validation at import. */
+int poly_bind_index_find(const PolyBindIndex *idx, const char *name);
 
 /*
  * Copy F32 tensor data into the named buffer of the bound PolyModel.

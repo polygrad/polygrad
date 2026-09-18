@@ -167,7 +167,7 @@ PolyModel *model_vision_import(
     const PolyHfDecoded *hf,
     const PolyGenericImportOpts *opts,
     PolyModel *(*build)(PolyCtx *, const cJSON *, PolyModelError *),
-    const char *unused
+    const ModelVisionSkip *skippable
 ) {
   if (!hf || !opts) return NULL;
   PolyModelError err = {0};
@@ -199,16 +199,17 @@ PolyModel *model_vision_import(
   if (!seen || !index) goto fail;
   for (int i = 0; i < hf->n_tensors; i++) {
     const PolyDecodedTensor *t = &hf->tensors[i];
-    /* Mask tokens are unused by the explicitly unmasked inference signature. */
-    if (unused && !strcmp(t->name, unused)) continue;
-    /* HF serializes an empty register parameter when DINOv3 uses no registers. */
-    if (!strcmp(hf->model_type, "dinov3_vit") && !strcmp(t->name, "embeddings.register_tokens") &&
-        t->ndim == 3 && t->shape[0] == 1 && t->shape[1] == 0 && t->numel == 0)
-      continue;
-    int b = 0;
-    while (b < n && strcmp(t->name, poly_model_buf_name(m, b)))
-      b++;
-    if (b == n || poly_model_buf_role(m, b) != POLY_ROLE_PARAM || seen[b] ||
+    int b = poly_bind_index_find(index, t->name);
+    bool skip = false;
+    for (const ModelVisionSkip *s = skippable; b < 0 && s && s->name; s++) {
+      if (strcmp(t->name, s->name)) continue;
+      bool matches = !s->shape || t->ndim == s->ndim;
+      for (int axis = 0; matches && s->shape && axis < s->ndim; axis++)
+        if (s->shape[axis] >= 0 && s->shape[axis] != t->shape[axis]) matches = false;
+      skip |= matches;
+    }
+    if (skip) continue;
+    if (b < 0 || poly_model_buf_role(m, b) != POLY_ROLE_PARAM || seen[b] ||
         poly_import_bind_tensor(index, t->name, t, 0, -1) != 1) {
       poly_import_error_set(
           POLY_IMPORT_ERR_WEIGHT_MISMATCH, "invalid, unexpected or duplicate vision weight '%s'",

@@ -1,5 +1,4 @@
 #include "vision.h"
-#include "../device.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +23,8 @@ static PolyTensor *dinov3_rotary(
       float value = sine ? 0 : 1;
       if (t >= prefix) {
         int p = t - prefix, coordinate = j < quarter ? p / grid : p % grid;
+        /* Transformers forces coordinate/frequency arithmetic to float32;
+         * keep its rounding rather than borrowing Llama3's double scaling. */
         float coord = 2.0f * ((coordinate + 0.5f) / grid) - 1.0f;
         float freq = 1.0f / powf((float)theta, (float)(j % quarter) / quarter);
         float angle = (6.2831853071795864769f * coord) * freq;
@@ -31,18 +32,11 @@ static PolyTensor *dinov3_rotary(
       }
       values[(size_t)t * half + j] = value;
     }
-  PolyCtx *ctx = poly_model_ctx(m);
-  PolyDevice device = poly_ctx_get_preferred_device(ctx);
-  PolyTensor *x =
-      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, c->tokens, half}, 4, device);
-  PolyUOp *buffer = x ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(x)) : NULL;
-  bool copied = buffer && poly_buffer_ensure_device_allocated(ctx, buffer, device) == 0 &&
-                poly_buffer_write(ctx, buffer, values, n * sizeof(float)) == 0;
+  PolyTensor *x = poly_model_aux_from_host(
+      m, sine ? "rope_sin" : "rope_cos", POLY_FLOAT32, (int64_t[]){1, 1, c->tokens, half}, 4,
+      values, n * sizeof(float)
+  );
   free(values);
-  if (!copied || poly_model_aux(m, sine ? "rope_sin" : "rope_cos", x, 0) != POLY_STATUS_OK) {
-    poly_tensor_release(x);
-    return NULL;
-  }
   return x;
 }
 
@@ -142,5 +136,11 @@ PolyModel *model_dinov3_from_hf_decoded(
     const PolyHfDecoded *hf,
     const PolyGenericImportOpts *opts
 ) {
-  return model_vision_import(hf, opts, model_dinov3_from_config, "embeddings.mask_token");
+  /* HF includes an empty parameter when no registers are configured. A
+   * nonempty register tensor still must match a declared Model binding. */
+  const ModelVisionSkip skip[] = {
+      {"embeddings.mask_token", NULL, 0},
+      {"embeddings.register_tokens", (int64_t[]){1, 0, -1}, 3},
+      {NULL, NULL, 0}};
+  return model_vision_import(hf, opts, model_dinov3_from_config, skip);
 }

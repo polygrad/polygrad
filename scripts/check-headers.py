@@ -21,6 +21,8 @@ def check_api_owners():
     umbrella = (ROOT / 'src/polygrad.h').read_text()
     core = (ROOT / 'src/core.h').read_text()
     tensor = (ROOT / 'src/tensor.h').read_text()
+    layers = (ROOT / 'src/models/layers.h').read_text()
+    assert not re.search(r'\bpoly_(linear|layernorm|rmsnorm|embedding)\(', layers), 'removed ctx-global layer helpers'
     assert '#include "core.h"' in umbrella, 'polygrad.h must expose the shared core header'
     assert not re.search(r'\bpoly_\w+\s*\(', umbrella), 'declarations belong to domain headers'
     assert not re.search(r'^#\s*include\s*"', core, re.M), 'core.h must not depend on domain headers'

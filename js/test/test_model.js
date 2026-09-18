@@ -46,8 +46,11 @@ async function runModelTests(pg) {
     assert(byName.GPT2.constructible && byName.GPT2.hf && byName.GPT2.gguf, 'GPT2 capabilities')
     assert(byName.Llama.constructible && byName.Llama.hf && !byName.Llama.gguf, 'Llama capabilities')
     assert(byName.Qwen3.gguf && !byName.Qwen3.hf, 'Qwen3 capabilities')
-    for (const type of types) assert((typeof pg.models[type.name] === 'function') === type.constructible,
-      `constructor availability for ${type.name}`)
+    for (const type of types) assert(typeof pg.models[type.name] === 'function',
+      `named access for ${type.name}`)
+    let message = ''
+    try { pg.models.Qwen3({}) } catch (e) { message = e.message }
+    assert(/Qwen3 is import-only; use Model.fromGGUF/.test(message), message)
     types[0].name = 'changed'
     assert(pg.models.list()[0].name !== 'changed', 'discovery must return independent records')
   })

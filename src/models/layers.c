@@ -1,5 +1,4 @@
-/* Model-owned layer construction. Reuses nn programs; owns no runtime.
- * Deprecated ctx-registry constructors remain only for the existing C ABI. */
+/* Model-owned layer construction. Reuses nn programs; owns no runtime. */
 #include "layers.h"
 #include "../device.h"
 #include <math.h>
@@ -72,6 +71,39 @@ int model_init_param(
   return rc;
 }
 
+PolyTensor *poly_model_aux_from_host(
+    PolyModel *model,
+    const char *name,
+    PolyDType dtype,
+    const int64_t *dims,
+    int ndim,
+    const void *data,
+    size_t nbytes
+) {
+  int itemsize = poly_dtype_itemsize(dtype);
+  if (!model || !name || !data || !dims || ndim < 0 || ndim > POLY_MAX_DIMS || itemsize <= 0)
+    return NULL;
+  size_t expected = (size_t)itemsize;
+  for (int i = 0; i < ndim; i++) {
+    if (dims[i] <= 0 || (uint64_t)dims[i] > SIZE_MAX / expected) return NULL;
+    expected *= (size_t)dims[i];
+  }
+  if (nbytes != expected) return NULL;
+  PolyCtx *ctx = poly_model_ctx(model);
+  PolyDevice device = poly_ctx_get_preferred_device(ctx);
+  PolyTensor *v = poly_tensor_empty(ctx, dtype, dims, ndim, device);
+  PolyUOp *buffer = v ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(v)) : NULL;
+  /* from_host borrows its input. Initialize owned device storage instead so
+   * freeing the caller's array cannot leave a pending COPY reading released bytes. */
+  bool copied = buffer && poly_buffer_ensure_device_allocated(ctx, buffer, device) == 0 &&
+                poly_buffer_write(ctx, buffer, data, nbytes) == 0;
+  if (!copied || poly_model_aux(model, name, v, 0) != POLY_STATUS_OK) {
+    poly_tensor_release(v);
+    return NULL;
+  }
+  return v;
+}
+
 PolyTensor *poly_model_rope_frequencies(
     PolyModel *model,
     const char *name,
@@ -94,6 +126,8 @@ PolyTensor *poly_model_rope_frequencies(
    * The owned AUX snapshot makes export independent of this temporary array. */
   for (int t = 0; t < c->length; t++)
     for (int j = 0; j < half; j++) {
+      /* Preserve Llama3 frequency-scaling precision, then round the angle to
+       * float32 before trig as in the pinned Tensor helper. */
       double freq = 1.0 / pow(c->theta, (double)j / half);
       /* Llama 3.1/3.2's wavelength scaling (Meta apply_scaling and HF
        * _compute_llama3_parameters). Model-owned extension: the pinned
@@ -111,20 +145,10 @@ PolyTensor *poly_model_rope_frequencies(
       float angle = (float)((double)t * freq);
       data[(size_t)t * half + j] = sine ? sinf(angle) : cosf(angle);
     }
-  PolyCtx *ctx = poly_model_ctx(model);
-  PolyDevice device = poly_ctx_get_preferred_device(ctx);
-  PolyTensor *v =
-      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, c->length, half}, 4, device);
-  PolyUOp *buffer = v ? (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(v)) : NULL;
-  /* from_host borrows its input. Initialize owned device storage instead so
-   * freeing this temporary cannot leave a pending COPY reading released bytes. */
-  bool copied = buffer && poly_buffer_ensure_device_allocated(ctx, buffer, device) == 0 &&
-                poly_buffer_write(ctx, buffer, data, count * sizeof(float)) == 0;
+  PolyTensor *v = poly_model_aux_from_host(
+      model, name, POLY_FLOAT32, (int64_t[]){1, 1, c->length, half}, 4, data, count * sizeof(float)
+  );
   free(data);
-  if (!copied || poly_model_aux(model, name, v, 0) != POLY_STATUS_OK) {
-    poly_tensor_release(v);
-    return NULL;
-  }
   return v;
 }
 
@@ -157,60 +181,6 @@ int poly_model_lstm_cell(
   if (scoped && poly_model_scope_pop(model) != POLY_STATUS_OK) return -1;
   if (!wi || !wh || (bias && (!bi || !bh))) return -1;
   return poly_tensor_lstm_cell(ctx, x, h, c, wi, wh, bi, bh, new_h, new_c);
-}
-
-PolyUOp *poly_linear(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *x,
-    int in_features,
-    int out_features,
-    bool use_bias
-) {
-  int64_t ws[] = {out_features, in_features};
-  PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ws, 2, "%s.weight", prefix);
-  if (!w) return NULL;
-  w = poly_uop_reshape(ctx, w, ws, 2);
-
-  PolyUOp *b = NULL;
-  if (use_bias) {
-    int64_t bs[] = {out_features};
-    b = poly_param(ctx, POLY_FLOAT32, bs, 1, "%s.bias", prefix);
-    if (!b) return NULL;
-  }
-
-  return poly_uop_linear_apply(ctx, x, w, b);
-}
-
-PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
-  int64_t ds[] = {dim};
-  PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
-  PolyUOp *b = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.bias", prefix);
-  if (!w || !b) return NULL;
-
-  return poly_uop_layernorm_apply(
-      ctx, x, poly_uop_reshape(ctx, w, ds, 1), poly_uop_reshape(ctx, b, ds, 1), -1, eps
-  );
-}
-
-PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
-  int64_t ds[] = {dim};
-  PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
-  if (!w) return NULL;
-  return poly_uop_rmsnorm_apply(ctx, x, poly_uop_reshape(ctx, w, ds, 1), eps);
-}
-
-PolyUOp *poly_embedding(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *tokens,
-    int vocab_size,
-    int embed_dim
-) {
-  int64_t ws[] = {vocab_size, embed_dim};
-  PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ws, 2, "%s.weight", prefix);
-  if (!w) return NULL;
-  return poly_uop_embedding_apply(ctx, tokens, poly_uop_reshape(ctx, w, ws, 2));
 }
 
 static int model_parameters(

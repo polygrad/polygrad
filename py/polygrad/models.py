@@ -105,6 +105,16 @@ def _type_factory(name):
     return factory
 
 
+def _import_only_factory(entry):
+    loaders = [f'Model.from_{fmt}' for fmt in ('hf', 'gguf') if entry[fmt]]
+    message = f"{entry['name']} is import-only; use {' or '.join(loaders)}"
+    def factory(*args, **kwargs):
+        raise ValueError(message)
+    factory.__name__ = entry['name']
+    factory.__doc__ = message
+    return factory
+
+
 def list(*, runtime=None):
     """Return supported model types and JSON/HF/GGUF capabilities from C."""
     lib = _ffi.get_lib()
@@ -119,9 +129,11 @@ def list(*, runtime=None):
 
 __all__ = ['list']
 for entry in list():
+    name = entry['name']
+    __all__.append(name)
     if entry['constructible']:
-        name = entry['name']
-        __all__.append(name)
         if name not in globals():
             globals()[name] = _type_factory(name)
+    else:
+        globals()[name] = _import_only_factory(entry)
 del name, entry

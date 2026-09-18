@@ -25,6 +25,7 @@ os.environ.setdefault('POLY_LIB', str(ROOT / 'build' / 'libpolygrad.so'))
 from polygrad.model import Model, OPTIM_ADAM, ROLE_PARAM, ROLE_AUX  # noqa: E402
 from polygrad.models import MLP, Graph  # noqa: E402
 from polygrad import create, _ffi  # noqa: E402
+from vision_fixture import load_vision_cases
 
 
 def check_components(model):
@@ -43,7 +44,7 @@ def check_qwen(model):
 
 
 def vision_cases():
-    cases = json.loads((ROOT / 'test/fixtures/vision.json').read_text())['cases']
+    cases = load_vision_cases()
     return [cases[i] for i in (0, 1, 2, 4)]
 
 

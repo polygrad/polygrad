@@ -5,7 +5,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 100
+#define POLYGRAD_ABI_VERSION 101
 
 #include <stdint.h>
 #include <stddef.h>
@@ -914,7 +914,8 @@ PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Named buffer registry.
  *
- * Compatibility API for old ctx-global instance construction. New C model
+ * Scheduled for removal in 0.6.0, together with poly_model_from_ctx/from_sinks
+ * and the corresponding low-level binding adapters. New C model
  * builders should use staged PolyModel declarations from model.h:
  * poly_model_input/param/state/output/entrypoint/build. */
 

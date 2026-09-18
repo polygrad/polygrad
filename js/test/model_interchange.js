@@ -22,7 +22,8 @@ async function main() {
   try {
     const cases = require('../../test/fixtures/vision.json').cases
     for (const i of [0,1,2,4]) {
-      const item = cases[i], bytes = readBytes(path.join(dir, `python-${item.name}.bundle`))
+      const item = await require('./vision_fixture').expandVisionCase(cases[i])
+      const bytes = readBytes(path.join(dir, `python-${item.name}.bundle`))
       const model = pg.Model.load(bytes)
       try {
         const inputs = Object.fromEntries(Object.entries(item.inputs).map(([k,v]) =>

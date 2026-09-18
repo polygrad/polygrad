@@ -314,6 +314,8 @@ are valid. Wrong input dtypes are rejected, not silently narrowed.
 `name`, `constructible`, `hf`, and `gguf` capabilities. `constructible` means
 JSON configuration construction. Qwen3 currently supports GGUF loading, not
 JSON construction or HF loading.
+Calling `models.Qwen3(...)` reports that it is import-only and points to
+`Model.from_gguf(...)`; it does not construct an uninitialized model.
 
 New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
 `model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,

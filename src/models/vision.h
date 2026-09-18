@@ -28,6 +28,11 @@ model_vision_attention(PolyModel *, const ModelVisionConfig *, PolyTensor *, con
 PolyTensor *model_vision_activation(PolyCtx *, PolyTensor *, const char *);
 PolyTensor *model_vision_scale(PolyModel *, PolyTensor *, const char *, int);
 PolyModel *model_vision_finish(PolyModel *, PolyModelError *);
+typedef struct {
+  const char *name;
+  const int64_t *shape; /* NULL accepts any shape; -1 matches one extent. */
+  int ndim;
+} ModelVisionSkip;
 PolyModel *
-model_vision_import(const PolyHfDecoded *, const PolyGenericImportOpts *, PolyModel *(*)(PolyCtx *, const cJSON *, PolyModelError *), const char *);
+model_vision_import(const PolyHfDecoded *, const PolyGenericImportOpts *, PolyModel *(*)(PolyCtx *, const cJSON *, PolyModelError *), const ModelVisionSkip *);
 #endif

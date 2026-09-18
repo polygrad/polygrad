@@ -92,5 +92,7 @@ PolyModel *model_dinov2_from_hf_decoded(
     const PolyHfDecoded *hf,
     const PolyGenericImportOpts *opts
 ) {
-  return model_vision_import(hf, opts, model_dinov2_from_config, "embeddings.mask_token");
+  /* Unmasked inference has no mask-token binding. */
+  const ModelVisionSkip skip[] = {{"embeddings.mask_token", NULL, 0}, {NULL, NULL, 0}};
+  return model_vision_import(hf, opts, model_dinov2_from_config, skip);
 }

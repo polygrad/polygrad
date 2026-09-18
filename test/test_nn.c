@@ -30,6 +30,39 @@ static int nn_param_index(PolyModel *inst, const char *name) {
 
 /* Convenience builder tests */
 
+TEST(nn, model_aux_from_host_owns_snapshot) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *model = poly_model_new(ctx, NULL);
+  ASSERT_NOT_NULL(model);
+  int64_t shape[] = {2};
+  float data[] = {1.25f, -2.5f};
+  ASSERT_TRUE(!poly_model_aux_from_host(model, "table", POLY_FLOAT32, shape, 1, data, 4));
+  ASSERT_TRUE(!poly_model_aux_from_host(model, "table", POLY_FLOAT32, shape, 1, NULL, 8));
+  ASSERT_TRUE(
+      !poly_model_aux_from_host(model, "table", POLY_FLOAT32, (int64_t[]){INT64_MAX, 2}, 2, data, 8)
+  );
+  PolyTensor *table = poly_model_aux_from_host(model, "table", POLY_FLOAT32, shape, 1, data, 8);
+  ASSERT_NOT_NULL(table);
+  data[0] = data[1] = 99;
+  ASSERT_INT_EQ(poly_model_output(model, "output", table), POLY_STATUS_OK);
+  ASSERT_INT_EQ(
+      poly_model_entrypoint(model, "forward", NULL, 0, (const char *[]){"output"}, 1, NULL),
+      POLY_STATUS_OK
+  );
+  PolyModelError err = {0};
+  ASSERT_INT_EQ(poly_model_build(model, &err), POLY_STATUS_OK);
+  poly_tensor_release(table);
+  poly_ctx_collect(ctx);
+  ASSERT_INT_EQ(poly_model_call(model, "forward", NULL, 0), 0);
+  float actual[2];
+  ASSERT_INT_EQ(poly_model_read_buf_named(model, "table", actual, sizeof(actual)), 0);
+  ASSERT_FLOAT_EQ(actual[0], 1.25f, 0);
+  ASSERT_FLOAT_EQ(actual[1], -2.5f, 0);
+  poly_model_free(model);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, embedding_preserves_bounded_batch) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *n = poly_uop_bind(

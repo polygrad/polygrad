@@ -4,6 +4,7 @@ import json
 import torch
 import transformers
 from safetensors.torch import save
+from vision_fixture import compact_case
 from transformers import (CLIPConfig, CLIPModel, CLIPTextConfig, CLIPVisionConfig,
                           ViTConfig, ViTModel, Dinov2Config, Dinov2Model,
                           DINOv3ViTConfig, DINOv3ViTModel)
@@ -42,4 +43,5 @@ for name, cls, config in specs:
                       inputs={k:v.tolist() for k,v in inputs.items()},
                       outputs={k:getattr(out,k).tolist() for k in keys},
                       weights=base64.b64encode(save({k:v.contiguous() for k,v in model.state_dict().items()})).decode()))
-print(json.dumps(dict(reference=f'transformers {transformers.__version__}, eager float32 eval', cases=cases), indent=2))
+print(json.dumps(dict(reference=f'transformers {transformers.__version__}, eager float32 eval',
+                     payload_formula='vision-f32@1', cases=[compact_case(case) for case in cases]), indent=2))

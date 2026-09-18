@@ -1854,8 +1854,12 @@ class TestMLPCreate:
         assert available['Qwen3']['gguf'] and not available['Qwen3']['hf']
         with pg.create(device='INTERP') as rt:
             assert rt.models.list() == pg.models.list()
+            with pytest.raises(ValueError, match=r'Qwen3 is import-only; use Model.from_gguf'):
+                rt.models.Qwen3({})
+        with pytest.raises(ValueError, match=r'Qwen3 is import-only; use Model.from_gguf'):
+            pg.models.Qwen3({})
         for name, entry in available.items():
-            assert callable(getattr(pg.models, name, None)) == entry['constructible']
+            assert callable(getattr(pg.models, name, None))
 
     @pytest.mark.parametrize('family,spec', [
         ('MLP', {'layers': [2, 3, 2]}),

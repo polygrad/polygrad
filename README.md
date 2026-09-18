@@ -996,13 +996,17 @@ also work independently: `core.h` owns shared types and context controls,
 `poly_uop_*` graph construction and composition. Include `model.h` or `nn/nn.h`
 when using those APIs. `frontend.h` is separate: it adapts dtype IDs, flattened
 arguments and opaque handles for language bindings. Core implementations do
-not call these adapters.
+not call these adapters. The deprecated context-global named registry and
+`poly_model_from_ctx`/`poly_model_from_sinks` are scheduled for removal in 0.6.0;
+use Model-owned declarations or `poly_model_from_bindings` instead. The unused
+`poly_linear`/`poly_layernorm`/`poly_rmsnorm`/`poly_embedding` constructors are
+removed at ABI101; their Model-owned equivalents are `poly_model_*`.
 
 Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-The 0.5.2 candidate requires C ABI100 and graph formats PGIR19/PGPM10; incompatible
+The 0.5.2 candidate requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

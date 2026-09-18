@@ -15,28 +15,17 @@ void poly_init_param_kaiming(
     int64_t fan_in
 );
 
-PolyUOp *poly_linear(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *x,
-    int in_features,
-    int out_features,
-    bool use_bias
-) POLY_DEPRECATED("use poly_model_linear or poly_uop_linear_apply with explicit params");
-
-PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_model_layernorm or poly_uop_layernorm_apply with explicit params");
-
-PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
-    POLY_DEPRECATED("use poly_model_rmsnorm or poly_uop_rmsnorm_apply with explicit params");
-
-PolyUOp *poly_embedding(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *tokens,
-    int vocab_size,
-    int embed_dim
-) POLY_DEPRECATED("use poly_model_embedding or poly_uop_embedding_apply with explicit params");
+/* Snapshot host bytes into Model-owned AUX storage; never retain the caller's
+ * memory. The caller owns the returned Tensor handle independently of Model. */
+PolyTensor *poly_model_aux_from_host(
+    PolyModel *model,
+    const char *name,
+    PolyDType dtype,
+    const int64_t *dims,
+    int ndim,
+    const void *data,
+    size_t nbytes
+);
 
 PolyTensor *poly_model_linear(
     PolyModel *inst,

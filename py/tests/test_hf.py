@@ -54,6 +54,8 @@ def test_checkpoint_abi_uses_generic_loaders_only():
     from polygrad import _ffi
 
     lib = _ffi.get_lib()
+    for name in ('poly_linear', 'poly_layernorm', 'poly_rmsnorm', 'poly_embedding'):
+        assert not hasattr(lib, name), f'obsolete ctx-global constructor: {name}'
     for name in ('poly_hf_load', 'poly_hf_load_into', 'poly_gguf_load', 'poly_gguf_load_into'):
         assert getattr(lib, name)
     for model, formats in (('gpt2', ('hf', 'gguf')), ('llama', ('hf',)), ('qwen3', ('gguf',))):

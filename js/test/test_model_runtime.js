@@ -65,7 +65,12 @@ async function checkFamilyRegistry(pg) {
   assert(types.GPT2.constructible && types.GPT2.hf && types.GPT2.gguf, 'GPT2 capabilities')
   assert(types.Llama.hf && !types.Llama.gguf, 'Llama capabilities')
   assert(types.Qwen3.gguf && !types.Qwen3.hf && !types.Qwen3.constructible, 'Qwen3 capabilities')
-  assert(!pg.models.Qwen3, 'import-only type must not expose a config constructor')
+  let importMessage = ''
+  try { pg.models.Qwen3({}) } catch (e) { importMessage = e.message }
+  assert(/Qwen3 is import-only; use Model.fromGGUF/.test(importMessage), importMessage)
+  importMessage = ''
+  try { await pg.models.Qwen3Async({}) } catch (e) { importMessage = e.message }
+  assert(/Qwen3 is import-only; use Model.fromGGUF/.test(importMessage), importMessage)
   const configs = {MLP:{layers:[2,1]}, TabM:{layers:[2,1],n_ensemble:2},
     NAM:{n_features:2,hidden_sizes:[2]}, GPT2:{vocab_size:8,n_embd:4,n_head:2,n_layer:1,n_positions:2},
     DistilGPT2:{vocab_size:8,n_embd:4,n_head:2,n_positions:2}}
@@ -133,8 +138,9 @@ async function checkQwenRotaryState(pg) {
 }
 
 async function checkVisionModels(pg) {
-  for (const item of require('../../test/fixtures/vision.json').cases) {
-    const weights = Uint8Array.from(atob(item.weights), c => c.charCodeAt(0))
+  for (const packed of require('../../test/fixtures/vision.json').cases) {
+    const item = await require('./vision_fixture').expandVisionCase(packed)
+    const weights = item.weights
     const model = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(item.config)), [weights], {maxBatch: 2})
     let restored
     try {

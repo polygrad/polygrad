@@ -391,6 +391,8 @@ Partial writes do not initialize a parameter; explicitly written zeros do.
 `pg.models.list()` reports each registered type's `name`, `constructible`, `hf`,
 and `gguf` capabilities. `constructible` means JSON configuration construction.
 Qwen3 currently supports GGUF loading, not JSON construction or HF loading.
+Calling `pg.models.Qwen3(...)` reports that it is import-only and points to
+`pg.Model.fromGGUF(...)`; it does not construct an uninitialized model.
 
 New Qwen3 GGUF imports take only `x` (`Int32Array`) and return `output`:
 `(await model.forwardAsync({ x: tokenIds })).output`. Rotary tables are

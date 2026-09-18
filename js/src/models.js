@@ -41,6 +41,11 @@ function createBoundModels(runtime) {
     if (flags & 1) {
       result[name] = spec => buildModel(runtime, name, spec)
       result[name + 'Async'] = async spec => buildModel(runtime, name, spec, true)
+    } else {
+      const loaders = [flags & 2 ? 'Model.fromHF' : null, flags & 4 ? 'Model.fromGGUF' : null].filter(Boolean)
+      const reject = () => { throw new Error(`${name} is import-only; use ${loaders.join(' or ')}`) }
+      result[name] = reject
+      result[name + 'Async'] = async () => reject()
     }
   }
   result.list = () => types.map(type => ({ ...type }))

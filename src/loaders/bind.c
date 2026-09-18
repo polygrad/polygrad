@@ -86,7 +86,8 @@ void poly_bind_index_destroy(PolyBindIndex *idx) {
   free(idx);
 }
 
-static int bind_find(const PolyBindIndex *idx, const char *name) {
+int poly_bind_index_find(const PolyBindIndex *idx, const char *name) {
+  if (!idx || !name) return -1;
   unsigned int h = hash_name(name, idx->capacity);
   for (int probe = 0; probe < idx->capacity; probe++) {
     const BindEntry *e = &idx->entries[h];
@@ -103,7 +104,7 @@ int poly_bind_index_dst_shape(
     int64_t *shape_out,
     int max_dims
 ) {
-  int bi = bind_find(idx, name);
+  int bi = poly_bind_index_find(idx, name);
   if (bi < 0) return 0;
   return poly_model_buf_shape(idx->inst, bi, shape_out, max_dims);
 }
@@ -139,7 +140,7 @@ int poly_import_copy_named_tensor(
     int transpose_2d,
     int crop_axis
 ) {
-  int bi = bind_find(idx, dst_name);
+  int bi = poly_bind_index_find(idx, dst_name);
   if (bi < 0) return 0; /* not found */
 
   size_t dst_bytes = poly_model_buf_nbytes(idx->inst, bi);
