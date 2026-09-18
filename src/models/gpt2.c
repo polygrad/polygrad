@@ -270,7 +270,7 @@ PolyModel *poly_gpt2_from_json_into(PolyCtx *ctx, const char *json, int len, Pol
 
 #include "../loaders/hf_decode.h"
 #include "../loaders/bind.h"
-#include "../loaders/import_desc.h"
+#include "registry.h"
 #include "../loaders/import_error.h"
 
 static const char *gpt2_strip_prefix(const char *name, const char *prefix) {
@@ -345,26 +345,16 @@ static PolyModel *gpt2_from_hf_decoded(
       continue;
     }
 
-    float *f32 = poly_decoded_tensor_to_f32(t);
-    if (!f32) {
-      poly_import_error_set(
-          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
-          t->dtype
-      );
-      goto fail;
-    }
-
     int64_t dst_shape[8];
     int dst_ndim = poly_bind_index_dst_shape(idx, name, dst_shape, 8);
     int transpose = (dst_ndim > 0) ? gpt2_needs_transpose(name, t->ndim, dst_ndim) : 0;
 
-    int rc = poly_import_copy_named_tensor(idx, name, f32, t->shape, t->ndim, transpose);
+    int rc = poly_import_bind_tensor(idx, name, t, transpose, !strcmp(name, "wpe.weight") ? 0 : -1);
     if (rc == 1)
       loaded++;
     else if (rc == 0)
       fprintf(stderr, "poly_gpt2_from_hf: no buffer for '%s'\n", name);
 
-    free(f32);
     /* An ignored source key is distinct from a failed write to named state. */
     if (rc < 0) goto fail;
   }
@@ -521,28 +511,17 @@ static PolyModel *gpt2_from_gguf_decoded(
       continue;
     }
 
-    /* Convert to F32 (dequantize if needed) */
-    float *f32 = poly_decoded_tensor_to_f32(t);
-    if (!f32) {
-      poly_import_error_set(
-          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
-          t->dtype
-      );
-      goto fail;
-    }
-
     /*
      * GGUF weights are stored in the model's native convention
      * (not Conv1D). No transpose needed -- GGUF stores (out, in)
      * which matches polygrad's linear layer convention.
      */
-    int rc = poly_import_copy_named_tensor(idx, name, f32, t->shape, t->ndim, 0);
+    int rc = poly_import_bind_tensor(idx, name, t, 0, !strcmp(name, "wpe.weight") ? 0 : -1);
     if (rc == 1)
       loaded++;
     else if (rc == 0)
       fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n", name, t->name);
 
-    free(f32);
     if (rc < 0) goto fail;
   }
 

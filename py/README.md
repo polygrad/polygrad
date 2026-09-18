@@ -310,6 +310,11 @@ weights. They reject execution and saving until every required parameter has bee
 written; use a checkpoint loader for a ready-to-run model. Explicit zero weights
 are valid. Wrong input dtypes are rejected, not silently narrowed.
 
+`models.list()` (also `rt.models.list()`) reports each registered type's
+`name`, `constructible`, `hf`, and `gguf` capabilities. `constructible` means
+JSON configuration construction. Qwen3 currently supports GGUF loading, not
+JSON construction or HF loading.
+
 For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 These return the same Model type and use the same training and export APIs.

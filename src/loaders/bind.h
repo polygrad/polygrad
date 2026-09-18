@@ -9,6 +9,7 @@
 #define POLY_BIND_H
 
 #include "../model.h"
+#include "decoded.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -22,6 +23,9 @@ void poly_bind_index_destroy(PolyBindIndex *idx);
 
 /*
  * Copy F32 tensor data into the named buffer of the bound PolyModel.
+ * Shapes must match after optional transpose. crop_axis=-1 forbids cropping;
+ * crop_axis=0 permits a leading-axis prefix (e.g. a shorter position table).
+ * Other crop axes and combined transpose/cropping are not supported.
  *
  * Returns:
  *    1 = success (copied)
@@ -34,7 +38,18 @@ int poly_import_copy_named_tensor(
     const float *src_data,
     const int64_t *src_shape,
     int src_ndim,
-    int transpose_2d
+    int transpose_2d,
+    int crop_axis
+);
+
+/* Convert/dequantize, validate and upload one decoded binding. Temporary host
+ * storage is released before returning; the model retains only its own state. */
+int poly_import_bind_tensor(
+    PolyBindIndex *idx,
+    const char *name,
+    const PolyDecodedTensor *tensor,
+    int transpose_2d,
+    int crop_axis
 );
 
 /*

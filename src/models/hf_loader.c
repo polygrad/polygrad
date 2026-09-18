@@ -7,7 +7,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "hf_loader.h"
-#include "../loaders/import_desc.h"
+#include "registry.h"
 #include "../loaders/import_error.h"
 #include <stdio.h>
 
@@ -32,10 +32,12 @@ static PolyModel *hf_load(
     return NULL;
 
   /* 2. Lookup model descriptor */
-  const PolyImportDesc *desc = poly_import_desc_find(hf->model_type);
+  const PolyModelType *desc = model_type_find(hf->model_type);
   if (!desc || !desc->from_hf_decoded) {
     poly_import_error_set(
-        POLY_IMPORT_ERR_UNSUPPORTED_MODEL, "unsupported model_type '%s'", hf->model_type
+        POLY_IMPORT_ERR_UNSUPPORTED_MODEL,
+        desc ? "%s does not support HF import" : "unsupported model_type '%s'",
+        desc ? desc->name : hf->model_type
     );
     poly_hf_decoded_free(hf);
     return NULL;

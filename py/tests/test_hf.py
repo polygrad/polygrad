@@ -11,6 +11,34 @@ from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_s
 from polygrad.model import Model
 
 
+@pytest.mark.parametrize('shape,transpose', [((4, 2), 0), ((2, 3), 0), ((3, 2), 1)])
+def test_checkpoint_binding_rejects_wrong_shape_without_writing(shape, transpose):
+    import polygrad as pg
+    from polygrad import _ffi
+    lib = _ffi.get_lib()
+    lib.poly_bind_index_create.argtypes = [ctypes.c_void_p]
+    lib.poly_bind_index_create.restype = ctypes.c_void_p
+    lib.poly_bind_index_destroy.argtypes = [ctypes.c_void_p]
+    lib.poly_bind_index_destroy.restype = None
+    lib.poly_import_copy_named_tensor.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.poly_import_copy_named_tensor.restype = ctypes.c_int
+    with pg.create(device='INTERP') as rt:
+        model = pg.models.MLP(layers=[2, 3], runtime=rt)
+        index = lib.poly_bind_index_create(model._ptr)
+        try:
+            before = model.read_buffer('layers.0.weight')
+            values = np.ones(shape, dtype=np.float32)
+            dims = (ctypes.c_int64 * len(shape))(*shape)
+            rc = lib.poly_import_copy_named_tensor(index, b'layers.0.weight',
+                values.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), dims, len(shape), transpose, -1)
+            assert rc == -1
+            np.testing.assert_array_equal(model.read_buffer('layers.0.weight'), before)
+        finally:
+            lib.poly_bind_index_destroy(index)
+            model.dispose()
+
+
 def make_safetensors(tensors):
     """Build a minimal safetensors file from {name: (dtype_str, shape, data_bytes)}.
 
@@ -87,6 +115,28 @@ GPT2_TINY_CONFIG = json.dumps({
     'n_positions': 8,
     'layer_norm_epsilon': 1e-5
 })
+
+
+@pytest.mark.parametrize('shape,accepted', [((8, 16), True), ((8, 17), False), ((1, 16), False)])
+def test_gpt2_position_crop_is_explicit_and_axis_checked(shape, accepted):
+    values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    checkpoint = make_safetensors({'transformer.wpe.weight': ('F32', shape, values)})
+    if not accepted:
+        with pytest.raises(RuntimeError, match='shape mismatch'):
+            load_hf_bytes(GPT2_TINY_CONFIG, [checkpoint], max_seq_len=2)
+    else:
+        model = load_hf_bytes(GPT2_TINY_CONFIG, [checkpoint], max_seq_len=2)
+        try:
+            np.testing.assert_array_equal(model.read_buffer('wpe.weight'), values[:2].reshape(-1))
+        finally:
+            model.dispose()
+
+
+def test_known_type_rejects_unsupported_import_format():
+    config = json.dumps({'model_type': 'qwen3'})
+    checkpoint = make_safetensors({'weight': ('F32', (1,), np.ones(1, dtype=np.float32))})
+    with pytest.raises(RuntimeError, match='Qwen3 does not support HF import'):
+        load_hf_bytes(config, [checkpoint])
 
 
 LLAMA_CASES = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/llama.json').read_text())['cases']

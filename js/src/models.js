@@ -34,10 +34,16 @@ function createBoundModels(runtime) {
   const result = {}
   const api = runtime._core.model
   if (!api) return result
-  for (let i = 0, name; (name = api.familyName(i)); i++) {
-    result[name] = spec => buildModel(runtime, name, spec)
-    result[name + 'Async'] = async spec => buildModel(runtime, name, spec, true)
+  const types = []
+  for (let i = 0, name; (name = api.typeName(i)); i++) {
+    const flags = api.typeCapabilities(i)
+    types.push({ name, constructible: Boolean(flags & 1), hf: Boolean(flags & 2), gguf: Boolean(flags & 4) })
+    if (flags & 1) {
+      result[name] = spec => buildModel(runtime, name, spec)
+      result[name + 'Async'] = async spec => buildModel(runtime, name, spec, true)
+    }
   }
+  result.list = () => types.map(type => ({ ...type }))
   return result
 }
 

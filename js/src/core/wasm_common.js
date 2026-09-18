@@ -2152,7 +2152,8 @@ function createWasmCoreFromModule(Module, device) {
       return error ? readCString(error + 8) : ''
     },
 
-    familyName(index) { return readCString(Module._poly_model_family_name(index)) || null },
+    typeName(index) { return readCString(Module._poly_model_type_name(index)) || null },
+    typeCapabilities(index) { return Module._poly_model_type_capabilities(index) },
 
     async fromConfigAsync(ctxPtr, json, family) {
       if (deviceName === 'webgpu') await ensureWebGPU()

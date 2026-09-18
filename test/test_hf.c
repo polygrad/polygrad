@@ -16,7 +16,7 @@
 #include "../src/loaders/hf_decode.h"
 #include "../src/loaders/gguf_decode.h"
 #include "../src/loaders/bind.h"
-#include "../src/loaders/import_desc.h"
+#include "../src/models/registry.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -714,7 +714,7 @@ TEST(hf, gguf_families_reject_failed_weights_and_bindings) {
       PolyGgufDecoded g = {
           .kv = kv, .n_kv = 6, .arch = family ? "qwen3" : "gpt2", .tensors = &t, .n_tensors = 1};
       if (mode == 2) poly_test_bind_alloc_fail_after(1);
-      const PolyImportDesc *desc = poly_import_desc_find(g.arch);
+      const PolyModelType *desc = model_type_find(g.arch);
       PolyGenericImportOpts opts = {.max_batch = 1, .max_seq_len = 2, .device = POLY_DEVICE_CPU};
       PolyModel *model = desc->from_gguf_decoded(&g, &opts);
       poly_test_bind_alloc_fail_after(-1);

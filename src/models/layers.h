@@ -6,6 +6,15 @@
 extern "C" {
 #endif
 
+/* Seed/name-keyed SplitMix64 Kaiming uniform, bound = sqrt(6/fan_in). */
+void poly_init_param_kaiming(
+    uint64_t seed,
+    const char *name,
+    float *data,
+    int64_t numel,
+    int64_t fan_in
+);
+
 PolyUOp *poly_linear(
     PolyCtx *ctx,
     const char *prefix,

@@ -1,4 +1,4 @@
-"""Model-family constructors.
+"""Registered model types and their construction/import capabilities.
 
 These constructors call C model-family builders and return generic
 ``Model`` runtime objects. This module owns named architecture factories; Model.from_hf/from_gguf are
@@ -91,7 +91,7 @@ def Llama(spec, *, runtime=None):
     return _build('llama', spec, runtime)
 
 
-def _family_factory(name):
+def _type_factory(name):
     def factory(spec=None, *, runtime=None, device=None, **kwargs):
         if spec is None:
             spec = kwargs
@@ -101,14 +101,27 @@ def _family_factory(name):
             spec = {**spec, **kwargs}
         return _build(name, spec, runtime, device)
     factory.__name__ = name
-    factory.__doc__ = f"Construct {name} through the shared C family registry."
+    factory.__doc__ = f"Construct {name} through the shared C model-type registry."
     return factory
 
 
-__all__ = []
-while (name := _ffi.get_lib().poly_model_family_name(len(__all__))) is not None:
-    name = name.decode('ascii')
-    __all__.append(name)
-    if name not in globals():
-        globals()[name] = _family_factory(name)
-del name
+def list(*, runtime=None):
+    """Return supported model types and JSON/HF/GGUF capabilities from C."""
+    lib = _ffi.get_lib()
+    result, index = [], 0
+    while (name := lib.poly_model_type_name(index)) is not None:
+        flags = lib.poly_model_type_capabilities(index)
+        result.append(dict(name=name.decode('ascii'), constructible=bool(flags & 1),
+                           hf=bool(flags & 2), gguf=bool(flags & 4)))
+        index += 1
+    return result
+
+
+__all__ = ['list']
+for entry in list():
+    if entry['constructible']:
+        name = entry['name']
+        __all__.append(name)
+        if name not in globals():
+            globals()[name] = _type_factory(name)
+del name, entry

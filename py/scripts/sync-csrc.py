@@ -103,7 +103,6 @@ SOURCES = [
     'src/loaders/hf_decode.c',
     'src/loaders/gguf_decode.c',
     'src/loaders/gguf_loader.c',
-    'src/loaders/import_desc.c',
 ]
 
 # Headers needed for compilation
@@ -169,7 +168,7 @@ HEADERS = [
     'src/loaders/hf_decode.h',
     'src/loaders/gguf_decode.h',
     'src/loaders/gguf_loader.h',
-    'src/loaders/import_desc.h',
+    'src/models/registry.h',
     # Model headers referenced by gpt2.c
     'src/models/gpt2.h',
     'src/models/qwen3.h',

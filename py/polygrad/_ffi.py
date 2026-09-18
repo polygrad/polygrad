@@ -1336,8 +1336,10 @@ def _declare_signatures(lib):
     # --- PolyModel (model.h) ---
     lib.poly_model_from_config.restype = _ptr
     lib.poly_model_from_config.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(PolyModelError)]
-    lib.poly_model_family_name.restype = ctypes.c_char_p
-    lib.poly_model_family_name.argtypes = [ctypes.c_int]
+    lib.poly_model_type_name.restype = ctypes.c_char_p
+    lib.poly_model_type_name.argtypes = [ctypes.c_int]
+    lib.poly_model_type_capabilities.restype = ctypes.c_int
+    lib.poly_model_type_capabilities.argtypes = [ctypes.c_int]
     lib.poly_model_last_error.restype = ctypes.POINTER(PolyModelError)
     lib.poly_model_last_error.argtypes = [_ptr]
     for name in ('poly_sequential_from_json', 'poly_graph_from_json', 'poly_llama_from_json'):

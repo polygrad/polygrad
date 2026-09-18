@@ -48,10 +48,21 @@ TEST(mlp, registered_factory_scopes_and_validates_construction) {
     ASSERT_INT_EQ(ctx->n_tensors, 0);
   }
   bool gpt2 = false;
-  for (int i = 0; poly_model_family_name(i); i++)
-    gpt2 |= !strcmp(poly_model_family_name(i), "GPT2");
+  for (int i = 0; poly_model_type_name(i); i++) {
+    if (!strcmp(poly_model_type_name(i), "GPT2")) {
+      gpt2 = true;
+      ASSERT_INT_EQ(
+          poly_model_type_capabilities(i),
+          POLY_MODEL_CONSTRUCTIBLE | POLY_MODEL_HF | POLY_MODEL_GGUF
+      );
+    }
+    if (!strcmp(poly_model_type_name(i), "Qwen3"))
+      ASSERT_INT_EQ(poly_model_type_capabilities(i), POLY_MODEL_GGUF);
+  }
   ASSERT_TRUE(gpt2);
-  ASSERT_TRUE(poly_model_family_name(-1) == NULL);
+  ASSERT_TRUE(poly_model_type_name(-1) == NULL);
+  ASSERT_INT_EQ(poly_model_type_capabilities(-1), 0);
+  ASSERT_INT_EQ(poly_model_type_capabilities(10000), 0);
   poly_ctx_destroy(ctx);
   PASS();
 }

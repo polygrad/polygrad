@@ -2,6 +2,7 @@
 #include "hf_loader.h"
 #include "models.h"
 #include "factory.h"
+#include "registry.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <string.h>
 #include <stdlib.h>
@@ -172,22 +173,38 @@ bool model_config_training(const cJSON *root, PolyModelError *err) {
          model_config_choice(root, "loss", "|none|mse|cross_entropy|", err);
 }
 
-static const struct {
-  const char *name, *tag;
-  PolyModel *(*build)(PolyCtx *, const cJSON *, PolyModelError *);
-} families[] = {
-    {"MLP", "mlp", model_mlp_build},
-    {"TabM", "tabm", model_tabm_build},
-    {"NAM", "nam", model_nam_build},
-    {"GPT2", "gpt2", model_gpt2_build},
-    {"Sequential", "sequential", model_sequential_build},
-    {"Graph", "graph", model_graph_build},
-    {"Llama", "llama", model_llama_build},
+static const PolyModelType model_types[] = {
+    {"MLP", "mlp", model_mlp_build, NULL, NULL},
+    {"TabM", "tabm", model_tabm_build, NULL, NULL},
+    {"NAM", "nam", model_nam_build, NULL, NULL},
+    {"GPT2", "gpt2", model_gpt2_build, poly_gpt2_from_hf_decoded_generic,
+     poly_gpt2_from_gguf_decoded_generic},
+    {"Sequential", "sequential", model_sequential_build, NULL, NULL},
+    {"Graph", "graph", model_graph_build, NULL, NULL},
+    {"Llama", "llama", model_llama_build, poly_llama_from_hf_decoded_generic, NULL},
+    {"Qwen3", "qwen3", NULL, NULL, poly_qwen3_from_gguf_decoded_generic},
 };
 
-const char *poly_model_family_name(int index) {
-  return index >= 0 && (size_t)index < sizeof(families) / sizeof(*families) ? families[index].name
-                                                                            : NULL;
+const char *poly_model_type_name(int index) {
+  return index >= 0 && (size_t)index < sizeof(model_types) / sizeof(*model_types)
+             ? model_types[index].name
+             : NULL;
+}
+
+int poly_model_type_capabilities(int index) {
+  if (!poly_model_type_name(index)) return 0;
+  const PolyModelType *type = &model_types[index];
+  return (type->build ? POLY_MODEL_CONSTRUCTIBLE : 0) |
+         (type->from_hf_decoded ? POLY_MODEL_HF : 0) |
+         (type->from_gguf_decoded ? POLY_MODEL_GGUF : 0);
+}
+
+const PolyModelType *model_type_find(const char *name) {
+  if (!name) return NULL;
+  for (size_t i = 0; i < sizeof(model_types) / sizeof(*model_types); i++)
+    if (!strcmp(name, model_types[i].name) || !strcmp(name, model_types[i].tag))
+      return &model_types[i];
+  return NULL;
 }
 
 PolyModel *poly_model_from_config(
@@ -213,15 +230,20 @@ PolyModel *poly_model_from_config(
     goto done;
   }
   const char *selected = family ? family : type->valuestring;
-  int i = 0;
-  for (; (size_t)i < sizeof(families) / sizeof(*families); i++)
-    if (!strcmp(selected, families[i].name) || !strcmp(selected, families[i].tag)) break;
-  if ((size_t)i == sizeof(families) / sizeof(*families)) {
-    model_factory_error(err, "type", "unknown model family '%s'", selected);
+  const PolyModelType *desc = model_type_find(selected);
+  if (!desc) {
+    model_factory_error(err, "type", "unknown model type '%s'", selected);
     goto done;
   }
-  if (type && strcmp(type->valuestring, families[i].tag)) {
-    model_factory_error(err, "type", "expected '%s'", families[i].tag);
+  if (type && strcmp(type->valuestring, desc->tag)) {
+    model_factory_error(err, "type", "expected '%s'", desc->tag);
+    goto done;
+  }
+  if (!desc->build) {
+    model_factory_error(
+        err, "type",
+        "%s supports checkpoint import only; configuration construction is unavailable", desc->name
+    );
     goto done;
   }
   PolyModelFactoryScope scope;
@@ -229,8 +251,8 @@ PolyModel *poly_model_from_config(
     model_factory_error(err, "$", "construction requires an idle runtime and executable device");
     goto done;
   }
-  model = families[i].build(scope.ctx, root, err);
-  if (!model && !err->code) model_factory_error(err, families[i].name, "construction failed");
+  model = desc->build(scope.ctx, root, err);
+  if (!model && !err->code) model_factory_error(err, desc->name, "construction failed");
   model = model_factory_end(&scope, model);
 done:
   cJSON_Delete(root);

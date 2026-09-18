@@ -225,6 +225,9 @@ and browsers without model-specific source compilation or an authoring callback.
 declares `format: "poly.modeldef@1"` and a registered `type`: `mlp`, `tabm`, `nam`,
 `gpt2`, `llama`, `sequential` or `graph`. Named factories, including `models.GPT2`,
 use that same C dispatch and accept untagged configurations.
+`models.list()` in Python and `pg.models.list()` in JS expose construction,
+HF and GGUF capabilities from this same C table. Qwen3 is currently GGUF-only
+through the generic interface; it is not advertised as a configuration factory.
 Untagged configurations are not guessed; the explicit family factories remain
 available. Python accepts `runtime=rt` for configuration construction. JavaScript
 uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
@@ -977,7 +980,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-The 0.5.2 candidate requires C ABI95 and graph formats PGIR19/PGPM10; incompatible
+The 0.5.2 candidate requires C ABI96 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 

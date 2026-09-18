@@ -33,17 +33,6 @@ PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device);
 PolyModel *poly_mlp_from_json(const char *json, int len, PolyDevice device);
 PolyModel *poly_mlp_from_json_into(PolyCtx *ctx, const char *json, int len, PolyDevice device);
 
-/* Deterministic parameter initialization.
- * Uses SplitMix64 PRNG seeded by (seed, FNV1a(name)).
- * Kaiming uniform: U(-bound, +bound) where bound = sqrt(6/fan_in). */
-void poly_init_param_kaiming(
-    uint64_t seed,
-    const char *name,
-    float *data,
-    int64_t numel,
-    int64_t fan_in
-);
-
 #ifdef __cplusplus
 }
 #endif

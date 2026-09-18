@@ -18,7 +18,7 @@
 #include "factory.h"
 #include <limits.h>
 
-#include "mlp.h" /* poly_init_param_kaiming */
+#include "layers.h"
 #include "../model.h"
 #include "../tensor.h"
 #include "../../vendor/cjson/cJSON.h"
@@ -26,29 +26,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-
-/* Activation types */
-
-typedef enum { NAM_ACT_RELU, NAM_ACT_GELU, NAM_ACT_SILU, NAM_ACT_EXU } NamActivation;
-
-static NamActivation nam_parse_activation(const char *s) {
-  if (!s || strcmp(s, "exu") == 0) return NAM_ACT_EXU;
-  if (strcmp(s, "relu") == 0) return NAM_ACT_RELU;
-  if (strcmp(s, "gelu") == 0) return NAM_ACT_GELU;
-  if (strcmp(s, "silu") == 0) return NAM_ACT_SILU;
-  return NAM_ACT_EXU;
-}
-
-static PolyTensor *nam_float_scalar(PolyCtx *ctx, double value) {
-  PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);
-  if (!constant) return NULL;
-  PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
-  if (out) {
-    poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
-  }
-  return out;
-}
 
 /* NAM Builder */
 
@@ -81,7 +58,7 @@ PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err)
     }
   }
 
-  NamActivation activation = nam_parse_activation(act_item ? act_item->valuestring : NULL);
+  const char *activation = act_item ? act_item->valuestring : "exu";
   int n_outputs = no_item ? no_item->valueint : 1;
   if (n_outputs < 1) n_outputs = 1;
   const char *loss_type = loss_item ? loss_item->valuestring : "none";
@@ -162,7 +139,7 @@ PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err)
 
       /* Activation (skip on last layer). */
       if (l < n_linear - 1) {
-        if (activation == NAM_ACT_EXU) {
+        if (!strcmp(activation, "exu")) {
           int64_t eu_shape[] = {out_dim};
           if (poly_model_scope_push(inst, "features.%d.exu.%d", k, l) != POLY_STATUS_OK)
             goto fail_pre_build;
@@ -184,12 +161,8 @@ PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err)
           PolyTensor *exp_w = ew ? poly_tensor_exp(ctx, ew) : NULL;
           xk = centered && exp_w ? poly_tensor_alu2(ctx, POLY_OP_MUL, exp_w, centered) : NULL;
           xk = xk ? poly_tensor_relu(ctx, xk) : NULL;
-        } else if (activation == NAM_ACT_RELU) {
-          xk = poly_tensor_relu(ctx, xk);
-        } else if (activation == NAM_ACT_GELU) {
-          xk = poly_tensor_gelu(ctx, xk);
-        } else if (activation == NAM_ACT_SILU) {
-          xk = poly_tensor_silu(ctx, xk);
+        } else {
+          xk = model_activation(ctx, xk, activation);
         }
         if (!xk) goto fail_pre_build;
       }
@@ -215,32 +188,9 @@ PolyModel *model_nam_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err)
     int64_t y_shape[] = {batch_size, n_outputs};
     PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
-    PolyTensor *loss_tensor;
-    if (strcmp(loss_type, "mse") == 0) {
-      PolyTensor *diff = poly_tensor_alu2(ctx, POLY_OP_SUB, out_tensor, y_tensor);
-      PolyTensor *sq = diff ? poly_tensor_alu2(ctx, POLY_OP_MUL, diff, diff) : NULL;
-      int64_t axes_r0[] = {0};
-      PolyTensor *sum0 = sq ? poly_tensor_sum(ctx, sq, axes_r0, 1, false) : NULL;
-      int64_t axes_r1[] = {0};
-      PolyTensor *sum1 = sum0 ? poly_tensor_sum(ctx, sum0, axes_r1, 1, false) : NULL;
-      double mse_scale = 1.0 / ((double)batch_size * n_outputs);
-      PolyTensor *loss_scale = nam_float_scalar(ctx, mse_scale);
-      loss_tensor =
-          sum1 && loss_scale ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum1, loss_scale) : NULL;
-    } else {
-      PolyTensor *log_probs = poly_tensor_log_softmax(ctx, out_tensor, 1);
-      PolyTensor *prod = log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, y_tensor, log_probs) : NULL;
-      int64_t axes_class[] = {1};
-      PolyTensor *sum_class = prod ? poly_tensor_sum(ctx, prod, axes_class, 1, false) : NULL;
-      int64_t axes_batch[] = {0};
-      PolyTensor *sum_batch =
-          sum_class ? poly_tensor_sum(ctx, sum_class, axes_batch, 1, false) : NULL;
-      double ce_scale = -1.0 / (double)batch_size;
-      PolyTensor *loss_scale = nam_float_scalar(ctx, ce_scale);
-      loss_tensor = sum_batch && loss_scale
-                        ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum_batch, loss_scale)
-                        : NULL;
-    }
+    PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
+                                  ? poly_tensor_mse_loss(ctx, out_tensor, y_tensor)
+                                  : poly_tensor_cross_entropy(ctx, out_tensor, y_tensor, 1, 2, 0);
     if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};

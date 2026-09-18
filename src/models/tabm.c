@@ -14,7 +14,7 @@
 #include "factory.h"
 #include <limits.h>
 
-#include "mlp.h" /* poly_init_param_kaiming */
+#include "layers.h"
 #include "../model.h"
 #include "../tensor.h"
 #include "../../vendor/cjson/cJSON.h"
@@ -22,32 +22,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-
-/* Activation dispatch (same as model_mlp.c) */
-
-typedef enum { TABM_ACT_NONE, TABM_ACT_RELU, TABM_ACT_GELU, TABM_ACT_SILU } TabmActivation;
-
-static TabmActivation tabm_parse_activation(const char *s) {
-  if (!s || strcmp(s, "none") == 0) return TABM_ACT_NONE;
-  if (strcmp(s, "relu") == 0) return TABM_ACT_RELU;
-  if (strcmp(s, "gelu") == 0) return TABM_ACT_GELU;
-  if (strcmp(s, "silu") == 0) return TABM_ACT_SILU;
-  return TABM_ACT_RELU;
-}
-
-static PolyTensor *tabm_apply_activation(PolyCtx *ctx, PolyTensor *x, TabmActivation act) {
-  switch (act) {
-  case TABM_ACT_RELU:
-    return poly_tensor_relu(ctx, x);
-  case TABM_ACT_GELU:
-    return poly_tensor_gelu(ctx, x);
-  case TABM_ACT_SILU:
-    return poly_tensor_silu(ctx, x);
-  case TABM_ACT_NONE:
-    return x;
-  }
-  return x;
-}
 
 static PolyTensor *tabm_float_scalar(PolyCtx *ctx, double value) {
   PolyUOp *constant = poly_const_typed(ctx, POLY_FLOAT32, value);
@@ -88,7 +62,7 @@ PolyModel *model_tabm_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err
     layer_sizes[i] = item ? item->valueint : 0;
   }
 
-  TabmActivation activation = tabm_parse_activation(act_item ? act_item->valuestring : "relu");
+  const char *activation = act_item ? act_item->valuestring : "relu";
   const char *loss_type = loss_item ? loss_item->valuestring : "none";
   int batch_size = batch_item ? batch_item->valueint : 1;
   uint64_t seed = seed_item ? (uint64_t)seed_item->valuedouble : 42;
@@ -184,7 +158,7 @@ PolyModel *model_tabm_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err
     PolyTensor *b_2d = poly_tensor_reshape(ctx, b, b_shape, 2);
     x = poly_tensor_alu2(ctx, POLY_OP_ADD, x, b_2d);
 
-    if (l < n_linear - 1) x = tabm_apply_activation(ctx, x, activation);
+    if (l < n_linear - 1) x = model_activation(ctx, x, activation);
     if (!x) goto fail_pre_build;
   }
 
@@ -211,32 +185,9 @@ PolyModel *model_tabm_build(PolyCtx *ctx, const cJSON *root, PolyModelError *err
     int64_t y_shape[] = {batch_size, out_dim};
     PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
     if (!y_tensor) goto fail_pre_build;
-    PolyTensor *loss_tensor;
-    if (strcmp(loss_type, "mse") == 0) {
-      PolyTensor *diff = poly_tensor_alu2(ctx, POLY_OP_SUB, out_tensor, y_tensor);
-      PolyTensor *sq = diff ? poly_tensor_alu2(ctx, POLY_OP_MUL, diff, diff) : NULL;
-      int64_t axes_r0[] = {1};
-      PolyTensor *sum0 = sq ? poly_tensor_sum(ctx, sq, axes_r0, 1, false) : NULL;
-      int64_t axes_r1[] = {0};
-      PolyTensor *sum1 = sum0 ? poly_tensor_sum(ctx, sum0, axes_r1, 1, false) : NULL;
-      double mse_scale = 1.0 / ((double)batch_size * out_dim);
-      PolyTensor *loss_scale = tabm_float_scalar(ctx, mse_scale);
-      loss_tensor =
-          sum1 && loss_scale ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum1, loss_scale) : NULL;
-    } else {
-      PolyTensor *log_probs = poly_tensor_log_softmax(ctx, out_tensor, 1);
-      PolyTensor *prod = log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, y_tensor, log_probs) : NULL;
-      int64_t axes_class[] = {1};
-      PolyTensor *sum_class = prod ? poly_tensor_sum(ctx, prod, axes_class, 1, false) : NULL;
-      int64_t axes_batch[] = {0};
-      PolyTensor *sum_batch =
-          sum_class ? poly_tensor_sum(ctx, sum_class, axes_batch, 1, false) : NULL;
-      double ce_scale = -1.0 / (double)batch_size;
-      PolyTensor *loss_scale = tabm_float_scalar(ctx, ce_scale);
-      loss_tensor = sum_batch && loss_scale
-                        ? poly_tensor_alu2(ctx, POLY_OP_MUL, sum_batch, loss_scale)
-                        : NULL;
-    }
+    PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
+                                  ? poly_tensor_mse_loss(ctx, out_tensor, y_tensor)
+                                  : poly_tensor_cross_entropy(ctx, out_tensor, y_tensor, 1, 2, 0);
     if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};

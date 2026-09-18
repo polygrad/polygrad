@@ -108,13 +108,36 @@ int poly_bind_index_dst_shape(
   return poly_model_buf_shape(idx->inst, bi, shape_out, max_dims);
 }
 
+int poly_import_bind_tensor(
+    PolyBindIndex *idx,
+    const char *name,
+    const PolyDecodedTensor *tensor,
+    int transpose_2d,
+    int crop_axis
+) {
+  float *data = poly_decoded_tensor_to_f32(tensor);
+  if (!data) {
+    poly_import_error_set(
+        POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", tensor->name,
+        tensor->dtype
+    );
+    return -1;
+  }
+  int rc = poly_import_copy_named_tensor(
+      idx, name, data, tensor->shape, tensor->ndim, transpose_2d, crop_axis
+  );
+  free(data);
+  return rc;
+}
+
 int poly_import_copy_named_tensor(
     PolyBindIndex *idx,
     const char *dst_name,
     const float *src_data,
     const int64_t *src_shape,
     int src_ndim,
-    int transpose_2d
+    int transpose_2d,
+    int crop_axis
 ) {
   int bi = bind_find(idx, dst_name);
   if (bi < 0) return 0; /* not found */
@@ -136,8 +159,23 @@ int poly_import_copy_named_tensor(
     src_numel *= src_shape[d];
   }
 
-  int64_t dst_shape[8];
-  int dst_ndim = poly_model_buf_shape(idx->inst, bi, dst_shape, 8);
+  int64_t dst_shape[POLY_MAX_DIMS];
+  int dst_ndim = poly_model_buf_shape(idx->inst, bi, dst_shape, POLY_MAX_DIMS);
+  /* nn.state.load_state_dict checks shapes, not only storage size. Cropping
+   * is a model-adapter decision: never infer it from an oversized source. */
+  bool valid = src_ndim == dst_ndim && crop_axis >= -1 && crop_axis <= 0 &&
+               !(transpose_2d && (src_ndim != 2 || crop_axis != -1));
+  for (int d = 0; valid && d < dst_ndim; d++) {
+    int64_t extent = src_shape[transpose_2d ? 1 - d : d];
+    valid = d == crop_axis ? extent >= dst_shape[d] : extent == dst_shape[d];
+  }
+  if (!valid) {
+    poly_import_error_set(
+        POLY_IMPORT_ERR_SHAPE_MISMATCH, "shape mismatch for '%s' (transpose=%d, crop_axis=%d)",
+        dst_name, transpose_2d, crop_axis
+    );
+    return -1;
+  }
 
   if (transpose_2d) {
     if (src_ndim != 2 || dst_ndim != 2) {
@@ -174,8 +212,7 @@ int poly_import_copy_named_tensor(
   }
 
   if (dst_numel <= src_numel) {
-    /* Preserve prefix loading (e.g. a shortened position table), but do not
-     * request a persistent mutable CPU shadow of the destination parameter. */
+    /* Only a validated leading-axis crop is contiguous in source storage. */
     if (!dst_bytes || poly_model_write_buf(idx->inst, bi, src_data, dst_bytes) == 0) return 1;
     poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", dst_name);
     return -1;

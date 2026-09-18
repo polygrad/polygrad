@@ -1251,7 +1251,7 @@ class TestModelDefinition:
                                     {'format': 'poly.modeldef@2', 'type': 'graph'},
                                     {'format': 'poly.modeldef@1', 'type': 'unknown'}])
     def test_constructor_does_not_guess_configuration(self, spec):
-        with pytest.raises((TypeError, ValueError), match='format|configuration|unknown model family'):
+        with pytest.raises((TypeError, ValueError), match='format|configuration|unknown model type'):
             Model(spec)
 
     def test_constructor_rejects_mixed_configuration_and_tensor_bindings(self):
@@ -1819,6 +1819,39 @@ class TestCompiledProgramExport:
 
 
 class TestMLPCreate:
+    def test_model_type_capabilities(self):
+        import polygrad as pg
+        available = {entry['name']: entry for entry in pg.models.list()}
+        assert available['GPT2'] == dict(name='GPT2', constructible=True, hf=True, gguf=True)
+        assert available['Llama'] == dict(name='Llama', constructible=True, hf=True, gguf=False)
+        assert available['Qwen3']['gguf'] and not available['Qwen3']['hf']
+        with pg.create(device='INTERP') as rt:
+            assert rt.models.list() == pg.models.list()
+        for name, entry in available.items():
+            assert callable(getattr(pg.models, name, None)) == entry['constructible']
+
+    @pytest.mark.parametrize('family,spec', [
+        ('MLP', {'layers': [2, 3, 2]}),
+        ('TabM', {'layers': [2, 3, 2], 'n_ensemble': 2}),
+        ('NAM', {'n_features': 2, 'hidden_sizes': [3], 'n_outputs': 2}),
+    ])
+    @pytest.mark.parametrize('loss', ['mse', 'cross_entropy'])
+    @pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+    def test_shared_loss_matches_tensor_expression(self, family, spec, loss, device):
+        import polygrad as pg
+        with pg.create(device=device) as rt:
+            model = getattr(pg.models, family)({**spec, 'loss': loss}, runtime=rt)
+            try:
+                x = np.array([[.25, -.5]], dtype=np.float32)
+                y = np.array([[0., 1.]], dtype=np.float32)
+                prediction = model.forward(x=x)['output']
+                p, t = rt.Tensor(prediction.reshape(1, 2)), rt.Tensor(y)
+                expected = (p-t).square().mean() if loss == 'mse' else p.cross_entropy(t)
+                np.testing.assert_allclose(model.call('loss', x=x, y=y)['loss'],
+                                           expected.numpy(), rtol=1e-5, atol=1e-6)
+            finally:
+                model.dispose()
+
     @pytest.mark.parametrize('family,spec', [
         ('MLP', {'layers': [2, 3, 1]}),
         ('TabM', {'layers': [2, 3, 1], 'n_ensemble': 2}),

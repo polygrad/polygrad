@@ -22,139 +22,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* Stateless PRNG (SplitMix64) */
-
-static uint64_t splitmix64(uint64_t x) {
-  x += 0x9E3779B97F4A7C15ULL;
-  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-  return x ^ (x >> 31);
-}
-
-static float prng_float(uint64_t seed, uint64_t stream, uint64_t idx) {
-  uint64_t r = splitmix64(seed ^ splitmix64(stream) ^ splitmix64(idx));
-  return (float)(r >> 40) * 0x1.0p-24f;
-}
-
-static uint64_t fnv1a_64(const char *s, size_t len) {
-  uint64_t h = 0xcbf29ce484222325ULL;
-  for (size_t i = 0; i < len; i++)
-    h = (h ^ (uint8_t)s[i]) * 0x100000001b3ULL;
-  return h;
-}
-
-void poly_init_param_kaiming(
-    uint64_t seed,
-    const char *name,
-    float *data,
-    int64_t numel,
-    int64_t fan_in
-) {
-  uint64_t stream = fnv1a_64(name, strlen(name));
-  float bound = sqrtf(6.0f / (float)fan_in);
-  for (int64_t i = 0; i < numel; i++)
-    data[i] = (prng_float(seed, stream, (uint64_t)i) * 2.0f - 1.0f) * bound;
-}
-
-/* Activation dispatch */
-
-typedef enum { ACT_NONE, ACT_RELU, ACT_GELU, ACT_SILU, ACT_TANH, ACT_SIGMOID } ActivationKind;
-
-static ActivationKind parse_activation(const char *s) {
-  if (!s || strcmp(s, "none") == 0) return ACT_NONE;
-  if (strcmp(s, "relu") == 0) return ACT_RELU;
-  if (strcmp(s, "gelu") == 0) return ACT_GELU;
-  if (strcmp(s, "silu") == 0) return ACT_SILU;
-  if (strcmp(s, "tanh") == 0) return ACT_TANH;
-  if (strcmp(s, "sigmoid") == 0) return ACT_SIGMOID;
-  return ACT_RELU;
-}
-
-static PolyTensor *apply_activation(PolyCtx *ctx, PolyTensor *x, ActivationKind act) {
-  switch (act) {
-  case ACT_RELU:
-    return poly_tensor_relu(ctx, x);
-  case ACT_GELU:
-    return poly_tensor_gelu(ctx, x);
-  case ACT_SILU:
-    return poly_tensor_silu(ctx, x);
-  case ACT_TANH:
-    return poly_tensor_tanh(ctx, x);
-  case ACT_SIGMOID:
-    return poly_tensor_sigmoid(ctx, x);
-  case ACT_NONE:
-    return x;
-  }
-  return x;
-}
-
-static PolyTensor *mlp_int_scalar(PolyCtx *ctx, int64_t value) {
-  PolyUOp *constant = poly_const_typed(ctx, POLY_INT32, (double)value);
-  if (!constant) return NULL;
-  PolyTensor *out =
-      poly_tensor_create_with_roots(ctx, constant, constant, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
-  if (out) {
-    poly_tensor_set_provenance(out, POLY_TENSOR_PROVENANCE_CONST_INIT);
-  }
-  return out;
-}
-
-static PolyTensor *mlp_mean_all(PolyCtx *ctx, PolyTensor *src) {
-  PolyUOp *physical = poly_tensor_uop_physical(src);
-  int ndim = physical ? poly_uop_ndim(ctx, physical) : -1;
-  const int64_t *shape = ndim >= 0 ? poly_uop_max_shape_dims(ctx, physical) : NULL;
-  int64_t numel = shape ? poly_shape_numel_checked(shape, ndim) : -1;
-  if (ndim < 0 || numel <= 0) return NULL;
-  if (ndim == 0) return src;
-  int64_t axes[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    axes[i] = i;
-  PolyTensor *sum = poly_tensor_sum(ctx, src, axes, ndim, false);
-  PolyTensor *denominator = mlp_int_scalar(ctx, numel);
-  return sum && denominator ? poly_tensor_div(ctx, sum, denominator, 0) : NULL;
-}
-
-static PolyTensor *mlp_mse(PolyCtx *ctx, PolyTensor *pred, PolyTensor *target) {
-  PolyTensor *diff = poly_tensor_alu2(ctx, POLY_OP_SUB, pred, target);
-  PolyTensor *square = diff ? poly_tensor_alu2(ctx, POLY_OP_MUL, diff, diff) : NULL;
-  return square ? mlp_mean_all(ctx, square) : NULL;
-}
-
-static PolyTensor *mlp_dense_cross_entropy(PolyCtx *ctx, PolyTensor *logits, PolyTensor *target) {
-  PolyUOp *physical = poly_tensor_uop_physical(logits);
-  int ndim = physical ? poly_uop_ndim(ctx, physical) : -1;
-  int classes_dim = ndim == 1 ? 0 : 1;
-  if (ndim < 1) return NULL;
-  PolyTensor *log_probs = poly_tensor_log_softmax(ctx, logits, classes_dim);
-  PolyTensor *weighted = log_probs ? poly_tensor_alu2(ctx, POLY_OP_MUL, log_probs, target) : NULL;
-  int64_t axis[] = {classes_dim};
-  PolyTensor *reduced = weighted ? poly_tensor_sum(ctx, weighted, axis, 1, false) : NULL;
-  PolyTensor *mean = reduced ? mlp_mean_all(ctx, reduced) : NULL;
-  return mean ? poly_tensor_alu1(ctx, POLY_OP_NEG, mean) : NULL;
-}
-
 /* MLP Config */
-
-int model_init_param(
-    PolyModel *model,
-    const char *name,
-    uint64_t seed,
-    int64_t fan_in,
-    float fill
-) {
-  int64_t n = poly_model_buf_numel_named(model, name);
-  if (n <= 0 || (uint64_t)n > SIZE_MAX / sizeof(float) || fan_in < 0) return -1;
-  float *values = malloc((size_t)n * sizeof(float));
-  if (!values) return -1;
-  if (fan_in)
-    poly_init_param_kaiming(seed, name, values, n, fan_in);
-  else
-    for (int64_t i = 0; i < n; i++)
-      values[i] = fill;
-  int rc = poly_model_write_buf_named(model, name, values, (size_t)n * sizeof(float));
-  free(values);
-  return rc;
-}
 
 MLPConfig poly_mlp_config_default(void) {
   return (MLPConfig){
@@ -176,7 +44,7 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *
   int in_dim = cfg->layers[0];
   int out_dim = cfg->layers[cfg->n_layers - 1];
   int batch_size = cfg->batch_size > 0 ? cfg->batch_size : 1;
-  ActivationKind activation = parse_activation(cfg->activation);
+  const char *activation = cfg->activation;
   const char *loss_type = cfg->loss ? cfg->loss : "none";
 
   PolyModel *inst = poly_model_new(ctx, NULL);
@@ -194,7 +62,7 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *
     snprintf(prefix, sizeof(prefix), "layers.%d", l);
     x = poly_model_linear(inst, prefix, x, cfg->layers[l], cfg->layers[l + 1], cfg->use_bias);
     if (!x) goto fail_pre_build;
-    if (l < n_linear - 1) x = apply_activation(ctx, x, activation);
+    if (l < n_linear - 1) x = model_activation(ctx, x, activation);
     if (!x) goto fail_pre_build;
   }
 
@@ -214,8 +82,8 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *
     if (!y_tensor) goto fail_pre_build;
 
     PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
-                                  ? mlp_mse(ctx, x, y_tensor)
-                                  : mlp_dense_cross_entropy(ctx, x, y_tensor);
+                                  ? poly_tensor_mse_loss(ctx, x, y_tensor)
+                                  : poly_tensor_cross_entropy(ctx, x, y_tensor, 1, 2, 0);
     if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
       goto fail_pre_build;
     const char *loss_inputs[] = {"x", "y"};

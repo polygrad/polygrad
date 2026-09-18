@@ -238,7 +238,7 @@ PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice devi
 
 #include "../loaders/gguf_decode.h"
 #include "../loaders/bind.h"
-#include "../loaders/import_desc.h"
+#include "registry.h"
 #include "../loaders/import_error.h"
 
 static PolyModel *qwen3_from_gguf_decoded(
@@ -367,26 +367,16 @@ static PolyModel *qwen3_from_gguf_decoded(
       continue;
     }
 
-    float *f32 = poly_decoded_tensor_to_f32(t);
-    if (!f32) {
-      poly_import_error_set(
-          POLY_IMPORT_ERR_WEIGHT_MISMATCH, "failed to convert weight '%s' (dtype=%d)", t->name,
-          t->dtype
-      );
-      goto fail;
-    }
-
     /*
      * GGUF stores weights in (out, in) convention matching poly_linear.
      * No transpose needed (unlike HF Conv1D).
      */
-    int rc = poly_import_copy_named_tensor(idx, t->name, f32, t->shape, t->ndim, 0);
+    int rc = poly_import_bind_tensor(idx, t->name, t, 0, -1);
     if (rc == 1)
       loaded++;
     else if (rc == 0)
       fprintf(stderr, "poly_qwen3_from_gguf: no buffer for '%s'\n", t->name);
 
-    free(f32);
     if (rc < 0) goto fail;
   }
 

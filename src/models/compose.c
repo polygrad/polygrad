@@ -239,18 +239,8 @@ static PolyTensor *lookup(Definition *d, const cJSON *ref, const char *path) {
 
 static PolyTensor *activation(Definition *d, PolyTensor *x, const char *kind, const char *path) {
   if (!strcmp(kind, "none")) return x;
-  PolyTensor *out = NULL;
-  if (!strcmp(kind, "relu"))
-    out = poly_tensor_relu(d->ctx, x);
-  else if (!strcmp(kind, "sigmoid"))
-    out = poly_tensor_sigmoid(d->ctx, x);
-  else if (!strcmp(kind, "tanh"))
-    out = poly_tensor_tanh(d->ctx, x);
-  else if (!strcmp(kind, "silu"))
-    out = poly_tensor_silu(d->ctx, x);
-  else if (!strcmp(kind, "gelu"))
-    out = poly_tensor_gelu(d->ctx, x);
-  else {
+  PolyTensor *out = model_activation(d->ctx, x, kind);
+  if (!out) {
     def_error(d, path, "unknown activation '%s'", kind);
     return NULL;
   }

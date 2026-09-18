@@ -2,7 +2,7 @@
 #include "factory.h"
 #include "layers.h"
 #include "../nn/nn.h"
-#include "../loaders/import_desc.h"
+#include "registry.h"
 #include "../loaders/import_error.h"
 #include "../loaders/bind.h"
 #include <limits.h>
@@ -257,9 +257,7 @@ PolyModel *poly_llama_from_hf_decoded_generic(
       );
       goto fail;
     }
-    float *data = poly_decoded_tensor_to_f32(t);
-    int rc = data ? poly_import_copy_named_tensor(idx, t->name, data, t->shape, t->ndim, 0) : -1;
-    free(data);
+    int rc = poly_import_bind_tensor(idx, t->name, t, 0, -1);
     if (rc != 1) {
       poly_import_error_set(POLY_IMPORT_ERR_WEIGHT_MISMATCH, "Llama: invalid weight '%s'", t->name);
       goto fail;

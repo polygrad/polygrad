@@ -32,6 +32,8 @@ bool model_config_choice(
     PolyModelError *err
 );
 bool model_config_training(const cJSON *root, PolyModelError *err);
+/* "none" returns the borrowed input; other activations return a new Tensor. */
+PolyTensor *model_activation(PolyCtx *ctx, PolyTensor *x, const char *name);
 /* fan_in > 0 selects the existing seed/name-keyed Kaiming initializer;
  * fan_in == 0 fills a constant. Publish through Model writes on any placement. */
 int model_init_param(PolyModel *model, const char *name, uint64_t seed, int64_t fan_in, float fill);

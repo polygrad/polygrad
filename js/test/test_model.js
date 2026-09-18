@@ -40,6 +40,18 @@ async function runModelTests(pg) {
 
   console.log('\n== Model.fromTensors export ==')
 
+  await test('model type capabilities come from C registry', async () => {
+    const types = pg.models.list()
+    const byName = Object.fromEntries(types.map(type => [type.name, type]))
+    assert(byName.GPT2.constructible && byName.GPT2.hf && byName.GPT2.gguf, 'GPT2 capabilities')
+    assert(byName.Llama.constructible && byName.Llama.hf && !byName.Llama.gguf, 'Llama capabilities')
+    assert(byName.Qwen3.gguf && !byName.Qwen3.hf, 'Qwen3 capabilities')
+    for (const type of types) assert((typeof pg.models[type.name] === 'function') === type.constructible,
+      `constructor availability for ${type.name}`)
+    types[0].name = 'changed'
+    assert(pg.models.list()[0].name !== 'changed', 'discovery must return independent records')
+  })
+
   await test('functional model exports selected forward entrypoint', async () => {
     const w = new Tensor([[2], [3]], { dtype: 'float32' })
     await w.realize()

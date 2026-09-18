@@ -73,7 +73,8 @@ function createNativeCore(device) {
 
   const model = {
     lastError(inst) { return binding.poly_model_last_error(inst) },
-    familyName(index) { return binding.poly_model_family_name(index) },
+    typeName(index) { return binding.poly_model_type_name(index) },
+    typeCapabilities(index) { return binding.poly_model_type_capabilities(index) },
     fromConfig(ctxPtr, json, family) {
       return binding.poly_model_from_config(ctxPtr, family || '', json, deviceId)
     },

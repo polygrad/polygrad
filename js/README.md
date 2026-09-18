@@ -388,6 +388,10 @@ and shared embedding, normalization, RoPE and attention components. For example,
 weights or explicitly write every parameter before calling or exporting them.
 Partial writes do not initialize a parameter; explicitly written zeros do.
 
+`pg.models.list()` reports each registered type's `name`, `constructible`, `hf`,
+and `gguf` capabilities. `constructible` means JSON configuration construction.
+Qwen3 currently supports GGUF loading, not JSON construction or HF loading.
+
 ### Capture and input rules
 
 - Object authors expose `forward(inputs)`; their Tensor attributes supply state

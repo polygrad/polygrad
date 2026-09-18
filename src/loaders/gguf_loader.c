@@ -8,7 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gguf_decode.h"
 #include "gguf_loader.h"
-#include "import_desc.h"
+#include "../models/registry.h"
 #include "import_error.h"
 #include "../model.h"
 #include <stdio.h>
@@ -26,11 +26,14 @@ static PolyModel *gguf_load(
   PolyGgufDecoded *gguf = NULL;
   if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf) return NULL;
 
-  const PolyImportDesc *desc = poly_import_desc_find(gguf->arch);
+  const PolyModelType *desc = model_type_find(gguf->arch);
   if (!desc || !desc->from_gguf_decoded) {
     poly_import_error_set(
-        POLY_IMPORT_ERR_UNSUPPORTED_MODEL, "unsupported GGUF architecture '%s'",
-        gguf->arch ? gguf->arch : ""
+        POLY_IMPORT_ERR_UNSUPPORTED_MODEL,
+        desc ? "%s does not support GGUF import" : "unsupported GGUF architecture '%s'",
+        desc         ? desc->name
+        : gguf->arch ? gguf->arch
+                     : ""
     );
     poly_gguf_decoded_free(gguf);
     return NULL;

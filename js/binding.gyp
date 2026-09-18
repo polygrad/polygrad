@@ -76,7 +76,6 @@
         "csrc/src/loaders/hf_decode.c",
         "csrc/src/loaders/gguf_decode.c",
         "csrc/src/loaders/gguf_loader.c",
-        "csrc/src/loaders/import_desc.c",
         "csrc/src/tokenizer.c"
       ],
       "include_dirs": ["csrc/src", "csrc/vendor/cjson"],

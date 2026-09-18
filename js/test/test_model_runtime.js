@@ -61,6 +61,11 @@ async function checkModelContractErrors(pg) {
 }
 
 async function checkFamilyRegistry(pg) {
+  const types = Object.fromEntries(pg.models.list().map(type => [type.name, type]))
+  assert(types.GPT2.constructible && types.GPT2.hf && types.GPT2.gguf, 'GPT2 capabilities')
+  assert(types.Llama.hf && !types.Llama.gguf, 'Llama capabilities')
+  assert(types.Qwen3.gguf && !types.Qwen3.hf && !types.Qwen3.constructible, 'Qwen3 capabilities')
+  assert(!pg.models.Qwen3, 'import-only type must not expose a config constructor')
   const configs = {MLP:{layers:[2,1]}, TabM:{layers:[2,1],n_ensemble:2},
     NAM:{n_features:2,hidden_sizes:[2]}, GPT2:{vocab_size:8,n_embd:4,n_head:2,n_layer:1,n_positions:2}}
   for (const [family, config] of Object.entries(configs)) {

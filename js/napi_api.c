@@ -5708,21 +5708,35 @@ static napi_value napi_poly_model_from_config(napi_env env, napi_callback_info i
   return make_external(env, model);
 }
 
-static napi_value napi_poly_model_family_name(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_model_type_name(napi_env env, napi_callback_info info) {
   napi_value argv[1], result;
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   int32_t index;
   if (argc != 1) {
-    napi_throw_error(env, NULL, "family name expects an index");
+    napi_throw_error(env, NULL, "model type name expects an index");
     return NULL;
   }
   NAPI_CALL(env, napi_get_value_int32(env, argv[0], &index));
-  const char *name = poly_model_family_name(index);
+  const char *name = poly_model_type_name(index);
   if (name)
     NAPI_CALL(env, napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &result));
   else
     NAPI_CALL(env, napi_get_null(env, &result));
+  return result;
+}
+
+static napi_value napi_poly_model_type_capabilities(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int32_t index;
+  if (argc != 1) {
+    napi_throw_error(env, NULL, "model type capabilities expects an index");
+    return NULL;
+  }
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &index));
+  NAPI_CALL(env, napi_create_int32(env, poly_model_type_capabilities(index), &result));
   return result;
 }
 
@@ -7466,7 +7480,8 @@ NAPI_MODULE_INIT() {
           "poly_model_set_device_map_arrays", napi_poly_model_set_device_map_arrays
       ),
       DECLARE_NAPI_METHOD("poly_model_from_config", napi_poly_model_from_config),
-      DECLARE_NAPI_METHOD("poly_model_family_name", napi_poly_model_family_name),
+      DECLARE_NAPI_METHOD("poly_model_type_name", napi_poly_model_type_name),
+      DECLARE_NAPI_METHOD("poly_model_type_capabilities", napi_poly_model_type_capabilities),
       DECLARE_NAPI_METHOD("poly_model_param_count", napi_poly_model_param_count),
       DECLARE_NAPI_METHOD("poly_model_param_name", napi_poly_model_param_name),
       DECLARE_NAPI_METHOD("poly_model_param_shape", napi_poly_model_param_shape),

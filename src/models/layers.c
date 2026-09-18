@@ -4,6 +4,73 @@
 #include "../device.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+#include "factory.h"
+
+PolyTensor *model_activation(PolyCtx *ctx, PolyTensor *x, const char *name) {
+  if (!name || !strcmp(name, "none")) return x;
+  if (!strcmp(name, "relu")) return poly_tensor_relu(ctx, x);
+  if (!strcmp(name, "gelu")) return poly_tensor_gelu(ctx, x);
+  if (!strcmp(name, "silu")) return poly_tensor_silu(ctx, x);
+  if (!strcmp(name, "sigmoid")) return poly_tensor_sigmoid(ctx, x);
+  if (!strcmp(name, "tanh")) return poly_tensor_tanh(ctx, x);
+  return NULL;
+}
+
+/* Stateless PRNG (SplitMix64) */
+
+static uint64_t splitmix64(uint64_t x) {
+  x += 0x9E3779B97F4A7C15ULL;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+  return x ^ (x >> 31);
+}
+
+static float prng_float(uint64_t seed, uint64_t stream, uint64_t idx) {
+  uint64_t r = splitmix64(seed ^ splitmix64(stream) ^ splitmix64(idx));
+  return (float)(r >> 40) * 0x1.0p-24f;
+}
+
+static uint64_t fnv1a_64(const char *s, size_t len) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (size_t i = 0; i < len; i++)
+    h = (h ^ (uint8_t)s[i]) * 0x100000001b3ULL;
+  return h;
+}
+
+void poly_init_param_kaiming(
+    uint64_t seed,
+    const char *name,
+    float *data,
+    int64_t numel,
+    int64_t fan_in
+) {
+  uint64_t stream = fnv1a_64(name, strlen(name));
+  float bound = sqrtf(6.0f / (float)fan_in);
+  for (int64_t i = 0; i < numel; i++)
+    data[i] = (prng_float(seed, stream, (uint64_t)i) * 2.0f - 1.0f) * bound;
+}
+
+int model_init_param(
+    PolyModel *model,
+    const char *name,
+    uint64_t seed,
+    int64_t fan_in,
+    float fill
+) {
+  int64_t n = poly_model_buf_numel_named(model, name);
+  if (n <= 0 || (uint64_t)n > SIZE_MAX / sizeof(float) || fan_in < 0) return -1;
+  float *values = malloc((size_t)n * sizeof(float));
+  if (!values) return -1;
+  if (fan_in)
+    poly_init_param_kaiming(seed, name, values, n, fan_in);
+  else
+    for (int64_t i = 0; i < n; i++)
+      values[i] = fill;
+  int rc = poly_model_write_buf_named(model, name, values, (size_t)n * sizeof(float));
+  free(values);
+  return rc;
+}
 
 PolyTensor *poly_model_rope_frequencies(
     PolyModel *model,
