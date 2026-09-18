@@ -228,6 +228,8 @@ use that same C dispatch and accept untagged configurations.
 `models.list()` in Python and `pg.models.list()` in JS expose construction,
 HF and GGUF capabilities from this same C table. Qwen3 is currently GGUF-only
 through the generic interface; it is not advertised as a configuration factory.
+New Qwen3 imports own their rotary tables and accept only int32 token input `x`,
+returning `output`. Old bundles retain the signatures shown by `entrypoints()`.
 Untagged configurations are not guessed; the explicit family factories remain
 available. Python accepts `runtime=rt` for configuration construction. JavaScript
 uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.

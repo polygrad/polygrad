@@ -83,12 +83,12 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
   PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_INT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
-  int half_hd = hd / 2;
-  int64_t rope_shape[] = {T, half_hd};
-  PolyTensor *rope_cos_tensor = poly_model_input(inst, "rope_cos", POLY_FLOAT32, rope_shape, 2);
-  if (!rope_cos_tensor) goto fail_pre_build;
-  PolyTensor *rope_sin_tensor = poly_model_input(inst, "rope_sin", POLY_FLOAT32, rope_shape, 2);
-  if (!rope_sin_tensor) goto fail_pre_build;
+  /* TransformerBlock owns rotary frequencies; callers supply only tokens.
+   * Fixed-position AUX also preserves these values across portable imports. */
+  PolyModelRoPEConfig rope = {.length = T, .dim = hd, .theta = cfg->rope_theta, .factor = 1};
+  PolyTensor *rope_cos = poly_model_rope_frequencies(inst, "rope_cos", &rope, false);
+  PolyTensor *rope_sin = poly_model_rope_frequencies(inst, "rope_sin", &rope, true);
+  if (!rope_cos || !rope_sin) goto fail_pre_build;
 
   if (poly_model_scope_push(inst, "token_embd") != POLY_STATUS_OK) goto fail_pre_build;
   int64_t token_shape[] = {V, D};
@@ -98,11 +98,6 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
   PolyTensor *h = poly_tensor_embedding_apply(ctx, x_tensor, token_tensor);
   h = poly_tensor_contiguous(ctx, h);
   if (!h) goto fail_pre_build;
-
-  PolyTensor *rope_cos =
-      poly_tensor_reshape(ctx, rope_cos_tensor, (int64_t[]){1, 1, T, half_hd}, 4);
-  PolyTensor *rope_sin =
-      poly_tensor_reshape(ctx, rope_sin_tensor, (int64_t[]){1, 1, T, half_hd}, 4);
 
   PolyTensor *mask = poly_tensor_causal_mask(ctx, T);
   mask = poly_tensor_reshape(ctx, mask, (int64_t[]){1, 1, T, T}, 4);
@@ -198,9 +193,9 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
   if (!logits) goto fail_pre_build;
 
   if (poly_model_output(inst, "output", logits) != POLY_STATUS_OK) goto fail_pre_build;
-  const char *forward_inputs[] = {"x", "rope_cos", "rope_sin"};
+  const char *forward_inputs[] = {"x"};
   const char *forward_outputs[] = {"output"};
-  if (poly_model_entrypoint(inst, "forward", forward_inputs, 3, forward_outputs, 1, NULL) !=
+  if (poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
       POLY_STATUS_OK)
     goto fail_pre_build;
 
@@ -318,36 +313,6 @@ PolyModel *model_qwen3_from_gguf_decoded(
 
   PolyModel *inst = poly_qwen3_into(ctx, &cfg, device);
   if (!inst) return NULL;
-
-  /* Precompute RoPE frequencies and fill the input buffers */
-  {
-    int hd = cfg.head_dim;
-    int T = cfg.max_seq_len;
-    double theta = (double)cfg.rope_theta;
-
-    /* Find rope_cos and rope_sin buffers */
-    int nb = poly_model_buf_count(inst);
-    float *cos_data = NULL, *sin_data = NULL;
-    int64_t cos_numel = 0, sin_numel = 0;
-    for (int b = 0; b < nb; b++) {
-      const char *bname = poly_model_buf_name(inst, b);
-      if (strcmp(bname, "rope_cos") == 0)
-        cos_data = poly_model_buf_data(inst, b, &cos_numel);
-      else if (strcmp(bname, "rope_sin") == 0)
-        sin_data = poly_model_buf_data(inst, b, &sin_numel);
-    }
-    if (cos_data && sin_data) {
-      int half = hd / 2;
-      for (int pos = 0; pos < T; pos++) {
-        for (int j = 0; j < half; j++) {
-          double freq = 1.0 / pow(theta, (double)(2 * j) / (double)hd);
-          double angle = (double)pos * freq;
-          cos_data[pos * half + j] = (float)cos(angle);
-          sin_data[pos * half + j] = (float)sin(angle);
-        }
-      }
-    }
-  }
 
   /* Bind GGUF weights -- names already match internal names */
   PolyBindIndex *idx = poly_bind_index_create(inst);

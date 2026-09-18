@@ -89,11 +89,7 @@ async function main() {
 
   console.log('forward start')
   const forwardStart = performance.now()
-  // Match the C Qwen fixture's explicit signature, including the imported
-  // RoPE tables. Loading state does not supply omitted invocation inputs.
-  const rope_cos = await inst.readBufferAsync('rope_cos')
-  const rope_sin = await inst.readBufferAsync('rope_sin')
-  const outputs = await inst.forwardAsync({ x, rope_cos, rope_sin })
+  const outputs = await inst.forwardAsync({ x })
   const logits = outputs.output
   if (!(logits instanceof Float32Array)) throw new Error('missing Float32Array output')
   console.log('forward seconds', ((performance.now() - forwardStart) / 1000).toFixed(2), 'output', logits.length)

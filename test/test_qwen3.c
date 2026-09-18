@@ -170,7 +170,7 @@ TEST(qwen3, model_build_and_load) {
   ASSERT_NOT_NULL(inst);
   ASSERT_TRUE(poly_model_ctx(inst) == ctx);
 
-  /* Check buffer count: 4 I/O (x, output, rope_cos, rope_sin) + 310 params */
+  /* Two I/O, two rotary AUX buffers, and checkpoint parameters. */
   int nb = poly_model_buf_count(inst);
   ASSERT_TRUE(nb >= 310);
 
@@ -200,24 +200,8 @@ TEST(qwen3, forward_cpu) {
 
   /* Fill input with prompt "The capital of France is" */
   int32_t input_ids[25] = {785, 6722, 315, 9625, 374};
-  int64_t rope_cos_numel = 0, rope_sin_numel = 0;
-  float *rope_cos = find_buf(inst, "rope_cos", &rope_cos_numel);
-  float *rope_sin = find_buf(inst, "rope_sin", &rope_sin_numel);
-  ASSERT_NOT_NULL(rope_cos);
-  ASSERT_NOT_NULL(rope_sin);
-  PolyIOBinding io[] = {
-      POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32),
-      {.name = "rope_cos",
-       .data = rope_cos,
-       .nbytes = (size_t)rope_cos_numel * sizeof(float),
-       .dtype_id = poly_dtype_id_by_name("float32")},
-      {.name = "rope_sin",
-       .data = rope_sin,
-       .nbytes = (size_t)rope_sin_numel * sizeof(float),
-       .dtype_id = poly_dtype_id_by_name("float32")},
-  };
-
-  int rc = poly_model_forward(inst, io, 3);
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32)};
+  int rc = poly_model_forward(inst, io, 1);
   ASSERT_INT_EQ(rc, 0);
 
   int64_t numel;
@@ -256,24 +240,8 @@ TEST(qwen3, forward_cuda) {
   poly_model_set_device(inst, POLY_DEVICE_CUDA);
 
   int32_t input_ids[25] = {785, 6722, 315, 9625, 374};
-  int64_t rope_cos_numel = 0, rope_sin_numel = 0;
-  float *rope_cos = find_buf(inst, "rope_cos", &rope_cos_numel);
-  float *rope_sin = find_buf(inst, "rope_sin", &rope_sin_numel);
-  ASSERT_NOT_NULL(rope_cos);
-  ASSERT_NOT_NULL(rope_sin);
-  PolyIOBinding io[] = {
-      POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32),
-      {.name = "rope_cos",
-       .data = rope_cos,
-       .nbytes = (size_t)rope_cos_numel * sizeof(float),
-       .dtype_id = poly_dtype_id_by_name("float32")},
-      {.name = "rope_sin",
-       .data = rope_sin,
-       .nbytes = (size_t)rope_sin_numel * sizeof(float),
-       .dtype_id = poly_dtype_id_by_name("float32")},
-  };
-
-  int rc = poly_model_forward(inst, io, 3);
+  PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("x", input_ids, POLY_INT32)};
+  int rc = poly_model_forward(inst, io, 1);
   ASSERT_INT_EQ(rc, 0);
 
   int64_t numel;

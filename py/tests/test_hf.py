@@ -1,6 +1,7 @@
 """Tests for HuggingFace model loading."""
 
 import ctypes
+import base64
 from contextlib import ExitStack
 import json
 import struct
@@ -8,7 +9,45 @@ from pathlib import Path
 import numpy as np
 import pytest
 from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_size
-from polygrad.model import Model
+from polygrad.model import Model, ROLE_AUX
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'CUDA'])
+def test_qwen3_rotary_state_and_roundtrip(device):
+    import polygrad as pg
+    from polygrad.device import Device
+
+    if device == 'CUDA' and not Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/qwen3.json').read_text())
+    with pg.create(device=device) as rt:
+        model = Model.from_gguf(base64.b64decode(fixture['gguf']), max_seq_len=4, runtime=rt)
+        restored = None
+        try:
+            assert model.entrypoints()[0]['inputs'] == ['x']
+            for binding in model.bindings():
+                if binding['name'] in ('rope_cos', 'rope_sin'):
+                    assert binding['role'] == ROLE_AUX
+                    assert binding['shape'] == (1, 1, 4, 4)
+                    assert not binding['trainable']
+                    np.testing.assert_allclose(model.read_buffer(binding['name']).reshape(4, 4),
+                                               fixture[binding['name']], atol=2e-7, rtol=2e-6)
+            bundle = model.save()
+            restored = Model.load(bundle, runtime=rt)
+            assert restored.save() == bundle
+            tokens = np.array(fixture['tokens'], dtype=np.int32)
+            for current in (model, restored):
+                assert current.entrypoints()[0]['inputs'] == ['x']
+                np.testing.assert_allclose(current.forward(x=tokens)['output'], fixture['logits'],
+                                           atol=3e-5, rtol=3e-5)
+            # Imported AUX has independent storage, despite sharing the runtime.
+            before = model.read_buffer('rope_cos').copy()
+            restored.write_buffer('rope_cos', np.zeros(16, dtype=np.float32))
+            np.testing.assert_array_equal(model.read_buffer('rope_cos'), before)
+        finally:
+            if restored is not None:
+                restored.dispose()
+            model.dispose()
 
 
 def test_checkpoint_abi_uses_generic_loaders_only():

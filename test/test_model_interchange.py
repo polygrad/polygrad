@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import json
 import os
@@ -32,6 +33,13 @@ def check_components(model):
         outputs = model.forward(tokens=np.array(case['tokens'], np.int32))
         np.testing.assert_allclose(outputs['prediction'], case['prediction'], atol=2e-5)
         np.testing.assert_allclose(outputs['mean'], case['mean'], atol=2e-5)
+
+
+def check_qwen(model):
+    oracle = json.loads((ROOT / 'test/fixtures/qwen3.json').read_text())
+    assert model.entrypoints()[0]['inputs'] == ['x']
+    output = model.forward(x=np.array(oracle['tokens'], np.int32))['output']
+    np.testing.assert_allclose(output, oracle['logits'], atol=3e-5, rtol=3e-5)
 
 
 def export_c_lstm(work: Path) -> None:
@@ -248,6 +256,11 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
             np.testing.assert_array_equal(variable.forward(x=x)['prediction'], x*2)
     finally:
         variable.dispose()
+    qwen = Model.load((work / f'javascript-{core}-qwen.bundle').read_bytes())
+    try:
+        check_qwen(qwen)
+    finally:
+        qwen.dispose()
     components = Model.load((work / f'javascript-{core}-components.bundle').read_bytes())
     try:
         check_components(components)
@@ -373,6 +386,13 @@ def main() -> None:
     export_custom(work)
     export_variable(work)
     export_stateful(work)
+    oracle = json.loads((ROOT / 'test/fixtures/qwen3.json').read_text())
+    qwen = Model.from_gguf(base64.b64decode(oracle['gguf']), max_seq_len=4)
+    try:
+        check_qwen(qwen)
+        (work / 'python-qwen.bundle').write_bytes(qwen.save())
+    finally:
+        qwen.dispose()
     components = Graph((ROOT / 'test/fixtures/model_components.json').read_bytes())
     try:
         oracle = json.loads((ROOT / 'test/fixtures/model_components_expected.json').read_text())

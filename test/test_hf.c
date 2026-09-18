@@ -635,6 +635,8 @@ TEST(hf, qwen3_build_tiny_staged) {
   ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
 
   ASSERT_INT_EQ(poly_model_param_count(inst), 11);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(inst, "forward"), 1);
+  ASSERT_STR_EQ(poly_model_entrypoint_input_name(inst, "forward", 0), "x");
   ASSERT_STR_EQ(poly_model_param_name(inst, 0), "token_embd.weight");
   ASSERT_STR_EQ(poly_model_param_name(inst, 1), "blk.0.attn_norm.weight");
   ASSERT_STR_EQ(poly_model_param_name(inst, 2), "blk.0.attn_q.weight");
@@ -651,6 +653,22 @@ TEST(hf, qwen3_build_tiny_staged) {
   ASSERT_INT_EQ(numel, 16);
   ASSERT_NOT_NULL(poly_model_buf_data_named(inst, "rope_sin", &numel));
   ASSERT_INT_EQ(numel, 16);
+  for (int i = 0; i < poly_model_buf_count(inst); i++) {
+    const char *name = poly_model_buf_name(inst, i);
+    if (!strcmp(name, "rope_cos") || !strcmp(name, "rope_sin")) {
+      ASSERT_INT_EQ(poly_model_buf_role(inst, i), POLY_ROLE_AUX);
+      float *values = poly_model_buf_data(inst, i, NULL);
+      ASSERT_NOT_NULL(values);
+      for (int t = 0; t < 4; t++)
+        for (int j = 0; j < 4; j++) {
+          double angle = t / pow(cfg.rope_theta, (double)j / 4);
+          ASSERT_TRUE(isfinite(values[t * 4 + j]));
+          ASSERT_FLOAT_EQ(
+              values[t * 4 + j], !strcmp(name, "rope_cos") ? cos(angle) : sin(angle), 1e-6
+          );
+        }
+    }
+  }
   ASSERT_NOT_NULL(poly_model_buf_data_named(inst, "output", &numel));
   ASSERT_INT_EQ(numel, 4 * 32);
 

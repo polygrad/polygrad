@@ -315,6 +315,11 @@ are valid. Wrong input dtypes are rejected, not silently narrowed.
 JSON configuration construction. Qwen3 currently supports GGUF loading, not
 JSON construction or HF loading.
 
+New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
+`model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,
+included in saved bundles. Older bundles retain their original signatures;
+use `model.entrypoints()` to inspect them.
+
 For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 These return the same Model type and use the same training and export APIs.

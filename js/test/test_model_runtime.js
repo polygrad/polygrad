@@ -101,6 +101,37 @@ async function checkFamilyRegistry(pg) {
   assert(/n_ensemble/.test(message), `missing factory diagnostic: ${message}`)
 }
 
+async function checkQwenRotaryState(pg) {
+  const fixture = require('../../test/fixtures/qwen3.json')
+  const bytes = Uint8Array.from(atob(fixture.gguf), c => c.charCodeAt(0))
+  const model = pg.Model.fromGGUF(bytes, { maxSeqLen: 4 })
+  let restored
+  try {
+    assert(JSON.stringify(model.entrypoints()[0].inputs) === '["x"]', 'Qwen accepts only tokens')
+    for (const name of ['rope_cos', 'rope_sin']) {
+      const binding = model.bindings().find(b => b.name === name)
+      assert(binding && binding.role === pg.Model.ROLE_AUX && !binding.trainable, `${name} must be AUX`)
+      assert(JSON.stringify(binding.shape) === '[1,1,4,4]', `${name} broadcast shape`)
+      assertClose(await model.readBufferAsync(name), fixture[name].flat(), 2e-7)
+    }
+    const bundle = await model.saveAsync()
+    restored = pg.Model.load(bundle)
+    const saved = await restored.saveAsync()
+    assert(bundle.length === saved.length && bundle.every((v, i) => v === saved[i]), 'Qwen canonical round trip')
+    const x = new Int32Array(fixture.tokens.flat())
+    for (const current of [model, restored]) {
+      assert(JSON.stringify(current.entrypoints()[0].inputs) === '["x"]', 'round trip preserves signature')
+      assertClose((await current.forwardAsync({ x })).output, fixture.logits.flat(2), 3e-5)
+    }
+    const before = await model.readBufferAsync('rope_cos')
+    await restored.writeBufferAsync('rope_cos', new Float32Array(before.length))
+    assertClose(await model.readBufferAsync('rope_cos'), before, 0)
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+}
+
 async function checkLlamaFamily(pg) {
   const gpu = pg.device === 'webgpu'
   for (const item of llamaFixture.cases) {
@@ -1425,6 +1456,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
+  await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
@@ -2192,6 +2224,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
+  await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))

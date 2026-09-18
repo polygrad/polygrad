@@ -20,6 +20,21 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const qwenBytes = readBytes(path.join(dir, 'python-qwen.bundle'))
+    const qwen = pg.Model.load(qwenBytes)
+    try {
+      const oracle = require('../../test/fixtures/qwen3.json')
+      if (JSON.stringify(qwen.entrypoints()[0].inputs) !== '["x"]')
+        throw new Error('Qwen artifact lost its token-only signature')
+      const out = (await qwen.forwardAsync({ x: new Int32Array(oracle.tokens.flat()) })).output
+      const expected = oracle.logits.flat(2)
+      if (out.length !== expected.length || out.some((v, i) => !Number.isFinite(v) || Math.abs(v - expected[i]) > 3e-5))
+        throw new Error('Qwen rotary state or logits changed across frontends')
+      const saved = await qwen.saveAsync()
+      if (saved.length !== qwenBytes.length || saved.some((b, i) => b !== qwenBytes[i]))
+        throw new Error('Qwen bundle changed across frontends')
+      writeBytes(path.join(dir, `javascript-${core}-qwen.bundle`), saved)
+    } finally { await qwen.dispose() }
     const componentBytes = readBytes(path.join(dir,'python-components.bundle'))
     const components = pg.Model.load(componentBytes)
     try {

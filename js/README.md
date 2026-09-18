@@ -392,6 +392,11 @@ Partial writes do not initialize a parameter; explicitly written zeros do.
 and `gguf` capabilities. `constructible` means JSON configuration construction.
 Qwen3 currently supports GGUF loading, not JSON construction or HF loading.
 
+New Qwen3 GGUF imports take only `x` (`Int32Array`) and return `output`:
+`(await model.forwardAsync({ x: tokenIds })).output`. Rotary tables are
+Model-owned state, included in saved bundles. Older bundles retain their
+original signatures; inspect them with `model.entrypoints()`.
+
 ### Capture and input rules
 
 - Object authors expose `forward(inputs)`; their Tensor attributes supply state
