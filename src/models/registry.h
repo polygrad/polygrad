@@ -23,11 +23,21 @@ typedef struct {
 
 const PolyModelType *model_type_find(const char *name);
 
-PolyModel *poly_gpt2_from_hf_decoded_generic(const PolyHfDecoded *, const PolyGenericImportOpts *);
-PolyModel *
-poly_gpt2_from_gguf_decoded_generic(const PolyGgufDecoded *, const PolyGenericImportOpts *);
-PolyModel *poly_llama_from_hf_decoded_generic(const PolyHfDecoded *, const PolyGenericImportOpts *);
-PolyModel *
-poly_qwen3_from_gguf_decoded_generic(const PolyGgufDecoded *, const PolyGenericImportOpts *);
+/* Registry callbacks are library-internal, not independently callable ABI.
+ * Private headers alone do not hide symbols in native shared-library builds. */
+#if defined(__GNUC__)
+#define MODEL_IMPORT_INTERNAL __attribute__((visibility("hidden")))
+#else
+#define MODEL_IMPORT_INTERNAL
+#endif
+MODEL_IMPORT_INTERNAL PolyModel *
+model_gpt2_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_gpt2_from_gguf_decoded(const PolyGgufDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_llama_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_qwen3_from_gguf_decoded(const PolyGgufDecoded *, const PolyGenericImportOpts *);
+#undef MODEL_IMPORT_INTERNAL
 
 #endif

@@ -233,6 +233,11 @@ available. Python accepts `runtime=rt` for configuration construction. JavaScrip
 uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
 They are factories, not subclasses or a second execution graph.
 
+C checkpoint callers use `poly_hf_load` / `poly_gguf_load`, or their `_into`
+variants to borrow a caller-owned context. The registry selects the model-specific
+name mapping; decoded adapters are private. MLP/TabM/NAM and Sequential/Graph
+use Model bundles or state loading, not HF/GGUF adapters.
+
 MLP, TabM, NAM and Sequential/Graph initialize their parameters during construction.
 GPT-2, Llama and Qwen checkpoint builders allocate topology and storage, but refuse
 execution and export until all required parameters have been supplied. Use the HF/

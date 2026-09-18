@@ -795,7 +795,9 @@ class Model:
             ctx, buf, len(data), int(max_batch), int(max_seq_len), _device_id(device) if device is not None else 0
         )
         if not ptr:
-            raise RuntimeError('poly_gguf_load returned NULL')
+            detail = _get_lib().poly_import_last_error_message()
+            message = detail.decode('utf-8', errors='replace') if detail else ''
+            raise RuntimeError('poly_gguf_load returned NULL' + (f': {message}' if message else ''))
         return Model._from_handle(ptr, ctx)
 
     # ── Param Enumeration ────────────────────────────────────────────

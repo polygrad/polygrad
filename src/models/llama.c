@@ -221,10 +221,7 @@ PolyModel *model_llama_from_config(PolyCtx *ctx, const cJSON *root, PolyModelErr
   return llama_config(root, &c, err) ? llama_build(ctx, &c, err) : NULL;
 }
 
-PolyModel *poly_llama_from_hf_decoded_generic(
-    const PolyHfDecoded *hf,
-    const PolyGenericImportOpts *opts
-) {
+PolyModel *model_llama_from_hf_decoded(const PolyHfDecoded *hf, const PolyGenericImportOpts *opts) {
   PolyModelError err = {0};
   LlamaConfig c;
   if (!hf || !opts || !llama_config(hf->config, &c, &err)) goto invalid;

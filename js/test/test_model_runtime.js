@@ -644,6 +644,18 @@ function checkModelCodecRejection(pg) {
   let invalidRejected = false
   try { pg.Model.fromHF(invalidHeads, []).dispose() } catch (e) { invalidRejected = /fromHF failed/.test(e.message) }
   assert(invalidRejected, 'zero attention heads must fail before division')
+  const zeroHeads = [71, 71, 85, 70]
+  const u32 = n => zeroHeads.push(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255)
+  const u64 = n => { u32(n); u32(0) }
+  const str = s => { const bytes = new TextEncoder().encode(s); u64(bytes.length); zeroHeads.push(...bytes) }
+  u32(3); u64(0); u64(2)
+  str('general.architecture'); u32(8); str('qwen3')
+  str('qwen3.attention.head_count'); u32(4); u32(0)
+  while (zeroHeads.length % 32) zeroHeads.push(0)
+  invalidRejected = false
+  try { pg.Model.fromGGUF(new Uint8Array(zeroHeads)).dispose() }
+  catch (e) { invalidRejected = /attention.head_count must be positive/.test(e.message) }
+  assert(invalidRejected, 'GGUF zero heads must return an import error, not trap')
   const config = new TextEncoder().encode(JSON.stringify({ model_type: 'gpt2',
     n_embd: 8, n_head: 2, n_layer: 1, vocab_size: 4, n_positions: 4 }))
   const badShard = new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 123])
@@ -659,7 +671,8 @@ function checkModelCodecRejection(pg) {
   wrongShape.set(header, 8)
   error = null
   try { pg.Model.fromHF(config, [wrongShape]).dispose() } catch (e) { error = e }
-  assert(error && /numel mismatch/.test(error.message), 'Model import must propagate weight-copy failure')
+  assert(error && /shape mismatch for 'wte.weight'/.test(error.message),
+    'Model import must propagate the named checkpoint shape mismatch')
   const badGguf = new Uint8Array(64)
   badGguf.set([71, 71, 85, 70, 3])
   badGguf[16] = 1

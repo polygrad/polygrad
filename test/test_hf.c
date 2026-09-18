@@ -15,6 +15,7 @@
 #include "../src/engine/schedule.h"
 #include "../src/loaders/hf_decode.h"
 #include "../src/loaders/gguf_decode.h"
+#include "../src/loaders/import_error.h"
 #include "../src/loaders/bind.h"
 #include "../src/models/registry.h"
 #include <string.h>
@@ -688,6 +689,22 @@ TEST(hf, bind_index_candidate_allocation_failure) {
 
 TEST(hf, bind_index_table_allocation_failure) {
   ASSERT_TRUE(bind_allocation_rejected(1));
+  PASS();
+}
+
+TEST(hf, qwen3_gguf_zero_heads_rejects_before_division) {
+  PolyGgufKV kv = {.key = "qwen3.attention.head_count", .type = 4, .val.u64 = 0};
+  PolyGgufDecoded g = {.kv = &kv, .n_kv = 1, .arch = "qwen3"};
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyGenericImportOpts opts = {.ctx = ctx, .device = POLY_DEVICE_INTERP};
+  const PolyModelType *desc = model_type_find(g.arch);
+  poly_import_error_clear();
+  ASSERT_TRUE(desc->from_gguf_decoded(&g, &opts) == NULL);
+  ASSERT_INT_EQ(poly_import_last_error_code(), POLY_IMPORT_ERR_PARSE);
+  ASSERT_TRUE(strstr(poly_import_last_error_message(), "attention.head_count must be positive"));
+  ASSERT_NOT_NULL(poly_const_int(ctx, 42));
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

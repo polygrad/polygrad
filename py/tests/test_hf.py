@@ -11,6 +11,38 @@ from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_s
 from polygrad.model import Model
 
 
+def test_checkpoint_abi_uses_generic_loaders_only():
+    from polygrad import _ffi
+
+    lib = _ffi.get_lib()
+    for name in ('poly_hf_load', 'poly_hf_load_into', 'poly_gguf_load', 'poly_gguf_load_into'):
+        assert getattr(lib, name)
+    for model, formats in (('gpt2', ('hf', 'gguf')), ('llama', ('hf',)), ('qwen3', ('gguf',))):
+        for fmt in formats:
+            for name in (f'poly_{model}_from_{fmt}', f'poly_{model}_from_{fmt}_decoded',
+                         f'poly_{model}_from_{fmt}_decoded_generic', f'model_{model}_from_{fmt}_decoded'):
+                with pytest.raises(AttributeError, match='undefined symbol'):
+                    getattr(lib, name)
+
+
+def test_qwen3_gguf_zero_heads_preserves_runtime():
+    import polygrad as pg
+
+    def string(value):
+        data = value.encode()
+        return struct.pack('<Q', len(data)) + data
+
+    data = b'GGUF' + struct.pack('<IQQ', 3, 0, 2)
+    data += string('general.architecture') + struct.pack('<I', 8) + string('qwen3')
+    data += string('qwen3.attention.head_count') + struct.pack('<II', 4, 0)
+    data += bytes((-len(data)) % 32)
+    with pg.create(device='INTERP') as rt:
+        live = rt.Tensor([2.0]).realize()
+        with pytest.raises(RuntimeError, match='attention.head_count.*positive'):
+            Model.from_gguf(data, runtime=rt)
+        assert (live + 1).item() == 3
+
+
 @pytest.mark.parametrize('shape,transpose', [((4, 2), 0), ((2, 3), 0), ((3, 2), 1)])
 def test_checkpoint_binding_rejects_wrong_shape_without_writing(shape, transpose):
     import polygrad as pg

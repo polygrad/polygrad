@@ -233,13 +233,14 @@ PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice devi
 #include "registry.h"
 #include "../loaders/import_error.h"
 
-static PolyModel *qwen3_from_gguf_decoded(
-    PolyCtx *ctx,
+PolyModel *model_qwen3_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
-    int max_batch,
-    int max_seq_len,
-    PolyDevice device
+    const PolyGenericImportOpts *opts
 ) {
+  PolyCtx *ctx = opts ? opts->ctx : NULL;
+  int max_batch = opts ? opts->max_batch : 0;
+  int max_seq_len = opts ? opts->max_seq_len : 0;
+  PolyDevice device = opts ? opts->device : POLY_DEVICE_AUTO;
   if (!gguf) return NULL;
 
   /* Extract config from GGUF KV */
@@ -271,6 +272,12 @@ static PolyModel *qwen3_from_gguf_decoded(
 
 #undef KV_INT
 #undef KV_FLOAT
+
+  /* The adapter derives head widths before the builder can validate config. */
+  if (cfg.n_heads < 1) {
+    poly_import_error_set(POLY_IMPORT_ERR_PARSE, "qwen3.attention.head_count must be positive");
+    return NULL;
+  }
 
   /* vocab_size from token_embd.weight shape */
   for (int i = 0; i < gguf->n_tensors; i++) {
@@ -380,24 +387,4 @@ fail:
   poly_bind_index_destroy(idx);
   poly_model_free(inst);
   return NULL;
-}
-
-/* Registry adapter */
-PolyModel *poly_qwen3_from_gguf_decoded(
-    const PolyGgufDecoded *gguf,
-    int max_batch,
-    int max_seq_len,
-    PolyDevice device
-) {
-  return qwen3_from_gguf_decoded(NULL, gguf, max_batch, max_seq_len, device);
-}
-
-PolyModel *poly_qwen3_from_gguf_decoded_generic(
-    const PolyGgufDecoded *gguf,
-    const PolyGenericImportOpts *opts
-) {
-  return qwen3_from_gguf_decoded(
-      opts ? opts->ctx : NULL, gguf, opts ? opts->max_batch : 0, opts ? opts->max_seq_len : 0,
-      opts ? opts->device : POLY_DEVICE_AUTO
-  );
 }

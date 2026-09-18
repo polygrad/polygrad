@@ -49,6 +49,7 @@ int main(void) {
                               if p.parent.name == 'models' and p.suffix == '.h')
     for kind in ('mlp', 'tabm', 'nam', 'gpt2', 'qwen3', 'llama', 'sequential', 'graph'):
         assert not re.search(r'\bpoly_' + kind + r'(?:_from_json(?:_into)?)?\s*\(', model_headers), kind
+        assert not re.search(r'\bpoly_' + kind + r'_from_(?:hf|gguf)\w*\s*\(', model_headers), kind
     for path, source in sources.items():
         if path.name not in ("frontend.c", "frontend.h"):
             assert not re.search(r'#\s*include\s*["<](?:[^">]*/)?frontend(?:_internal)?\.h[">]', source), path

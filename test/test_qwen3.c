@@ -7,9 +7,9 @@
  */
 
 #include "test_harness.h"
-#include "../src/models/qwen3.h"
 #include "../src/codegen/codegen.h"
 #include "../src/loaders/gguf_decode.h"
+#include "../src/loaders/gguf_loader.h"
 #include "../src/model.h"
 #include "../src/engine/schedule.h"
 #include "../src/tokenizer.h"
@@ -164,8 +164,11 @@ TEST(qwen3, config_from_gguf) {
 
 TEST(qwen3, model_build_and_load) {
   SKIP_IF_NO_GGUF();
-  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
+  ASSERT_TRUE(poly_model_ctx(inst) == ctx);
 
   /* Check buffer count: 4 I/O (x, output, rope_cos, rope_sin) + 310 params */
   int nb = poly_model_buf_count(inst);
@@ -182,12 +185,17 @@ TEST(qwen3, model_build_and_load) {
   ASSERT_INT_EQ(numel, 25 * 151936); /* batch * seq_len * vocab */
 
   poly_model_free(inst);
+  /* The generic loader borrows the caller's context, even after model disposal. */
+  ASSERT_NOT_NULL(poly_const_int(ctx, 42));
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(qwen3, forward_cpu) {
   SKIP_IF_NO_GGUF();
-  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Fill input with prompt "The capital of France is" */
@@ -232,6 +240,7 @@ TEST(qwen3, forward_cpu) {
   ASSERT_INT_EQ(next_id, 12095);
 
   poly_model_free(inst);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -240,7 +249,9 @@ TEST(qwen3, forward_cuda) {
   if (!poly_cuda_available()) SKIP("no CUDA GPU");
   SKIP_IF_NO_GGUF();
 
-  PolyModel *inst = poly_qwen3_from_gguf_decoded(g_gguf, 1, 25, POLY_DEVICE_AUTO);
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   poly_model_set_device(inst, POLY_DEVICE_CUDA);
 
@@ -282,6 +293,7 @@ TEST(qwen3, forward_cuda) {
   ASSERT_INT_EQ(next_id, 12095);
 
   poly_model_free(inst);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 #endif /* POLY_HAS_CUDA */

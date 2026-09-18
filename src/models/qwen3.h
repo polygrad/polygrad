@@ -6,7 +6,6 @@
 #define POLY_MODEL_QWEN3_H
 
 #include "../model.h"
-#include "../loaders/gguf_decode.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,12 +32,6 @@ Qwen3Config poly_qwen3_config_default(void);
 /* Borrows ctx and restores its defaults on every exit. Explicit NULL ctx
  * requests a standalone Model that owns its context. */
 PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice device);
-PolyModel *poly_qwen3_from_gguf_decoded(
-    const PolyGgufDecoded *gguf,
-    int batch_size,
-    int max_seq_len,
-    PolyDevice device
-);
 
 #ifdef __cplusplus
 }

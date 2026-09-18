@@ -177,14 +177,14 @@ static const PolyModelType model_types[] = {
     {"MLP", "mlp", model_mlp_from_config, NULL, NULL},
     {"TabM", "tabm", model_tabm_from_config, NULL, NULL},
     {"NAM", "nam", model_nam_from_config, NULL, NULL},
-    {"GPT2", "gpt2", model_gpt2_from_config, poly_gpt2_from_hf_decoded_generic,
-     poly_gpt2_from_gguf_decoded_generic},
+    {"GPT2", "gpt2", model_gpt2_from_config, model_gpt2_from_hf_decoded,
+     model_gpt2_from_gguf_decoded},
     {"Sequential", "sequential", model_sequential_from_config, NULL, NULL},
     {"Graph", "graph", model_graph_from_config, NULL, NULL},
-    {"Llama", "llama", model_llama_from_config, poly_llama_from_hf_decoded_generic, NULL},
-    {"Qwen3", "qwen3", NULL, NULL, poly_qwen3_from_gguf_decoded_generic},
-    {"DistilGPT2", "distilgpt2", model_distilgpt2_from_config, poly_gpt2_from_hf_decoded_generic,
-     poly_gpt2_from_gguf_decoded_generic},
+    {"Llama", "llama", model_llama_from_config, model_llama_from_hf_decoded, NULL},
+    {"Qwen3", "qwen3", NULL, NULL, model_qwen3_from_gguf_decoded},
+    {"DistilGPT2", "distilgpt2", model_distilgpt2_from_config, model_gpt2_from_hf_decoded,
+     model_gpt2_from_gguf_decoded},
 };
 
 const char *poly_model_type_name(int index) {
