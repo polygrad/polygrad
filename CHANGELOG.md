@@ -6,6 +6,10 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Preserve execution of programs with incomplete optional estimates, including
+  imported programs and CUDA graphs. Count kernels while omitting incomplete
+  operation/memory estimates.
+
 - Reduce replay allocation churn by sharing simplified PROGRAM estimates on
   retained runtime entries, preparing fixed runner launch bounds once, and
   using scratch storage for short device names. Dynamic bindings, PROGRAM

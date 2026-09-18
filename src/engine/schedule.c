@@ -1362,6 +1362,12 @@ static void poly_runner_apply_program_launch_info(
   }
 }
 
+/* PGIR admits nullable estimate fields. Preserve ordinary execution's existing
+ * all-or-nothing statistics contract; missing metadata is not a kernel error. */
+static bool runtime_estimates_complete(const PolyEstimates *estimates) {
+  return estimates && estimates->ops && estimates->lds && estimates->mem;
+}
+
 static void runtime_estimates_release(PolyCtx *ctx, PolyEstimates *estimates) {
   poly_uop_release(ctx, estimates->ops);
   poly_uop_release(ctx, estimates->lds);
@@ -4081,7 +4087,7 @@ static int poly_linear_stats(
 ) {
   if (!ctx || !update_stats || ctx->stats_suppression_depth > 0) return 0;
   uint64_t ops = 0, mem = copy_bytes, lds = 0;
-  if (estimates && estimates->ops && estimates->lds && estimates->mem &&
+  if (runtime_estimates_complete(estimates) &&
       poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
     return -1;
   ctx->kernel_count = poly_counter_add_sat(ctx->kernel_count, 1);
@@ -4250,7 +4256,8 @@ static int poly_exec_linear_program(
     }
     ctx->launch_count++;
     const PolyEstimates *estimates = poly_program_estimates(program);
-    if (update_stats && ctx->stats_suppression_depth == 0 && runtime_entry && estimates) {
+    if (update_stats && ctx->stats_suppression_depth == 0 && runtime_entry &&
+        runtime_estimates_complete(estimates)) {
       if (!runtime_entry->estimates.ops &&
           !runtime_estimates_simplify(ctx, &runtime_entry->estimates, estimates))
         goto lane_cleanup;
@@ -4630,14 +4637,16 @@ static int poly_exec_linear_graph(
     /* Keep per-PROGRAM checked inference and saturating totals. A graph owns
      * fallback metadata when runtime caching is disabled; otherwise share the
      * existing retained runtime owner with ordinary LINEAR execution. */
-    PolyEstimates *estimates = entry->runtime_entries[node]
-                                   ? &entry->runtime_entries[node]->estimates
-                                   : &entry->estimates[node];
-    if (!estimates->ops &&
-        !runtime_estimates_simplify(ctx, estimates, poly_program_estimates(body)))
-      goto fail_prepared;
-    if (poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
-      goto fail_prepared;
+    const PolyEstimates *source_estimates = poly_program_estimates(body);
+    if (runtime_estimates_complete(source_estimates)) {
+      PolyEstimates *estimates = entry->runtime_entries[node]
+                                     ? &entry->runtime_entries[node]->estimates
+                                     : &entry->estimates[node];
+      if (!estimates->ops && !runtime_estimates_simplify(ctx, estimates, source_estimates))
+        goto fail_prepared;
+      if (poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
+        goto fail_prepared;
+    }
     total_ops = poly_counter_add_sat(total_ops, ops);
     total_mem = poly_counter_add_sat(total_mem, mem);
   }

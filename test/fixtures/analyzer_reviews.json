@@ -135,7 +135,7 @@
       "src/engine/jit.h": "2d425001350ea0faecd3b418887b381c5cfdc6ae6ad26e80b61525f05022f949",
       "src/engine/realize.c": "00c0e0f1f10e5bc9aa5f69965d58f596b72c8deba3fabda5a0c4dc5278e8ee77",
       "src/engine/realize.h": "0efb03179b956db6da7005b5ef2094237cacd641837d2bf4b86a36d5e06366c1",
-      "src/engine/schedule.c": "58e9abb809719768d10504e44af1c172e46fba93e8111b54d2696030102f3e37",
+      "src/engine/schedule.c": "d30ad744486887c50ad18ba9e6b23cd91ef539fe9a7581d39a8e79632c03360b",
       "src/engine/schedule.h": "31ce129c28a8f2abee8811cd897f7e52dcb248ddc0d221b18cab6549165259ec",
       "src/frontend.c": "d585254a633100f56688fba65108f9fc3dd9c35d9cfb73f173703bf6df9b38e5",
       "src/frontend.h": "d389be3264ff1ccc265377fda9bc0f7e3a04c1d4ea24d68ae9dea0eff551faec",
@@ -423,7 +423,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 4601,
+      "line": 4608,
       "column": 28,
       "message": "Array access (via field 'items') results in a null pointer dereference",
       "checker": "core.NullDereference",

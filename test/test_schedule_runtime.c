@@ -1203,6 +1203,120 @@ TEST_BACKEND(cuda, graph_estimates_cached_preserves_saturating_totals) {
 }
 #endif
 
+static bool partial_estimates_execute(PolyDevice device, bool graph, bool round_trip) {
+  bool ok = true;
+  /* Every incomplete combination is accepted by PGIR; the complete packet
+   * is a control that must still contribute counters. */
+  for (int mask = 1; mask <= 7; mask++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, device);
+    PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT64, 1, 0);
+    poly_uop_retain(ctx, out);
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, ptr, &zero, 1),
+        poly_uop_const_typed(ctx, POLY_INT64, 42), poly_arg_none()
+    );
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "partial_estimates");
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+    PolyUOp *linear = poly_compile_linear(
+        ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), 0
+    );
+    if (!linear) {
+      poly_ctx_destroy(ctx);
+      return false;
+    }
+    PolyUOp *program = linear->src[0]->src[0];
+    PolyEstimates estimates = {
+        .ops = mask & 1 ? poly_uop_const_typed(ctx, POLY_INT64, 5) : NULL,
+        .lds = mask & 2 ? poly_uop_const_typed(ctx, POLY_INT64, 7) : NULL,
+        .mem = mask & 4 ? poly_uop_const_typed(ctx, POLY_INT64, 11) : NULL};
+    PolyKernelInfo info = *program->src[0]->arg.kernel_info;
+    info.estimates = &estimates;
+    PolyUOp *body = program->src[0];
+    PolyUOp **sources = malloc((size_t)program->n_src * sizeof(*sources));
+    if (!sources) {
+      poly_ctx_destroy(ctx);
+      return false;
+    }
+    memcpy(sources, program->src, (size_t)program->n_src * sizeof(*sources));
+    sources[0] = poly_uop_tagged_arg(
+        ctx, body->op, body->dtype, body->src, body->n_src, poly_arg_kernel_info(&info), body->tag,
+        body->tag_arg
+    );
+    program = poly_uop_replace_src(ctx, program, sources);
+    free(sources);
+    call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, program, out, poly_arg_none());
+    linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+    PolyIrSpec imported = {0};
+    if (round_trip) {
+      PolyIrEntrypoint ep = {.name = "run", .sink = linear};
+      PolyIrSpec spec = {.ctx = ctx, .entrypoints = &ep, .n_entrypoints = 1};
+      int length = 0;
+      uint8_t *bytes = poly_program_graph_export(&spec, &length);
+      bool loaded = bytes && poly_program_graph_import(bytes, length, &imported) == 0;
+      free(bytes);
+      poly_ctx_destroy(ctx);
+      if (!loaded) return false;
+      ctx = imported.ctx;
+      linear = imported.entrypoints[0].sink;
+      out = linear->src[0]->src[1];
+      poly_uop_retain(ctx, out);
+    }
+    if (graph) linear = runtime_test_graph(ctx, linear);
+    poly_uop_retain(ctx, linear);
+    for (int repeat = 0; repeat < 3; repeat++) {
+      bool stats = repeat != 0;
+      int64_t got = 0, reset = 0;
+      ok &= poly_buffer_write(ctx, out, &reset, sizeof(reset)) == 0;
+      poly_ctx_reset_counters(ctx);
+      int rc = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, stats, true, false);
+      int read = poly_buffer_read(ctx, out, &got, sizeof(got));
+      bool correct = rc == 0 && read == 0 && got == 42 && ctx->kernel_count == (stats ? 1 : 0) &&
+                     ctx->global_ops == (stats && mask == 7 ? 5 : 0) &&
+                     ctx->global_mem == (stats && mask == 7 ? 11 : 0);
+      if (!correct)
+        fprintf(
+            stderr,
+            "partial estimates: device%d graph%d import%d mask%d stats%d rc%d kernels%llu ops%llu "
+            "got%lld\n",
+            device, graph, round_trip, mask, stats, rc, (unsigned long long)ctx->kernel_count,
+            (unsigned long long)ctx->global_ops, (long long)got
+        );
+      ok &= correct;
+      if (repeat == 1) poly_runtime_cache_clear(ctx);
+      ok &= poly_ctx_collect(ctx) == 0;
+    }
+    poly_uop_release(ctx, linear);
+    poly_uop_release(ctx, out);
+    if (round_trip) poly_ir_spec_free(&imported);
+    poly_ctx_destroy(ctx);
+  }
+  return ok;
+}
+
+TEST(schedule_runtime, partial_estimates_execute) {
+  ASSERT_TRUE(partial_estimates_execute(POLY_DEVICE_INTERP, false, false));
+  PASS();
+}
+
+TEST(schedule_runtime, partial_estimates_import_execute) {
+  ASSERT_TRUE(partial_estimates_execute(POLY_DEVICE_INTERP, false, true));
+  PASS();
+}
+
+#ifdef POLY_HAS_CUDA
+TEST_BACKEND(cuda, partial_estimates_execute) {
+  ASSERT_TRUE(partial_estimates_execute(POLY_DEVICE_CUDA, false, false));
+  PASS();
+}
+
+TEST_BACKEND(cuda, partial_estimates_graph_execute) {
+  ASSERT_TRUE(partial_estimates_execute(POLY_DEVICE_CUDA, true, true));
+  PASS();
+}
+#endif
+
 TEST(schedule_runtime, program_rejects_unbound_buffer_parameter) {
   PolyDevice devices[] = {
 #ifndef __EMSCRIPTEN__

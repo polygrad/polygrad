@@ -6,6 +6,9 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Preserve execution of imported programs with incomplete optional estimates;
+  missing counter metadata no longer makes successful execution report failure.
+
 - Reduce native, Wasm and WebGPU replay allocation churn through shared
   estimate preparation, fixed launch metadata and device-name scratch storage.
   Dynamic bindings and Asyncify execution contracts are unchanged.

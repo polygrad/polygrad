@@ -132,6 +132,7 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.beam_time_call_reads_scalar_values
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.wide_scalar_integer_args
 	$(SAN_RUN) $(NODE) $< --require-no-skips runtime_estimates_cached
+	$(SAN_RUN) $(NODE) $< --require-no-skips partial_estimates
 	$(SAN_RUN) $(NODE) $< --require-no-skips fixed_launch_preparation
 	$(SAN_RUN) $(NODE) $< --require-no-skips local_size
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_allocates_only_program_globals

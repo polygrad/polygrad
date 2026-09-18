@@ -6,6 +6,9 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Preserve execution of imported programs with incomplete optional estimates;
+  missing counter metadata no longer makes successful execution report failure.
+
 - Reduce core replay allocation churn through cached symbolic estimates,
   prepared fixed launch bounds and short device-name scratch storage. No
   Python API, ABI or artifact-format change.
