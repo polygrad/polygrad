@@ -27,7 +27,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
             'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-browser',
             'test-js-native-cpu', 'test-js-native-x86', 'test-js-native-interp',
             'test-js-native-cuda', 'test-js-native-gc', 'test-js-wasm',
-            'test-py-sdist-install', 'test-js-package-install',
+            'test-py-sdist-install', 'test-py-min-install', 'test-js-package-install',
             'test-parity', 'test-parity-graph', 'test-parity-cuda',
             'test-compat-tinygrad-upstream-ratchet', 'test-compat-tinygrad-ops',
             'test-compat-tinygrad-nn', 'test-compat-tinygrad-policy', 'test-nn-wasm',
@@ -87,7 +87,13 @@ def test_release_stops_before_matrix_when_preflight_fails(runner, tmp_path):
 
 
 def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path):
-    variables = dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable)
+    # The real 3.9 execution belongs to test-py-min-install. A configured
+    # probe double keeps orchestration tests independent of a local 3.9 path.
+    floor_python = tmp_path / 'python39'
+    floor_python.write_text('#!/bin/sh\necho "CPython 3.9"\nexit 0\n')
+    floor_python.chmod(0o700)
+    variables = dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable,
+                     PYTHON_MIN=str(floor_python))
     assert runner['preflight'](variables) == 0
     # GCC accepts the C11 core, but not the CPU renderer's __fp16 storage type.
     assert runner['preflight'](dict(variables, CC='gcc')) == 1
@@ -95,6 +101,9 @@ def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path):
     wrong_python.write_text('#!/bin/sh\necho "CPython 3.12"\nexit 1\n')
     wrong_python.chmod(0o700)
     assert runner['preflight'](dict(variables, PYTHON=str(wrong_python))) == 1
+    assert runner['preflight'](dict(variables, PYTHON_MIN=str(wrong_python))) == 1
+    # The audit interpreter cannot stand in for the floor interpreter.
+    assert runner['preflight'](dict(variables, PYTHON_MIN=sys.executable)) == 1
 
 
 def test_release_preflight_decodes_diagnostics_under_ascii_locale(tmp_path):
@@ -125,11 +134,12 @@ def test_release_subprocesses_use_utf8(runner, tmp_path):
 
 def test_release_make_defaults_do_not_export_builtin_cc_or_ambient_python():
     env = {key: value for key, value in os.environ.items()
-           if key not in ('CC', 'PYTHON', 'MAKEFLAGS', 'MAKEOVERRIDES', 'MFLAGS')}
+           if key not in ('CC', 'PYTHON', 'PYTHON_MIN', 'MAKEFLAGS', 'MAKEOVERRIDES', 'MFLAGS')}
     command = ['make', '-n', 'test-release', 'PARITY_PY=reviewed-python']
     defaults = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=True)
     assert "--make-var 'CC=clang'" in defaults.stdout
     assert "--make-var 'PYTHON=reviewed-python'" in defaults.stdout
+    assert "--make-var 'PYTHON_MIN=python3.9'" in defaults.stdout
     explicit = subprocess.run(command + ['CC=gcc', 'PYTHON=other-python'],
                               cwd=ROOT, env=env, text=True, capture_output=True, check=True)
     assert "--make-var 'CC=gcc'" in explicit.stdout

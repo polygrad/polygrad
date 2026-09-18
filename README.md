@@ -1149,7 +1149,12 @@ Provide the documented toolchains, pinned `PARITY_PY` environment, fixtures,
 writable caches and browser display. `PYTHON` selects the ordinary frontend and
 package-test environment and defaults to `PARITY_PY` for release runs;
 both must use CPython 3.11 for the pinned source-audit tests. `HF_PYTHON` selects
-the independent HF reference stack. Release runs default to Clang unless `CC`
+the independent HF reference stack. `PYTHON_MIN` (default `python3.9`) selects
+the required minimum-version installed-package lane, `test-py-min-install`.
+It builds with `PYTHON`, then installs and executes the sdist in a fresh 3.9
+environment, including quantized GGUF decoding. Set `PYTHON_MIN` to your 3.9
+interpreter's path; a missing or wrong interpreter fails acceptance.
+Release runs default to Clang unless `CC`
 is explicitly supplied. Formatting uses `CLANG_FORMAT=clang-format-14`; analysis
 uses `ANALYZER_CC=clang-14` and requires the exact reviewed compiler version.
 The first gate checks these tools, CPU-renderer `__fp16` support, Python versions,

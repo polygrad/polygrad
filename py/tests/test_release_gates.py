@@ -126,6 +126,14 @@ def test_package_gate_rejects_missing_or_ambiguous_artifact(tmp_path):
         select(tmp_path, '*.tgz')
 
 
+def test_package_gate_rejects_wrong_floor_before_install():
+    result = subprocess.run([sys.executable, str(ROOT / 'test/test_package_install.py'),
+                             'python', '--require-python', '0.0'], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert 'requires 0.0; running' in result.stderr
+    assert 'Evidence:' not in result.stdout
+
+
 def test_qwen_fixture_gate_rejects_missing_file(tmp_path):
     run = subprocess.run(['make', '-s', 'require-qwen3-gguf', f'QWEN3_GGUF={tmp_path}/missing'],
                          cwd=ROOT, capture_output=True, text=True)

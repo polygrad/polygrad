@@ -81,7 +81,9 @@ def ggml_data_to_tensor(t: Tensor, n: int, ggml_type: int) -> Tensor:
       db = d * (scale_words.rshift(28).cast(dtypes.float32) + 0.5).reshape((-1, 8, 1, 1)) * 0.5
       sign_idx = scale_words.unsqueeze(-1).rshift(
         Tensor([0, 7, 14, 21], device=t.device, dtype=dtypes.uint32)).bitwise_and(0x7F).reshape((-1, 32)).cast(dtypes.int32)
-      even_signs = Tensor([i | (0x80 if i.bit_count() % 2 else 0) for i in range(128)], dtype=dtypes.uint8, device=t.device)
+      # tinygrad/llm/gguf.py:ggml_data_to_tensor uses int.bit_count (3.10+).
+      # Preserve the same parity table on Polygrad's Python 3.9 floor.
+      even_signs = Tensor([i | (0x80 if bin(i).count('1') % 2 else 0) for i in range(128)], dtype=dtypes.uint8, device=t.device)
       signs = (q_to_uint8(even_signs[sign_idx].reshape((-1, 32, 1)), 1) == 0).where(1.0, -1.0).reshape((-1, 8, 4, 8))
       grid = _ggml_iq_grid(t.device, _ggml.iq3xxs_grid, (256, 4))[blocks[:, 2:66]].reshape((-1, 8, 4, 8))
       return (db * grid * signs).flatten(-3)

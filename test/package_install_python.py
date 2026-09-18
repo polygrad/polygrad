@@ -1,6 +1,7 @@
 """Executed with -I inside a fresh installed-package environment."""
 
 from pathlib import Path
+import hashlib
 import sys
 
 import numpy as np
@@ -10,12 +11,22 @@ from polygrad.models import Sequential
 from polygrad.helpers import Context
 from polygrad.nn import LSTMCell, optim
 from polygrad.uop.ops import KernelInfo, UOp
+from polygrad.dtype import dtypes
+from polygrad.llm.gguf import ggml_data_to_tensor
 
 
 prefix = Path(sys.prefix).resolve()
 assert Path(polygrad.__file__).resolve().is_relative_to(prefix), polygrad.__file__
 assert Path(_ffi.get_lib()._name).resolve().is_relative_to(prefix), _ffi.get_lib()._name
 assert Path(np.__file__).resolve().is_relative_to(prefix), np.__file__
+print({'python': sys.version, 'numpy': np.__version__}, flush=True)
+# Same IQ3_XXS block and pinned-output digest as test_gguf.py. Execute it on
+# the minimum interpreter: parsing/importing alone misses newer int methods.
+block = ((np.arange(98, dtype=np.uint16) * 37 + 11) & 0xFF).astype(np.uint8)
+block[:2] = np.asarray([1.0], dtype=np.float16).view(np.uint8)
+decoded = ggml_data_to_tensor(Tensor(block, dtype=dtypes.uint8, device='INTERP').realize(), 256, 18)
+assert hashlib.sha256(decoded.numpy().tobytes()).hexdigest() == (
+    '35aa99c61a8a85f22c5fc116e83dcc80299c6f20d820774a00f0cda44d08cdbb')
 np.testing.assert_array_equal(Tensor([1, 2, 3]).mul(2).numpy(), [2, 4, 6])
 import platform
 if platform.machine().lower() in ('x86_64', 'amd64'):
@@ -65,4 +76,5 @@ with Context(TRAINING=1):
 np.testing.assert_allclose(p.numpy(), [[1.03743243, 2.11009645], [2.77558279, 4.05183554]],
                            atol=2e-5, rtol=2e-5)
 print({'package': polygrad.__file__, 'library': _ffi.get_lib()._name,
-       'tensor': True, 'model_bundle': True, 'lstm': True, 'muon': True, 'cache_clear': True})
+       'tensor': True, 'model_bundle': True, 'lstm': True, 'muon': True, 'cache_clear': True,
+       'gguf_iq3_xxs': True})

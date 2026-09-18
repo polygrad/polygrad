@@ -33,7 +33,7 @@ pip install polygrad
 Requirements:
 
 - Linux
-- Python 3.9 or newer (0.5.0 post-publication examples checked on CPython 3.11)
+- Python 3.9 or newer (release checks execute isolated installs on 3.9 and 3.11)
 - NumPy
 - A C compiler and Python development headers
 - A C compiler on `PATH` for CPU execution: clang recommended, GCC fallback;

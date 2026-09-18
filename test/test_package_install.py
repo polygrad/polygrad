@@ -108,7 +108,12 @@ def main():
     parser.add_argument('kind', choices=['python', 'node'])
     parser.add_argument('--npm', default='npm')
     parser.add_argument('--node', default='node')
+    parser.add_argument('--require-python', help='require this exact major.minor for the Python install lane')
     args = parser.parse_args()
+    if args.require_python:
+        actual = '.'.join(map(str, sys.version_info[:2]))
+        if args.kind != 'python' or actual != args.require_python:
+            parser.error(f'Python install lane requires {args.require_python}; running {actual}')
     (ROOT / 'temp').mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=f'package-{args.kind}-', dir=ROOT / 'temp'))
     print('Evidence:', work, flush=True)

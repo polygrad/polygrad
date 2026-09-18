@@ -21,6 +21,7 @@ SAN_RUN = ASAN_OPTIONS=$(ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 EMCC ?= emcc
 EMSDK_PYTHON ?= /usr/bin/python3
 PYTHON ?= python
+PYTHON_MIN ?= python3.9
 NPM ?= npm
 TWINE ?= twine
 # Polygrad's scheduler/codegen path uses deeper C call chains than
@@ -878,7 +879,7 @@ RELEASE_MAKE := $(MAKE)
 # user choices remain authoritative and are checked before the matrix starts.
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
-RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
+RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
                    QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
@@ -889,6 +890,7 @@ test-release:
 test-release-preflight:
 	@$(PARITY_PY) scripts/test_release.py --preflight \
 		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)' \
+		--make-var 'PYTHON_MIN=$(PYTHON_MIN)' \
 		--make-var 'CLANG_FORMAT=$(CLANG_FORMAT)' --make-var 'ANALYZER_CC=$(ANALYZER_CC)'
 
 test-release-list:
@@ -973,6 +975,11 @@ build-python: build-py
 test-py-sdist-install: build-py-sdist
 	$(PYTHON) test/test_package_install.py python
 
+.PHONY: test-py-min-install
+# Build tooling stays on PYTHON; only the isolated consumer runs on the floor.
+test-py-min-install: build-py-sdist
+	$(PYTHON_MIN) test/test_package_install.py python --require-python 3.9
+
 test-js-package-install: verify-source-mirrors wasm-pkg
 	$(PYTHON) test/test_package_install.py node --npm $(NPM) --node $(NODE)
 
@@ -980,6 +987,7 @@ test-js-package-install: verify-source-mirrors wasm-pkg
 # even when the parent make was invoked with -j.
 test-release-packages:
 	$(MAKE) test-py-sdist-install
+	$(MAKE) test-py-min-install
 	$(MAKE) test-js-package-install
 
 publish-py: build-py-sdist

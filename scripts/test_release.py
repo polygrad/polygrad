@@ -50,7 +50,7 @@ def release_gates():
         test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm
         test-indexing-wasm test-materialization-wasm
         test-js-wasm test-js-package test-browser test-browser-qwen3
-        test-model-interchange test-py-sdist-install test-js-package-install
+        test-model-interchange test-py-sdist-install test-py-min-install test-js-package-install
         test-parity test-parity-ir test-parity-ir-opt test-parity-cuda
         test-parity-graph test-release-op-census
         test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops test-compat-tinygrad-nn
@@ -102,6 +102,9 @@ def preflight(variables):
     )
     for name in ('PYTHON', 'PARITY_PY'):
         checks.append((name, shlex.split(variables.get(name, sys.executable)) + ['-c', version_check], None))
+    checks.append(('PYTHON_MIN', shlex.split(variables.get('PYTHON_MIN', 'python3.9')) + ['-c',
+                   'import sys, venv; print(sys.executable, sys.version); '
+                   'sys.exit(sys.version_info[:2] != (3, 9))'], None))
     # Fail before the matrix when isolated-package/proof tooling is missing.
     checks.append(('PYTHON build', shlex.split(variables.get('PYTHON', sys.executable)) +
                    ['-c', 'import build'], None))
@@ -131,7 +134,7 @@ def preflight(variables):
             print(f'{name}: {exc}')
     if failed:
         print('Use a compiler accepting CPU __fp16 kernels and CPython 3.11 for PYTHON/PARITY_PY. '
-              'HF_PYTHON is independent.')
+              'PYTHON_MIN must be Python 3.9; HF_PYTHON is independent.')
     return int(failed)
 
 
