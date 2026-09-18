@@ -8,6 +8,7 @@ LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
 TSAN_CC ?= clang
 CLANG_FORMAT ?= clang-format-14
 ANALYZER_CC ?= clang-14
+ARCHBIRD ?= archbird
 TSAN_OPTIONS ?= halt_on_error=1:second_deadlock_stack=1
 TSAN_RUNNER ?= setarch $$(uname -m) -R
 # Keep LeakSanitizer enabled by default for the native debug test binary.
@@ -401,9 +402,9 @@ test-parity-graph parity-graph-report: build/libpolygrad.so
 
 reference-migration-report: parity-graph-report
 	@mkdir -p temp/xdg_cache
-	@ARCHBIRD="$$(command -v archbird || true)"; \
-	  test -n "$$ARCHBIRD" || ARCHBIRD=/home/anton/tools/miniconda3/envs/agents/bin/archbird; \
-	  XDG_CACHE_HOME=$(abspath temp/xdg_cache) "$$ARCHBIRD" map . \
+	@command -v "$(ARCHBIRD)" >/dev/null 2>&1 || { \
+	  echo 'Archbird not found; install it on PATH or set ARCHBIRD=/path/to/archbird' >&2; exit 1; }; \
+	  XDG_CACHE_HOME=$(abspath temp/xdg_cache) "$(ARCHBIRD)" map . \
 	    --format json --output temp/archbird-polygrad.json --check
 	$(PARITY_PY) scripts/reference_migration.py \
 		--graph-report $(GRAPH_PARITY_DIR)/report.json \

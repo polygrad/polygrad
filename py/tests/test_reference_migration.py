@@ -3,12 +3,24 @@
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 
 import pytest
 
 from scripts import reference_migration as migration
+
+
+@pytest.mark.parametrize("override", [None, "/opt/custom tools/archbird"])
+def test_report_uses_configurable_archbird(override):
+    command = ["make", "-n", "-o", "parity-graph-report", "reference-migration-report"]
+    if override is not None:
+        command.append(f"ARCHBIRD={override}")
+    env = {k: v for k, v in os.environ.items() if k not in ("ARCHBIRD", "MAKEFLAGS", "MFLAGS")}
+    result = subprocess.run(command, cwd=migration.ROOT, env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert f'"{override or "archbird"}" map .' in result.stdout
 
 
 def put(root, name, text):
