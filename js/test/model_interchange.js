@@ -20,6 +20,24 @@ async function main() {
   }
   const pg = await polygrad.create({ core, device: core === 'native' ? 'cpu' : 'wasm' })
   try {
+    const cases = require('../../test/fixtures/vision.json').cases
+    for (const i of [0,1,2,4]) {
+      const item = cases[i], bytes = readBytes(path.join(dir, `python-${item.name}.bundle`))
+      const model = pg.Model.load(bytes)
+      try {
+        const inputs = Object.fromEntries(Object.entries(item.inputs).map(([k,v]) =>
+          [k, k === 'input_ids' ? new Int32Array(v.flat(Infinity)) : new Float32Array(v.flat(Infinity))]))
+        const outputs = await model.forwardAsync(inputs)
+        for (const [name,v] of Object.entries(item.outputs)) {
+          const expected = v.flat(Infinity), actual = outputs[name]
+          if (actual.length !== expected.length || actual.some((x,j) => !Number.isFinite(x) || Math.abs(x-expected[j]) > 1e-4))
+            throw new Error(`${item.name} ${name} changed across frontends`)
+        }
+        const saved = await model.saveAsync()
+        if (saved.length !== bytes.length || saved.some((b,j) => b !== bytes[j])) throw new Error(`${item.name} noncanonical bundle`)
+        writeBytes(path.join(dir, `javascript-${core}-${item.name}.bundle`), saved)
+      } finally { await model.dispose() }
+    }
     const qwenBytes = readBytes(path.join(dir, 'python-qwen.bundle'))
     const qwen = pg.Model.load(qwenBytes)
     try {

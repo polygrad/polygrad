@@ -7,6 +7,7 @@
 
 #include "test_harness.h"
 #include "../src/safetensors.h"
+#include "../src/bundle.h"
 #include "../src/models/models.h"
 #include "../src/models/qwen3.h"
 #include "../src/nn/nn.h"
@@ -23,6 +24,39 @@
 #include <math.h>
 
 /* Safetensors multi-dtype */
+
+TEST(hf, vision_config_factories_require_weights) {
+  const char *types[] = {"ViT", "DINOv2", "DINOv3", "CLIP"};
+  const char *encoder = "{\"hidden_size\":16,\"num_attention_heads\":2,\"num_hidden_layers\":1,"
+                        "\"intermediate_size\":24,\"image_size\":8,\"patch_size\":4}";
+  for (int i = 0; i < 4; i++) {
+    char config[1024];
+    if (i == 3)
+      snprintf(
+          config, sizeof(config),
+          "{\"vision_config\":%s,\"text_config\":%s,\"projection_dim\":8,\"max_seq_len\":3}",
+          encoder, encoder
+      );
+    else
+      snprintf(config, sizeof(config), "%s", encoder);
+    PolyCtx *ctx = poly_ctx_new();
+    PolyModelError err = {0};
+    PolyModel *m = poly_model_from_config(
+        ctx, types[i], config, (int)strlen(config), POLY_DEVICE_INTERP, &err
+    );
+    ASSERT_NOT_NULL(m);
+    ASSERT_TRUE(poly_model_ctx(m) == ctx);
+    ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "forward"), i == 3 ? 2 : 1);
+    int size = 0;
+    uint8_t *data = poly_model_save_bundle(m, &size);
+    ASSERT_TRUE(data == NULL);
+    ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not initialized") != NULL);
+    free(data);
+    poly_model_free(m);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
 
 TEST(hf, decoded_output_byte_count_cannot_wrap) {
   float input = 1.0f;

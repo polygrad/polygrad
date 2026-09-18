@@ -174,6 +174,10 @@ bool model_config_training(const cJSON *root, PolyModelError *err) {
 }
 
 static const PolyModelType model_types[] = {
+    {"CLIP", "clip", model_clip_from_config, model_clip_from_hf_decoded, NULL},
+    {"ViT", "vit", model_vit_from_config, model_vit_from_hf_decoded, NULL},
+    {"DINOv2", "dinov2", model_dinov2_from_config, model_dinov2_from_hf_decoded, NULL},
+    {"DINOv3", "dinov3_vit", model_dinov3_from_config, model_dinov3_from_hf_decoded, NULL},
     {"MLP", "mlp", model_mlp_from_config, NULL, NULL},
     {"TabM", "tabm", model_tabm_from_config, NULL, NULL},
     {"NAM", "nam", model_nam_from_config, NULL, NULL},

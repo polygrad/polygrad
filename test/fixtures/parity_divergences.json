@@ -173,6 +173,18 @@
       "close_when": "Re-evaluate the exact invalid-coordinate graph and execution probes on Tinygrad pin changes. No backend-specific arithmetic policy is introduced."
     },
     {
+      "id": "PG-DIV-011",
+      "status": "approved",
+      "stages": ["model"],
+      "area": "portable CLIP, ViT, DINOv2 and DINOv3 vision models",
+      "tinygrad": "Pinned extra/models/clip.py and vit.py implement CLIP/ViT authoring. The pin has no DINOv2 or DINOv3 model implementation.",
+      "polygrad": "Shared C registry builders expose fixed-resolution eval Models and HF checkpoint imports. CLIP/ViT reuse pinned components with HF names, activations and pooling; DINOv2/v3 follow Transformers5.3.0. DINOv3 precomputes fixed-position 2D rotary AUX. Tensor, compiler and execution semantics are unchanged.",
+      "rationale": "The user requested all four models as portability checks across Python, JavaScript, native and Wasm execution. This is a Model construction extension, not a physical-graph parity allowance.",
+      "approval": "User 2026-09-18: create CLIP and DINO, explicitly DINO2 and DINO3, then include ViT as a portability check.",
+      "evidence": ["src/models/vision.c", "src/models/clip.c", "src/models/vit.c", "src/models/dinov2.c", "src/models/dinov3.c", "test/generate_vision_fixture.py", "test/fixtures/vision.json", "py/tests/test_vision_models.py", "js/test/test_model_runtime.js", "temp/vision-correspondence.md"],
+      "close_when": "Re-evaluate authoring references when the Tinygrad or Transformers reference changes. This row never excuses compiler, Tensor or backend mismatches."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

@@ -132,6 +132,33 @@ async function checkQwenRotaryState(pg) {
   }
 }
 
+async function checkVisionModels(pg) {
+  for (const item of require('../../test/fixtures/vision.json').cases) {
+    const weights = Uint8Array.from(atob(item.weights), c => c.charCodeAt(0))
+    const model = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(item.config)), [weights], {maxBatch: 2})
+    let restored
+    try {
+      const inputs = Object.fromEntries(Object.entries(item.inputs).map(([k,v]) =>
+        [k, k === 'input_ids' ? new Int32Array(v.flat(Infinity)) : new Float32Array(v.flat(Infinity))]))
+      const outputs = await model.forwardAsync(inputs)
+      for (const [k,v] of Object.entries(item.outputs)) assertClose(outputs[k], v.flat(Infinity), 1e-4)
+      const bundle = await model.saveAsync()
+      restored = pg.Model.load(bundle)
+      const saved = await restored.saveAsync()
+      assert(bundle.length === saved.length && bundle.every((v,i) => v === saved[i]), `${item.name} canonical bundle`)
+      const roundtrip = await restored.forwardAsync(inputs)
+      for (const [k,v] of Object.entries(item.outputs)) assertClose(roundtrip[k], v.flat(Infinity), 1e-4)
+      if (item.name === 'CLIP') {
+        assertClose((await model.callAsync('encode_image', {pixel_values:inputs.pixel_values})).image_embeds, outputs.image_embeds, 1e-5)
+        assertClose((await model.callAsync('encode_text', {input_ids:inputs.input_ids})).text_embeds, outputs.text_embeds, 1e-5)
+      }
+    } finally {
+      if (restored) await restored.dispose()
+      await model.dispose()
+    }
+  }
+}
+
 async function checkLlamaFamily(pg) {
   const gpu = pg.device === 'webgpu'
   for (const item of llamaFixture.cases) {
@@ -1457,6 +1484,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
+  await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
@@ -2225,6 +2253,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
+  await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))

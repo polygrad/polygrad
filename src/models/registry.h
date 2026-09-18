@@ -38,6 +38,14 @@ MODEL_IMPORT_INTERNAL PolyModel *
 model_llama_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
 MODEL_IMPORT_INTERNAL PolyModel *
 model_qwen3_from_gguf_decoded(const PolyGgufDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_clip_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_vit_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_dinov2_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_dinov3_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
 #undef MODEL_IMPORT_INTERNAL
 
 #endif

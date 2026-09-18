@@ -230,6 +230,12 @@ HF and GGUF capabilities from this same C table. Qwen3 is currently GGUF-only
 through the generic interface; it is not advertised as a configuration factory.
 New Qwen3 imports own their rotary tables and accept only int32 token input `x`,
 returning `output`. Old bundles retain the signatures shown by `entrypoints()`.
+CLIP, ViT, DINOv2 and DINOv3 ViT provide shared C vision inference and HF
+checkpoint imports. Their saved bundles work in Python, Node and the browser;
+see the [Python](py/README.md#vision-models) and [JavaScript](js/README.md#vision-models)
+guides for image/token inputs, outputs and supported variants.
+These model-layer additions are registered as PG-DIV-011; DINO architectures
+follow Transformers because they are absent from the pinned Tinygrad catalogue.
 Untagged configurations are not guessed; the explicit family factories remain
 available. Python accepts `runtime=rt` for configuration construction. JavaScript
 uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
@@ -1207,6 +1213,8 @@ Strict release checks require actual fixtures and execution:
 ```bash
 make test-release-gates                    # negative controls: missing HF dependencies / CUDA
 make test-qwen3                            # requires POLY_QWEN3_GGUF or the default temp/ fixture
+make test-vision                           # small CLIP/ViT/DINO reference, import and native/Wasm checks
+POLY_TEST_FILTER=Vision make test-browser   # the same models on browser auto/INTERP/WebGPU
 make HAS_CUDA=1 test-qwen3-cuda              # requires a working CUDA GPU, not a skipped test
 make test-hf-e2e HF_PYTHON=/path/to/python  # requires huggingface_hub, transformers and torch
 make test-release-packages                  # fresh sdist and npm native/fallback installations

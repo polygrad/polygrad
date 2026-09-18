@@ -48,6 +48,10 @@ PolyModel *model_gpt2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_gpt2_configure(PolyCtx *, const cJSON *, GPT2Config, PolyModelError *);
 PolyModel *model_distilgpt2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_llama_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_clip_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_vit_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_dinov2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_dinov3_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_sequential_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_graph_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 

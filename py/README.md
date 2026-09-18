@@ -320,6 +320,33 @@ New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
 included in saved bundles. Older bundles retain their original signatures;
 use `model.entrypoints()` to inspect them.
 
+### Vision models
+
+`models.CLIP`, `models.ViT`, `models.DINOv2` and `models.DINOv3` use shared C
+components. Construct from a configuration, write all required weights, or load
+a Hugging Face directory with `Model.from_hf(path)`. Unloaded models reject
+execution and saving. Their bundles load in JavaScript with `pg.Model.load(bytes)`.
+
+| Model | Inputs | Forward outputs |
+| --- | --- | --- |
+| CLIP | `pixel_values`, `input_ids` | `image_embeds`, `text_embeds`, `logits_per_image`, `logits_per_text` |
+| ViT | `pixel_values` | `last_hidden_state`, `pooler_output` (tanh pooler) |
+| DINOv2 / DINOv3 | `pixel_values` | `last_hidden_state`, `pooler_output` (CLS token) |
+
+Inputs are already normalized float32 images in `[batch, channels, height, width]`
+layout. Use the checkpoint's image processor; the Model does not decode, resize
+or normalize images. CLIP additionally takes int32, right-padded token IDs with
+an EOS token. Its `encode_image` and `encode_text` entrypoints accept one modality
+and return normalized embeddings. Both modalities use the configured batch size.
+
+This implementation is fixed-square-resolution, unmasked inference. It supports
+HF `CLIPModel`, `ViTModel`, `Dinov2Model` and `DINOv3ViTModel` weights, not
+classification heads, DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations
+or positional interpolation to other resolutions. DINOv3 includes register tokens
+and patch-only 2D RoPE; `last_hidden_state` retains those prefix tokens. DINOv2
+SwiGLU and DINOv3 gated MLP configurations are supported. JSON type tags are
+`clip`, `vit`, `dinov2` and `dinov3_vit`.
+
 For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
 [model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
 These return the same Model type and use the same training and export APIs.

@@ -42,6 +42,18 @@ def check_qwen(model):
     np.testing.assert_allclose(output, oracle['logits'], atol=3e-5, rtol=3e-5)
 
 
+def vision_cases():
+    cases = json.loads((ROOT / 'test/fixtures/vision.json').read_text())['cases']
+    return [cases[i] for i in (0, 1, 2, 4)]
+
+
+def check_vision(model, case):
+    inputs = {k:np.array(v, np.int32 if k == 'input_ids' else np.float32) for k,v in case['inputs'].items()}
+    outputs = model.forward(**inputs)
+    for name, expected in case['outputs'].items():
+        np.testing.assert_allclose(outputs[name], expected, atol=5e-5, rtol=5e-4)
+
+
 def export_c_lstm(work: Path) -> None:
     """Exercise C model construction without a Python Tensor/model recipe."""
     lib = ctypes.CDLL(_ffi._lib._name)
@@ -266,6 +278,12 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
         check_components(components)
     finally:
         components.dispose()
+    for case in vision_cases():
+        model = Model.load((work / f"javascript-{core}-{case['name']}.bundle").read_bytes())
+        try:
+            check_vision(model, case)
+        finally:
+            model.dispose()
     composed = Model.from_bundle((work / f'javascript-{core}-graph.bundle').read_bytes())
     try:
         np.testing.assert_array_equal(composed.forward(x=np.array([[1, 2]], np.float32))['prediction'], [[28, 61]])
@@ -386,6 +404,14 @@ def main() -> None:
     export_custom(work)
     export_variable(work)
     export_stateful(work)
+    for case in vision_cases():
+        model = Model.from_hf(config_json=json.dumps(case['config']),
+                              weight_bytes_list=[base64.b64decode(case['weights'])], max_batch=2)
+        try:
+            check_vision(model, case)
+            (work / f"python-{case['name']}.bundle").write_bytes(model.save())
+        finally:
+            model.dispose()
     oracle = json.loads((ROOT / 'test/fixtures/qwen3.json').read_text())
     qwen = Model.from_gguf(base64.b64decode(oracle['gguf']), max_seq_len=4)
     try:

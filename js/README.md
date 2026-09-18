@@ -397,6 +397,34 @@ New Qwen3 GGUF imports take only `x` (`Int32Array`) and return `output`:
 Model-owned state, included in saved bundles. Older bundles retain their
 original signatures; inspect them with `model.entrypoints()`.
 
+### Vision models
+
+`pg.models.CLIP`, `ViT`, `DINOv2` and `DINOv3` use the same C builders as Python.
+Load HF config/safetensors bytes with `pg.Model.fromHF(configBytes, weightFiles)`,
+or a Python-saved bundle with `pg.Model.load(bytes)`. Configuration-only models
+require weights before execution or saving; WebGPU construction uses the `Async`
+factory variants.
+
+| Model | Inputs | Forward outputs |
+| --- | --- | --- |
+| CLIP | `pixel_values`, `input_ids` | `image_embeds`, `text_embeds`, `logits_per_image`, `logits_per_text` |
+| ViT | `pixel_values` | `last_hidden_state`, `pooler_output` (tanh pooler) |
+| DINOv2 / DINOv3 | `pixel_values` | `last_hidden_state`, `pooler_output` (CLS token) |
+
+Use `await model.forwardAsync(inputs)` on WebGPU. Images are preprocessed
+`Float32Array` values in NCHW order at the checkpoint's fixed square resolution;
+decoding, resizing and normalization are not part of the Model. CLIP tokens are
+right-padded `Int32Array` values containing EOS. Its `encode_image`/`encode_text`
+entrypoints return normalized embeddings from one modality; both use the same
+configured batch size.
+
+Supported checkpoint classes: HF `CLIPModel`, `ViTModel`, `Dinov2Model` and
+`DINOv3ViTModel`. This is unmasked inference, not classification heads,
+DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations or variable-resolution
+position interpolation. DINOv3 includes register tokens and patch-only 2D RoPE;
+the full hidden-state output includes prefix tokens. DINOv2 SwiGLU and DINOv3
+gated MLP are supported. JSON tags: `clip`, `vit`, `dinov2`, `dinov3_vit`.
+
 ### Capture and input rules
 
 - Object authors expose `forward(inputs)`; their Tensor attributes supply state
