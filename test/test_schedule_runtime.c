@@ -1011,6 +1011,125 @@ TEST_BACKEND(cuda, graph_scalar_integer_args) {
   ASSERT_TRUE(runtime_scalar_integer_args(POLY_DEVICE_CUDA, true));
   PASS();
 }
+
+static void graph_estimates_cached(int *_passed, int *_failed, bool symbolic, bool saturated) {
+  ASSERT_TRUE(poly_cuda_available());
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT64, 1, 0);
+  PolyParamArg arg = {
+      .slot = 1,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "estimate_n",
+      .has_minmax = true,
+      .min_val = poly_arg_int(INT64_MIN),
+      .max_val = poly_arg_int(INT64_MAX)};
+  PolyUOp *n = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT64, poly_arg_param(&arg));
+  ASSERT_INT_EQ(poly_uop_retain(ctx, n), 0);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, out), 0);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, ptr, &zero, 1), n, poly_arg_none()
+  );
+  PolyKernelInfo info = {.name = "graph_estimate_bindings"};
+  PolyUOp *sink =
+      poly_uop_tagged(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_kernel_info(&info), 1);
+  PolyUOp *calls[3] = {poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none())};
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 1, poly_arg_none());
+  linear = poly_compile_linear(ctx, linear, 0);
+  ASSERT_NOT_NULL(linear);
+  PolyUOp *other = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *copied = poly_test_buffer_on_device(ctx, POLY_INT64, 1, POLY_DEVICE_CUDA);
+  PolyUOp *copy = poly_uop1(ctx, POLY_OP_COPY, POLY_INT64, other, poly_arg_str("CUDA"));
+  calls[2] = poly_uop3(ctx, POLY_OP_CALL, POLY_VOID, copy, copied, other, poly_arg_none());
+  /* Create derived metadata after compilation's collection safe point.
+   * Pinned GraphRunner sums Estimates(2*n,8*n,8*n) twice plus an 8-byte COPY. */
+  PolyUOp *two = poly_uop_const_typed(ctx, POLY_INT64, 2);
+  PolyUOp *eight = poly_uop_const_typed(ctx, POLY_INT64, 8);
+  PolyUOp *extent = symbolic ? n : poly_uop_const_typed(ctx, POLY_INT64, 3);
+  PolyEstimates estimates = {
+      .ops = poly_uop_alu2(ctx, POLY_OP_MUL, extent, two),
+      .lds = poly_uop_alu2(ctx, POLY_OP_MUL, extent, eight),
+      .mem = poly_uop_alu2(ctx, POLY_OP_MUL, extent, eight)};
+  if (saturated) {
+    /* Each estimate fits signed64; their graph total does not. Keep the
+     * existing unsigned, saturating counter sum after simplification. */
+    estimates.ops = estimates.lds = estimates.mem = poly_uop_alu2(
+        ctx, POLY_OP_ADD, poly_uop_const(ctx, poly_arg_int(INT64_MAX), POLY_INT64),
+        poly_uop_const_typed(ctx, POLY_INT64, 0)
+    );
+  }
+  ASSERT_NOT_NULL(estimates.ops);
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *program = linear->src[0]->src[0];
+    PolyUOp *sources[4];
+    ASSERT_TRUE(program->n_src <= 4);
+    memcpy(sources, program->src, program->n_src * sizeof(*sources));
+    PolyUOp *body = sources[0];
+    PolyKernelInfo metadata = *body->arg.kernel_info;
+    metadata.estimates = &estimates;
+    sources[0] = poly_uop_tagged_arg(
+        ctx, body->op, body->dtype, body->src, body->n_src, poly_arg_kernel_info(&metadata),
+        body->tag, body->tag_arg
+    );
+    ASSERT_NOT_NULL(sources[0]);
+    program = poly_uop_replace_src(ctx, program, sources);
+    ASSERT_NOT_NULL(program);
+    calls[i] = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, program, i ? other : out, poly_arg_none());
+  }
+  linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 3, poly_arg_none());
+  ASSERT_NOT_NULL(linear);
+  linear = runtime_test_graph(ctx, linear);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  const int64_t values[] = {2, 7, 2};
+  for (int i = 0; i < 3; i++) {
+    PolyVarBinding binding = {.var = n, .value = values[i]};
+    poly_ctx_reset_counters(ctx);
+    poly_test_estimates_walk_count(true);
+    ASSERT_INT_EQ(poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, true, false), 0);
+    ASSERT_INT_EQ(ctx->kernel_count, 1);
+    ASSERT_TRUE(
+        ctx->global_ops == (saturated ? UINT64_MAX - 1 : 4 * (uint64_t)(symbolic ? values[i] : 3))
+    );
+    ASSERT_TRUE(
+        ctx->global_mem == (saturated ? UINT64_MAX : 16 * (uint64_t)(symbolic ? values[i] : 3) + 8)
+    );
+    ASSERT_INT_EQ(poly_test_estimates_walk_count(false), symbolic ? 6 : 0);
+    int64_t got = 0;
+    ASSERT_INT_EQ(poly_buffer_read(ctx, copied, &got, sizeof(got)), 0);
+    ASSERT_INT_EQ(got, values[i]);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  }
+  poly_ctx_reset_counters(ctx);
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false), -1);
+  ASSERT_INT_EQ(ctx->global_ops, 0);
+  ASSERT_INT_EQ(ctx->global_mem, 0);
+  /* Clearing graph runtimes must release the derived expression roots, then
+   * permit rebuilding the same graph with a new binding. */
+  poly_engine_ctx_cleanup(ctx);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyVarBinding binding = {.var = n, .value = 5};
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, true, false), 0);
+  ASSERT_TRUE(ctx->global_ops == (saturated ? UINT64_MAX - 1 : symbolic ? 20 : 12));
+  ASSERT_TRUE(ctx->global_mem == (saturated ? UINT64_MAX : symbolic ? 88 : 56));
+  poly_uop_release(ctx, linear);
+  poly_uop_release(ctx, n);
+  poly_uop_release(ctx, out);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, graph_estimates_cached_symbolic_bindings_and_copy) {
+  graph_estimates_cached(_passed, _failed, true, false);
+}
+
+TEST_BACKEND(cuda, graph_estimates_cached_constants_without_walks) {
+  graph_estimates_cached(_passed, _failed, false, false);
+}
+
+TEST_BACKEND(cuda, graph_estimates_cached_preserves_saturating_totals) {
+  graph_estimates_cached(_passed, _failed, false, true);
+}
 #endif
 
 TEST(schedule_runtime, program_rejects_unbound_buffer_parameter) {

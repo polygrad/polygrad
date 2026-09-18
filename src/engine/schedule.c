@@ -85,6 +85,7 @@ typedef struct {
   PolyCudaGraph *graph;
   PolyRunner *runners;
   PolyRuntimeCacheEntry **runtime_entries;
+  PolyEstimates *estimates;
   int n_nodes;
 } PolyGraphCacheEntry;
 #endif
@@ -1221,6 +1222,13 @@ static bool poly_launch_arg_to_i64(PolyArg arg, int64_t *out) {
   }
 }
 
+#ifdef POLY_TESTING
+static atomic_int estimates_walk_count;
+int poly_test_estimates_walk_count(bool reset) {
+  return reset ? atomic_exchange(&estimates_walk_count, 0) : atomic_load(&estimates_walk_count);
+}
+#endif
+
 static int poly_estimate_expr_infer(
     PolyUOp *expr,
     const PolyVarBinding *bindings,
@@ -1228,8 +1236,16 @@ static int poly_estimate_expr_infer(
     uint64_t *out
 ) {
   if (!expr || !out) return -1;
+#ifdef POLY_TESTING
+  if (expr->op != POLY_OP_CONST) atomic_fetch_add(&estimates_walk_count, 1);
+#endif
   PolyArg value;
-  if (!poly_eval_launch_expr(expr, bindings, n_bindings, &value)) return -1;
+  /* ssimplify returns a host scalar for fixed estimates. Avoid allocating a
+   * topological evaluator for that scalar on every graph replay. */
+  if (expr->op == POLY_OP_CONST)
+    value = expr->arg;
+  else if (!poly_eval_launch_expr(expr, bindings, n_bindings, &value))
+    return -1;
   int64_t signed_value = 0;
   if (!poly_launch_arg_to_i64(value, &signed_value)) return -1;
   if (signed_value < 0) return -1;
@@ -1494,6 +1510,9 @@ static void poly_graph_cache_entry_free(const void *key, void *value, void *user
   if (!entry) return;
   poly_cuda_graph_destroy(entry->graph);
   for (int i = 0; i < entry->n_nodes; i++) {
+    poly_uop_release(ctx, entry->estimates[i].ops);
+    poly_uop_release(ctx, entry->estimates[i].lds);
+    poly_uop_release(ctx, entry->estimates[i].mem);
     if (entry->runtime_entries[i]) {
       poly_runner_cleanup_local_mappings(&entry->runners[i]);
       poly_runtime_cache_entry_release(entry->runtime_entries[i]);
@@ -1503,6 +1522,7 @@ static void poly_graph_cache_entry_free(const void *key, void *value, void *user
   }
   free(entry->runners);
   free(entry->runtime_entries);
+  free(entry->estimates);
   poly_uop_release(ctx, entry->function);
   free(entry);
 }
@@ -4422,9 +4442,11 @@ static PolyGraphCacheEntry *graph_cache_entry_new(PolyCtx *ctx, PolyUOp *functio
   entry->n_nodes = n_nodes;
   entry->runners = calloc((size_t)n_nodes, sizeof(*entry->runners));
   entry->runtime_entries = calloc((size_t)n_nodes, sizeof(*entry->runtime_entries));
-  if (!entry->runners || !entry->runtime_entries) {
+  entry->estimates = calloc((size_t)n_nodes, sizeof(*entry->estimates));
+  if (!entry->runners || !entry->runtime_entries || !entry->estimates) {
     free(entry->runners);
     free(entry->runtime_entries);
+    free(entry->estimates);
     poly_uop_release(ctx, function);
     free(entry);
     return NULL;
@@ -4435,6 +4457,22 @@ static PolyGraphCacheEntry *graph_cache_entry_new(PolyCtx *ctx, PolyUOp *functio
 static void graph_cache_entry_destroy(PolyCtx *ctx, PolyGraphCacheEntry *entry) {
   if (!entry) return;
   poly_graph_cache_entry_free(NULL, entry, ctx);
+}
+
+/* GraphRunner.__init__/Estimates.simplify: cache expressions, not bound values.
+ * Keep per-PROGRAM terms so C's checked signed-64 inference and saturating
+ * unsigned counter sum do not become an overflowing signed graph expression.
+ * Each field owns a retain, including when simplification merges the roots. */
+static bool graph_estimates_simplify(PolyCtx *ctx, PolyEstimates *out, const PolyEstimates *in) {
+  if (!in) return false;
+  PolyUOp *src[] = {in->ops, in->lds, in->mem};
+  PolyUOp **dst[] = {&out->ops, &out->lds, &out->mem};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *simplified = src[i] ? poly_graph_rewrite(ctx, src[i], poly_symbolic()) : NULL;
+    if (!simplified || poly_uop_retain(ctx, simplified) != 0) return false;
+    *dst[i] = simplified;
+  }
+  return true;
 }
 
 /* Current Tinygrad engine/realize.py:get_graph_runtime + exec_graph. */
@@ -4562,8 +4600,10 @@ static int poly_exec_linear_graph(
       specs[node].value.program.block[dim] = runner->block[dim];
     }
     uint64_t ops = 0, lds = 0, mem = 0;
-    const PolyEstimates *estimates = poly_program_estimates(body);
-    if (!estimates || poly_estimates_infer(estimates, bindings, n_bindings, &ops, &lds, &mem) != 0)
+    if (new_entry &&
+        !graph_estimates_simplify(ctx, &entry->estimates[node], poly_program_estimates(body)))
+      goto fail_prepared;
+    if (poly_estimates_infer(&entry->estimates[node], bindings, n_bindings, &ops, &lds, &mem) != 0)
       goto fail_prepared;
     total_ops = poly_counter_add_sat(total_ops, ops);
     total_mem = poly_counter_add_sat(total_mem, mem);

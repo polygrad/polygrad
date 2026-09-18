@@ -101,6 +101,7 @@ bool poly_test_optimize_local_size(
     int best[3]
 );
 int poly_test_runtime_cache_policy(PolyCtx *ctx, PolyUOp *call, PolyDevice device, bool cache);
+int poly_test_estimates_walk_count(bool reset);
 #endif
 
 /* Uncached, waited time_call execution used by codegen/opt/search. The caller
