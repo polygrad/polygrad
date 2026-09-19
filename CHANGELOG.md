@@ -6,6 +6,9 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Fix X86 JIT crashes in Clang 18 sanitizer builds. Exempt raw JIT calls from
+  compiler-only function-type checks while retaining ASan and other UBSan checks.
+
 - Reject duplicate HF/GGUF checkpoint names and collisions after weight-name
   mapping. Preserve GPT-2/Qwen3's acceptance of unknown weights and make their
   successful imports quiet unless debugging is enabled.

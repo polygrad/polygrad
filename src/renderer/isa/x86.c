@@ -5424,6 +5424,14 @@ struct PolyX86Program {
   void *entry;
 };
 
+#ifdef POLY_TESTING
+/* The test owns the mapping so it can put a guard page before the entry. */
+int poly_test_x86_program_call_entry(void *entry, void **args, int n_args) {
+  PolyX86Program prog = {.entry = entry};
+  return poly_x86_program_call(&prog, args, n_args);
+}
+#endif
+
 PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size) {
   if (!code || code_size <= 0) return NULL;
   long page_size = sysconf(_SC_PAGESIZE);
@@ -5489,6 +5497,12 @@ PolyX86Program *poly_compile_x86_source(const char *source, int *size_out, int *
   return prog;
 }
 
+/* Like Tinygrad CPUProgram's ctypes call, this enters raw machine code without
+ * a Clang function-type prefix. UBSan's prefix probe can read before the mapping;
+ * exempt only that check, not ASan or the other undefined-behavior checks. */
+#if defined(__clang__)
+__attribute__((no_sanitize("function")))
+#endif
 int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args) {
   if (!prog || !args || n_args < 0) return -1;
   switch (n_args) {

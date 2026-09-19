@@ -6,6 +6,7 @@
  * LINEAR, PROGRAM, and runtime boundaries.
  */
 
+#define _DEFAULT_SOURCE
 #ifdef POLY_HAS_X86
 
 #include "test_harness.h"
@@ -21,6 +22,38 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+int poly_test_x86_program_call_entry(void *entry, void **args, int n_args);
+
+TEST_BACKEND(x86, program_call_without_compiler_type_prefix) {
+  long page = sysconf(_SC_PAGESIZE);
+  ASSERT_TRUE(page > 0);
+  uint8_t *mapping = mmap(NULL, (size_t)page * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_TRUE(mapping != MAP_FAILED);
+  uint8_t *entry = mapping + page;
+  /* mov dword ptr [rdi], 42; ret. Raw JIT code has no Clang type metadata.
+   * The guard makes reads before the entry fail independently of ASLR. */
+  const uint8_t code[] = {0xc7, 0x07, 0x2a, 0, 0, 0, 0xc3};
+  bool ok = mprotect(entry, (size_t)page, PROT_READ | PROT_WRITE) == 0;
+  if (ok) {
+    memcpy(entry, code, sizeof(code));
+    ok = mprotect(entry, (size_t)page, PROT_READ | PROT_EXEC) == 0;
+  }
+  int output = 0;
+  void *args[16] = {&output};
+  if (ok) {
+    ok &= poly_test_x86_program_call_entry(entry + 6, args, 0) == 0;
+    for (int n = 1; n <= 16; n++) {
+      output = 0;
+      ok &= poly_test_x86_program_call_entry(entry, args, n) == 0 && output == 42;
+    }
+  }
+  munmap(mapping, (size_t)page * 2);
+  ASSERT_TRUE(ok);
+  PASS();
+}
 
 TEST_BACKEND(x86, compiler_hex_source_error_contract) {
   /* X86Compiler.compile delegates to bytes.fromhex: whitespace separates bytes,
