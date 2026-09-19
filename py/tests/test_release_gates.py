@@ -15,6 +15,94 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('failure', ['', 'missing-wheel', 'tampered'])
+def test_publish_python_uses_verified_staged_archives(tmp_path, failure):
+    import hashlib
+
+    release = tmp_path / 'release'
+    wheels = release / 'wheels'
+    wheels.mkdir(parents=True)
+    sdist = release / 'polygrad-0.5.2.tar.gz'
+    sdist.write_bytes(b'sdist')
+    wheel = wheels / 'polygrad-0.5.2-cp39-cp39-manylinux_2_28_x86_64.whl'
+    wheel.write_bytes(b'wheel')
+    (release / 'SHA256SUMS').write_text(f'{hashlib.sha256(sdist.read_bytes()).hexdigest()}  {sdist}\n')
+    (wheels / 'SHA256SUMS').write_text(f'{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n')
+    if failure == 'missing-wheel':
+        wheel.unlink()
+    elif failure == 'tampered':
+        wheel.write_bytes(b'changed')
+    calls = tmp_path / 'calls.jsonl'
+    twine = tmp_path / 'twine'
+    twine.write_text(f'#!{sys.executable}\nimport json, sys\n'
+                     f'with open({str(calls)!r}, "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+    twine.chmod(0o700)
+    # Even the old target must not build or contact a registry in this regression.
+    result = subprocess.run(['make', '--no-print-directory', '-o', 'build-py-sdist',
+                             'publish-py', f'PUBLISH_DIR={release}', f'TWINE={twine}'],
+                            cwd=ROOT, capture_output=True, text=True)
+    if failure:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not calls.exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [json.loads(line) for line in calls.read_text().splitlines()] == [
+            ['check', str(sdist), str(wheel)], ['upload', str(sdist), str(wheel)]]
+
+
+@pytest.mark.parametrize('failure', ['', 'build', 'missing-wheel'])
+def test_manylinux_stages_only_complete_matrix(tmp_path, monkeypatch, failure):
+    import hashlib
+    import re
+
+    version = re.search(r'^version = "([^"]+)"', (ROOT / 'py/pyproject.toml').read_text(), re.M)[1]
+    release = tmp_path / 'release'
+    release.mkdir()
+    sdist = release / f'polygrad-{version}.tar.gz'
+    sdist.write_bytes(b'fixture archive; no real compilation in this harness test')
+    checksum = hashlib.sha256(sdist.read_bytes()).hexdigest()
+    (release / 'SHA256SUMS').write_text(f'{checksum}  {sdist}\n')
+    runner = tmp_path / 'apptainer'
+    runner.write_text(f'#!{sys.executable}\n' + '''
+import os, pathlib, sys
+args = sys.argv[1:]
+if args[0] == 'pull':
+    pathlib.Path(args[1]).write_bytes(b'mock image')
+else:
+    # --containall must not put compiler/pip intermediates in the session tmpfs.
+    assert '--workdir' in args
+    scratch = pathlib.Path(args[args.index('--workdir') + 1])
+    assert scratch.is_dir()
+    if os.environ['MOCK_FAILURE'] == 'build':
+        sys.exit(23)
+    work = next(pathlib.Path(a.split(':')[0]) for a in args if a.endswith(':/work'))
+    version = args[-1]
+    wheels = work / 'wheels'
+    wheels.mkdir()
+    versions = (39, 310, 311, 312) if os.environ['MOCK_FAILURE'] else (39, 310, 311, 312, 313)
+    for v in versions:
+        (wheels / f'polygrad-{version}-cp{v}-cp{v}-manylinux_2_28_x86_64.whl').write_bytes(b'mock wheel')
+''')
+    runner.chmod(0o700)
+    for name in ('APPTAINER_CONTAINER', 'SINGULARITY_CONTAINER'):
+        monkeypatch.delenv(name, raising=False)
+    env = dict(os.environ, APPTAINER=str(runner), MOCK_FAILURE=failure,
+               MANYLINUX_WORK_DIR=str(tmp_path / 'work'))
+    command = ['make', '--no-print-directory', 'build-py-manylinux',
+               f'MANYLINUX_RELEASE_DIR={release}', 'MANYLINUX_IMAGE=docker://fixture']
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+    if failure:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not (release / 'wheels').exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert len(list((release / 'wheels').glob('*.whl'))) == 5
+        subprocess.run(['sha256sum', '-c', 'SHA256SUMS'], cwd=release / 'wheels', check=True)
+        repeated = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+        assert repeated.returncode != 0
+        assert 'already exists' in repeated.stderr
+
+
 def test_c_harness_probe_preserves_debug_link_flags(tmp_path, monkeypatch):
     calls = []
 

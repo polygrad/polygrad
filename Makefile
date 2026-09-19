@@ -979,6 +979,18 @@ build-py-wheel: verify-source-mirrors
 		$(PYTHON) scripts/sync-csrc.py && \
 		$(PYTHON) -m build --wheel
 
+# Host-only portable wheels, built from the staged sdist rather than the checkout.
+APPTAINER ?= apptainer
+MANYLINUX_IMAGE ?= docker://quay.io/pypa/manylinux_2_28_x86_64@sha256:531d7aa844bbb0c131d4ab011d3db741c4abc8d498cd5ccc86121046f62303b4
+MANYLINUX_WORK_DIR ?= $(abspath build/manylinux)
+MANYLINUX_RELEASE_DIR ?=
+
+.PHONY: build-py-manylinux
+build-py-manylinux:
+	APPTAINER="$(APPTAINER)" MANYLINUX_IMAGE="$(MANYLINUX_IMAGE)" \
+	  MANYLINUX_WORK_DIR="$(MANYLINUX_WORK_DIR)" \
+	  bash scripts/build_manylinux.sh "$(MANYLINUX_RELEASE_DIR)"
+
 build-python: build-py
 
 test-py-sdist-install: build-py-sdist
@@ -999,8 +1011,15 @@ test-release-packages:
 	$(MAKE) test-py-min-install
 	$(MAKE) test-js-package-install
 
-publish-py: build-py-sdist
-	cd py && $(TWINE) upload dist/*.tar.gz
+PUBLISH_VERSION = $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' py/pyproject.toml)
+PUBLISH_DIR ?= build/release/$(PUBLISH_VERSION)
+
+# Publish the tested artifacts; never rebuild them as a side effect of upload.
+publish-py:
+	sha256sum -c "$(PUBLISH_DIR)/SHA256SUMS"
+	cd "$(PUBLISH_DIR)/wheels" && sha256sum -c SHA256SUMS
+	$(TWINE) check "$(PUBLISH_DIR)/polygrad-$(PUBLISH_VERSION).tar.gz" "$(PUBLISH_DIR)"/wheels/*.whl
+	$(TWINE) upload "$(PUBLISH_DIR)/polygrad-$(PUBLISH_VERSION).tar.gz" "$(PUBLISH_DIR)"/wheels/*.whl
 
 publish-python: publish-py
 

@@ -31,14 +31,15 @@ pip install polygrad
 Requirements:
 
 - Linux
-- Python 3.9 or newer (release checks execute isolated installs on 3.9 and 3.11)
+- Python 3.9 or newer (installed wheels tested on CPython 3.9-3.13)
 - NumPy
-- A C compiler and Python development headers
 - A C compiler on `PATH` for CPU execution: clang recommended, GCC fallback;
   generated float16 kernels require clang's `__fp16` support
 
-The PyPI package is distributed as source; pip builds the native extension
-during installation unless it can reuse a cached wheel.
+CPython 3.9-3.13 on x86_64 Linux with glibc 2.27+ can install a prebuilt wheel.
+Other Linux configurations build from source and require a C compiler and Python
+development headers. Wheels do not remove the CPU backend's runtime compiler
+requirement; use `DEV=X86` (x86_64) or `DEV=INTERP` to run without one.
 
 Optional model-loading dependency:
 

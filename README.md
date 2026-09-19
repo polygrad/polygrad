@@ -664,6 +664,11 @@ cd js
 npm run build:browser
 ```
 
+For portable Python wheels, run `make build-py-manylinux` from the host with
+Apptainer installed. It builds from the staged release sdist, audits and tests
+CPython 3.9-3.13 wheels, then stages them under `build/release/<version>/wheels/`.
+It does not publish packages; logs are under `build/manylinux/run.*/build.log`.
+
 ## Tests
 
 `make test-readme` checks links and runs the local Python/Node examples,
