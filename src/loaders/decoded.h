@@ -52,6 +52,13 @@ typedef struct {
   int dtype; /* POLY_DECODED_* unified code */
 } PolyDecodedTensor;
 
+/* Reject ambiguous source dictionaries before Model construction, including
+ * duplicate names that an adapter would otherwise skip. Library-internal. */
+#if defined(__GNUC__)
+__attribute__((visibility("hidden")))
+#endif
+int decoded_names_unique(const PolyDecodedTensor *tensors, int count);
+
 /*
  * Convert a decoded tensor to a newly allocated F32 buffer.
  *

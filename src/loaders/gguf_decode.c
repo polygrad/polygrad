@@ -461,15 +461,16 @@ int poly_gguf_decode(const uint8_t *data, int64_t len, PolyGgufDecoded **out) {
     tensors[i].data = data + data_start + tinfos[i].offset;
   }
 
+  if (decoded_names_unique(tensors, (int)n_tensors) != 0) goto fail_reported;
   free(tinfos);
-
   *out = gguf;
   return 0;
 
 fail:
+  poly_import_error_set(POLY_IMPORT_ERR_PARSE, "invalid or unallocatable GGUF data");
+fail_reported:
   free(tinfos);
   poly_gguf_decoded_free(gguf);
-  poly_import_error_set(POLY_IMPORT_ERR_PARSE, "invalid or unallocatable GGUF data");
   return -1;
 }
 

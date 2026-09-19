@@ -6,6 +6,9 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Reject duplicate checkpoint weights without rejecting unknown GPT-2/Qwen3
+  weights. Successful imports no longer print diagnostics unless debugging is enabled.
+
 - Preserve execution of imported programs with incomplete optional estimates;
   missing counter metadata no longer makes successful execution report failure.
 

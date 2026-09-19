@@ -44,7 +44,10 @@ int poly_import_copy_named_tensor(
     int crop_axis
 );
 
-/* Convert/dequantize, validate and upload one decoded binding. Temporary host
+/* Convert/dequantize, validate and upload a decoded binding at most once per
+ * index. Distinct checkpoint aliases must not overwrite one destination name.
+ * Unknown names return 0 without decoding; adapters own their skip policy.
+ * Temporary host
  * storage is released before returning; the model retains only its own state. */
 int poly_import_bind_tensor(
     PolyBindIndex *idx,

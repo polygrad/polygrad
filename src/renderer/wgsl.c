@@ -550,7 +550,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
   int cap_bindings = 0;
 
   /* prefix counters */
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0;
   int depth = 1;
 
   /* Workgroup shared memory declarations (externalized before @compute).

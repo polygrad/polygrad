@@ -8,8 +8,38 @@
  */
 
 #include "decoded.h"
+#include "import_error.h"
 #include <stdlib.h>
 #include <string.h>
+
+static int decoded_name_compare(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+int decoded_names_unique(const PolyDecodedTensor *tensors, int count) {
+  if (count < 2) return 0;
+  const char **names =
+      (size_t)count <= SIZE_MAX / sizeof(*names) ? malloc((size_t)count * sizeof(*names)) : NULL;
+  if (!names) {
+    poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "checkpoint name table allocation failed");
+    return -1;
+  }
+  /* Sort borrowed names, not tensors: binding order and payload ownership stay
+   * unchanged, and validation is O(n log n) for large sharded checkpoints. */
+  for (int i = 0; i < count; i++)
+    names[i] = tensors[i].name;
+  qsort(names, (size_t)count, sizeof(*names), decoded_name_compare);
+  int rc = 0;
+  for (int i = 1; i < count; i++) {
+    if (!strcmp(names[i - 1], names[i])) {
+      poly_import_error_set(POLY_IMPORT_ERR_WEIGHT_MISMATCH, "duplicate weight '%s'", names[i]);
+      rc = -1;
+      break;
+    }
+  }
+  free(names);
+  return rc;
+}
 
 /* File payloads are borrowed bytes and need not have native scalar alignment. */
 static uint16_t read_u16(const uint8_t *bytes) {

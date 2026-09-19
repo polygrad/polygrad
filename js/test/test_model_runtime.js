@@ -702,7 +702,7 @@ async function checkQuantizedModelWeights(pg) {
   }
 }
 
-function checkModelCodecRejection(pg) {
+async function checkModelCodecRejection(pg) {
   const invalidHeads = new TextEncoder().encode(JSON.stringify({model_type:'gpt2',
     n_embd:4, n_head:0, n_layer:1, vocab_size:8, n_positions:2}))
   let invalidRejected = false
@@ -722,6 +722,29 @@ function checkModelCodecRejection(pg) {
   assert(invalidRejected, 'GGUF zero heads must return an import error, not trap')
   const config = new TextEncoder().encode(JSON.stringify({ model_type: 'gpt2',
     n_embd: 8, n_head: 2, n_layer: 1, vocab_size: 4, n_positions: 4 }))
+  const checkpoint = name => {
+    const header = new TextEncoder().encode(JSON.stringify({ [name]: {
+      dtype: 'F32', shape: [4, 8], data_offsets: [0, 128]
+    } }))
+    const bytes = new Uint8Array(8 + header.length + 128)
+    new DataView(bytes.buffer).setUint32(0, header.length, true)
+    bytes.set(header, 8)
+    return bytes
+  }
+  const weight = checkpoint('transformer.wte.weight')
+  for (const name of ['transformer.wte.weight', 'unused.weight', 'transformer.h.0.attn.bias']) {
+    const shard = checkpoint(name)
+    // WebGPU disposal holds an async runtime lease; await it before the next import.
+    await pg.Model.fromHF(config, [shard]).dispose()
+    let duplicate
+    try { await pg.Model.fromHF(config, [shard, shard]).dispose() } catch (e) { duplicate = e }
+    assert(duplicate && /duplicate weight/.test(duplicate.message), `duplicate source name must reject: ${duplicate}`)
+  }
+  let collision
+  try { await pg.Model.fromHF(config, [weight, checkpoint('wte.weight')]).dispose() }
+  catch (e) { collision = e }
+  assert(collision && /duplicate weight binding/.test(collision.message), 'normalized names must not overwrite')
+  await pg.Model.fromHF(config, [weight]).dispose() // Rejection must leave the runtime usable.
   const badShard = new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 123])
   let error
   try { pg.Model.fromHF(config, [badShard]).dispose() } catch (e) { error = e }

@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qwen3.h"
 #include "factory.h"
+#include "../utils.h"
 
 #include "layers.h"
 #include "../nn/nn.h"
@@ -303,13 +304,14 @@ PolyModel *model_qwen3_from_gguf_decoded(
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
 
-  fprintf(
-      stderr,
-      "poly_qwen3: V=%d D=%d H=%d KvH=%d L=%d FF=%d hd=%d T=%d "
-      "eps=%.1e rope=%.0f qk_norm=%d\n",
-      cfg.vocab_size, cfg.dim, cfg.n_heads, cfg.n_kv_heads, cfg.n_layers, cfg.hidden_dim,
-      cfg.head_dim, cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm
-  );
+  if (poly_debug_at_least(1))
+    fprintf(
+        stderr,
+        "Qwen3 GGUF: V=%d D=%d H=%d KvH=%d L=%d FF=%d hd=%d T=%d "
+        "eps=%.1e rope=%.0f qk_norm=%d\n",
+        cfg.vocab_size, cfg.dim, cfg.n_heads, cfg.n_kv_heads, cfg.n_layers, cfg.hidden_dim,
+        cfg.head_dim, cfg.max_seq_len, cfg.norm_eps, cfg.rope_theta, cfg.qk_norm
+    );
 
   PolyModel *inst = poly_qwen3_into(ctx, &cfg, device);
   if (!inst) return NULL;
@@ -332,20 +334,23 @@ PolyModel *model_qwen3_from_gguf_decoded(
     }
 
     /*
-     * GGUF stores weights in (out, in) convention matching poly_linear.
+     * GGUF stores weights in the model linear layer's (out, in) convention.
      * No transpose needed (unlike HF Conv1D).
      */
     int rc = poly_import_bind_tensor(idx, t->name, t, 0, -1);
     if (rc == 1)
       loaded++;
-    else if (rc == 0)
-      fprintf(stderr, "poly_qwen3_from_gguf: no buffer for '%s'\n", t->name);
+    else if (rc == 0) {
+      skipped++;
+      if (poly_debug_at_least(1)) fprintf(stderr, "Qwen3 GGUF: ignoring weight '%s'\n", t->name);
+    }
 
     if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
-  fprintf(stderr, "poly_qwen3_from_gguf: loaded %d, skipped %d\n", loaded, skipped);
+  if (poly_debug_at_least(1))
+    fprintf(stderr, "Qwen3 GGUF: loaded %d, skipped %d\n", loaded, skipped);
   return inst;
 
 fail:

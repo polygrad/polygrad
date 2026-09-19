@@ -6,6 +6,13 @@ The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
 Full release acceptance is pending.
 
+- Reject duplicate HF/GGUF checkpoint names and collisions after weight-name
+  mapping. Preserve GPT-2/Qwen3's acceptance of unknown weights and make their
+  successful imports quiet unless debugging is enabled.
+- Correct the JavaScript package-composition example and label R as an
+  unsupported prototype. Restore sealed migration-review text without changing
+  its recorded hashes or current symbol mappings.
+
 - Preserve execution of programs with incomplete optional estimates, including
   imported programs and CUDA graphs. Count kernels while omitting incomplete
   operation/memory estimates.

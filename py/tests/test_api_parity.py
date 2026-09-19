@@ -831,6 +831,28 @@ def test_python_source_manifest_contains_makefile_sources():
     assert not required - shipped
 
 
+def test_readme_javascript_package_example():
+    import shutil
+    import subprocess
+    import re
+
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node is required to execute the JavaScript README example')
+    root = Path(__file__).resolve().parents[2]
+    text = (root / 'README.md').read_text(encoding='utf-8')
+    section = text.split('JavaScript package pattern:', 1)[1]
+    consumer, implementation = re.findall(r'```js\n(.*?)\n```', section, re.S)[:2]
+    consumer = consumer.replace("require('polygrad')", "require('./')")
+    consumer = consumer.replace('pg.dispose()', '''
+if (y.shape.join(',') !== '1,2' || !Array.from(y.toArray()).every(Number.isFinite))
+  throw new Error('invalid package prediction')
+pg.dispose()''')
+    script = implementation + '\nconst SomePackage = { create };\n' + consumer
+    result = subprocess.run([node, '-e', script], cwd=root / 'js', capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_readme_device_map_example():
     text = (Path(__file__).resolve().parents[2] / 'README.md').read_text(encoding='utf-8')
     start = text.index('from polygrad import Model, Tensor', text.index('exact named module cuts'))

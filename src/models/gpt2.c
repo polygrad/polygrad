@@ -24,6 +24,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gpt2.h"
 #include "factory.h"
+#include "../utils.h"
 #include <limits.h>
 #include <float.h>
 #include <math.h>
@@ -341,15 +342,18 @@ PolyModel *model_gpt2_from_hf_decoded(const PolyHfDecoded *hf, const PolyGeneric
     int rc = poly_import_bind_tensor(idx, name, t, transpose, !strcmp(name, "wpe.weight") ? 0 : -1);
     if (rc == 1)
       loaded++;
-    else if (rc == 0)
-      fprintf(stderr, "poly_gpt2_from_hf: no buffer for '%s'\n", name);
+    else if (rc == 0) {
+      skipped++;
+      if (poly_debug_at_least(1)) fprintf(stderr, "GPT-2 HF: ignoring weight '%s'\n", name);
+    }
 
     /* An ignored source key is distinct from a failed write to named state. */
     if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
-  fprintf(stderr, "poly_gpt2_from_hf: loaded %d parameters, skipped %d\n", loaded, skipped);
+  if (poly_debug_at_least(1))
+    fprintf(stderr, "GPT-2 HF: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
 
 fail:
@@ -469,14 +473,17 @@ PolyModel *model_gpt2_from_gguf_decoded(
     int rc = poly_import_bind_tensor(idx, name, t, 0, !strcmp(name, "wpe.weight") ? 0 : -1);
     if (rc == 1)
       loaded++;
-    else if (rc == 0)
-      fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n", name, t->name);
+    else if (rc == 0) {
+      skipped++;
+      if (poly_debug_at_least(1)) fprintf(stderr, "GPT-2 GGUF: ignoring weight '%s'\n", t->name);
+    }
 
     if (rc < 0) goto fail;
   }
 
   poly_bind_index_destroy(idx);
-  fprintf(stderr, "poly_gpt2_from_gguf: loaded %d parameters, skipped %d\n", loaded, skipped);
+  if (poly_debug_at_least(1))
+    fprintf(stderr, "GPT-2 GGUF: loaded %d parameters, skipped %d\n", loaded, skipped);
   return inst;
 
 fail:

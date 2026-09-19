@@ -672,7 +672,7 @@ char *poly_render_hip(
   int param_order[64];
   int n_params = 0;
 
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0;
   int depth = 1;
 
   /* Range liveness tracking */

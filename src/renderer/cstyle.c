@@ -934,7 +934,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   int n_buffer_params = 0;
 
   /* prefix counters */
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0;
   int depth = 1;
 
   /* Range liveness tracking: emit END only after last non-END use. */

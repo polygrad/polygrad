@@ -615,7 +615,7 @@ tinygrad. Match stored values to the destination dtype, using an explicit
 UOp cast where needed. Current C and Wasm renderers reject mismatched vector
 stores; INTERP follows Tinygrad's Python memoryview conversion rules. These
 backend rules differ, so portable kernels must cast explicitly. Published
-0.5.1 still has the Wasm/INTERP mismatched-store defects fixed in current source.
+0.5.1 still has the Wasm/INTERP mismatched-store defects addressed in 0.5.2.
 
 For host-fed replay, `Tensor.copy_from(data)` (JS `copyFrom`) materializes
 pending work and writes current storage without replacing an existing BUFFER
@@ -831,7 +831,7 @@ override their initial environment values. Native runtimes share compiler
 policy; each Wasm module owns its policy. Node initializes Wasm compiler
 settings once per module. Browsers use runtime properties, not process env.
 
-`POLY_LIB` is Python/R's explicit native-library path; an invalid Python path
+`POLY_LIB` is Python's explicit native-library path; an invalid Python path
 fails without falling back to another installation. Node loads its packaged
 addon or Wasm via `POLY_CORE`. In 0.5.0, `POLY_DEV` and `POLY_LIB` replace
 `POLY_DEVICE` and `POLYGRAD_LIB`; the old names are no longer recognized.
@@ -868,10 +868,11 @@ const polygrad = require('polygrad')
 const pg = polygrad.create({ core: 'wasm' })
 const model = SomePackage.create({ polygrad: pg })
 
-const x = new pg.Tensor([[1, 2, 3, 4]])
+const x = new pg.Tensor([[1, 2, 3, 4]], { dtype: 'float32' })
 const y = model.predict(x)
 console.log(y.toArray())
 
+model.dispose()
 pg.dispose()
 ```
 
@@ -932,7 +933,7 @@ the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
 [operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) and
 [NN/optimizer](test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json) baselines
 keep nonpassing cases explicit, including unsupported Python compiler-private
-helpers. HIP is outside the 0.5.0 candidate's validation
+helpers. HIP is outside the 0.5.2 release-validation
 matrix.
 
 The main intentional differences are:
@@ -1372,7 +1373,7 @@ local paths.
 | `src/` | C core, compiler, schedulers, runtimes, backends |
 | `py/` | Python frontend |
 | `js/` | Node, WASM, and browser frontend |
-| `r/` | Limited R frontend and `.Call` bridge |
+| `r/` | Unmaintained R prototype; incompatible with the current C API and excluded from release validation |
 | `test/` | C tests |
 
 ## License

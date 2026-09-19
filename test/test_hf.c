@@ -795,6 +795,43 @@ TEST(hf, gguf_families_reject_failed_weights_and_bindings) {
   PASS();
 }
 
+TEST(hf, gguf_import_rejects_duplicate_binding) {
+  const char *suffix[] = {"embedding_length",        "attention.head_count", "block_count",
+                          "attention.head_count_kv", "feed_forward_length",  "context_length"};
+  int config[] = {8, 2, 1, 2, 16, 2};
+  bool rejected = true;
+  for (int family = 0; family < 2; family++) {
+    char keys[6][64];
+    PolyGgufKV kv[6] = {0};
+    const char *arch = family ? "qwen3" : "gpt2";
+    for (int i = 0; i < 6; i++) {
+      snprintf(keys[i], sizeof(keys[i]), "%s.%s", arch, suffix[i]);
+      kv[i] = (PolyGgufKV){.key = keys[i], .type = 4, .val.u64 = (uint64_t)config[i]};
+    }
+    float data[16] = {0};
+    PolyDecodedTensor tensors[2] = {
+        {.name = "token_embd.weight",
+         .data = data,
+         .shape = {2, 8},
+         .ndim = 2,
+         .numel = 16,
+         .dtype = POLY_DECODED_F32}};
+    tensors[1] = tensors[0];
+    PolyGgufDecoded g = {.kv = kv, .n_kv = 6, .arch = arch, .tensors = tensors, .n_tensors = 2};
+    PolyCtx *ctx = poly_ctx_new();
+    PolyGenericImportOpts opts = {
+        .ctx = ctx, .max_batch = 1, .max_seq_len = 2, .device = POLY_DEVICE_INTERP};
+    poly_import_error_clear();
+    PolyModel *model = model_type_find(arch)->from_gguf_decoded(&g, &opts);
+    rejected &= !model && poly_import_last_error_code() == POLY_IMPORT_ERR_WEIGHT_MISMATCH &&
+                strstr(poly_import_last_error_message(), "duplicate") != NULL;
+    poly_model_free(model);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
 TEST(hf, model_import_rejects_failed_weight_conversion_or_copy) {
   const char *config = "{\"model_type\":\"gpt2\",\"vocab_size\":32,\"n_embd\":16,"
                        "\"n_head\":2,\"n_layer\":1,\"n_positions\":8}";

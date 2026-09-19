@@ -669,7 +669,7 @@ char *poly_render_cuda(
   int *param_order = NULL;
   int n_params = 0, param_capacity = 0;
 
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0;
   int depth = 1;
 
   /* Range liveness tracking */

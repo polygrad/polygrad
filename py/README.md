@@ -436,7 +436,7 @@ needed. Current C and Wasm renderers reject mismatched vector stores with
 Scalar C stores can convert numerically, but that is not a portable kernel
 contract. INTERP follows Tinygrad's Python memoryview conversion rules. Cast
 explicitly on every backend. Published 0.5.1 still has the Wasm/INTERP
-mismatched-store defects fixed in current source; 0.5.0 also has the CPU defect.
+mismatched-store defects addressed in 0.5.2; 0.5.0 also has the CPU defect.
 
 ## Common API Recipes
 

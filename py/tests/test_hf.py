@@ -50,6 +50,62 @@ def test_qwen3_rotary_state_and_roundtrip(device):
             model.dispose()
 
 
+@pytest.mark.parametrize('kind', ['gpt2', 'qwen3'])
+def test_checkpoint_import_is_quiet_by_default(kind, capfd, monkeypatch):
+    import polygrad as pg
+    monkeypatch.setenv('POLY_DEBUG', '0')
+    with pg.create(device='INTERP') as rt:
+        if kind == 'gpt2':
+            values = np.ones((32, 16), dtype=np.float32)
+            weights = make_safetensors({'transformer.wte.weight': ('F32', values.shape, values)})
+            model = load_hf_bytes(GPT2_TINY_CONFIG, [weights], runtime=rt)
+        else:
+            fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/qwen3.json').read_text())
+            model = Model.from_gguf(base64.b64decode(fixture['gguf']), max_seq_len=4, runtime=rt)
+        model.dispose()
+    assert capfd.readouterr().err == ''
+
+
+@pytest.mark.parametrize('alias', ['transformer.wte.weight', 'wte.weight'])
+def test_gpt2_checkpoint_rejects_duplicate_binding(alias):
+    import polygrad as pg
+    values = np.ones((32, 16), dtype=np.float32)
+    first = make_safetensors({'transformer.wte.weight': ('F32', values.shape, values)})
+    second = make_safetensors({alias: ('F32', values.shape, values * 2)})
+    with pg.create(device='INTERP') as rt:
+        live = rt.Tensor([19.0]).realize()
+        with pytest.raises(RuntimeError, match="duplicate.*wte.weight"):
+            model = load_hf_bytes(GPT2_TINY_CONFIG, [first, second], runtime=rt)
+            model.dispose()
+        assert (live + 1).item() == 20
+
+
+@pytest.mark.parametrize('name', ['unused.weight', 'transformer.h.0.attn.bias'])
+def test_gpt2_checkpoint_skips_unknown_once_but_rejects_duplicate_names(name, capfd, monkeypatch):
+    import polygrad as pg
+    monkeypatch.setenv('POLY_DEBUG', '0')
+    values = np.ones(1, dtype=np.float32)
+    shard = make_safetensors({name: ('F32', values.shape, values)})
+    with pg.create(device='INTERP') as rt:
+        model = load_hf_bytes(GPT2_TINY_CONFIG, [shard], runtime=rt)
+        model.dispose()
+        assert capfd.readouterr().err == ''
+        with pytest.raises(RuntimeError, match='duplicate weight'):
+            model = load_hf_bytes(GPT2_TINY_CONFIG, [shard, shard], runtime=rt)
+            model.dispose()
+
+
+def test_gguf_rejects_duplicate_names_before_model_dispatch():
+    import polygrad as pg
+    data = b'GGUF' + struct.pack('<IQQ', 3, 2, 0)
+    for offset in (0, 32):
+        data += struct.pack('<Q', 1) + b'x' + struct.pack('<IQIQ', 1, 1, 0, offset)
+    data += bytes((-len(data)) % 32) + bytes(36)
+    with pg.create(device='INTERP') as rt:
+        with pytest.raises(RuntimeError, match="duplicate weight 'x'"):
+            Model.from_gguf(data, runtime=rt)
+
+
 def test_checkpoint_abi_uses_generic_loaders_only():
     from polygrad import _ffi
 

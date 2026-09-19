@@ -107,6 +107,7 @@ int poly_hf_decode(
     free(views);
   }
 
+  if (decoded_names_unique(hf->tensors, hf->n_tensors) != 0) goto fail;
   *out = hf;
   return 0;
 

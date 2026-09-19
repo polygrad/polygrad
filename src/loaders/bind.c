@@ -31,6 +31,7 @@ static void *bind_calloc(size_t count, size_t size) {
 typedef struct {
   const char *name;
   int buf_idx;
+  bool bound;
 } BindEntry;
 
 struct PolyBindIndex {
@@ -86,16 +87,21 @@ void poly_bind_index_destroy(PolyBindIndex *idx) {
   free(idx);
 }
 
-int poly_bind_index_find(const PolyBindIndex *idx, const char *name) {
-  if (!idx || !name) return -1;
+static BindEntry *bind_index_lookup(const PolyBindIndex *idx, const char *name) {
+  if (!idx || !name) return NULL;
   unsigned int h = hash_name(name, idx->capacity);
   for (int probe = 0; probe < idx->capacity; probe++) {
-    const BindEntry *e = &idx->entries[h];
-    if (e->name == NULL) return -1;
-    if (strcmp(e->name, name) == 0) return e->buf_idx;
+    BindEntry *e = &idx->entries[h];
+    if (e->name == NULL) return NULL;
+    if (strcmp(e->name, name) == 0) return e;
     h = (h + 1) % (unsigned int)idx->capacity;
   }
-  return -1;
+  return NULL;
+}
+
+int poly_bind_index_find(const PolyBindIndex *idx, const char *name) {
+  const BindEntry *entry = bind_index_lookup(idx, name);
+  return entry ? entry->buf_idx : -1;
 }
 
 int poly_bind_index_dst_shape(
@@ -116,6 +122,14 @@ int poly_import_bind_tensor(
     int transpose_2d,
     int crop_axis
 ) {
+  BindEntry *entry = bind_index_lookup(idx, name);
+  if (!entry) return 0;
+  /* Different source names can map to one binding after prefix removal. Reject
+   * before writing; failed candidates never become the caller's Model. */
+  if (entry->bound) {
+    poly_import_error_set(POLY_IMPORT_ERR_WEIGHT_MISMATCH, "duplicate weight binding '%s'", name);
+    return -1;
+  }
   float *data = poly_decoded_tensor_to_f32(tensor);
   if (!data) {
     poly_import_error_set(
@@ -128,6 +142,7 @@ int poly_import_bind_tensor(
       idx, name, data, tensor->shape, tensor->ndim, transpose_2d, crop_axis
   );
   free(data);
+  if (rc == 1) entry->bound = true;
   return rc;
 }
 
