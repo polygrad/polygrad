@@ -1,56 +1,12 @@
 # Polygrad
 
-Build and train models in Python or JavaScript, then run them in Node.js,
-the browser or native applications. Exported Polygrad models carry their graph
-and weights, so deployment does not require rewriting the model in another
-language or keeping its authoring code running.
-
-Polygrad provides tensors, automatic differentiation, neural-network layers and
-JIT compilation through a shared C11 core based on tinygrad. Native execution
-supports CPU and CUDA; browsers use WebAssembly or WebGPU. See the frontend
-guides for installation, examples and backend requirements.
+Polygrad is a tensor library and JIT compiler built around a C11 port of
+tinygrad. It provides Python and JavaScript APIs for automatic
+differentiation, neural networks and model export. Native applications can use
+the C API directly.
 
 - [Python guide](py/README.md): installation, Tensor/NumPy usage, training, Models and JIT.
 - [JavaScript guide](js/README.md): Node, browser/WebGPU, typed arrays, training and Models.
-
-## Contents
-
-- [Where Polygrad Fits](#where-polygrad-fits)
-- [Install](#install)
-- [30-Second Demo](#30-second-demo)
-- [High-Level APIs](#high-level-apis)
-- [Export Products](#export-products)
-- [JIT And Compile](#jit-and-compile)
-- [Custom Kernels](#custom-kernels)
-- [Runtime Choices And API Reference](#runtime-choices)
-- [Runtime Ownership](#runtime-ownership)
-- [Tinygrad Relationship](#tinygrad-relationship)
-- [The C Core](#the-c-core)
-- [Building From Source](#building-from-source)
-- [Tests](#tests)
-- [Current Limits](#current-limits)
-- [Repository](#repository)
-
-## Where Polygrad Fits
-
-Polygrad is not trying to replace every tensor framework. It is aimed at tools
-that need a small, embeddable compiler/runtime.
-
-Good fits:
-
-- browser-first ML tools;
-- Node and Python packages that should share one runtime;
-- native libraries that need tensor kernels without a Python dependency;
-- model packages that need both WASM/WebGPU and native execution;
-- compiler experiments that want tinygrad-like UOps in a C core.
-
-Probably not the right fit yet:
-
-- large distributed training;
-- depending on the largest existing model ecosystem;
-- vendor BLAS/LAPACK as the primary linalg implementation;
-- production workloads that require mature backend-specific kernels for every
-  dense linalg path.
 
 ## Install
 
@@ -66,16 +22,12 @@ JavaScript:
 npm install polygrad
 ```
 
-Python requires Linux, Python 3.9+, NumPy, and a C compiler/Python headers for
-installation from the published source package. The CPU backend needs a C compiler
-at runtime: clang is recommended; GCC is the fallback when clang is absent.
-Generated float16 kernels require clang's `__fp16` support.
-Node requires version 18+; native builds need a `node-gyp` toolchain, with
-bundled Wasm fallback when compilation fails. To skip the native build:
-`POLYGRAD_SKIP_NATIVE=1 npm install polygrad`. Browser/Wasm execution does not
-require a local C compiler. See the frontend guides for backend choices.
+Python requires Linux and Python 3.9+; Node.js requires Node 18+.
+See the [Python installation guide](py/README.md#install) and
+[JavaScript installation guide](js/README.md#install) for compiler requirements
+and native/Wasm setup.
 
-## 30-Second Demo
+## Quickstart: Tensors
 
 Python:
 
@@ -101,8 +53,9 @@ const y = x.dot(w).softmax(-1)
 console.log(y.toArray())
 ```
 
-Browser:
+Browser (npm package with a browser bundler):
 
+<!-- readme-test: browser -->
 ```js
 import { Tensor } from 'polygrad'
 
@@ -110,256 +63,19 @@ const y = new Tensor([1, 2, 3]).mul(2).add(1)
 console.log(y.toArray())
 ```
 
-## High-Level APIs
+Polygrad follows tinygrad's graph-based execution model:
 
-Start with [fit in Python, load in JavaScript](py/README.md#fit-in-python-load-in-javascript)
-for a complete `linear.pgb` example, or [train a Model in JavaScript](js/README.md#train-a-model).
-The following sections describe the shared Model interface and C-built families.
+- **Build a graph:** Tensor operations create UOps describing the computation,
+  rather than immediately running a kernel for each operation.
+- **Lower and render:** when results are needed, the scheduler forms kernels;
+  the compiler lowers their operations and renders backend-specific code.
+- **Execute:** run on native CPU or CUDA, or use WebAssembly and WebGPU in the
+  browser. Direct x86 and interpreter backends are also available.
 
-`Model` is a C-owned runtime with sealed graph topology and mutable named state.
-Use `Model(...)` / `new Model(...)` with a callable or Tensor bindings.
-Explicit `Model.from_callable(...)` / `Model.fromCallable(...)` and
-`Model.from_tensors(...)` / `Model.fromTensors(...)` bypass constructor dispatch.
-Curated `models.MLP`, `TabM`, and `NAM` use the
-same runtime. In Python, pass `runtime=rt` to a family factory or HF/GGUF loader
-to select an explicit Runtime; otherwise they use the default runtime. In JS,
-use `rt.models.MLP(...)` or `rt.Model.fromHF(...)` / `fromGGUF(...)`.
-Disposing a Model releases its ownership without destroying that runtime;
-disposing the Runtime invalidates its Models. Training stays on Model; no
-separate Trainer is required.
+## Quickstart: Models
 
-With a `loss`, callable construction runs the author twice: evaluation for
-`forward`, then training for the loss entrypoint. Both use the same named state;
-execution never calls the author again. BatchNorm statistics and RNG progression
-belong to the Model, not the authoring object. Capture restores Tensor roots and
-training mode on success or failure. Only declared auxiliary state may be assigned
-by the author; optimizer updates to parameters remain part of training.
-Set the RNG seed before capture. Pure synchronous inspection is allowed, but
-effectful materialization and asynchronous work during capture reject. Arbitrary
-host-language side effects are not rolled back; keep authoring callbacks limited
-to graph construction. Without a loss, capture uses the current training mode.
-Bundles preserve auxiliary/RNG state. To resume training after loading, configure
-the same optimizer; `include_optimizer` saves its state, not its configuration.
-
-Model calls accept arrays or Tensors. If any input is a Tensor, every output is
-an owned device Tensor; array-only calls still return host arrays. Tensor inputs
-must satisfy the declared shape, dtype, Runtime and device. Use
-`model.forward(x=x)["prediction"]` in Python or
-`(await model.forwardAsync({x})).prediction` in JS, where `prediction` is your
-declared output name. Results keep their values across later calls and Model
-disposal, but their Runtime must remain alive. Dispose results when finished.
-This enables device-resident chaining, not differentiation through a Model call.
-The initial implementation copies device values; it is not zero-copy. Ordinary
-schedule-cache retention still applies; clear that cache at an idle boundary
-when reclaiming cached execution resources. Borrowed/caller-supplied result
-storage is not supported by this interface yet.
-
-Captured inputs may have one bounded variable leading dimension and fixed trailing
-dimensions. Calls and explicit training steps can bind different leading extents;
-earlier outputs retain their concrete shapes and values. Shared dimensions must
-agree across inputs. Current storage reserves the declared maximum capacity.
-Portable save/load preserves these signatures; bound-program export rejects them.
-Empty input bindings are currently unsupported and reject before any input writes.
-
-Flat host arrays use the declared shape, inferring a variable leading extent when
-the fixed trailing dimensions determine it uniquely. Explicit shapes must match: Python
-multidimensional ndarrays carry their shape; JS accepts
-`{x: {data: new Float32Array(6), shape: [2, 3]}}`. Equal byte counts do not make
-`[3, 2]` interchangeable with `[2, 3]`. C checks all input rows before writes.
-
-`model.fit(data, epochs=2, batch_size=32)` in Python, or
-`model.fit(data, {epochs: 2, batchSize: 32})` in JS, traverses host arrays or
-device Tensor datasets in input order each epoch. Each captured input/target
-must admit batch size 32 in its leading-axis bounds;
-all datasets must have the same sample count. Omit batch size to repeat the
-supplied full batch. An incomplete batch rejects before training unless
-`remainder="drop"` (JS `remainder: 'drop'`) discards it, or `remainder="keep"`
-processes it when every input's bounds permit the smaller extent. These policies
-are explicit; no padding or shuffling is implicit. Returns one loss per step;
-callback indices span epochs. Tensor datasets carry concrete shapes and are
-sliced on-device, including noncontiguous views; host and Tensor inputs may mix.
-WebGPU uses `await model.fitAsync(data, options)` with synchronous `onStep`
-callbacks. Minibatching does not read device datasets back into host arrays;
-the scalar loss still returns to the host each step.
-
-### Configuration-driven model families
-
-`models.Llama(config)` constructs a dense Llama in C, with thin Python/JS
-wrappers. It accepts HF-style dimensions, `batch_size` (default 1) and
-`max_seq_len` (default 1). The signature is int32 `tokens[batch_size,max_seq_len]`
-to float32 `logits[batch_size,max_seq_len,vocab_size]`. Parameters must be populated;
-construction alone does not load a checkpoint or provide trained weights.
-Python `Model.from_hf(...)` and JS `Model.fromHF(...)` load config+safetensors
-through the same C builder, checking all required weights before publication.
-Python accepts `runtime=rt`; JS uses `rt.models.Llama`, or `LlamaAsync` on WebGPU.
-
-The initial Llama scope covers dense Llama 2/base 3 and text-only 3.x configurations
-using `rope_scaling.rope_type="llama3"`, including tied embeddings. Scaled rotary
-tables are a documented model-layer extension to pinned Tinygrad (PG-DIV-009),
-not a compiler change. Execution is fixed-window, float32, beginning at position
-zero. No KV cache, sampler, tokenizer/chat template, GGUF Llama importer, vision,
-MoE or arbitrary RoPE scheme is included. Small reference fixtures are tested;
-this is not a claim that every pretrained Llama checkpoint has been validated.
-
-`make fetch-llama-pretrained` downloads a pinned 61 MB TinyStories Llama 2-style
-checkpoint (not a Meta checkpoint). `make test-llama-pretrained` compares full
-logits, three greedy choices and bundle reload against Transformers. Set
-`HF_PYTHON` to an environment with Torch/Transformers/Hugging Face Hub, and
-`LLAMA_TEST_DEVICES='cpu cuda'` to require both backends. Downloads are separate
-from testing; missing or altered weights fail this target. This is full-window
-recomputation, not KV-cached generation.
-
-For the pinned BF16 Llama 3.2 1B checkpoint, use `make test-llama32-pretrained
-LLAMA32_CHECKPOINT=/path/to/Llama-3.2-1B LLAMA32_TEST_DEVICES='cuda cpu'
-HF_PYTHON=/path/to/reference/python`. This runs the float32 Transformers oracle
-and each Polygrad backend in separate processes, comparing full logits and
-greedy choices. It does not download weights or test KV caching/bundle export.
-Allow substantial host RAM/swap as well as GPU memory: the current importer and
-float32 Model retain more storage than the BF16 checkpoint size. Float32 weights
-alone exceed 4 GB, so this is not a Wasm-sized checkpoint.
-
-`models.Sequential(config)` and `models.Graph(config)` build ordinary Models in
-C, alongside MLP/TabM/NAM. One JSON configuration can be shared by Python, Node,
-and browsers without model-specific source compilation or an authoring callback.
-`Model(config)` / `new Model(config)` selects these same factories when the object
-declares `format: "poly.modeldef@1"` and a registered `type`: `mlp`, `tabm`, `nam`,
-`gpt2`, `distilgpt2`, `llama`, `sequential` or `graph`. Named factories, including `models.GPT2`,
-use that same C dispatch and accept untagged configurations.
-`models.list()` in Python and `pg.models.list()` in JS expose construction,
-HF and GGUF capabilities from this same C table. Qwen3 is currently GGUF-only
-through the generic interface; it is not advertised as a configuration factory.
-New Qwen3 imports own their rotary tables and accept only int32 token input `x`,
-returning `output`. Old bundles retain the signatures shown by `entrypoints()`.
-CLIP, ViT, DINOv2 and DINOv3 ViT provide shared C vision inference and HF
-checkpoint imports. Their saved bundles work in Python, Node and the browser;
-see the [Python](py/README.md#vision-models) and [JavaScript](js/README.md#vision-models)
-guides for image/token inputs, outputs and supported variants.
-These model-layer additions are registered as PG-DIV-011; DINO architectures
-follow Transformers because they are absent from the pinned Tinygrad catalogue.
-Untagged configurations are not guessed; the explicit family factories remain
-available. Python accepts `runtime=rt` for configuration construction. JavaScript
-uses the owning `rt.Model`; WebGPU requires `models.SequentialAsync`/`GraphAsync`.
-They are factories, not subclasses or a second execution graph.
-
-C checkpoint callers use `poly_hf_load` / `poly_gguf_load`, or their `_into`
-variants to borrow a caller-owned context. The registry selects the model-specific
-name mapping; decoded adapters are private. MLP/TabM/NAM and Sequential/Graph
-use Model bundles or state loading, not HF/GGUF adapters.
-
-MLP, TabM, NAM and Sequential/Graph initialize their parameters during construction.
-GPT-2, Llama and Qwen checkpoint builders allocate topology and storage, but refuse
-execution and export until all required parameters have been supplied. Use the HF/
-GGUF loaders or explicit Model writes; zero-valued weights are valid. Reading a C
-buffer pointer does not mark it initialized. Unchanged portable bundles remain
-byte-identical across load/save, while separate imports own independent state.
-
-For example, save this as `network.json`:
-
-```json
-{
-  "input": {"name": "x", "shape": [1, 4], "dtype": "float32"},
-  "layers": [
-    {"name": "first", "type": "linear", "out_features": 2, "activation": "relu"},
-    {"name": "second", "type": "linear", "out_features": 3, "activation": "relu"},
-    {"name": "head", "type": "linear", "out_features": 4}
-  ],
-  "output": "prediction",
-  "seed": 42
-}
-```
-
-```python
-from pathlib import Path
-from polygrad import models
-model = models.Sequential(Path("network.json").read_text())
-# Optional runtime=rt uses an explicit Runtime instead of the default context.
-```
-
-```javascript
-const model = pg.models.Sequential(config) // Node/native or synchronous Wasm
-// WebGPU: await pg.models.SequentialAsync(config)
-// Graph and GraphAsync accept the connected form described below.
-```
-
-C exposes `poly_model_from_config(ctx, "sequential", json, len, device, &error)`
-in `models/models.h`; use `"graph"` for connected models. A non-NULL context is
-borrowed and must outlive the Model; explicit NULL requests an owned context.
-Construction scopes logical retention and restores the caller's policy.
-Typed C callers use `poly_mlp_into`, `poly_gpt2_into` or `poly_qwen3_into`.
-
-`models.DistilGPT2(config)` (JS: `pg.models.DistilGPT2(config)`) is a six-block
-GPT-2 preset using the same builder and checkpoint names. Config fields can
-override defaults. Like GPT-2, it requires weights before execution or export;
-HF DistilGPT-2 checkpoints still declare `model_type: "gpt2"` and load normally.
-
-The initial component catalogue is deliberately bounded:
-
-| Component | Configuration |
-| --- | --- |
-| `linear` | `out_features`; optional `bias` (default true), `activation` (default `none`) |
-| `embedding` | Integer indices; `vocab_size`, `embed_dim` |
-| `layernorm`, `rmsnorm` | Normalize the fixed last dimension; `eps` (defaults `1e-5`/`1e-6`), `affine` (default true) |
-| `rope` | Split-half rotation of `[batch,heads,sequence,head_dim]`; fixed sequence and even head width; `theta` (default 10000) |
-| `attention` | Query, key, value, optional mask; `is_causal`, `enable_gqa` (default false); no dropout |
-| `relu`, `sigmoid`, `tanh`, `silu`, `gelu` | One input |
-| `identity`, `square`, `exp`, `log` | One input |
-| `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
-| `sum`, `mean` | Reduce all axes to a scalar |
-| `reshape` | Positive `shape`, optionally the same bounded leading dimension; unchanged symbolic element count |
-| `permute` | `axes`: a permutation of all input axes |
-| `cast` | Explicit destination `dtype` |
-| `repeat` | Positive integer `count`; `body` is one unnamed component or a named layer list |
-
-Graph configurations replace `input/layers/output` with:
-
-- `inputs`: name → `{shape, dtype, role?}`; role is `input` or `target`.
-- `nodes`: ordered `{name, type, inputs: [earlier_value_names], ...}` records.
-- `outputs`: output name → input or node name.
-- Optional `entrypoints`: `{name, inputs, outputs, objective?}` records. Without
-  them, `forward` exposes all declared inputs and outputs. An explicit scalar
-  objective enables the existing Model training path.
-
-Both families accept `modules`, a table of named leaf-component configurations.
-Use `{name, call: "shared", inputs: [...]}` instead of `type` in a Graph node
-(omit `inputs` in Sequential). Here `shared` is the key of a declaration in
-`modules`, not a reserved keyword. Repeated calls reuse the declared component's
-parameters; ordinary Repeat bodies create fresh parameters. Module declarations
-are construction components, not device-placement cuts or runtime submodels.
-See [the shared-layer Graph configuration](test/fixtures/model_definition.json).
-
-Parameter names are `layers.<name>.weight/bias`, `nodes.<name>.weight/bias`, or
-`modules.<name>.weight/bias`; Repeat inserts zero-based indices. Linear weights
-and embedding weights use the existing seed/name-keyed C-family Kaiming uniform
-initializer; biases are zero. Normalization weights start at one. Parameters are
-float32; Tensor promotion rules apply to other input dtypes. RoPE owns deterministic
-`freqs_cos`/`freqs_sin` AUX tables under its component name. This does not promise
-Keras/Tinygrad initial-weight equivalence or automatic conversion between split-half
-and interleaved checkpoint layouts.
-
-Inputs require an explicit concrete scalar dtype supported by the selected backend,
-rank <=8 and positive dimensions.
-A leading dimension may be `{"name":"batch","min":1,"max":32}`. All bounded
-declarations in one definition must use that same name and bounds; trailing
-dimensions remain fixed. Calls resolve concrete extents through the normal Model
-input contract, and reductions use the invocation extent, not the declared maximum.
-See [the typed, bounded transformer-component fixture](test/fixtures/model_components.json).
-Names are ASCII identifiers of 1–63 characters. Configuration limits
-are 1 MiB JSON, nesting 32, 16,384 JSON values, 1,024 expanded component calls,
-construction depth 16, and 64 inputs/outputs/entrypoints. Expanded paths are at
-most 191 bytes. Named storage totals at most 16,777,216 elements; node shapes,
-linear contractions, embedding selectors and attention scores have the same limit,
-evaluated at maximum extents.
-These are construction limits, not a bound on compiler/backend peak memory.
-
-Optional `format: "poly.modeldef@1"` and `type: "sequential"`/`"graph"` tags are
-checked when present. The selected factory already identifies the family.
-Unknown fields, duplicate keys/names, forward/cyclic references, unused shared
-components and incompatible shapes fail. There are no config expressions,
-recursive modules, runtime loops, data-dependent shapes or Keras JSON compatibility.
-Configuration describes construction, not checkpoint state: save/load the
-result through existing Model bundle or graph/weights APIs.
-
-### Tensor-authored models
+Fit `y = 3x + 2` in Python, save its graph and weights, then load it in
+JavaScript without redefining the model:
 
 ```python
 from polygrad import Model, Tensor
@@ -396,87 +112,213 @@ try {
 }
 ```
 
-This example has a fixed input shape of five elements. Runnable checkout scripts:
-`py/examples/linear_export.py` and `js/examples/linear_predict.js`. `save()` returns
-bundle bytes, or also writes a supplied local path in Python/Node. Browser APIs
-accept bytes, not filesystem paths. `summary()` returns metadata-only text without
-executing graphs or reading weights. Excluding optimizer state does not remove
-training entrypoints.
+Polygrad adds three pieces around tinygrad's compiler core:
 
-Portable loads use the default runtime unless explicitly selected: Python
-`Model.load(source, runtime=rt)` / `Model.from_bundle(data, runtime=rt)`, or JS
-`rt.Model.load(source)` / `rt.Model.fromBundle(data)`. Package-level JS
-`Model.load` uses the package default, not a runtime created separately with
-`pg.create()`. Imports have independent storage; tied names within an import
-remain aliases. Disposing a loaded Model does not destroy its runtime. Explicit
-runtime disposal invalidates its Models. Standalone C imports can still own a
-private context; bound-program imports keep their separate device/ABI contract.
+- **Model and helpers:** capture Tensor computations or construct supported
+  architectures, with named inputs, outputs and state.
+- **Logical and physical graphs:** retain a portable logical graph separately
+  from the device-specific graph used for execution.
+- **Portable bundles:** save the logical graph and weights together. Another
+  frontend can load the bundle and compile it for its backend without the
+  original model class.
 
-Captured state is independent of the authoring object's Tensor attributes. Reads return copies.
-Callable objects provide named Tensor attributes through `get_state_dict` (JS
-`getStateDict`). JS objects implement `forward(namedInputs)`; plain functions
-receive that same input object. Python callables receive keyword inputs.
-`params=net` or `params=get_state_dict(net)` explicitly selects state; a supplied
-mapping overrides automatic collection, and an empty mapping disables it.
-Functions do not expose lexical closure state: pass their tensors in `params`.
-`is_param=True` selects PARAM; false selects persistent AUX. Freeze a PARAM with
-`set_trainable`/`setTrainable` without changing its role. Advanced `from_bindings`
-can declare an initially frozen PARAM. The separate `state=` argument is removed.
+## Devices And Runtimes
 
-Capture temporarily preserves newly authored logical roots and restores the
-Runtime policy on failure or success. Inputs/state must still have logical roots;
-capture cannot recover discarded producers. It does not suppress execution effects.
+Explicit runtimes and Models are optional for ordinary Tensor programs.
 
-Use `read_buffer`/`write_buffer` (JS `readBuffer`/`writeBuffer`) for explicit
-state access. `bindings()` and `entrypoints()` describe the sealed interface.
-For training, supply targets and named losses, configure the optimizer, and
-call `train_step`/`trainStep`; select an entrypoint when objectives are ambiguous.
-`fit` repeats the supplied batch or iterates minibatches with `batch_size` /
-`batchSize`; it does not implicitly shuffle or pad. WebGPU
-uses explicit `trainStepAsync`, `readBufferAsync`, and `writeBufferAsync`.
-For WebGPU capture, use `Model.fromCallableAsync` or `await Model.fromTensors(...)`;
-authoring is synchronous (twice when a loss is supplied), while C state
-initialization can suspend.
+```text
+Python Tensor API       JavaScript Tensor API       C / native package
+       |                        |                         |
+       +------------------------+-------------------------+
+                                |
+                       Polygrad C11 runtime
+                                |
+       +----------------+-------+-------+----------------+
+       |                |               |                |
+    CPU/x86          CUDA/HIP          WASM            WebGPU
+```
 
-Polygrad includes the usual tensor building blocks:
+| Situation | Use |
+|---|---|
+| Python research or scripts | `polygrad` from PyPI |
+| Node.js product code | `polygrad` from npm with the default `Tensor` API or `polygrad.create()` |
+| Browser CPU/WASM | `polygrad` with `core: "wasm"` |
+| Browser GPU | `polygrad` with `core: "wasm", device: "webgpu"` |
+| Native embedding | C ABI and `libpolygrad` |
+| Package integration | create one runtime and pass it into the package |
 
-- elementwise ops, broadcasting, reductions, movement ops, indexing, gather,
-  sort, argsort, topk, matmul, softmax, normalization, and loss helpers;
-- reverse-mode autograd for first-order training;
-- `nn` layers and optimizers in Python and JavaScript;
-- structured linalg: QR, triangular solve, Cholesky, Cholesky solve, solve, and
-  least squares;
-- tinygrad-style raw Tensor JIT capture/replay;
-- portable bundles for saving IR and weights together, plus separate bound
-  compiled-program export for compatible runtimes;
-- model loading paths for supported safetensors/GGUF workflows.
+Browser WebGPU execution and readback require async methods. HIP is implemented
+but excluded from the 0.5.2 release-validation matrix.
 
-Reusable C layer programs are declared in `src/nn/nn.h`; scoped Model layer
-construction is in `src/models/layers.h`. LSTMCell, Linear, LayerNorm,
-GroupNorm, BatchNorm, InstanceNorm and RMSNorm share C programs across
-Python and JavaScript; C model builders can compose the same programs.
-LSTM state is explicit: each call returns hidden/cell tensors that can feed
-the next call. These are ordinary graphs, with existing autograd and export.
-Standalone optimizers include LARS/LAMB/Muon. Model optimizer configuration
-and checkpoints currently support SGD/Adam/AdamW, not those additional kinds.
+Choose a device through Tensor/Runtime options or, in native applications,
+`POLY_DEV` / `DEV`. Use the default runtime for ordinary programs; create an
+explicit runtime for isolation and construct related objects through it.
+See [Python runtimes](py/README.md#devices-and-runtimes),
+[JS runtimes](js/README.md#devices-and-runtimes), and the
+[shared settings](#settings) and [ownership reference](#runtime-ownership).
 
-C Model imports reject malformed HF shards as a whole; they do not publish a
-partially loaded model. The C GGUF loader supports F32/F16/BF16, I8/I16/I32
-(GGML IDs24/25/26), and Q4_0/Q4_1/Q8_0/Q6_K with complete blocks.
-Q4_K/Q5_K metadata can be decoded, but their C weight conversion is not
-implemented; Model import rejects conversion failures rather than leaving
-initialized weights in their place.
-Other types are rejected, not interpreted as integers. This is narrower than
-the Python Tensor-level GGUF helper; decoding a file does not imply that its
-model architecture is supported.
+## Current Limits
 
-Structured linalg is implemented as portable tensor-composed fallback code. It
-does not add LAPACK or vendor-runtime dependencies. Backend-specific blocked
-kernels are planned for larger matrices.
+- Python installation currently targets Linux.
+- Polygrad tracks tinygrad 0.14.0, but is not a drop-in replacement or a
+  distributed-training framework. Genuine multi-GPU execution is unsupported.
+- Do not use one Python runtime concurrently from multiple threads, including
+  the default runtime. Overlapping calls can crash the process; use a runtime
+  per thread or serialize all use and cleanup.
+- Integer division by zero at valid coordinates can terminate native Python
+  or Node. Validate divisors supplied by users.
+- Structured linear algebra uses portable Tensor compositions, not vendor
+  BLAS/LAPACK kernels.
 
-## Export Products
+See [compatibility](#tinygrad-relationship) for backend and API gaps, and the
+[Python](py/README.md#troubleshooting) or [JS](js/README.md#troubleshooting)
+troubleshooting sections for installation and runtime errors.
 
-Polygrad keeps portable graphs, bound programs, and weights separate:
+## Reference
+
+### Guides By Topic
+
+- JIT: [Python](py/README.md#jit-and-compile), [JavaScript](js/README.md#jit-and-compile).
+- Custom kernels: [Python](py/README.md#custom-kernels), [JavaScript](js/README.md#custom-kernels).
+- Package integration: [Python](py/README.md#package-integration), [JavaScript](js/README.md#package-integration).
+
+### Supported Models
+
+| Model type | JSON construction | HF import | GGUF import | Python generation helper |
+| --- | --- | --- | --- | --- |
+| MLP, TabM, NAM, Sequential, Graph | Yes | No | No | No |
+| GPT2, DistilGPT2 | Yes | Yes | Yes | Yes |
+| Llama | Yes | Yes | No | No |
+| Qwen3 | No | No | Yes | No |
+| CLIP, ViT, DINOv2, DINOv3 | Yes | Yes | No | No |
+
+Checkpoint-required types must have all weights loaded before execution or
+export. `models.list()` reports construction/import capabilities; generation
+is a separate Python helper, not implied by checkpoint support.
+
+### Configuration-driven Models
+
+Sequential and Graph use the same JSON definitions in Python and JavaScript.
+Named factories accept untagged configs; `Model(config)` / `new Model(config)`
+requires `format: "poly.modeldef@1"` and a registered `type`.
+`models.list()` reports which types support construction or checkpoint import.
+These factories return ordinary Models, not architecture-specific subclasses.
+The JavaScript snippets below use an existing runtime `pg` and parsed JSON `config`.
+
+<details markdown="1">
+<summary>JSON examples, components and construction limits (Python and JavaScript)</summary>
+
+For example, save this as `network.json`:
+
+```json
+{
+  "input": {"name": "x", "shape": [1, 4], "dtype": "float32"},
+  "layers": [
+    {"name": "first", "type": "linear", "out_features": 2, "activation": "relu"},
+    {"name": "second", "type": "linear", "out_features": 3, "activation": "relu"},
+    {"name": "head", "type": "linear", "out_features": 4}
+  ],
+  "output": "prediction",
+  "seed": 42
+}
+```
+
+<!-- readme-test: config -->
+```python
+from pathlib import Path
+from polygrad import models
+model = models.Sequential(Path("network.json").read_text())
+# Optional runtime=rt uses an explicit Runtime instead of the default context.
+```
+
+<!-- readme-test: config -->
+```javascript
+const model = pg.models.Sequential(config) // Node/native or synchronous Wasm
+// WebGPU: await pg.models.SequentialAsync(config)
+// Graph and GraphAsync accept the connected form described below.
+```
+
+`models.DistilGPT2(config)` (JS: `pg.models.DistilGPT2(config)`) is a six-block
+GPT-2 preset using the same builder and checkpoint names. Config fields can
+override defaults. Like GPT-2, it requires weights before execution or export;
+HF DistilGPT-2 checkpoints still declare `model_type: "gpt2"` and load normally.
+
+The initial component catalogue is deliberately bounded:
+
+| Component | Configuration |
+| --- | --- |
+| `linear` | `out_features`; optional `bias` (default true), `activation` (default `none`) |
+| `embedding` | Integer indices; `vocab_size`, `embed_dim` |
+| `layernorm`, `rmsnorm` | Normalize the fixed last dimension; `eps` (defaults `1e-5`/`1e-6`), `affine` (default true) |
+| `rope` | Split-half rotation of `[batch,heads,sequence,head_dim]`; fixed sequence and even head width; `theta` (default 10000) |
+| `attention` | Query, key, value, optional mask; `is_causal`, `enable_gqa` (default false); no dropout |
+| `relu`, `sigmoid`, `tanh`, `silu`, `gelu` | One input |
+| `identity`, `square`, `exp`, `log` | One input |
+| `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
+| `sum`, `mean` | Reduce all axes to a scalar |
+| `reshape` | Positive `shape`, optionally the same bounded leading dimension; unchanged symbolic element count |
+| `permute` | `axes`: a permutation of all input axes |
+| `cast` | Explicit destination `dtype` |
+| `repeat` | Positive integer `count`; `body` is one unnamed component or a named layer list |
+
+Graph configurations replace `input/layers/output` with:
+
+- `inputs`: name maps to `{shape, dtype, role?}`; role is `input` or `target`.
+- `nodes`: ordered `{name, type, inputs: [earlier_value_names], ...}` records.
+- `outputs`: output name maps to input or node name.
+- Optional `entrypoints`: `{name, inputs, outputs, objective?}` records. Without
+  them, `forward` exposes all declared inputs and outputs. An explicit scalar
+  objective enables the existing Model training path.
+
+Both model types accept `modules`, a table of named leaf-component configurations.
+Use `{name, call: "shared", inputs: [...]}` instead of `type` in a Graph node
+(omit `inputs` in Sequential). Here `shared` is the key of a declaration in
+`modules`, not a reserved keyword. Repeated calls reuse the declared component's
+parameters; ordinary Repeat bodies create fresh parameters. Module declarations
+are construction components, not device-placement cuts or runtime submodels.
+See [the shared-layer Graph configuration](https://github.com/polygrad/polygrad/blob/main/test/fixtures/model_definition.json).
+
+Parameter names are `layers.<name>.weight/bias`, `nodes.<name>.weight/bias`, or
+`modules.<name>.weight/bias`; Repeat inserts zero-based indices. Linear weights
+and embedding weights use the existing seed/name-keyed C model Kaiming uniform
+initializer; biases are zero. Normalization weights start at one. Parameters are
+float32; Tensor promotion rules apply to other input dtypes. RoPE owns deterministic
+`freqs_cos`/`freqs_sin` AUX tables under its component name. This does not promise
+Keras/Tinygrad initial-weight equivalence or automatic conversion between split-half
+and interleaved checkpoint layouts.
+
+Inputs require an explicit concrete scalar dtype supported by the selected backend,
+rank <=8 and positive dimensions.
+A leading dimension may be `{"name":"batch","min":1,"max":32}`. All bounded
+declarations in one definition must use that same name and bounds; trailing
+dimensions remain fixed. Calls resolve concrete extents through the normal Model
+input contract, and reductions use the invocation extent, not the declared maximum.
+See [the typed, bounded transformer-component fixture](https://github.com/polygrad/polygrad/blob/main/test/fixtures/model_components.json).
+Names are ASCII identifiers of 1-63 characters. Configuration limits
+are 1 MiB JSON, nesting 32, 16,384 JSON values, 1,024 expanded component calls,
+construction depth 16, and 64 inputs/outputs/entrypoints. Expanded paths are at
+most 191 bytes. Named storage totals at most 16,777,216 elements; node shapes,
+linear contractions, embedding selectors and attention scores have the same limit,
+evaluated at maximum extents.
+These are construction limits, not a bound on compiler/backend peak memory.
+
+Optional `format: "poly.modeldef@1"` and `type: "sequential"`/`"graph"` tags are
+checked when present. The selected factory already identifies the model type.
+Unknown fields, duplicate keys/names, forward/cyclic references, unused shared
+components and incompatible shapes fail. There are no config expressions,
+recursive modules, runtime loops, data-dependent shapes or Keras JSON compatibility.
+Configuration describes construction, not checkpoint state: save/load the
+result through existing Model bundle or graph/weights APIs.
+
+</details>
+
+### Export Products
+
+Use `save()` / `load()` for a portable graph-and-weights bundle.
+Polygrad 0.5.2 requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
+artifacts are rejected.
+
+For separate artifacts:
 
 - `export_ir()` / `exportIR()` returns portable logical PGIR. Import it with a
   new placement policy when the target device layout may change.
@@ -488,6 +330,7 @@ Polygrad keeps portable graphs, bound programs, and weights separate:
 
 Python:
 
+<!-- readme-test: export -->
 ```python
 program = model.export_program()
 weights = model.export_weights()
@@ -497,6 +340,7 @@ result = fast_model.call("forward", {"x": input_array})
 
 JavaScript (native/Wasm synchronous runtimes):
 
+<!-- readme-test: export -->
 ```js
 const program = model.exportProgram()
 const weights = model.exportWeights()
@@ -510,191 +354,11 @@ is inference/call-only: it has no portable logical graph and cannot be
 re-placed, trained, differentiated, or exported as PGIR. The existing bundle
 format remains the portable PGIR-plus-weights product.
 
-## JIT And Compile
 
-`jit` follows tinygrad's three-call shape: first call runs normally, second call
-captures, later calls replay.
-Tensor host-data reads during capture are rejected: their values would otherwise
-be baked into the replay. Read results outside the captured function. Following
-Tinygrad, replay snapshots an input when it aliases a captured write-only output;
-ordinary inputs and explicit in-place updates do not need this extra copy.
+### Settings
 
-Python capture currently requires at least one Tensor argument to select its
-C context; closure-only and scalar-only calls are unsupported. Python padding
-arguments do not accept symbolic UOp bounds; symbolic shrink/reshape/expand
-already have separate UOp-backed paths. Tinygrad's `Device[...].graph` introspection
-attribute is not exposed; its absence does not mean CUDA graph execution is
-absent. The upstream JIT tests remain non-green for these gaps and the missing
-selection APIs above.
-
-Python:
-
-```python
-from polygrad import Tensor, jit
-
-@jit
-def f(x):
-    return (x + 1).realize()
-
-print(f(Tensor([1, 2, 3])).numpy())  # run
-print(f(Tensor([4, 5, 6])).numpy())  # capture
-print(f(Tensor([7, 8, 9])).numpy())  # replay
-```
-
-JavaScript:
-
-```js
-const { Tensor, jit } = require('polygrad')
-
-const f = jit((x) => x.add(1).realize())
-f(new Tensor([1, 2, 3]))
-f(new Tensor([4, 5, 6]))
-console.log(f(new Tensor([7, 8, 9])).toArray())
-```
-
-Python and JS also expose `compile(...)`, which warms and captures the same path
-up front and returns an explicit callable with `run(...)`, `stats()`, and
-`dispose()`.
-
-## Custom Kernels
-
-Polygrad exposes a tinygrad-shaped custom kernel path for cases where Tensor
-composition is too indirect. A kernel function receives placeholder UOps and
-returns a compiler-ready `SINK(..., arg=KernelInfo(...))` body. As in tinygrad,
-`KernelInfo` marks the opaque kernel boundary. Polygrad wraps that body in `CALL` and returns
-`AFTER(...)` tensors that still run through normal scheduling, placement,
-caches, and device residency.
-
-Python:
-
-```python
-from polygrad import Tensor
-from polygrad.uop.ops import KernelInfo, UOp
-
-def add_kernel(out, a, b):
-    out, a, b = out.flatten(), a.flatten(), b.flatten()
-    i = UOp.range(out.ctx, out.numel(), 0)
-    return out[i].store(a[i] + b[i]).end(i).sink(
-        arg=KernelInfo(name="custom_add_4")
-    )
-
-out = Tensor.empty((4,), dtype="float32")
-y = out.custom_kernel(Tensor([1.0, 2.0, 3.0, 4.0]), Tensor([10.0, 20.0, 30.0, 40.0]), fxn=add_kernel)[0]
-print(y.numpy())  # [11. 22. 33. 44.]
-```
-
-Python `UOp.const(value, dtype=None)` and
-`UOp.variable(name, min_val, max_val, ...)` use the default Tensor context.
-Advanced embedded callers pass their owning context as `ctx=...`; the old
-leading-context signatures are not retained. Other low-level UOp factories
-still use their existing explicit-context APIs.
-
-JavaScript:
-
-```js
-const { Tensor, uop } = require('polygrad')
-
-function addKernel(out, a, b) {
-  out = out.flatten(); a = a.flatten(); b = b.flatten()
-  const i = uop.range(out.numel(), 0)
-  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink(
-    new uop.KernelInfo('custom_add_4')
-  )
-}
-
-const out = Tensor.empty([4], { dtype: 'float32' })
-const y = out.customKernel(
-  new Tensor([1, 2, 3, 4], { dtype: 'float32' }),
-  new Tensor([10, 20, 30, 40], { dtype: 'float32' }), addKernel
-)[0]
-console.log(y.toArray()) // [11, 22, 33, 44]
-```
-
-Without `KernelInfo`, a body can leave the output unchanged, as in pinned
-tinygrad. Match stored values to the destination dtype, using an explicit
-UOp cast where needed. Current C and Wasm renderers reject mismatched vector
-stores; INTERP follows Tinygrad's Python memoryview conversion rules. These
-backend rules differ, so portable kernels must cast explicitly. Published
-0.5.1 still has the Wasm/INTERP mismatched-store defects addressed in 0.5.2.
-
-For host-fed replay, `Tensor.copy_from(data)` (JS `copyFrom`) materializes
-pending work and writes current storage without replacing an existing BUFFER
-identity. Use JS `await tensor.copyFromAsync(data)` when WebGPU materialization
-is needed; it snapshots the supplied bytes while awaiting execution. Writes
-to an already-current WebGPU buffer can remain synchronous. Use `assign` for
-mutation expressed in the graph.
-
-## Runtime Choices
-
-This section is the shared API/backend reference. For task-oriented examples,
-use the [Python guide](py/README.md) or [JavaScript guide](js/README.md).
-
-Python `Tensor.dtype` returns a `DType` object, for example `dtypes.float32`;
-JavaScript retains dtype names such as `'float32'`. Constructors accept names
-in both frontends. `element_size()` / `elementSize()` report storage bytes and
-reject weak dtypes; `is_floating_point()` / `isFloatingPoint()` classify the
-dtype without materializing the Tensor.
-
-Movement helpers accept `None` (Python) or `null` (JS) for unchanged axes in
-`shrink`, `shrink_to` / `shrinkTo`, and `pad_to` / `padTo`. Target shapes may
-be a sequence or positional dimensions. For nonzero fill, use
-`x.pad_to(3, 5, value=-1)` or `x.padTo(3, 5, {value: -1})`.
-`pad_to` enlarges only; general symbolic padding is not implemented.
-
-WebGPU storage views require nonzero byte offsets to be multiples of 256.
-Unaligned typed-view assignment is rejected; it does not silently copy into
-separate storage. Arbitrary-offset views are deferred, and pinned Tinygrad
-v0.14.0's WebGPU allocator does not implement buffer offsets either.
-`max_shape` / `maxShape` and `max_numel()` / `maxNumel()` expose allocation
-bounds without changing the graph. Python retains symbolic `shape` values;
-JS `shape` already exposes maximum extents. Full slices and no-op shrink,
-`pad_to`, and empty-axis flip return the original Tensor.
-
-Index reads and writes share the C indexing implementation. Python uses
-`x[indices]` and `x[indices] = value`; JS uses `x.getitem(...indices)` and
-`x.setitem(indices, value)`, with slice objects such as `{start: 1, stop: 7,
-step: 2}`. Use Tensor indices for advanced indexing in JS. Multiple Tensor
-indices broadcast together; duplicate writes keep the last value, including
-zero. Conflicting live computations reject mutation. Advanced indexing and
-strided writes currently require concrete shapes; no host index readback is
-used. `.grad` can be assigned another Tensor or cleared (`None` / `null`).
-Integral-valued float arrays need an explicit float dtype in JS.
-
-Spatial operations also share C construction: Python `avg_pool2d`,
-`max_pool2d`, `max_unpool2d`, `interpolate`, and `conv_transpose2d`; JS
-`avgPool2d`, `maxPool2d`, `maxUnpool2d`, `interpolate`, and `convTranspose2d`.
-Pooling supports ceil mode, excluded padding for averages, and optional max
-indices. Interpolation supports `linear`, `nearest`, and `nearest-exact`.
-These spatial builders currently require concrete input shapes.
-
-Both frontends also expose like/normal factories, product and stable log
-reductions, normalization, exact GELU, diagonal/unfold/meshgrid helpers,
-nonconstant padding, and sparse cross-entropy options. Shared C owners build
-the graphs; Python uses snake_case and JS uses camelCase where applicable
-(for example, `full_like` / `fullLike`, `std_mean` / `stdMean`). JS `BigInt`
-scalar/full literals preserve all uint64 bits. Rounded division selects its
-integer or floating path after promotion. Cloning a weak-typed computation
-creates strong-typed storage; it does not allocate weak storage.
-
-`Tensor.invalids(..., dtype=...)` (JS: `Tensor.invalids(shape, {dtype})`)
-creates anonymous storage through the existing Invalid graph sentinel; read
-only regions that have been written. This is not zero initialization.
-
-Python accepts `Context(CHECK_OOB=0)`. Nonzero values raise: the optional
-Tinygrad compiler bounds verifier is not implemented (`PG-PARITY-026`).
-This is separate from Tensor index and shape validation.
-Runtime scalar bindings use signed 64-bit values (since C ABI80). Python and JS
-reject values outside that range; JS accepts safe integer Numbers or BigInts.
-Larger Python integers remain unsupported (`PG-PARITY-028`). WebGPU keeps its
-32-bit uniform limit. Scheduling and JIT preserve admitted values; they do not wrap
-them. This limit does not restrict ordinary int64/uint64 Tensor storage.
-
-Python `function` supports ordinary backward, but its `precompile` and
-`precompile_backward` flags currently support forward execution only; backward
-rejects them. FUNCTION `grad_fxn` callbacks are not implemented
-(`PG-PARITY-029`). Existing Tensor custom-kernel gradient callbacks are a separate
-supported API. Sharded backward and Tinygrad-style backward provenance remain
-open gaps (`PG-PARITY-013`, `PG-PARITY-030`). These are not parity allowances.
+<details markdown="1">
+<summary>Compiler tuning</summary>
 
 Python `Context(NOOPT=1)` and JS `runtime.noopt = 1` disable automatic
 kernel scheduling heuristics, not the compiler's required lowering passes or
@@ -721,6 +385,11 @@ For native search diagnostics, `BEAM_DEBUG=1` prints the input graph and final
 options; `BEAM_DEBUG=2` also prints candidate compilation and execution times.
 These diagnostics are disabled by default and use the existing C graph printer.
 
+</details>
+
+<details markdown="1">
+<summary>Default dtypes</summary>
+
 Default storage dtypes use the same C-owned policy: Python
 `Context(DEFAULT_FLOAT='float64', DEFAULT_INT='int64')`, or JS
 `runtime.defaultFloat` / `runtime.defaultInt`. Change JS settings while idle
@@ -728,6 +397,11 @@ and restore them after use. Explicit dtypes and typed-array inputs are preserved
 backend dtype capabilities still apply. These settings participate in compiler
 cache keys. They do not change fixed accumulation/RNG compute widths or the
 bounds-based int32/int64 lowering of weak integer indices.
+
+</details>
+
+<details markdown="1">
+<summary>DISK storage</summary>
 
 Native file-backed tensors use C-owned `DISK:<path>` storage. Python
 `Tensor(pathlib.Path(...))` passes the path to C for memory mapping;
@@ -739,73 +413,10 @@ DISK is not a compute backend. Wasm does not implement native file mapping:
 load bytes in JavaScript and pass typed arrays through the host-buffer API.
 JS does not currently provide Python's Tensor path constructor.
 
-`Tensor.const(value, dtype)` wraps a scalar or UOp, casting its graph when a
-dtype is supplied. Python also accepts `Variable`/`BoundVariable` wrappers;
-bound values retain their graph identity, not a host-side snapshot.
+</details>
 
-Scalar reductions accept axes `0` and `-1`. `realize()` leaves virtual weak
-tensors unchanged; cast before requesting storage or a schedule. Einsum supports
-scalar operands, ellipses, uppercase labels and shared C accumulation rules.
-Python shallow/deep copies own distinct Tensor handles over shared graph roots;
-use `clone()` when requesting a separate storage allocation.
-
-Both frontends expose `all`, `any`, `cumsum`, `cumprod`, `cummax`, and `cummin`
-through shared C Tensor operations. `all`/`any` accept axes and `keepdim`;
-scans currently require concrete shapes. Cumulative extrema return
-`(values, indices)` in Python and `[values, indices]` in JS, with int32 indices
-selecting the first equal extremum. Use floating-point tensors for gradients.
-WebGPU does not guarantee NaN truthiness or preservation through clipping under
-WGSL's finite-math rules; this also affects the pinned Tinygrad renderer.
-
-Shared C pointwise operations include inverse trig/hyperbolic functions,
-`erf`, `celu`/`selu`, `isfinite`, `isclose`, `copysign`, and `lerp`.
-Attention and dropout share C graph construction across Python, JavaScript and
-C models, including boolean/additive masks, causal attention, explicit GQA and
-training dropout. The C Tensor API takes the training flag explicitly; frontend
-Tensor APIs use their existing training setting.
-Logits BCE and NLL accept `none`, `sum`, or `mean` reduction and optional
-weights: Python `binary_crossentropy_logits`/`nll_loss`, JS
-`binaryCrossEntropyLogits`/`nllLoss` with an options object. NLL also accepts
-`ignore_index` / `ignoreIndex`; its gather path currently requires concrete
-shapes. Both frontends use the same C construction and autograd, not host
-array implementations.
-Ordinary BCE also accepts `none`, `sum`, or `mean`: Python
-`x.binary_crossentropy(y, reduction='sum')`, JS `x.binaryCrossEntropy(y, 'sum')`.
-
-```text
-Python Tensor API       JavaScript Tensor API       C / native package
-       |                        |                         |
-       +------------------------+-------------------------+
-                                |
-                       Polygrad C11 runtime
-                                |
-       +----------------+-------+-------+----------------+
-       |                |               |                |
-    CPU/x86          CUDA/HIP          WASM            WebGPU
-```
-
-| Situation | Use |
-|---|---|
-| Python research or scripts | `polygrad` from PyPI |
-| Node.js product code | `polygrad` from npm with the default `Tensor` API or `polygrad.create()` |
-| Browser CPU/WASM | `polygrad` with `core: "wasm"` |
-| Browser GPU | `polygrad` with `core: "wasm", device: "webgpu"` |
-| Native embedding | C ABI and `libpolygrad` |
-| Package integration | create one runtime and pass it into the package |
-
-Backend table:
-
-| Backend | Role |
-|---|---|
-| CPU C | Portable compiled CPU path |
-| interp | Reference interpreter for differential testing |
-| x86 | tinygrad-style direct x86 ISA lowering |
-| CUDA | NVIDIA GPU backend |
-| HIP | AMD GPU backend |
-| WASM | Node/browser WebAssembly backend |
-| WebGPU | Browser GPU backend through the WASM runtime |
-
-Environment variables:
+<details markdown="1">
+<summary>Environment variables</summary>
 
 ```bash
 DEV=CPU                 # also CUDA, HIP, X86, INTERP, CPU:X86
@@ -833,183 +444,11 @@ settings once per module. Browsers use runtime properties, not process env.
 
 `POLY_LIB` is Python's explicit native-library path; an invalid Python path
 fails without falling back to another installation. Node loads its packaged
-addon or Wasm via `POLY_CORE`. In 0.5.0, `POLY_DEV` and `POLY_LIB` replace
-`POLY_DEVICE` and `POLYGRAD_LIB`; the old names are no longer recognized.
+addon or Wasm via `POLY_CORE`. The obsolete `POLY_DEVICE` and `POLYGRAD_LIB` names are not recognized.
 
-## Runtime Ownership
+</details>
 
-A Polygrad runtime is not just a namespace. It owns a `PolyCtx`, compiled
-program caches, JIT state, buffer residency, and backend handles such as a WASM
-module, WebGPU device state, CUDA runners, or native CPU runners.
-
-Raw C `PolyUOp *` results are borrowed. Retain a root stored across an execution
-or collection boundary with `poly_uop_retain()`, release it with
-`poly_uop_release()`, and call `poly_ctx_collect()` in allocation-only loops
-that never execute. `poly_ctx_stats()` does not collect.
-
-The application should usually create one runtime and pass it to libraries that
-need tensor work.
-
-Benefits:
-
-- compiled kernels and JIT captures are reused instead of rebuilt per package;
-- tensors from different packages share one buffer residency table;
-- browser code gets one WASM/WebGPU runtime instead of several hidden ones;
-- Node code gets one native/WASM runtime selection instead of conflicting
-  package defaults;
-- package APIs can accept and return Polygrad tensors without copying through
-  JavaScript arrays or host buffers.
-
-JavaScript package pattern:
-
-```js
-const polygrad = require('polygrad')
-
-const pg = polygrad.create({ core: 'wasm' })
-const model = SomePackage.create({ polygrad: pg })
-
-const x = new pg.Tensor([[1, 2, 3, 4]], { dtype: 'float32' })
-const y = model.predict(x)
-console.log(y.toArray())
-
-model.dispose()
-pg.dispose()
-```
-
-Inside `SomePackage`, use the supplied runtime to allocate tensors, compile
-kernels, and dispose package-owned compiled callables. Do not call
-`polygrad.create()` internally unless the package explicitly needs isolation:
-
-```js
-function create({ polygrad: pg }) {
-  const w = pg.Tensor.randn([4, 2]).realize()
-  const predict = pg.compile((x) => x.dot(w).realize(), [
-    pg.Tensor.empty([1, 4])
-  ])
-
-  return {
-    predict: (x) => predict.run([x]),
-    dispose: () => predict.dispose()
-  }
-}
-```
-
-Python has the same default-context shape for ordinary use and an explicit
-runtime API for package isolation or device-specific wiring. Python packages
-should accept caller-created `Tensor` or `Model` objects and keep outputs in
-the same context:
-
-```python
-from polygrad import Tensor
-
-def normalize(x: Tensor) -> Tensor:
-    mean = x.mean(axis=-1, keepdim=True)
-    scale = (x - mean).square().mean(axis=-1, keepdim=True).sqrt()
-    return (x - mean) / scale
-```
-
-Use separate runtimes only when isolation is the point: independent caches,
-independent devices, or a package boundary that must outlive/dispose separately.
-
-## Tinygrad Relationship
-
-Polygrad is a C11 port of tinygrad's compiler direction, not a fork of
-tinygrad's Python runtime. Shared concepts keep tinygrad naming where possible:
-UOps, rewrites, `LINEAR`, `CALL`, `PROGRAM`, JIT capture/replay, renderer
-capabilities, and backend-specific lowering.
-
-The migration target is [tinygrad v0.14.0](https://github.com/tinygrad/tinygrad/tree/v0.14.0),
-commit `6f87158d77f66a36d5f8bbe915170b24e2acabe8`. Keep its clean checkout at
-`references/tinygrad_014`, with `references/tinygrad_latest` pointing there.
-The previous `references/tinygrad_20260822` checkout and its compatibility
-baselines remain historical controls. Target selection is not a claim that
-every upstream feature or source audit is complete.
-
-The public Tensor APIs do not yet provide SVD/Newton–Schulz,
-`nonzero`/`masked_select` (including fixed-size variants), or borrowed-pointer `from_blob`
-construction. Tinygrad's `PYTHON` backend name is not an alias for Polygrad's
-`INTERP` backend. These are compatibility limits, not passing upstream tests;
-the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
-[operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) and
-[NN/optimizer](test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json) baselines
-keep nonpassing cases explicit, including unsupported Python compiler-private
-helpers. HIP is outside the 0.5.2 release-validation
-matrix.
-
-The main intentional differences are:
-
-| Area | Polygrad difference |
-|---|---|
-| Core runtime | Compiler state, buffers, caches, and backend runners live in `PolyCtx` inside a C library |
-| Frontends | Python and JavaScript are wrappers over the same C core rather than separate runtimes |
-| WASM/browser | Browser execution uses the unified C/WASM runtime path, with WebGPU orchestrated from the C backend |
-| Logical vs physical roots | Tensors keep exportable logical graph roots separate from realized/placed physical roots |
-| Model tooling | `PolyModel` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
-| Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
-| WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
-| WebGPU narrow integers | `PG-DIV-008`: truncate 8/16-bit integer casts and arithmetic results before widening, correcting the pinned WGSL renderer's lost narrowing; Tensor graphs remain unchanged |
-
-These differences exist to make Polygrad useful as an embeddable runtime for
-tools and model packages, while preserving tinygrad-style compiler semantics
-where tinygrad has an equivalent.
-
-One remaining core limit is shape rank: Tensor/intermediate STAGE shapes
-support at most 16 axes (`PG-PARITY-031`). Active loop dependencies are not
-rank-limited: materialization preserves every RANGE, while buffer-limit
-splitting rejects an intermediate shape it cannot represent. This is an open
-parity limitation, not a claim of complete Tinygrad compatibility.
-
-C-style and WGSL parameter names omit Tinygrad's shape suffix
-(`PG-PARITY-038`). This source-text parity debt does not permit differences in
-argument slots, graph topology or computed values.
-
-The schedule cache has no automatic eviction or size cap. Every distinct
-cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
-graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can
-therefore accumulate memory; `collect()` alone does not evict this cache.
-Symbolic bindings that reuse a schedule do not necessarily add cache entries.
-
-At an idle boundary, use Python `pg.clear_schedule_cache()` or
-`runtime.clear_schedule_cache()`, JavaScript `runtime.clearScheduleCache()`,
-or C `poly_schedule_cache_clear(ctx)` from `polygrad.h`. Then call
-`collect()` / `poly_ctx_collect(ctx)` to reclaim resources without other owners.
-Storage reclamation is deferred to safe points, including the next Tensor
-readback after a storage-owning root is retired. Ordinary JIT/readback does not
-scan retained graphs merely because a temporary wrapper was released.
-Await pending browser operations before clearing; raw C callers must serialize
-access and finish queued device work. Independently owned Model/JIT executions
-remain usable. Use clearing at workload boundaries or under memory pressure,
-not after every operation. New schedules may need rebuilding, but compiled
-kernels can still be reused from other caches; recompilation is not inevitable.
-Other caches are untouched, so clearing does not promise that all runtime
-memory is returned.
-Pointer-key ownership remains an open parity debt; explicit clearing is a
-lifetime control, not a new graph-identity implementation.
-
-## The C Core
-
-The C core owns graph construction, scheduling, placement, runtime caches, and
-backend dispatch. Frontends are thin wrappers over the same concepts.
-
-For C embedding, `polygrad.h` is the convenience umbrella. Its domain headers
-also work independently: `core.h` owns shared types and context controls,
-`tensor.h` owns `poly_tensor_*` operations, and `uop/` and `mixin/` headers own
-`poly_uop_*` graph construction and composition. Include `model.h` or `nn/nn.h`
-when using those APIs. `frontend.h` is separate: it adapts dtype IDs, flattened
-arguments and opaque handles for language bindings. Core implementations do
-not call these adapters. The deprecated context-global named registry and
-`poly_model_from_ctx`/`poly_model_from_sinks` are scheduled for removal in 0.6.0;
-use Model-owned declarations or `poly_model_from_bindings` instead. The unused
-`poly_linear`/`poly_layernorm`/`poly_rmsnorm`/`poly_embedding` constructors are
-removed at ABI101; their Model-owned equivalents are `poly_model_*`.
-
-Low-level `UOp.variable` bounds retain integer, floating-point and boolean
-endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
-Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
-`BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-Polygrad 0.5.2 requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
-artifacts are rejected. Typed endpoints can exceed the runtime's signed64
-variable-binding domain; metadata support does not imply executable bindings.
+## Logical Graphs And Placement
 
 ```text
 default Tensor construction
@@ -1044,7 +483,7 @@ or retirement of the source Tensor cannot invalidate the portable program.
 
 Default Tensor/JIT execution builds and schedules the physical graph eagerly;
 it does not invoke placement. Retained `Model` graphs may instead request an
-explicit policy. The first non-uniform policy uses exact named module cuts:
+explicit policy. Device maps use exact named module cuts:
 
 ```python
 from polygrad import Model, Tensor
@@ -1070,6 +509,132 @@ identities are executable today; nonzero CUDA/HIP identities, automatic
 sharding, pipeline schedules, offload, and VRAM planning remain future work.
 PGIR preserves the exact named module boundaries but not their device
 assignments, so an imported program can be placed under a new map.
+
+## Runtime Ownership
+
+<details markdown="1">
+<summary>Runtime owners, schedule-cache growth and reclamation</summary>
+
+A Runtime owns compiler caches, buffer residency and backend handles. Ordinary
+imports use the default runtime; explicit runtimes provide isolation. Use one
+owner for related Tensors, layers and Models. See the
+[Python](py/README.md#devices-and-runtimes) and
+[JavaScript](js/README.md#devices-and-runtimes) guides.
+
+The schedule cache has no automatic eviction or size cap. Every distinct
+cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
+graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can
+therefore accumulate memory; `collect()` alone does not evict this cache.
+Symbolic bindings that reuse a schedule do not necessarily add cache entries.
+
+At an idle boundary, use Python `pg.clear_schedule_cache()` or
+`runtime.clear_schedule_cache()`, JavaScript `runtime.clearScheduleCache()`,
+or C `poly_schedule_cache_clear(ctx)` from `polygrad.h`. Then call
+`collect()` / `poly_ctx_collect(ctx)` to reclaim resources without other owners.
+Storage reclamation is deferred to safe points, including the next Tensor
+readback after a storage-owning root is retired. Ordinary JIT/readback does not
+scan retained graphs merely because a temporary wrapper was released.
+Await pending browser operations before clearing; raw C callers must serialize
+access and finish queued device work. Independently owned Model/JIT executions
+remain usable. Use clearing at workload boundaries or under memory pressure,
+not after every operation. New schedules may need rebuilding, but compiled
+kernels can still be reused from other caches; recompilation is not inevitable.
+Other caches are untouched, so clearing does not promise that all runtime
+memory is returned.
+
+</details>
+
+## Tinygrad Relationship
+
+Polygrad ports tinygrad's compiler concepts to C: UOps, rewrites, LINEAR schedules,
+PROGRAMs, JIT capture/replay and backend lowering. The pinned reference is
+[tinygrad v0.14.0](https://github.com/tinygrad/tinygrad/tree/v0.14.0), commit
+`6f87158d77f66a36d5f8bbe915170b24e2acabe8`.
+
+<details markdown="1">
+<summary>Compatibility limits and intentional differences</summary>
+
+The public Tensor APIs do not yet provide SVD/Newton-Schulz,
+`nonzero`/`masked_select` (including fixed-size variants), or borrowed-pointer `from_blob`
+construction. Tinygrad's `PYTHON` backend name is not an alias for Polygrad's
+`INTERP` backend. These are compatibility limits, not passing upstream tests;
+the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
+[operation](test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json) and
+[NN/optimizer](test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json) baselines
+keep nonpassing cases explicit, including unsupported Python compiler-private
+helpers.
+
+One remaining core limit is shape rank: Tensor/intermediate STAGE shapes
+support at most 16 axes (`PG-PARITY-031`). Active loop dependencies are not
+rank-limited: materialization preserves every RANGE, while buffer-limit
+splitting rejects an intermediate shape it cannot represent. This is an open
+parity limitation, not a claim of complete Tinygrad compatibility.
+
+C-style and WGSL parameter names omit Tinygrad's shape suffix
+(`PG-PARITY-038`). This source-text parity debt does not permit differences in
+argument slots, graph topology or computed values.
+
+The padded-coordinate guard is an intentional divergence (PG-DIV-010);
+valid-coordinate division by zero remains subject to [Current Limits](#current-limits).
+The strict fixed-width symbolic oracle still fails `uint8_add_wrap_cmp` in both
+Polygrad and pinned Tinygrad; see [Tests](#tests).
+
+WebGPU does not guarantee NaN truthiness or preservation through clipping under
+WGSL finite-math rules. Unsupported features and reviewed divergences are listed
+in the [register](test/fixtures/parity_divergences.json).
+
+The main intentional differences are:
+
+| Area | Polygrad difference |
+|---|---|
+| Core runtime | Compiler state, buffers, caches, and backend runners live in `PolyCtx` inside a C library |
+| Frontends | Python and JavaScript are wrappers over the same C core rather than separate runtimes |
+| WASM/browser | Browser execution uses the unified C/WASM runtime path, with WebGPU orchestrated from the C backend |
+| Model tooling | `PolyModel` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
+| Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
+| WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
+| WebGPU narrow integers | `PG-DIV-008`: truncate 8/16-bit integer casts and arithmetic results before widening, correcting the pinned WGSL renderer's lost narrowing; Tensor graphs remain unchanged |
+
+</details>
+
+## Embedding The C Core
+
+See the [C examples](examples/) for Model construction, training and export.
+
+<details markdown="1">
+<summary>Headers, context ownership and retained roots</summary>
+
+The C core owns graph construction, scheduling, placement, runtime caches, and
+backend dispatch. Frontends are thin wrappers over the same concepts.
+
+For C embedding, `polygrad.h` is the convenience umbrella. Its domain headers
+also work independently: `core.h` owns shared types and context controls,
+`tensor.h` owns `poly_tensor_*` operations, and `uop/` and `mixin/` headers own
+`poly_uop_*` graph construction and composition. Include `model.h` or `nn/nn.h`
+when using those APIs. `frontend.h` is separate: it adapts dtype IDs, flattened
+arguments and opaque handles for language bindings. Core implementations do
+not call these adapters. Use Model-owned declarations or
+`poly_model_from_bindings` for named state, and `poly_model_*` helpers for layers.
+
+C Model construction uses `poly_model_from_config(ctx, type, json, len, device,
+&error)` from `models/models.h`. A non-NULL context is borrowed and must outlive
+the Model; explicit NULL requests an owned context. Typed constructors include
+`poly_mlp_into`, `poly_gpt2_into` and `poly_qwen3_into`. Checkpoint import uses
+`poly_hf_load` / `poly_gguf_load`, or `_into` variants for a caller-owned context.
+
+Low-level `UOp.variable` bounds retain integer, floating-point and boolean
+endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
+Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
+`BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
+Typed endpoints can exceed the runtime's signed64
+variable-binding domain; metadata support does not imply executable bindings.
+
+Raw C `PolyUOp *` results are borrowed. Retain roots crossing execution or
+collection boundaries with `poly_uop_retain()`, and release them with
+`poly_uop_release()`. Allocation-only loops that never execute must call
+`poly_ctx_collect()`; `poly_ctx_stats()` does not collect.
+
+</details>
 
 ## Building From Source
 
@@ -1101,7 +666,15 @@ npm run build:browser
 
 ## Tests
 
-Run the main gates:
+`make test-readme` checks links and runs the local Python/Node examples,
+including setup for multi-block workflows. Shell blocks are syntax-checked;
+JSON is parsed. Browser blocks are explicitly excluded, and the HF download
+example requires `README_NETWORK=1`. These exclusions are reported as skips.
+
+<details markdown="1">
+<summary>Developer checks, release acceptance and benchmarks</summary>
+
+### Functional checks
 
 ```bash
 make test
@@ -1113,10 +686,8 @@ DISPLAY=:1 make test-browser
 make test-browser-matrix
 ```
 
-`test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
-Firefox, and installed Chrome/Chromium executables where available.
-
-Override the browser matrix for a specific executable or device:
+`test-all` runs the functional backend/frontend matrix. `test-browser` covers
+real browser WebGPU; `test-browser-matrix` adds other browser executables:
 
 ```bash
 BROWSER_MATRIX="chromium,firefox,old-chrome=chromium@/path/to/chrome" make test-browser-matrix
@@ -1124,10 +695,9 @@ BROWSER_MATRIX_DEVICES="auto,interp" make test-browser-matrix
 ```
 
 Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
-`label=engine@/absolute/path`. WebGPU coverage remains in `make test-browser`.
+`label=engine@/absolute/path`.
 
-`make test-all` is the functional backend/frontend matrix. For complete
-CUDA/Wasm candidate acceptance, use:
+### Release acceptance
 
 ```bash
 make test-release-list  # inspect the gate list without running it
@@ -1135,93 +705,48 @@ make test-release PYTHON=/path/to/test/python PARITY_PY=/path/to/parity/python \
   PYTHON_MIN=/path/to/python3.9 HF_PYTHON=/path/to/hf/python
 ```
 
-`test-release` runs maintained targets serially, including common and specific
-CUDA/X86 C tests, INTERP, Python and Node lanes, sanitized Wasm controls,
-browser auto/INTERP/WebGPU and Qwen, strict HF/Qwen fixtures, isolated Python/npm
-installs, model interchange, value/graph/upstream parity, source matcher checks,
-reviewed analysis, bounded fuzz, smoke regression and frozen HLB semantic/timing
-gates. CUDA and browser WebGPU are required. HIP, HCQ2/GETADDR, genuine multi-GPU
-execution and PYLITERAL are outside the [0.5.0 scope](test/fixtures/release_050_scope.json).
-GETADDR/PYLITERAL debts remain open; their exclusions do not permit physical
-graph mismatches. Optional MSan/TSan/Fil-C, legacy packages, research benchmarks and
-the additional browser-executable matrix remain separate targets.
+Release acceptance runs maintained targets serially: sanitizers, backend and
+frontend suites, browser/Qwen, HF fixtures, isolated package installs, interchange,
+parity, reviewed analysis, fuzzing and performance checks. CUDA and browser
+WebGPU are required. HIP, HCQ2/GETADDR, genuine multi-GPU and PYLITERAL are
+[excluded](test/fixtures/release_050_scope.json), not certified. Optional
+MSan/TSan/Fil-C and additional browser executables have separate targets.
 
-Provide the documented toolchains, pinned `PARITY_PY` environment, fixtures,
-writable caches and browser display. `PYTHON` selects the ordinary frontend and
-package-test environment and defaults to `PARITY_PY` for release runs;
-both must use CPython 3.11 for the pinned source-audit tests. `HF_PYTHON` selects
-the independent HF reference stack. `PYTHON_MIN` (default `python3.9`) selects
-the required minimum-version installed-package lane, `test-py-min-install`.
-It builds with `PYTHON`, then installs and executes the sdist in a fresh 3.9
-environment, including quantized GGUF decoding. Set `PYTHON_MIN` to your 3.9
-interpreter's path; a missing or wrong interpreter fails acceptance.
-Release runs default to Clang unless `CC`
-is explicitly supplied. Formatting uses `CLANG_FORMAT=clang-format-14`; analysis
-uses `ANALYZER_CC=clang-14` and requires the exact reviewed compiler version.
-The first gate checks these tools, CPU-renderer `__fp16` support, Python versions,
-`build` in `PYTHON`, and `z3` in `PARITY_PY`; failure stops the matrix before
-expensive tests. Release subprocesses use UTF-8. Override
-`QWEN3_GGUF` as needed. The runner
-does not download missing fixtures, approve debts, or update baselines itself.
-Individual targets retain their existing package/network behavior.
-The Python performance gate installs the hash-pinned published 0.5.1 source
-package in a fresh virtual environment, with the runner's NumPy version. It
-requires PyPI access for dependencies. Set `PY_PERF_BASELINE_SDIST` to a local
-copy of that exact source archive to avoid downloading the archive itself;
-its hash is still checked. Installation or measurement failure fails acceptance.
+Required setup:
 
-The C performance gate builds the pinned 0.5.1 repository checkpoint and current
-source in isolated directories with the same smoke driver and CPU build flags.
-Nine alternating pairs replace the machine-local absolute baseline; each workload
-retains its relative/absolute noise budget. The Git checkpoint must exist locally.
-Reports retain all pairs, build commands, source/binary hashes, load averages and
-CPU affinity. High load is flagged, not used to discard or retry slow samples.
-The standalone `bench-smoke-regression` target still uses `BENCH_BASELINE`.
+- `PYTHON` and `PARITY_PY`: CPython 3.11 with the selected test dependencies;
+  source-audit AST hashes require that interpreter. Release `PYTHON` defaults
+  to `PARITY_PY`.
+- `PYTHON_MIN`: Python 3.9 for the isolated minimum-version package check.
+- `HF_PYTHON`: the Torch/Transformers/Hugging Face reference environment.
+- `CC`: defaults to Clang for release runs, with CPU-renderer `__fp16` support.
+  Formatting uses `CLANG_FORMAT=clang-format-14`; analysis uses
+  `ANALYZER_CC=clang-14` at the exact reviewed version.
+- `build` in `PYTHON`, `z3` in `PARITY_PY`, writable caches, a browser display
+  and the required model fixtures. Override `QWEN3_GGUF` for its local path.
 
-Results go to a fresh `temp/release-*` directory, or a new `RELEASE_DIR` supplied
-by the caller. Each gate gets a command log, exit code and elapsed time in
-`summary.json`, alongside source inputs checked before/after execution, log hashes
-and final built-artifact hashes; test counts and skips remain in the raw logs.
-This is bounded release evidence, not the full migration certificate. The runner prints
-the final summary after all gates finish, continues after non-preflight failures, and exits
-nonzero if any gate fails. Interrupted runs terminate their child process group
-and mark remaining gates unrun. Source edits during execution fail the run.
-A passing upstream ratchet does not mean every upstream test passed. This target
-never publishes packages.
-`make test-release-runner` tests orchestration using small Make fixtures without
-running the release matrix.
+Preflight stops on missing prerequisites. The runner does not download model
+fixtures, update baselines or approve debts. Individual package checks can use
+the network.
 
-`make analyze` remains the raw zero-warning gate. Release acceptance instead
-uses `test-analyze-reviewed`, which executes that same analysis and checks each
-warning against [reviewed path explanations](test/fixtures/analyzer_reviews.json)
-bound to source files, headers, flags and Clang version. New warnings, stale
-reviews, compiler failures and missing translation-unit completions fail. Raw
-logs and exit status remain visible; there are no broad checker suppressions.
-For a standalone run, provide a new `ANALYZER_REVIEW_DIR`.
+Results go to a fresh `temp/release-*` directory or a new `RELEASE_DIR`.
+`summary.json` records gate commands, exits, times and source/log/artifact hashes;
+individual test counts and skips remain in gate logs. Source changes fail the
+run. Non-preflight failures do not stop later gates; any failed gate makes the
+final exit nonzero. Interruptions terminate child processes and mark remaining
+gates unrun. This target never publishes packages.
 
-Release acceptance runs `test-symbolic-z3-supported` (general integers and
-division). `test-symbolic-z3-fixed` remains a separate strict overflow oracle:
-its `uint8_add_wrap_cmp` case fails in both Polygrad and pinned Tinygrad 0.14.0.
-The symbolic interval fold produces false, while uint8 arithmetic at 250 gives
-`((250 + 10) % 256) < 5`, which is true. This known limitation is not fixed or
-silently accepted by the strict oracle; `test-symbolic-z3` still runs all modes.
+`make test-release-runner` tests orchestration without running acceptance.
+`make analyze` is the raw zero-warning check; release acceptance uses
+`test-analyze-reviewed` with [source-bound reviews](test/fixtures/analyzer_reviews.json).
+New warnings, stale reviews, compiler errors and incomplete scans fail.
 
-Complete migration certification remains separate: `make reference-migration-check`
-still requires every source-wave audit and its source-bound execution manifest
-(`MIGRATION_EVIDENCE`), including multi-GPU. `make test-parity-op-census` still
-fails on open vocabulary debts. The release uses `test-reference-parity` and
-`test-release-op-census` instead: complete graph/matcher checks and exact named
-capability exclusions, without claiming those audits or debts are closed.
+`test-symbolic-z3-supported` checks general integers and division.
+The separate `test-symbolic-z3-fixed` still fails `uint8_add_wrap_cmp` in both
+Polygrad and pinned Tinygrad: the interval fold returns false while uint8
+`((250 + 10) % 256) < 5` is true. `test-symbolic-z3` runs all modes.
 
-Migration audit generation and checking use `PARITY_PY` (CPython 3.11).
-`ast.dump` hashes are interpreter-specific; direct invocations with another
-Python version are rejected. Durable, partial review records live in
-`test/fixtures/migration/`; stale hashes and missing execution evidence remain
-gate failures. A review-owner assignment does not exclude a shared dependency
-or approve a divergence. `make test-reference-migration` tests the checker;
-`make reference-migration-check` validates existing evidence without rebuilding.
-
-Strict release checks require actual fixtures and execution:
+### Model and package checks
 
 ```bash
 make test-release-gates                    # negative controls: missing HF dependencies / CUDA
@@ -1233,20 +758,25 @@ make test-hf-e2e HF_PYTHON=/path/to/python  # requires huggingface_hub, transfor
 make test-release-packages                  # fresh sdist and npm native/fallback installations
 ```
 
-HF tests retain individual skip records in ordinary developer runs; the strict
-target fails on missing dependencies. Set `HF_HUB_CACHE`, `HF_HUB_OFFLINE=1` and
-`TRANSFORMERS_OFFLINE=1` to verify pre-fetched fixtures without network access.
-Package checks retain logs under `temp/package-*`, verify installed library
-origins, and exercise a real native-build failure with Wasm fallback. Browser
-exports tested in Node do not replace real-browser/WebGPU execution.
+HF tests can skip missing dependencies in ordinary runs; the strict target fails.
+For offline fixtures, set `HF_HUB_CACHE`, `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`. Package checks verify installed library origins and
+native-build failure with Wasm fallback. Node browser-export checks do not
+replace real-browser execution.
 
-`WINO=0` remains accepted. Nonzero Python WINO requests raise
-`NotImplementedError`: the C core does not implement Winograd convolution
-(`PG-PARITY-012`), so the option cannot silently select ordinary convolution.
+`make fetch-llama-pretrained` downloads the pinned TinyStories Llama 2-style
+fixture; `make test-llama-pretrained` compares logits, greedy choices and bundle
+reload against Transformers. Set `LLAMA_TEST_DEVICES='cpu cuda'` to require both.
+For Llama 3.2 1B, use `make test-llama32-pretrained` with
+`LLAMA32_CHECKPOINT=/path/to/Llama-3.2-1B` and
+`LLAMA32_TEST_DEVICES='cuda cpu'`. That target does not download weights or test
+KV caching/bundle export. Float32 weights alone exceed 4 GB; allow additional
+host RAM/swap and device memory.
 
-Unchanged upstream Python tests can run in isolated Tinygrad and Polygrad
-processes (CPU). Install pytest, NumPy and each selected file's dependencies in
-`PARITY_PY`'s environment. The default selection is upstream `backend/test_ops.py`:
+### Tinygrad compatibility
+
+The default upstream selection is `backend/test_ops.py`. Each output directory
+must be new:
 
 ```bash
 make test-upstream-runner
@@ -1267,50 +797,18 @@ make test-compat-tinygrad-nn UPSTREAM_COMPAT_DIR=temp/upstream-nn-001
 make test-compat-tinygrad-suite UPSTREAM_COMPAT_DIR=temp/upstream-suite-001
 ```
 
-Each output directory must be new. `report.json` records source/library hashes,
-provider module identities, per-test outcomes and collection errors; per-file
-logs and flushed progress survive worker crashes. In the default lane only module imports are
-redirected: missing APIs/backends are not emulated, assertions and upstream
-skips are unchanged, and no Tinygrad implementation fills a Polygrad gap.
-Upstream test helpers stay on the reference path; loading Polygrad does not
-expose sibling packages such as `py/extra` to the reference process.
-Missing dependencies, collection failures and incomplete execution fail closed.
-Passing these tests does not replace exact `test-parity-graph` checks.
+Reports record source/library hashes, provider identities, outcomes and
+collection errors. Missing dependencies and incomplete execution fail. CPU ops
+and NN lanes use source-locked helper adaptations, not replacement implementations.
+Ratchets reject regressions and changed test/environment contracts; a passing
+ratchet does not mean every upstream test passes. Review baseline changes;
+see the [runner](scripts/tinygrad_upstream.py) for options.
 
-The separate `cpu-ops` adapter removes exactly the pinned NIR import and its
-inactive CPU skip decorator. It rejects changed source, non-CPU execution,
-renderer/interface overrides and image mode; the Tinygrad control also checks
-that its actual renderer is not NIR. All test bodies, tolerances, gradients and
-other skips remain unchanged. Adapted-file hashes are recorded in the report.
-Keep its reviewed baseline separate from the unchanged lane; this adapter is
-test infrastructure, not a Polygrad renderer implementation or source-audit closure.
+Complete migration certification is separate: `reference-migration-check`
+requires source-wave audits and source-bound execution evidence. Open debts are
+not approvals. Durable reviews live in `test/fixtures/migration/`.
 
-The `cpu-nn` adapter preserves NN/optimizer test bodies and enables their
-`RUN_SLOW` controls. Compiler-private helper imports remain real failures when
-Polygrad has no counterpart; they are not replaced with stubs. Muon controls
-require a Torch version providing `torch.optim.Muon`. The reviewed environment
-uses Python3.11.12, Torch2.10.0+cpu, NumPy2.4.6, pytest8.3.5 and hypothesis6.131.9;
-select it through `PARITY_PY`. Baseline contracts check these versions.
-The suite target runs all lanes even when one fails, and remains nonzero for
-known failures/skips. It is a diagnostic refresh, not an allowance gate.
-
-`UPSTREAM_COMPAT_ARGS='--write-baseline temp/candidate.json'` writes a new
-candidate only after complete execution. Review every nonpass's `reason` before
-using `--baseline PATH`; candidates are never accepted or overwritten silently.
-The ratchet rejects lost/new tests, pass-to-skip/fail transitions, changed
-failure signatures and changed pin/suite/environment/adapter contracts. Leading
-exception-location line numbers are excluded; raw diagnostics retain them.
-Exception messages and values remain part of the signature. Improvements
-also require promotion, so an old expected failure cannot return unnoticed.
-Diagnostic runs return failure for nonpasses even when writing a candidate.
-
-For a future upstream revision, `--reference PATH --compare-with OLD_REPORT`
-attaches added/removed/changed outcomes without changing the accepted checkout
-or baseline. This is migration triage, not source-audit closure. Frontend-private
-and compiler-private import gaps may prevent whole upstream files from collecting;
-the runner reports that boundary rather than counting their tests as skipped.
-
-Local performance checks:
+### Performance
 
 ```bash
 make bench-local-baseline
@@ -1318,53 +816,27 @@ make bench-smoke-regression
 make bench-ratios
 ```
 
-For Python eager, training and JIT/readback overhead, compare against an isolated
-interpreter with the published package installed:
+Absolute smoke baselines are machine-specific and stored under ignored paths.
+For paired Python eager, training and JIT/readback checks:
 
 ```bash
 make bench-py-eager PY_PERF_BASELINE=/path/to/baseline/venv/bin/python
 ```
 
-Run this on an idle machine. For each workload it alternates nine
-candidate/baseline process pairs, checks numerical results, isolated
-package/library paths, and matching Python and NumPy versions. The training
-fixtures run small two-layer MLPs with backward, Adam updates and loss readback.
-The JIT fixture keeps `.item()` inside the timed replay. Their loss trajectories
-are checked against pinned Tinygrad. Each workload must meet
-the 1.02 median paired-ratio limit independently. All pairs are retained, without
-retries or discarded outliers. The JSON report is
-`temp/python-eager-performance.json`.
+Use an idle machine and matching Python/NumPy versions. Nine alternating
+candidate/baseline pairs retain all samples without retries. Every workload must
+meet its 1.02 median ratio limit; numerical results and library origins are checked.
+The report is `temp/python-eager-performance.json`.
 
-`test-release` runs this guard automatically using its own fresh published-package
-installation, not `PY_PERF_BASELINE`. Its report, installation logs and baseline
-provenance are under `python-performance/` in the release evidence directory.
-For a standalone run, use `make test-release-py-performance
-PY_PERF_OUTPUT=temp/my-new-performance-run/report.json` with a fresh output
-directory. These small-workload guards do not certify large-model or Model API
-performance; the value assertion in `test_perf.py` is not a timing acceptance check.
+Release acceptance creates its own isolated, hash-pinned 0.5.1 baseline install,
+requiring PyPI access for dependencies. `PY_PERF_BASELINE_SDIST` can supply that
+exact source archive locally. Evidence is under `python-performance/`.
+The C gate separately builds the pinned 0.5.1 Git checkpoint and current source
+with matching flags and nine alternating pairs. That checkpoint must exist locally.
+Load averages and affinity are recorded; high load is flagged, not used to discard
+samples. These guards do not certify large-model or Model API performance.
 
-Absolute benchmark baselines are machine-specific and are stored under ignored
-local paths.
-
-## Current Limits
-
-- Python threads must not use the same runtime concurrently, including the
-  process-global default. Overlapping native calls can crash the process.
-  Use one explicit runtime per thread or serialize all shared-runtime use and
-  cleanup. See the [Python threading contract](py/README.md#devices-and-runtimes).
-- Invalid padded coordinates use safe integer divisors before their results
-  are discarded (PG-DIV-010). This fixes an inherited Tinygrad trap; division
-  by zero at a valid coordinate remains unsupported and can terminate native
-  Python or Node processes. Validate integer divisors supplied by users.
-- Python currently targets Linux.
-- CUDA, HIP, and WebGPU require matching local runtimes.
-- Browser WebGPU requires a compatible browser and GPU adapter.
-- Structured linalg is portable first. Large blocked linalg kernels are planned.
-- The tested eager and TinyJit RNG stream is bit-compatible with the pinned
-  tinygrad reference; backend-specific lowering still requires each backend's
-  normal correctness gate.
-- Intentional tinygrad divergences are kept in local architecture notes and
-  should be reflected in public docs when they affect users.
+</details>
 
 ## Repository
 

@@ -743,6 +743,10 @@ build/libpolygrad-core-check.so: $(SRC) $(PROJECT_HEADERS) Makefile
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
+.PHONY: test-readme
+test-readme: verify-source-mirrors build/libpolygrad.so
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_api_parity.py py/tests/test_readme.py -k readme
+
 # Supply an isolated interpreter with the published baseline installed. Run on
 # an idle machine; this guard measures frontend overhead, not only C kernels.
 PY_PERF_BASELINE ?=

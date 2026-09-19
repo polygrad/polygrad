@@ -1,27 +1,25 @@
 # Polygrad Python
 
-Build tensor computations and train neural networks in Python, then export
-Polygrad models for Node.js or the browser without rewriting them in JavaScript.
-Exported models carry their graph and weights; loading them does not require
-the Python class that created them.
-
-The Python API provides automatic differentiation, neural-network layers,
-optimizers, NumPy data exchange and JIT compilation, with CPU and CUDA execution.
+The Python API for Polygrad, a tensor library and JIT compiler built around a
+C11 port of tinygrad. It provides automatic differentiation, neural-network
+layers, optimizers and NumPy data exchange. Models saved in Python can load in
+JavaScript without their original Python classes.
 
 [Project overview and shared C/runtime reference](https://github.com/polygrad/polygrad#readme) | [JavaScript guide](https://github.com/polygrad/polygrad/blob/main/js/README.md)
 
 ## Contents
 
 - [Install](#install)
-- [Quick Start](#quick-start)
-- [Devices And Runtimes](#devices-and-runtimes)
-- [Data Flow](#data-flow)
+- [Quickstart: Tensors](#quickstart-tensors)
+- [Quickstart: Models](#quickstart-models)
+- [Working With Tensors](#working-with-tensors)
 - [Training](#training)
 - [Models](#models)
+- [Devices And Runtimes](#devices-and-runtimes)
 - [JIT And Compile](#jit-and-compile)
 - [Custom Kernels](#custom-kernels)
-- [Common API Recipes](#common-api-recipes)
 - [Package Integration](#package-integration)
+- [API Overview](#api-overview)
 - [Troubleshooting](#troubleshooting)
 
 ## Install
@@ -50,7 +48,7 @@ pip install huggingface_hub
 
 For a source checkout, see [building from source](https://github.com/polygrad/polygrad#building-from-source).
 
-## Quick Start
+## Quickstart: Tensors
 
 ```python
 from polygrad import Tensor
@@ -75,7 +73,105 @@ loss.backward()
 print(x.grad.numpy())  # [2. 4. 6.]
 ```
 
-Linear algebra:
+## Quickstart: Models
+
+Fit `y = 3x + 2` in Python, save its graph and weights, then load it in
+JavaScript without redefining the model.
+
+```python
+from polygrad import Model, Tensor
+
+class Linear:
+    def __init__(self):
+        self.a = Tensor([0.0])
+        self.b = Tensor([0.0])
+    def __call__(self, x):
+        return {"prediction": self.a * x + self.b}
+
+model = Model(
+    Linear(), inputs={"x": Tensor.empty(5)}, targets={"y": Tensor.empty(5)},
+    loss=lambda outputs, y: (outputs["prediction"] - y).square().mean(),
+)
+try:
+    model.fit({"x": [-2, -1, 0, 1, 2], "y": [-4, -1, 2, 5, 8]},
+              epochs=100, optimizer="sgd", lr=0.1)
+    model.save("linear.pgb", include_optimizer=False)
+finally:
+    model.dispose()
+```
+
+In Node, using a matching Polygrad package:
+
+```javascript
+const { Model } = require('polygrad')
+const model = Model.load('linear.pgb')
+try {
+  const { prediction } = model.forward({x: new Float32Array([3, 4, 5, 6, 7])})
+  console.log(Array.from(prediction)) // approximately [11, 14, 17, 20, 23]
+} finally {
+  model.dispose()
+}
+```
+
+See [Models](#models) for capture, input shapes, minibatches and export options.
+
+## Working With Tensors
+
+### Creation
+
+```python
+from polygrad import Tensor
+
+x = Tensor([1, 2, 3])
+a = Tensor.zeros(2, 3)
+b = Tensor.ones(2, 3)
+c = Tensor.randn(2, 3)
+d = Tensor.arange(0, 6).reshape(2, 3)
+```
+
+### Math And Indexing
+
+```python
+from polygrad import Tensor
+
+x = Tensor.arange(0, 12).reshape(3, 4)
+y = x.permute(1, 0).reshape(2, 6)
+z = y.relu().sum(axis=1)
+picked = x.gather(1, Tensor([[0, 2], [1, 3], [0, 1]], dtype="int32"))
+```
+
+### NumPy And Data Updates
+
+```python
+import numpy as np
+from polygrad import Tensor
+
+arr = np.array([1, 2, 3, 4], dtype=np.float32)
+x = Tensor(arr).reshape(2, 2)
+print((x * 2 + 1).numpy())
+```
+
+Polygrad tensors are lazy. Use `realize()` to execute and `numpy()` when host
+readback is needed.
+
+```python
+import numpy as np
+from polygrad import Tensor
+
+x = Tensor.empty((4,), dtype="float32")
+x.copy_from(np.array([1, 2, 3, 4], dtype=np.float32))
+
+y = (x * 3 - 1).realize()
+print(y.numpy())
+
+x.update_from(np.array([5, 6, 7, 8], dtype=np.float32))
+print((x + 1).realize().numpy())
+```
+
+Use `copy_from` or `update_from` for repeated loops that should preserve input
+buffer identity for compiled replay.
+
+### Linear Algebra
 
 ```python
 from polygrad import Tensor
@@ -91,17 +187,180 @@ Structured linalg methods are portable tensor-composed fallbacks tested against
 NumPy and Torch. They do not add LAPACK or runtime library dependencies.
 Current `lstsq` is solution-only for full-rank tall or square systems.
 
+## Training
+
+Use Tensor autograd when you want to control the training loop:
+
+```python
+from polygrad import Context, Tensor
+from polygrad.nn import Linear, get_parameters
+from polygrad.nn.optim import SGD
+
+Tensor.manual_seed(42)
+model = Linear(2, 1)
+opt = SGD(get_parameters(model), lr=0.01)
+
+with Context(TRAINING=1):
+    for _ in range(100):
+        opt.zero_grad()
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]])
+        y = Tensor([[5.0], [11.0]])
+        loss = (model(x) - y).square().mean()
+        loss.backward()
+        opt.step()
+
+print(loss.item())
+```
+
+### Layers And Optimizers
+
+```python
+from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding
+from polygrad.nn import get_parameters
+from polygrad.nn.optim import SGD, Adam, AdamW
+```
+
+Layers include `Linear`, `LayerNorm`, `LayerNorm2d`, `RMSNorm`, `Embedding`,
+`Dropout`, `GroupNorm`, `Conv1d`, `Conv2d`, `ConvTranspose1d`, `ConvTranspose2d`,
+`InstanceNorm`, `LSTMCell`, and `BatchNorm`. Optimizers include `SGD`, `Adam`, and
+`AdamW`; each provides `step()` and `zero_grad()`.
+
+## Models
+
+Start with [Quickstart: Models](#quickstart-models) for capture, fitting and export.
+More runnable scripts are in [Python examples](https://github.com/polygrad/polygrad/tree/main/py/examples).
+
+### Capture and input rules
+
+- `params` defaults to named Tensor attributes of the supplied object;
+  functions require explicit closure state. `model.summary()` inspects metadata without executing or
+  reading weights.
+- With `loss`, construction captures evaluation and training forwards against
+  the same state. The callable runs twice during construction, never during
+  execution. Without a loss, capture uses the current `TRAINING` value;
+  changing it later does not recapture the graph.
+- Set the seed before construction. BatchNorm/RNG updates affect Model-owned
+  state. Authoring Tensor roots and training mode are restored even on failure;
+  arbitrary Python side effects are not. Capture rejects parameter/input
+  assignments and effectful reads.
+- Variable-size calls support one bounded leading dimension with fixed trailing
+  dimensions. Save/load preserves the signature; storage currently reserves
+  maximum capacity. Tensor results retain their invocation's values and shape
+  across later calls and Model disposal, but require a live runtime.
+- Flat arrays use the signature. Multidimensional NumPy arrays must match the
+  declared shape, not merely its element count. The equivalent JS binding is
+  `{data: typedArray, shape: [rows, columns]}`.
+
+`model.place('CPU:1')` and `set_device_map(...)` accept the same exact native
+CPU identities. Unsupported accelerator ordinals reject without changing the Model.
+
+### Minibatches
+
+- Use `model.fit(data, epochs=2, batch_size=32)` when every input/target's
+  leading-axis bounds admit 32. Epochs visit samples in input order and return
+  one loss per step. Omit `batch_size` to repeat one full batch.
+- An incomplete final batch rejects before training unless `remainder='drop'`
+  discards it or `remainder='keep'` processes the smaller extent permitted by
+  every input's bounds. No padding or shuffling is implicit.
+- Tensor datasets are sliced on-device without frontend host readback and may
+  mix with host inputs.
+
+### Saving And Loading
+
+`model.save()` returns bundle bytes; `model.save(path)` also writes a file.
+`Model.load(bytes_or_path)` uses the default runtime, or pass `runtime=rt`.
+Each load owns independent state, while tied weights within a Model stay tied.
+Disposing a Model does not dispose its runtime.
+
+Bundles preserve auxiliary/RNG and optional optimizer state.
+`include_optimizer=False` omits optimizer state, not training entrypoints.
+To resume training, reapply the optimizer configuration after loading.
+See [export products](https://github.com/polygrad/polygrad#export-products)
+for graph, program and weight exports and version compatibility.
+
+### Pretrained models
+
+<!-- readme-test: network -->
+```python
+from polygrad.hf import download_hf, load_hf, generate
+import numpy as np
+
+model_path = download_hf("hf-internal-testing/tiny-random-gpt2")
+model = load_hf(model_path, max_batch=1, max_seq_len=16)
+try:
+    tokens = np.array([[1, 2, 3, 4]], dtype=np.int32)
+    result = generate(model, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
+    print(result)
+finally:
+    model.dispose()
+```
+
+`load_hf` supports GPT-2 and Llama configurations with F32/F16/BF16
+safetensors. The `generate` helper above expects GPT-2 input/output names;
+it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
+
+`models.GPT2(config)` and `models.Llama(config)` build topology without pretrained
+weights. They reject execution and saving until every required parameter has been
+written; use a checkpoint loader for a ready-to-run model. Explicit zero weights
+are valid. Wrong input dtypes are rejected, not silently narrowed.
+
+`models.list()` (also `rt.models.list()`) reports construction and checkpoint
+capabilities; see [supported models](https://github.com/polygrad/polygrad#supported-models).
+Calling `models.Qwen3(...)` reports that it is import-only and points to
+`Model.from_gguf(...)`; it does not construct an uninitialized model.
+
+New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
+`model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,
+included in saved bundles. Older bundles retain their original signatures;
+use `model.entrypoints()` to inspect them.
+
+Llama inference is fixed-window, float32, starting at position zero. It supports
+dense Llama 2/base 3 and text-only 3.x `llama3` RoPE scaling, not KV caching,
+MoE or arbitrary RoPE schemes. The loaders do not supply tokenizers/chat templates.
+
+The C Model GGUF loader converts F32/F16/BF16, I8/I16/I32 and complete
+Q4_0/Q4_1/Q8_0/Q6_K blocks. Q4_K/Q5_K metadata is readable but weight conversion
+is unsupported. This is narrower than Python's Tensor-level GGUF decoder;
+decoding a file does not imply support for its model architecture.
+
+### Vision models
+
+`models.CLIP`, `models.ViT`, `models.DINOv2` and `models.DINOv3` use shared C
+components. Construct from a configuration, write all required weights, or load
+a Hugging Face directory with `Model.from_hf(path)`. Unloaded models reject
+execution and saving. Their bundles load in JavaScript with `pg.Model.load(bytes)`.
+
+| Model | Inputs | Forward outputs |
+| --- | --- | --- |
+| CLIP | `pixel_values`, `input_ids` | `image_embeds`, `text_embeds`, `logits_per_image`, `logits_per_text` |
+| ViT | `pixel_values` | `last_hidden_state`, `pooler_output` (tanh pooler) |
+| DINOv2 / DINOv3 | `pixel_values` | `last_hidden_state`, `pooler_output` (CLS token) |
+
+Inputs are already normalized float32 images in `[batch, channels, height, width]`
+layout. Use the checkpoint's image processor; the Model does not decode, resize
+or normalize images. CLIP additionally takes int32, right-padded token IDs with
+an EOS token. Its `encode_image` and `encode_text` entrypoints accept one modality
+and return normalized embeddings. Both modalities use the configured batch size.
+
+This implementation is fixed-square-resolution, unmasked inference. It supports
+HF `CLIPModel`, `ViTModel`, `Dinov2Model` and `DINOv3ViTModel` weights, not
+classification heads, DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations
+or positional interpolation to other resolutions. DINOv3 includes register tokens
+and patch-only 2D RoPE; `last_hidden_state` retains those prefix tokens. DINOv2
+SwiGLU and DINOv3 gated MLP configurations are supported. JSON type tags are
+`clip`, `vit`, `dinov2` and `dinov3_vit`.
+
+For C-built model types and JSON-based `models.Sequential` / `models.Graph`, see
+[shared JSON reference](https://github.com/polygrad/polygrad#configuration-driven-models).
+These return the same Model type and use the same training and export APIs.
+Their configurations support typed inputs, one bounded leading batch dimension,
+and shared embedding, normalization, RoPE and attention components. For example,
+`{"dtype":"int32","shape":[{"name":"batch","min":1,"max":32},16]}`
+declares token batches of 1 to 32 rows without rebuilding the model.
+
 ## Devices And Runtimes
 
-Never use one runtime concurrently from multiple Python threads: native calls
-release the GIL, and overlapping context mutations can crash the process.
-The default runtime is process-global. For parallel work, create one runtime
-per thread, construct through `rt.Tensor` and `rt.Model`, and keep its objects
-in that thread, including cleanup.
-Separate-runtime CPU, INTERP and X86 execution is tested; concurrent GPU
-initialization is not validated. Alternatively, serialize all use and cleanup
-of a shared runtime yourself. Global configuration changes still need coordination.
-Call `collect()` and `dispose()` only when no other thread is using the runtime.
+Choose a device explicitly or through the environment:
 
 ```python
 from polygrad import Device, Tensor
@@ -152,210 +411,35 @@ Use explicit runtimes for isolation, device-specific package wiring, or tests
 that need independent compiler caches.
 
 Use `rt.nn` for layers, optimizers and state loaders, `rt.models` for C-backed
-families, and `rt.Model` for capture/import on that runtime. For example,
+model types, and `rt.Model` for capture/import on that runtime. For example,
 `rt.Model.load("model.pgb")` is equivalent to
 `polygrad.Model.load("model.pgb", runtime=rt)`.
 Create tensors and layers on the same runtime: mixing owners is rejected even
 when their devices match; package-level constructors use the default runtime.
 
-## Data Flow
+### Threads
 
-Polygrad tensors are lazy. Use `realize()` to execute and `numpy()` when host
-readback is needed.
+Never use one runtime concurrently from multiple Python threads: native calls
+release the GIL, and overlapping context mutations can crash the process.
+The default runtime is process-global. For parallel work, create one runtime
+per thread, construct through `rt.Tensor` and `rt.Model`, and keep its objects
+in that thread, including cleanup.
+Separate-runtime CPU, INTERP and X86 execution is tested; concurrent GPU
+initialization is not validated. Alternatively, serialize all use and cleanup
+of a shared runtime yourself. Global configuration changes still need coordination.
+Call `collect()` and `dispose()` only when no other thread is using the runtime.
 
-```python
-import numpy as np
-from polygrad import Tensor
-
-x = Tensor.empty((4,), dtype="float32")
-x.copy_from(np.array([1, 2, 3, 4], dtype=np.float32))
-
-y = (x * 3 - 1).realize()
-print(y.numpy())
-
-x.update_from(np.array([5, 6, 7, 8], dtype=np.float32))
-print((x + 1).realize().numpy())
-```
-
-Use `copy_from` or `update_from` for repeated loops that should preserve input
-buffer identity for compiled replay.
-
-## Training
+### Runtime Inspection
 
 ```python
-from polygrad import Context, Tensor
-from polygrad.nn import Linear, get_parameters
-from polygrad.nn.optim import SGD
+import polygrad
 
-Tensor.manual_seed(42)
-model = Linear(2, 1)
-opt = SGD(get_parameters(model), lr=0.01)
-
-with Context(TRAINING=1):
-    for _ in range(100):
-        opt.zero_grad()
-        x = Tensor([[1.0, 2.0], [3.0, 4.0]])
-        y = Tensor([[5.0], [11.0]])
-        loss = (model(x) - y).square().mean()
-        loss.backward()
-        opt.step()
-
-print(loss.item())
+print(polygrad.stats())
+print(polygrad.can_run("add", shape=[1024]))
 ```
 
-## Models
-
-### Fit in Python, load in JavaScript
-
-Model owns a captured graph and its state; JS does not need the Python class.
-
-```python
-from polygrad import Model, Tensor
-
-class Linear:
-    def __init__(self):
-        self.a = Tensor([0.0])
-        self.b = Tensor([0.0])
-    def __call__(self, x):
-        return {"prediction": self.a * x + self.b}
-
-model = Model(
-    Linear(), inputs={"x": Tensor.empty(5)}, targets={"y": Tensor.empty(5)},
-    loss=lambda outputs, y: (outputs["prediction"] - y).square().mean(),
-)
-try:
-    model.fit({"x": [-2, -1, 0, 1, 2], "y": [-4, -1, 2, 5, 8]},
-              epochs=100, optimizer="sgd", lr=0.1)
-    model.save("linear.pgb", include_optimizer=False)
-finally:
-    model.dispose()
-```
-
-In Node, using a matching Polygrad package:
-
-```javascript
-const { Model } = require('polygrad')
-const model = Model.load('linear.pgb')
-try {
-  const { prediction } = model.forward({x: new Float32Array([3, 4, 5, 6, 7])})
-  console.log(Array.from(prediction)) // approximately [11, 14, 17, 20, 23]
-} finally {
-  model.dispose()
-}
-```
-
-### Capture and input rules
-
-- This example fixes the input shape at five elements. `params` defaults to
-  named Tensor attributes of the supplied object; functions require explicit
-  closure state. `model.summary()` inspects metadata without executing or
-  reading weights.
-- With `loss`, construction captures evaluation and training forwards against
-  the same state. The callable runs twice during construction, never during
-  execution. Without a loss, capture uses the current `TRAINING` value;
-  changing it later does not recapture the graph.
-- Set the seed before construction. BatchNorm/RNG updates affect Model-owned
-  state. Authoring Tensor roots and training mode are restored even on failure;
-  arbitrary Python side effects are not. Capture rejects parameter/input
-  assignments and effectful reads.
-- Bundle bytes work across frontends; paths are Python/Node conveniences, not
-  browser filesystem access. Bundles preserve RNG and auxiliary state.
-  Excluding optimizer state does not remove training entrypoints. To resume
-  training, reapply the optimizer configuration after loading.
-- Variable-size calls support one bounded leading dimension with fixed trailing
-  dimensions. Save/load preserves the signature; storage currently reserves
-  maximum capacity. Tensor results retain their invocation's values and shape
-  across later calls and Model disposal, but require a live runtime.
-- Flat arrays use the signature. Multidimensional NumPy arrays must match the
-  declared shape, not merely its element count. The equivalent JS binding is
-  `{data: typedArray, shape: [rows, columns]}`.
-
-In 0.5.2, `model.place('CPU:1')` and `set_device_map(...)` accept the same
-exact native CPU identities. Unsupported accelerator ordinals reject without
-changing the Model. Published 0.5.1 accepts CPU ordinals only in module maps.
-
-### Minibatches
-
-- Use `model.fit(data, epochs=2, batch_size=32)` when every input/target's
-  leading-axis bounds admit 32. Epochs visit samples in input order and return
-  one loss per step. Omit `batch_size` to repeat one full batch.
-- An incomplete final batch rejects before training unless `remainder='drop'`
-  discards it or `remainder='keep'` processes the smaller extent permitted by
-  every input's bounds. No padding or shuffling is implicit.
-- Tensor datasets are sliced on-device without frontend host readback and may
-  mix with host inputs.
-
-### Pretrained models
-
-```python
-from polygrad.hf import download_hf, load_hf, generate
-import numpy as np
-
-model_path = download_hf("hf-internal-testing/tiny-random-gpt2")
-model = load_hf(model_path, max_batch=1, max_seq_len=16)
-try:
-    tokens = np.array([[1, 2, 3, 4]], dtype=np.int32)
-    result = generate(model, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
-    print(result)
-finally:
-    model.dispose()
-```
-
-`load_hf` supports GPT-2 and Llama configurations with F32/F16/BF16
-safetensors. The `generate` helper above expects GPT-2 input/output names;
-it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
-
-`models.GPT2(config)` and `models.Llama(config)` build topology without pretrained
-weights. They reject execution and saving until every required parameter has been
-written; use a checkpoint loader for a ready-to-run model. Explicit zero weights
-are valid. Wrong input dtypes are rejected, not silently narrowed.
-
-`models.list()` (also `rt.models.list()`) reports each registered type's
-`name`, `constructible`, `hf`, and `gguf` capabilities. `constructible` means
-JSON configuration construction. Qwen3 currently supports GGUF loading, not
-JSON construction or HF loading.
-Calling `models.Qwen3(...)` reports that it is import-only and points to
-`Model.from_gguf(...)`; it does not construct an uninitialized model.
-
-New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
-`model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,
-included in saved bundles. Older bundles retain their original signatures;
-use `model.entrypoints()` to inspect them.
-
-### Vision models
-
-`models.CLIP`, `models.ViT`, `models.DINOv2` and `models.DINOv3` use shared C
-components. Construct from a configuration, write all required weights, or load
-a Hugging Face directory with `Model.from_hf(path)`. Unloaded models reject
-execution and saving. Their bundles load in JavaScript with `pg.Model.load(bytes)`.
-
-| Model | Inputs | Forward outputs |
-| --- | --- | --- |
-| CLIP | `pixel_values`, `input_ids` | `image_embeds`, `text_embeds`, `logits_per_image`, `logits_per_text` |
-| ViT | `pixel_values` | `last_hidden_state`, `pooler_output` (tanh pooler) |
-| DINOv2 / DINOv3 | `pixel_values` | `last_hidden_state`, `pooler_output` (CLS token) |
-
-Inputs are already normalized float32 images in `[batch, channels, height, width]`
-layout. Use the checkpoint's image processor; the Model does not decode, resize
-or normalize images. CLIP additionally takes int32, right-padded token IDs with
-an EOS token. Its `encode_image` and `encode_text` entrypoints accept one modality
-and return normalized embeddings. Both modalities use the configured batch size.
-
-This implementation is fixed-square-resolution, unmasked inference. It supports
-HF `CLIPModel`, `ViTModel`, `Dinov2Model` and `DINOv3ViTModel` weights, not
-classification heads, DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations
-or positional interpolation to other resolutions. DINOv3 includes register tokens
-and patch-only 2D RoPE; `last_hidden_state` retains those prefix tokens. DINOv2
-SwiGLU and DINOv3 gated MLP configurations are supported. JSON type tags are
-`clip`, `vit`, `dinov2` and `dinov3_vit`.
-
-For C-built families and JSON-based `models.Sequential` / `models.Graph`, see
-[model configuration](https://github.com/polygrad/polygrad#configuration-driven-model-families).
-These return the same Model type and use the same training and export APIs.
-Their configurations support typed inputs, one bounded leading batch dimension,
-and shared embedding, normalization, RoPE and attention components. For example,
-`{"dtype":"int32","shape":[{"name":"batch","min":1,"max":32},16]}`
-declares token batches of 1 to 32 rows without rebuilding the model.
+`can_run(...)` is conservative. For some compound op/shape queries it raises
+when support cannot be proven statically.
 
 ## JIT And Compile
 
@@ -401,6 +485,26 @@ wrapper-level capture and replay counters.
 `polygrad.can_run(op, dtype="float32", shape=..., shapes=..., device="auto")`
 is an advisory backend capability probe.
 
+Capture requires at least one Tensor argument. Host reads must stay outside the
+captured function; otherwise their values would be fixed during capture.
+Compiler settings such as BEAM and NOOPT are documented in the
+[shared runtime reference](https://github.com/polygrad/polygrad#settings).
+
+### Reusing Input Buffers
+
+```python
+import numpy as np
+from polygrad import Tensor, compile
+
+x = Tensor(np.array([1, 2, 3], dtype=np.float32)).realize()
+f = compile(lambda x: x.square().sum().realize(), [x])
+
+print(f.run([x]).item())
+x.copy_from(np.array([4, 5, 6], dtype=np.float32))
+print(f.run([x]).item())
+f.dispose()
+```
+
 ## Custom Kernels
 
 `Tensor.custom_kernel(...)` mirrors tinygrad's alpha custom-kernel shape. The
@@ -435,86 +539,7 @@ needed. Current C and Wasm renderers reject mismatched vector stores with
 `vector STORE dtype mismatch; cast the value to the destination dtype`.
 Scalar C stores can convert numerically, but that is not a portable kernel
 contract. INTERP follows Tinygrad's Python memoryview conversion rules. Cast
-explicitly on every backend. Published 0.5.1 still has the Wasm/INTERP
-mismatched-store defects addressed in 0.5.2; 0.5.0 also has the CPU defect.
-
-## Common API Recipes
-
-Create tensors:
-
-```python
-from polygrad import Tensor
-
-x = Tensor([1, 2, 3])
-a = Tensor.zeros(2, 3)
-b = Tensor.ones(2, 3)
-c = Tensor.randn(2, 3)
-d = Tensor.arange(0, 6).reshape(2, 3)
-```
-
-Use NumPy buffers:
-
-```python
-import numpy as np
-from polygrad import Tensor
-
-arr = np.array([1, 2, 3, 4], dtype=np.float32)
-x = Tensor(arr).reshape(2, 2)
-print((x * 2 + 1).numpy())
-```
-
-Math, movement, indexing:
-
-```python
-from polygrad import Tensor
-
-x = Tensor.arange(0, 12).reshape(3, 4)
-y = x.permute(1, 0).reshape(2, 6)
-z = y.relu().sum(axis=1)
-picked = x.gather(1, Tensor([[0, 2], [1, 3], [0, 1]], dtype="int32"))
-```
-
-Repeated input updates:
-
-```python
-import numpy as np
-from polygrad import Tensor, compile
-
-x = Tensor(np.array([1, 2, 3], dtype=np.float32)).realize()
-f = compile(lambda x: x.square().sum().realize(), [x])
-
-print(f.run([x]).item())
-x.copy_from(np.array([4, 5, 6], dtype=np.float32))
-print(f.run([x]).item())
-f.dispose()
-```
-
-Runtime inspection:
-
-```python
-import polygrad
-
-print(polygrad.stats())
-print(polygrad.can_run("add", shape=[1024]))
-```
-
-`can_run(...)` is conservative. For some compound op/shape queries it raises
-when support cannot be proven statically.
-
-API reference at a glance:
-
-| Area | Main APIs |
-|---|---|
-| Runtime | `polygrad.create`, `polygrad.stats`, `polygrad.can_run`, `Device` |
-| Models | `Model`, `from_callable`, `from_tensors`, `fit`, `forward`, `save`, `load`, `summary`, `dispose`; `polygrad.models` factories |
-| Tensor creation | `Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `randint`, `arange`, `linspace`, `eye`, `empty` |
-| Tensor math | `+`, `-`, `*`, `/`, `**`, `exp`, `log`, `sqrt`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu`, `softmax` |
-| Reductions | `sum`, `mean`, `max`, `min`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
-| Movement/indexing | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
-| Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
-| Data/readback | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
-| Compilation | `jit`, `compile`, `Tensor.custom_kernel` |
-| Neural nets | `polygrad.nn` layers, `SGD`, `Adam`, `AdamW`, `get_parameters`, `get_state_dict` |
+explicitly on every backend.
 
 ## Package Integration
 
@@ -533,21 +558,30 @@ def normalize(x: Tensor) -> Tensor:
 This keeps execution in the caller's Polygrad context and avoids unnecessary
 NumPy readback.
 
-`nn` helpers:
+## API Overview
 
-```python
-from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding
-from polygrad.nn import get_parameters
-from polygrad.nn.optim import SGD, Adam, AdamW
-```
-
-Layers include `Linear`, `LayerNorm`, `LayerNorm2d`, `RMSNorm`, `Embedding`,
-`Dropout`, `GroupNorm`, `Conv1d`, `Conv2d`, `ConvTranspose1d`, `ConvTranspose2d`,
-`InstanceNorm`, `LSTMCell`, and `BatchNorm`. Optimizers include `SGD`, `Adam`, and
-`AdamW`; each provides `step()` and `zero_grad()`.
+| Area | Main APIs |
+|---|---|
+| Runtime | `polygrad.create`, `polygrad.stats`, `polygrad.can_run`, `Device` |
+| Models | `Model`, `from_callable`, `from_tensors`, `fit`, `forward`, `save`, `load`, `summary`, `dispose`; `polygrad.models` factories |
+| Tensor creation | `Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `randint`, `arange`, `linspace`, `eye`, `empty` |
+| Tensor math | `+`, `-`, `*`, `/`, `**`, `exp`, `log`, `sqrt`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu`, `softmax` |
+| Reductions | `sum`, `mean`, `max`, `min`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
+| Movement/indexing | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
+| Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
+| Data/readback | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
+| Compilation | `jit`, `compile`, `Tensor.custom_kernel` |
+| Neural nets | `polygrad.nn` layers, `SGD`, `Adam`, `AdamW`, `get_parameters`, `get_state_dict` |
 
 ## Troubleshooting
 
+- **`unknown type name '__fp16'`:** float16 CPU kernels require Clang.
+  Install it and select `CC=clang`; check that `CC` is not forcing GCC.
+- **`args mismatch in jit`:** the call must match the traced input shapes,
+  dtypes and devices. An `int32` input cannot replace a `float32` sample.
+- **Bundle ABI/format mismatch:** use matching producer/consumer Polygrad versions.
+  See [bundle compatibility](https://github.com/polygrad/polygrad#export-products);
+  do not edit artifact version fields to bypass validation.
 - **CPU compilation cannot find a compiler:** install clang (recommended) or GCC,
   or try `DEV=X86`
   on a supported x86 machine or `DEV=INTERP` for interpreted execution.

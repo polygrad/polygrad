@@ -840,7 +840,7 @@ def test_readme_javascript_package_example():
     if node is None:
         pytest.skip('Node is required to execute the JavaScript README example')
     root = Path(__file__).resolve().parents[2]
-    text = (root / 'README.md').read_text(encoding='utf-8')
+    text = (root / 'js/README.md').read_text(encoding='utf-8')
     section = text.split('JavaScript package pattern:', 1)[1]
     consumer, implementation = re.findall(r'```js\n(.*?)\n```', section, re.S)[:2]
     consumer = consumer.replace("require('polygrad')", "require('./')")
@@ -857,6 +857,47 @@ def test_readme_device_map_example():
     text = (Path(__file__).resolve().parents[2] / 'README.md').read_text(encoding='utf-8')
     start = text.index('from polygrad import Model, Tensor', text.index('exact named module cuts'))
     exec(text[start:text.index('```', start)], {})
+
+
+@pytest.mark.parametrize('readme', ['README.md', 'py/README.md', 'js/README.md'])
+def test_readme_local_links(readme):
+    from urllib.parse import unquote, urlsplit
+
+    root = Path(__file__).resolve().parents[2]
+    source = root / readme
+    # Ignore example strings and shell comments: they are not document links/headings.
+    def prose(path):
+        text = path.read_text(encoding='utf-8')
+        assert text.count('```') % 2 == 0, path
+        return re.sub(r'```[^\n]*\n.*?```', '', text, flags=re.S)
+
+    for link in re.findall(r'\[[^\]\n]+\]\(([^\s)]+)\)', prose(source)):
+        url = urlsplit(link)
+        if url.scheme or url.netloc:
+            if url.netloc != 'github.com':
+                continue
+            if url.path.rstrip('/') == '/polygrad/polygrad':
+                target = root / 'README.md'
+            elif url.path.startswith('/polygrad/polygrad/blob/main/'):
+                target = root / unquote(url.path.removeprefix('/polygrad/polygrad/blob/main/'))
+            elif url.path.startswith('/polygrad/polygrad/tree/main/'):
+                target = root / unquote(url.path.removeprefix('/polygrad/polygrad/tree/main/'))
+            else:
+                continue
+        else:
+            target = source.parent / unquote(url.path) if url.path else source
+        assert target.exists(), f'{readme}: missing link target {link}'
+        if not url.fragment or target.suffix != '.md' or url.fragment == 'readme':
+            continue
+        text = prose(target)
+        anchors = set(re.findall(r'<a\s+id="([^"]+)"', text))
+        counts = {}
+        for heading in re.findall(r'^#{1,6} (.+)$', text, re.M):
+            slug = re.sub(r'[^\w -]', '', heading.lower()).replace(' ', '-')
+            count = counts.get(slug, 0)
+            anchors.add(f'{slug}-{count}' if count else slug)
+            counts[slug] = count + 1
+        assert unquote(url.fragment) in anchors, f'{readme}: missing anchor {link}'
 
 
 @pytest.mark.parametrize('device', ['CPU', 'INTERP', 'X86'])
