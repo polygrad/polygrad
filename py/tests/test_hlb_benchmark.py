@@ -12,6 +12,18 @@ def test_hlb_uses_release014_reference_with_unchanged_workload():
     assert hlb.EXPECTED_HLB_SHA256 == "9d692a09c52219f274c26199a6a1cb0143a1c004e019f5e563a06dd3480363ba"
 
 
+@pytest.mark.parametrize('target', ['bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'])
+def test_hlb_make_uses_selected_output_directory(target, tmp_path):
+    output = tmp_path / 'release hlb'
+    result = subprocess.run(
+        ['make', '-n', target, 'HAS_CUDA=1', f'HLB_BENCH_DIR={output}'],
+        cwd=hlb.ROOT, capture_output=True, text=True, check=True,
+    )
+    assert f'mkdir -p "{output}"' in result.stdout
+    assert f'mktemp -d -p "{output}"' in result.stdout
+    assert 'temp/hlb_benchmark' not in result.stdout
+
+
 def test_numeric_npz_rejects_matching_nonfinite_values(tmp_path):
     reference = tmp_path / "reference.npz"
     subject = tmp_path / "subject.npz"

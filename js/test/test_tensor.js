@@ -4877,10 +4877,22 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
-  await test('NaN clip preserves unordered comparison', async () => {
+  await test('clip finite bounds', async () => {
+    const x = new Tensor([-2, 0, 0.5, 1, 2], {dtype: 'float32'})
+    const out = x.clip(0, 1)
+    try { assertClose(await out.toArray(), [0, 0, 0.5, 1, 1], 0) }
+    finally { out.dispose(); x.dispose() }
+  })
+
+  // Pinned WGSLRenderer emits the same compare/select chain. WGSL finite-math
+  // assumptions allow clip(NaN) to lose NaN, as with the truthiness case below.
+  await testIf(pg.device !== 'webgpu', 'NaN clip preserves unordered comparison (outside WGSL finite math)', async () => {
     const x = new Tensor([NaN], {dtype: 'float32'})
     const out = x.clip(0, 1)
-    try { assert(Number.isNaN((await out.toArray())[0])) }
+    try {
+      const value = (await out.toArray())[0]
+      assert(Number.isNaN(value), `expected NaN, got ${value}`)
+    }
     finally { out.dispose(); x.dispose() }
   })
 

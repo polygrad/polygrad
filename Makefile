@@ -556,10 +556,11 @@ bench-model-cuda: build/libpolygrad.so js/build/Release/polygrad_napi.node
 
 # Bounded semantic gate for the exact pinned HLB source. The Python driver
 # owns engine-specific caches, model bytes, provenance, and comparison output.
+HLB_BENCH_DIR ?= build/bench-hlb
 bench-hlb-cuda-semantic: build/libpolygrad.so
-	@mkdir -p temp/hlb_benchmark
+	@mkdir -p "$(HLB_BENCH_DIR)"
 	@set -eu; \
-		run_root=$$(mktemp -d -p temp/hlb_benchmark .semantic.XXXXXX); \
+		run_root=$$(mktemp -d -p "$(HLB_BENCH_DIR)" .semantic.XXXXXX); \
 		rmdir "$$run_root"; \
 		$(PARITY_PY) bench/bench_hlb_cifar.py \
 			$(HLB_BENCH_ARGS) \
@@ -572,9 +573,9 @@ bench-hlb-cuda-semantic: build/libpolygrad.so
 # one-step semantic canary on the same source/library/state, then records
 # deterministic eager/capture/replay windows in both process orders.
 bench-hlb-cuda-timing: build/libpolygrad.so
-	@mkdir -p temp/hlb_benchmark
+	@mkdir -p "$(HLB_BENCH_DIR)"
 	@set -eu; \
-		run_root=$$(mktemp -d -p temp/hlb_benchmark .timing.XXXXXX); \
+		run_root=$$(mktemp -d -p "$(HLB_BENCH_DIR)" .timing.XXXXXX); \
 		rmdir "$$run_root"; \
 		$(PARITY_PY) bench/bench_hlb_cifar.py \
 			$(HLB_BENCH_ARGS) \

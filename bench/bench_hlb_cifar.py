@@ -1624,7 +1624,7 @@ def main(argv: list[str] | None = None) -> int:
     run_root = (
         args.output_dir.resolve()
         if args.output_dir
-        else ROOT / "temp" / "hlb_benchmark" / stamp
+        else ROOT / "build" / "bench-hlb" / stamp
     )
     if run_root.exists():
         raise SystemExit(f"output directory already exists: {run_root}")

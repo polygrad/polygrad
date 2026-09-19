@@ -45,6 +45,9 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert perf['variables']['PY_PERF_OUTPUT'] == '{output}/python-performance/report.json'
     c_perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-c-performance')
     assert c_perf['variables']['C_PERF_OUTPUT'] == '{output}/c-performance/report.json'
+    for target in ('bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'):
+        gate = next(g for g in runner['release_gates']() if g['target'] == target)
+        assert gate['variables']['HLB_BENCH_DIR'] == '{output}/hlb'
     assert 'bench-smoke-regression' not in targets
     assert 'test-symbolic-z3' not in targets and 'test-symbolic-z3-fixed' not in targets
     assert targets[-1] == 'bench-hlb-cuda-timing'
@@ -156,6 +159,7 @@ def test_release_continues_after_failure_and_preserves_logs(runner, tmp_path):
     assert status == 1
     report = json.loads((output / 'summary.json').read_text())
     assert report['status'] == 'failed'
+    assert report['acceptance_scope'] == f"polygrad-{report['candidate_version']}-supported"
     assert [g['status'] for g in report['gates']] == ['failed', 'passed']
     assert report['gates'][0]['exit_code'] != 0
     assert all(g['duration_seconds'] >= 0 for g in report['gates'])

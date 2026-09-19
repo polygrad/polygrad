@@ -4,11 +4,19 @@ import copy
 import json
 from pathlib import Path
 import runpy
+import re
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_release_scope_matches_package_versions():
+    scope = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text())
+    python = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / 'py/pyproject.toml').read_text(), re.M).group(1)
+    javascript = json.loads((ROOT / 'js/package.json').read_text())['version']
+    assert scope['version'] == python == javascript
 
 
 @pytest.fixture
@@ -24,7 +32,7 @@ def gate():
 def test_scoped_vocabulary_does_not_relabel_open_debts(gate):
     module, scope, report = gate
     before = copy.deepcopy(report)
-    assert module['release_scope_errors'](report, scope, '0.5.0') == []
+    assert module['release_scope_errors'](report, scope, scope['version']) == []
     assert report == before
     assert all(not row['allowed'] for row in report['findings'])
 
@@ -32,7 +40,7 @@ def test_scoped_vocabulary_does_not_relabel_open_debts(gate):
 @pytest.mark.parametrize('mutation', ['new', 'stale', 'resolved', 'wrong_id', 'duplicate', 'missing', 'version', 'reference'])
 def test_scoped_vocabulary_rejects_new_or_changed_gaps(gate, mutation):
     module, scope, report = gate
-    version = '0.5.0'
+    version = scope['version']
     if mutation == 'new':
         report['findings'].append(dict(side='tinygrad_only', op='NEW', id=None, status='unregistered', allowed=False, present=True))
     elif mutation == 'stale':

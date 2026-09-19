@@ -65,6 +65,8 @@ def release_gates():
             gate['variables']['PY_PERF_OUTPUT'] = '{output}/python-performance/report.json'
         elif gate['target'] == 'test-release-c-performance':
             gate['variables']['C_PERF_OUTPUT'] = '{output}/c-performance/report.json'
+        elif gate['target'] in ('bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'):
+            gate['variables']['HLB_BENCH_DIR'] = '{output}/hlb'
         elif gate['target'] == 'test-compat-tinygrad-upstream-ratchet':
             gate['variables']['UPSTREAM_COMPAT_DIR'] = '{output}/upstream-nine'
         elif gate['target'] == 'test-compat-tinygrad-ops':
@@ -213,8 +215,9 @@ def run_release(root, output, make, gates, variables):
                   FUZZ_WORK_DIR=str(output / 'fuzz-corpus'),
                   BENCH_SMOKE_JSON=str(output / 'smoke.json'))
     inputs = source_manifest(root)
-    report = dict(schema_version=2, status='running', acceptance_scope='polygrad-0.5.0-supported',
-                  candidate_version=candidate_version(ROOT),
+    version = candidate_version(ROOT)
+    report = dict(schema_version=2, status='running', acceptance_scope=f'polygrad-{version}-supported',
+                  candidate_version=version,
                   source_inputs=inputs, source_sha256=manifest_hash(inputs),
                   deferred_certification=SCOPE['deferred_certification'],
                   started_at=datetime.now(timezone.utc).isoformat(),
