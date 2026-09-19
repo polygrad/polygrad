@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.5.2 (release candidate)
+## 0.5.2 (2026-09-19)
 
-The candidate requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
+This release requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate
 ABI numbers below describe development checkpoints, not package requirements.
-Full release acceptance is pending.
 
 - Fix X86 JIT crashes in Clang 18 sanitizer builds. Exempt raw JIT calls from
   compiler-only function-type checks while retaining ASan and other UBSan checks.

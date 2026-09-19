@@ -1007,7 +1007,7 @@ Low-level `UOp.variable` bounds retain integer, floating-point and boolean
 endpoints independently of the variable dtype. C takes scalar `PolyArg` values;
 Python accepts `int`/`float`/`bool`; JavaScript uses `pg.uop.variable(...)`, with
 `BigInt` for exact wide integers. NaN, reversed and nonnumeric bounds are rejected.
-The 0.5.2 candidate requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
+Polygrad 0.5.2 requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected. Typed endpoints can exceed the runtime's signed64
 variable-binding domain; metadata support does not imply executable bindings.
 
