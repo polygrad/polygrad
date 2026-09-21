@@ -1,5 +1,6 @@
 """Raw UOp wrappers must match the C elementwise helpers, not raw ALU ops."""
 import numpy as np
+import pytest
 
 from polygrad import Tensor, UOp, Variable, _ffi, dtypes
 
@@ -46,3 +47,29 @@ def test_repeat_interleave_keeps_symbolic_sequence_axis():
     arr = out.numpy()
     assert arr.shape == (1, 4, 1, 4)
     assert np.isfinite(arr).all()
+
+
+def test_symbolic_prefix_sum_and_max_match_constant():
+    rng = np.random.RandomState(0)
+    x_np = rng.randn(1, 2, 13, 4).astype(np.float32)
+    x = Tensor(x_np)
+    live = Variable('live', 1, 13)
+    a = 5
+    np.testing.assert_allclose(x[:, :, :live.bind(a), :].sum(-2).numpy(), x_np[:, :, :a].sum(-2), atol=1e-5)
+    np.testing.assert_allclose(x[:, :, :live.bind(a), :].max(-2).numpy(), x_np[:, :, :a].max(-2), atol=1e-5)
+
+
+@pytest.mark.xfail(strict=True, reason='keepdim broadcast then reduce over a symbolic last axis is numerically wrong')
+def test_symbolic_sdpa_matches_constant_prefix():
+    rng = np.random.RandomState(0)
+    q_np = rng.randn(1, 2, 1, 4).astype(np.float32)
+    k_np = rng.randn(1, 2, 13, 4).astype(np.float32)
+    v_np = rng.randn(1, 2, 13, 4).astype(np.float32)
+    q, k, v = Tensor(q_np), Tensor(k_np), Tensor(v_np)
+    live = Variable('live', 1, 13)
+    a = 5
+    const = q.scaled_dot_product_attention(k[:, :, :a, :], v[:, :, :a, :], enable_gqa=False).numpy()
+    sym = q.scaled_dot_product_attention(
+        k[:, :, :live.bind(a), :], v[:, :, :live.bind(a), :], enable_gqa=False
+    ).numpy()
+    np.testing.assert_allclose(sym, const, atol=1e-5)
