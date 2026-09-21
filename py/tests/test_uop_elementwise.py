@@ -1,6 +1,5 @@
 """Raw UOp wrappers must match the C elementwise helpers, not raw ALU ops."""
 import numpy as np
-import pytest
 
 from polygrad import Tensor, UOp, Variable, _ffi, dtypes
 
@@ -59,7 +58,20 @@ def test_symbolic_prefix_sum_and_max_match_constant():
     np.testing.assert_allclose(x[:, :, :live.bind(a), :].max(-2).numpy(), x_np[:, :, :a].max(-2), atol=1e-5)
 
 
-@pytest.mark.xfail(strict=True, reason='keepdim broadcast then reduce over a symbolic last axis is numerically wrong')
+def test_symbolic_keepdim_sub_then_sum_matches_constant():
+    x_np = np.array(
+        [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]],
+        np.float32,
+    )
+    x = Tensor(x_np)
+    live = Variable('live', 1, 8)
+    a = 5
+    xc, xs = x[:, :a], x[:, :live.bind(a)]
+    got = (xs - xs.max(-1, True)).sum(-1).numpy()
+    want = (xc - xc.max(-1, True)).sum(-1).numpy()
+    np.testing.assert_allclose(got, want, atol=1e-5)
+
+
 def test_symbolic_sdpa_matches_constant_prefix():
     rng = np.random.RandomState(0)
     q_np = rng.randn(1, 2, 1, 4).astype(np.float32)

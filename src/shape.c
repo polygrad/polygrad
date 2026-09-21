@@ -100,6 +100,16 @@ static bool resolved_shape_dim(PolyCtx *ctx, const PolyUOp *u, int axis, int64_t
   return true;
 }
 
+static bool shape_dim_proven_one(PolyCtx *ctx, const PolyUOp *u, int axis) {
+  int64_t dim = 0;
+  if (resolved_shape_dim(ctx, u, axis, &dim)) return dim == 1;
+  PolyUOp *sd = poly_uop_shape_dim(ctx, u, axis);
+  if (!sd) return false;
+  int64_t vmin = 0, vmax = 0;
+  poly_uop_minmax(ctx, sd, &vmin, &vmax);
+  return vmin == 1 && vmax == 1;
+}
+
 int poly_uop_broadcast_axes(
     PolyCtx *ctx,
     const PolyUOp *src,
@@ -119,12 +129,12 @@ int poly_uop_broadcast_axes(
     n_axes++;
   }
   for (int axis = 0; axis < src_ndim; axis++) {
-    int64_t src_dim = 0, out_dim = 0;
-    /* tinygrad resolve(..., default=False): only dimensions proven to be 1
-     * and expanded to a proven non-1 dimension are broadcast axes. */
-    if (!resolved_shape_dim(ctx, src, axis, &src_dim) || src_dim != 1 ||
-        !resolved_shape_dim(ctx, out, nleft + axis, &out_dim) || out_dim == 1)
-      continue;
+    /* Indexing must zero a proven-1 source axis whenever the consumer axis is
+     * not also proven 1. tinygrad's resolve(out != 1) misses a Variable whose
+     * vmin is 1; passing that RANGE into a size-1 keepdim buffer folds it into
+     * a sibling axis via reshape ((row+k)%nrows) and breaks softmax/dot. */
+    if (!shape_dim_proven_one(ctx, src, axis)) continue;
+    if (shape_dim_proven_one(ctx, out, nleft + axis)) continue;
     if (axes && n_axes < max_axes) axes[n_axes] = nleft + axis;
     n_axes++;
   }

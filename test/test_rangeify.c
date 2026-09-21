@@ -742,6 +742,38 @@ TEST(rangeify, broadcast_rngs_zero_expanded_axes_like_current_tinygrad) {
   PASS();
 }
 
+TEST(rangeify, broadcast_axes_zero_size1_against_unbound_variable) {
+  /* A keepdim-1 axis must broadcast against a Variable whose vmin is 1.
+   * resolve(out != 1) is false for that Variable, but indexing the size-1
+   * buffer with the consumer RANGE folds it into a sibling axis. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *keep = poly_uop_reshape(
+      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU), (int64_t[]){2, 1}, 2
+  );
+  PolyUOp *full = poly_uop_reshape(
+      ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, 16, POLY_DEVICE_CPU), (int64_t[]){2, 8}, 2
+  );
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *view = poly_uop_shrink_symbolic(
+      ctx, full, (PolyUOp *[]){zero, zero}, (PolyUOp *[]){two, n}, 2
+  );
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, view, keep, poly_arg_none());
+  ASSERT_NOT_NULL(n);
+  ASSERT_NOT_NULL(keep);
+  ASSERT_NOT_NULL(view);
+  ASSERT_NOT_NULL(add);
+  int axes[POLY_MAX_DIMS] = {-1, -1};
+  ASSERT_INT_EQ(poly_uop_broadcast_axes(ctx, keep, add, axes, POLY_MAX_DIMS), 1);
+  ASSERT_INT_EQ(axes[0], 1);
+  ASSERT_INT_EQ(poly_uop_broadcast_axes(ctx, view, add, axes, POLY_MAX_DIMS), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, range_prop_chain) {
   /* (a+b)*c → STORE → SINK: all ops share same ranges */
   PolyCtx *ctx = poly_ctx_new();

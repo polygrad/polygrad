@@ -305,8 +305,10 @@ int poly_uop_broadcast_shape(
  * exposes its ordered sources. Items are symbolically simplified UOps so C
  * consumers retain exact symbolic shape expressions. Returns item count or -1. */
 int poly_uop_as_shape(PolyCtx *ctx, PolyUOp *shape_arg, PolyUOp **items, int max_items);
-/* Exact C port of tinygrad/uop/ops.py:broadcast_axes. Returns the number of
- * output axes that are added/expanded, or -1 for incompatible ranks. */
+/* Broadcast axes of src relative to out. Returns the number of added or
+ * expanded output axes, or -1 for incompatible ranks. A proven size-1 source
+ * axis is expanded whenever the matching consumer axis is not also proven 1,
+ * including against an unbound Variable whose vmin is 1. */
 int poly_uop_broadcast_axes(
     PolyCtx *ctx,
     const PolyUOp *src,
