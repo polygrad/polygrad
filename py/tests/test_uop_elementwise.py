@@ -85,3 +85,21 @@ def test_symbolic_sdpa_matches_constant_prefix():
         k[:, :, :live.bind(a), :], v[:, :, :live.bind(a), :], enable_gqa=False
     ).numpy()
     np.testing.assert_allclose(sym, const, atol=1e-5)
+
+
+def test_symbolic_full_and_arange_extent():
+    live = Variable('live', 1, 8)
+    np.testing.assert_allclose(Tensor.full((live.bind(5),), 1.0, buffer=False).sum().numpy(), 5.0)
+    np.testing.assert_allclose(Tensor.arange(live.bind(5)).sum().numpy(), 10.0)
+
+
+def test_offset_mask_matches_j_le_p_plus_i():
+    for p, n in ((0, 1), (0, 3), (3, 1), (3, 2), (5, 4)):
+        s = p + n
+        allowed = np.isfinite(
+            Tensor.full((1, 1, n, s), float('-inf'), buffer=False).triu(p + 1).numpy()[0, 0]
+        )
+        i = np.arange(n)[:, None] + p
+        j = np.arange(s)[None, :]
+        np.testing.assert_array_equal(allowed, j <= i)
+

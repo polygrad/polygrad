@@ -36,6 +36,10 @@ PolyUOp *poly_uop_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);
 
 PolyUOp *poly_uop_triu(PolyCtx *ctx, PolyUOp *x, int diagonal);
 
+PolyUOp *poly_uop_tril_uop(PolyCtx *ctx, PolyUOp *x, PolyUOp *diagonal);
+
+PolyUOp *poly_uop_triu_uop(PolyCtx *ctx, PolyUOp *x, PolyUOp *diagonal);
+
 PolyUOp *poly_uop_cholesky(PolyCtx *ctx, PolyUOp *x, int upper);
 
 PolyUOp *poly_uop_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper);

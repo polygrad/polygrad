@@ -8932,6 +8932,38 @@ TEST(pe, triu_tril_batched_last_two_dims_match_tinygrad) {
   PASS();
 }
 
+TEST(pe, causal_mask_offset_matches_j_le_p_plus_i) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int n = 2, p = 3, S = 5;
+  PolyUOp *mask =
+      poly_uop_causal_mask_offset(ctx, poly_uop_const_int(ctx, n), poly_uop_const_int(ctx, p));
+  ASSERT_NOT_NULL(mask);
+  PolyShape s = poly_uop_max_shape(ctx, mask);
+  ASSERT_INT_EQ(s.ndim, 4);
+  ASSERT_INT_EQ(s.dims[0], 1);
+  ASSERT_INT_EQ(s.dims[1], 1);
+  ASSERT_INT_EQ(s.dims[2], n);
+  ASSERT_INT_EQ(s.dims[3], S);
+  if (s.dims) free(s.dims);
+
+  PolyUOp *out_buf = poly_uop_buffer_f32(ctx, (int64_t)n * S);
+  float out[10] = {0};
+  ASSERT_INT_EQ(realize_uop(ctx, mask, out_buf, out, NULL, NULL, 0), 0);
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < S; j++) {
+      float v = out[i * S + j];
+      if (j <= p + i)
+        ASSERT_FLOAT_EQ(v, 0.0f, 0);
+      else
+        ASSERT_TRUE(!isfinite(v));
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+
+
 /* ═══════════════════════════════════════════════════════════════════════ */
 /*  Structural gate for the const-registry root fix                       */
 /*                                                                        */

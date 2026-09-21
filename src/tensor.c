@@ -2332,6 +2332,37 @@ static PolyUOp *poly_full_from_scalar(
   return poly_uop_expand(ctx, r, (int64_t *)shape, ndim);
 }
 
+/* CONST -> RESHAPE((1,)*ndim) -> EXPAND(dims). Same construction as concrete
+ * full(buffer=False), with UOp extents so a Variable length stays symbolic. */
+static PolyUOp *poly_full_from_scalar_uop(
+    PolyCtx *ctx,
+    PolyUOp **dims,
+    int ndim,
+    PolyUOp *scalar
+) {
+  if (!scalar || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  if (ndim == 0) return scalar;
+  if (!dims) return NULL;
+  PolyUOp *ones[POLY_MAX_DIMS];
+  bool already_expanded = true;
+  for (int i = 0; i < ndim; i++) {
+    if (!dims[i]) return NULL;
+    int64_t d = 0;
+    if (poly_uop_const_i64(dims[i], &d) == 0) {
+      if (d < 0) return NULL;
+      if (d != 1) already_expanded = false;
+    } else {
+      already_expanded = false;
+    }
+    ones[i] = poly_uop_const_int(ctx, 1);
+    if (!ones[i]) return NULL;
+  }
+  PolyUOp *r = poly_uop_reshape_symbolic(ctx, scalar, ones, ndim);
+  if (!r) return NULL;
+  if (already_expanded) return r;
+  return poly_uop_expand_symbolic(ctx, r, dims, ndim);
+}
+
 static int64_t poly_arange_len(long double start, long double stop, long double step) {
   if (step == 0.0L) return -1;
   if ((step > 0.0L && start < stop) || (step < 0.0L && start > stop)) {
@@ -4830,6 +4861,19 @@ PolyUOp *poly_uop_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill
   return poly_uop_full_float_dtype(ctx, shape, ndim, fill_value, POLY_FLOAT32);
 }
 
+PolyUOp *poly_uop_full_float_uop(
+    PolyCtx *ctx,
+    PolyUOp **dims,
+    int ndim,
+    double fill_value,
+    PolyDType supplied_dtype
+) {
+  PolyDType dt = supplied_dtype;
+  if (!poly_dtype_is_float(dt)) return NULL;
+  PolyUOp *scalar = poly_uop_const_exact_float(ctx, dt, fill_value);
+  return poly_full_from_scalar_uop(ctx, dims, ndim, scalar);
+}
+
 /* Current tinygrad arange -- mixin/op.py:165-195:
  *   Tensor.full((output_len,), step)._cumalu(0, Ops.ADD) + (start - step)
  *
@@ -4979,6 +5023,31 @@ static PolyUOp *arange_default_int(PolyCtx *ctx, int64_t start, int64_t stop, in
   return poly_uop_arange_int_dtype(ctx, start, stop, step, dtype);
 }
 
+/* 0..n-1. A concrete or bound n uses the existing arange. A symbolic n
+ * materializes 0..vmax-1 then shrinks to n so the live length stays a UOp
+ * without a symbolic pool window. */
+PolyUOp *poly_uop_arange_extent(PolyCtx *ctx, PolyUOp *n) {
+  if (!ctx || !n) return NULL;
+  int64_t bound = 0;
+  if (poly_uop_bind_value(n, &bound) == 0 || poly_uop_const_i64(n, &bound) == 0) {
+    if (bound < 0) return NULL;
+    return arange_default_int(ctx, 0, bound, 1);
+  }
+  int64_t vmin = 0, vmax = 0;
+  poly_uop_minmax(ctx, n, &vmin, &vmax);
+  if (vmax < 0) return NULL;
+  if (vmax == 0) {
+    int64_t empty_shape[1] = {0};
+    return poly_uop_full_int_dtype(ctx, empty_shape, 1, 0, poly_dtype_strong(POLY_WEAKINT));
+  }
+  PolyUOp *full = arange_default_int(ctx, 0, vmax, 1);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  if (!full || !zero) return NULL;
+  PolyUOp *starts[1] = {zero};
+  PolyUOp *sizes[1] = {n};
+  return poly_uop_shrink_symbolic(ctx, full, starts, sizes, 1);
+}
+
 /* Current tinygrad eye -- mixin/op.py:215-231
  *   (arange(n).unsqueeze(-1) == arange(m)).cast(dtype) */
 PolyUOp *poly_uop_eye_dtype(PolyCtx *ctx, int64_t n, int64_t m, PolyDType supplied_dtype) {
@@ -5015,6 +5084,40 @@ static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) 
   return poly_uop_le(ctx, rows_shifted, cols);
 }
 
+static bool uop_extent_concrete(PolyUOp *u, int64_t *out) {
+  return u && (poly_uop_bind_value(u, out) == 0 || poly_uop_const_i64(u, out) == 0);
+}
+
+/* mixin/op.py:233-234 with sint r, c, and diagonal. Unbound extents use a
+ * concrete vmax arange, then shrink the compared mask so scheduling does not
+ * have to pool a symbolic window. */
+static PolyUOp *poly_tri_mask_uop(PolyCtx *ctx, PolyUOp *r, PolyUOp *c, PolyUOp *diagonal) {
+  if (!ctx || !r || !c || !diagonal) return NULL;
+  int64_t r_bound = 0, c_bound = 0, d_bound = 0;
+  if (uop_extent_concrete(r, &r_bound) && uop_extent_concrete(c, &c_bound) &&
+      uop_extent_concrete(diagonal, &d_bound)) {
+    if (r_bound < 0 || c_bound < 0 || d_bound < INT_MIN || d_bound > INT_MAX) return NULL;
+    return poly_tri_mask(ctx, r_bound, c_bound, (int)d_bound);
+  }
+  int64_t rmin = 0, rmax = 0, cmin = 0, cmax = 0;
+  poly_uop_minmax(ctx, r, &rmin, &rmax);
+  poly_uop_minmax(ctx, c, &cmin, &cmax);
+  if (rmax < 0 || cmax < 0) return NULL;
+  PolyUOp *rows = arange_default_int(ctx, 0, rmax, 1);
+  PolyUOp *cols = arange_default_int(ctx, 0, cmax, 1);
+  if (!rows || !cols) return NULL;
+  rows = poly_uop_reshape(ctx, rows, (int64_t[]){rmax, 1}, 2);
+  if (!rows) return NULL;
+  PolyUOp *rows_shifted = poly_uop_add(ctx, rows, diagonal);
+  PolyUOp *mask = rows_shifted ? poly_uop_le(ctx, rows_shifted, cols) : NULL;
+  if (!mask) return NULL;
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  if (!zero) return NULL;
+  PolyUOp *starts[2] = {zero, zero};
+  PolyUOp *sizes[2] = {r, c};
+  return poly_uop_shrink_symbolic(ctx, mask, starts, sizes, 2);
+}
+
 /* Current Tensor.tril -- mixin/op.py:279-280
  *   _tri(rows, cols, diagonal+1).where(self.const_like(0), self) */
 PolyUOp *poly_uop_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
@@ -5039,6 +5142,31 @@ PolyUOp *poly_uop_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   PolyUOp *mask = poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], diagonal);
   PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
   return poly_uop_where(ctx, mask, x, zero);
+}
+
+PolyUOp *poly_uop_tril_uop(PolyCtx *ctx, PolyUOp *x, PolyUOp *diagonal) {
+  if (!ctx || !x || !diagonal) return NULL;
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim < 2) return NULL;
+  PolyUOp *r = poly_uop_shape_dim(ctx, x, ndim - 2);
+  PolyUOp *c = poly_uop_shape_dim(ctx, x, ndim - 1);
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  if (!r || !c || !one) return NULL;
+  PolyUOp *diag1 = poly_uop_add(ctx, diagonal, one);
+  PolyUOp *mask = diag1 ? poly_tri_mask_uop(ctx, r, c, diag1) : NULL;
+  PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
+  return (mask && zero) ? poly_uop_where(ctx, mask, zero, x) : NULL;
+}
+
+PolyUOp *poly_uop_triu_uop(PolyCtx *ctx, PolyUOp *x, PolyUOp *diagonal) {
+  if (!ctx || !x || !diagonal) return NULL;
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim < 2) return NULL;
+  PolyUOp *r = poly_uop_shape_dim(ctx, x, ndim - 2);
+  PolyUOp *c = poly_uop_shape_dim(ctx, x, ndim - 1);
+  PolyUOp *mask = poly_tri_mask_uop(ctx, r, c, diagonal);
+  PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
+  return (mask && zero) ? poly_uop_where(ctx, mask, x, zero) : NULL;
 }
 
 typedef struct {

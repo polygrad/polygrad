@@ -151,6 +151,10 @@ int poly_tensor_lstm_cell(
 PolyUOp *poly_uop_causal_mask(PolyCtx *ctx, int64_t T);
 PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T);
 
+/* Offset causal additive mask, shape [1, 1, n, p+n]: 0 where j <= p+i. */
+PolyUOp *poly_uop_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p);
+PolyTensor *poly_tensor_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p);
+
 /* Multi-Head Attention */
 
 /* RandMixin.dropout. Returns an owned reference, including identity results. */

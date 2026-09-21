@@ -1694,6 +1694,13 @@ class Tensor:
             if _ptr_value(other._ctx) != _ptr_value(self._ctx):
                 raise ValueError('Tensor operands must belong to the same Polygrad context')
             return other
+        if isinstance(other, (Variable, BoundVariable)):
+            other = other.uop
+        if isinstance(other, UOp):
+            dt = other.dtype
+            if not (dtypes.is_int(dt) or dt in dtypes.weaks):
+                raise TypeError(f'Tensor op does not accept {dt} UOp scalars')
+            return Tensor(other, _ctx=self._ctx, device=self._device)
         if isinstance(other, np.generic):
             other = other.item()
         if isinstance(other, (bool, int, float)):
@@ -2578,12 +2585,33 @@ class Tensor:
             Tensor.arange(r, **opts).unsqueeze(-1) + diagonal
         ) <= Tensor.arange(c, **opts)
 
+    def _tri_diagonal_uop(self, diagonal):
+        if isinstance(diagonal, (Variable, BoundVariable)):
+            diagonal = diagonal.uop
+        if isinstance(diagonal, UOp):
+            return diagonal
+        return UOp.const(int(diagonal), ctx=self._ctx)
+
     def triu(self, diagonal=0):
+        if _shape_has_symbolic(self.shape) or _is_symbolic_dim(diagonal):
+            raw = _ffi._lib.poly_uop_triu_uop(
+                self._ctx, self.uop_physical.raw, self._tri_diagonal_uop(diagonal).raw
+            )
+            if not raw:
+                raise RuntimeError('poly_uop_triu_uop failed')
+            return Tensor(UOp(self._ctx, raw), _ctx=self._ctx, device=self._device)
         r, c = self.shape[-2], self.shape[-1]
         mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device, _ctx=self._ctx)
         return mask.where(self, self.const_like(0))
 
     def tril(self, diagonal=0):
+        if _shape_has_symbolic(self.shape) or _is_symbolic_dim(diagonal):
+            raw = _ffi._lib.poly_uop_tril_uop(
+                self._ctx, self.uop_physical.raw, self._tri_diagonal_uop(diagonal).raw
+            )
+            if not raw:
+                raise RuntimeError('poly_uop_tril_uop failed')
+            return Tensor(UOp(self._ctx, raw), _ctx=self._ctx, device=self._device)
         r, c = self.shape[-2], self.shape[-1]
         mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device, _ctx=self._ctx)
         return mask.where(self.const_like(0), self)
@@ -3525,6 +3553,17 @@ class Tensor:
         dtype_explicit = 'dtype' in kwargs
         inferred = kwargs.get('dtype', dtypes.from_py(fill_value))
         dtype_name = _dtype_name(inferred, default='float32')
+        if any(_is_symbolic_dim(s) for s in shape):
+            if buffer:
+                raise TypeError('buffered Tensor.full does not yet accept symbolic dimensions')
+            t = Tensor.const(
+                fill_value, dtype=inferred if dtype_explicit else None, _ctx=ctx
+            )
+            if dev is not None:
+                t._device = dev
+            if shape:
+                t = t.reshape((1,) * len(shape)).expand(shape)
+            return t
         dtype_id = _dtype_id(dtype_name)
         dims, ndim, _ = _shape_arg(shape)
 
@@ -3556,6 +3595,15 @@ class Tensor:
         step = _py_scalar(step)
         if stop is None:
             stop, start = start, 0
+        if any(_is_symbolic_dim(x) for x in (start, stop, step)):
+            if _is_symbolic_dim(start) or _is_symbolic_dim(step) or not _is_symbolic_dim(stop):
+                raise TypeError('symbolic arange requires start=0, step=1, and a UOp stop')
+            if start != 0 or step != 1:
+                raise TypeError('symbolic arange requires start=0 and step=1')
+            raw = _ffi._lib.poly_uop_arange_extent(ctx, _shape_dim_uop_raw(ctx, stop))
+            if not raw:
+                raise RuntimeError('poly_uop_arange_extent failed')
+            return Tensor(UOp(ctx, raw), _ctx=ctx, device=dev)
 
         lo, hi = (start, stop-step) if step > 0 else (stop-step, start)
         inferred = kwargs.get('dtype')

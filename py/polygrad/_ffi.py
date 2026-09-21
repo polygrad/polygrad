@@ -565,6 +565,16 @@ def _declare_signatures(lib):
     lib.poly_uop_arange.restype = _ptr
     lib.poly_uop_arange.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double]
 
+    lib.poly_uop_arange_extent.restype = _ptr
+    lib.poly_uop_arange_extent.argtypes = [_ptr, _ptr]
+
+    lib.poly_uop_triu_uop.restype = _ptr
+    lib.poly_uop_triu_uop.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_tril_uop.restype = _ptr
+    lib.poly_uop_tril_uop.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_uop_causal_mask_offset.restype = _ptr
+    lib.poly_uop_causal_mask_offset.argtypes = [_ptr, _ptr, _ptr]
+
     lib.poly_uop_arange_int_by_id.restype = _ptr
     lib.poly_uop_arange_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
 

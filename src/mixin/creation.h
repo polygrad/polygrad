@@ -45,6 +45,18 @@ PolyUOp *poly_uop_linspace(PolyCtx *ctx, double start, double stop, int64_t step
 
 PolyUOp *poly_uop_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
 
+/* Symbolic-extent full(buffer=False): CONST reshape-to-ones then expand. */
+PolyUOp *poly_uop_full_float_uop(
+    PolyCtx *ctx,
+    PolyUOp **dims,
+    int ndim,
+    double fill_value,
+    PolyDType supplied_dtype
+);
+
+/* 0..n-1 with n a CONST, BIND, or unbound Variable. */
+PolyUOp *poly_uop_arange_extent(PolyCtx *ctx, PolyUOp *n);
+
 PolyUOp *poly_uop_const_int_dtype(PolyCtx *ctx, int64_t value, PolyDType supplied_dtype);
 
 PolyUOp *poly_uop_const_uint_dtype(PolyCtx *ctx, uint64_t value, PolyDType supplied_dtype);

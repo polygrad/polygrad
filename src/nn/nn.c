@@ -596,6 +596,32 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T) {
   return out;
 }
 
+/* tinygrad llm/model.py: full((1,1,T,start_pos+T), -inf, buffer=False).triu(start_pos+1) */
+PolyUOp *poly_uop_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p) {
+  if (!ctx || !n || !p) return NULL;
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *pn = poly_uop_add(ctx, p, n);
+  if (!one || !pn) return NULL;
+  PolyUOp *dims[4] = {one, one, n, pn};
+  PolyUOp *fill = poly_uop_full_float_uop(ctx, dims, 4, -INFINITY, POLY_FLOAT32);
+  PolyUOp *diag = poly_uop_add(ctx, p, one);
+  return (fill && diag) ? poly_uop_triu_uop(ctx, fill, diag) : NULL;
+}
+
+PolyTensor *poly_tensor_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p) {
+  if (!ctx || !n || !p) return NULL;
+  bool build_logical = poly_ctx_get_logical_policy(ctx) != POLY_LOGICAL_NEVER;
+  PolyUOp *physical = poly_uop_causal_mask_offset(ctx, n, p);
+  PolyUOp *logical = build_logical ? poly_uop_causal_mask_offset(ctx, n, p) : NULL;
+  if (!physical || (build_logical && !logical)) return NULL;
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(ctx)
+  );
+  if (!out) return NULL;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
 /* Scaled Dot-Product Attention */
 
 /* RandMixin.scaled_dot_product_attention: return probabilities and the
