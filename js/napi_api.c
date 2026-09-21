@@ -770,6 +770,37 @@ static napi_value napi_poly_uop_binop(napi_env env, napi_callback_info info) {
   return make_external(env, poly_uop_binop(ctx, (PolyOps)op, a, b));
 }
 
+static napi_value napi_poly_uop_sub(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(
+      env, poly_uop_sub(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])
+           )
+  );
+}
+
+static napi_value napi_poly_uop_div(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(
+      env, poly_uop_div(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])
+           )
+  );
+}
+
+static napi_value napi_poly_uop_elementwise_neg(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(
+      env, poly_uop_elementwise_neg(get_external(env, argv[0]), get_external(env, argv[1]))
+  );
+}
+
 static napi_value napi_poly_uop_alu3(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -4736,7 +4767,9 @@ static napi_value napi_poly_uop_max_pool2d(napi_env env, napi_callback_info info
   read_int64_array(env, argv[5], dilation, MAX_DIMS);
   read_int64_array(env, argv[6], padding, MAX_DIMS * 2);
   napi_get_value_int32(env, argv[7], &npadding);
-  return make_external(env, poly_uop_max_pool2d(ctx, x, k, nk, stride, dilation, padding, npadding));
+  return make_external(
+      env, poly_uop_max_pool2d(ctx, x, k, nk, stride, dilation, padding, npadding)
+  );
 }
 
 static napi_value napi_poly_uop_conv2d(napi_env env, napi_callback_info info) {
@@ -6427,7 +6460,9 @@ static napi_value napi_poly_uop_triangular_solve(napi_env env, napi_callback_inf
   napi_get_value_int32(env, argv[3], &upper);
   napi_get_value_int32(env, argv[4], &transpose_a);
   napi_get_value_int32(env, argv[5], &unit_diagonal);
-  return make_external(env, poly_uop_triangular_solve(ctx, a, b, upper, transpose_a, unit_diagonal));
+  return make_external(
+      env, poly_uop_triangular_solve(ctx, a, b, upper, transpose_a, unit_diagonal)
+  );
 }
 
 static napi_value napi_poly_uop_solve(napi_env env, napi_callback_info info) {
@@ -7114,6 +7149,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_alu1", napi_poly_uop_alu1),
       DECLARE_NAPI_METHOD("poly_uop_alu2", napi_poly_uop_alu2),
       DECLARE_NAPI_METHOD("poly_uop_binop", napi_poly_uop_binop),
+      DECLARE_NAPI_METHOD("poly_uop_sub", napi_poly_uop_sub),
+      DECLARE_NAPI_METHOD("poly_uop_div", napi_poly_uop_div),
+      DECLARE_NAPI_METHOD("poly_uop_elementwise_neg", napi_poly_uop_elementwise_neg),
       DECLARE_NAPI_METHOD("poly_uop_alu3", napi_poly_uop_alu3),
 
       /* Graph construction */

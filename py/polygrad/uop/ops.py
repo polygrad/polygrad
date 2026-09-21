@@ -450,11 +450,13 @@ class UOp:
         return UOp(self.ctx, raw) if raw else None
 
     def __sub__(self, other):
-        return self._alu2('SUB', other)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_uop_sub(self.ctx, self.raw, other.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __rsub__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['SUB'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_sub(self.ctx, other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __mul__(self, other):
@@ -466,15 +468,18 @@ class UOp:
         return UOp(self.ctx, raw) if raw else None
 
     def __truediv__(self, other):
-        return self._alu2('FDIV', other)
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_uop_div(self.ctx, self.raw, other.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def __rtruediv__(self, other):
         other = self._coerce(other)
-        raw = _ffi._lib.poly_uop_binop(self.ctx, _ffi.OPS['FDIV'], other.raw, self.raw)
+        raw = _ffi._lib.poly_uop_div(self.ctx, other.raw, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __neg__(self):
-        return self._alu1('NEG')
+        raw = _ffi._lib.poly_uop_elementwise_neg(self.ctx, self.raw)
+        return UOp(self.ctx, raw) if raw else None
 
     def cdiv(self, other):
         return self._alu2('CDIV', other)

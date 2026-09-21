@@ -330,6 +330,15 @@ def _declare_signatures(lib):
     lib.poly_uop_binop.restype = _ptr
     lib.poly_uop_binop.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr]
 
+    lib.poly_uop_sub.restype = _ptr
+    lib.poly_uop_sub.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_div.restype = _ptr
+    lib.poly_uop_div.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_elementwise_neg.restype = _ptr
+    lib.poly_uop_elementwise_neg.argtypes = [_ptr, _ptr]
+
     lib.poly_uop_alu3.restype = _ptr
     lib.poly_uop_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
 

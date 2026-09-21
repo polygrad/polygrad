@@ -2409,7 +2409,8 @@ TEST(tensor, rng_state_owns_only_seed_and_counter_handles) {
 TEST(tensor, dtype_admission_rejects_float_shifts_and_range_overflow) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *src[] = {
-      poly_uop_const(ctx, poly_arg_float(1.5), POLY_FLOAT32), poly_uop_const_int(ctx, 1)};
+      poly_uop_const(ctx, poly_arg_float(1.5), POLY_FLOAT32), poly_uop_const_int(ctx, 1)
+  };
   PolyDType dtype;
   ASSERT_FALSE(poly_dtype_from_uop(POLY_OP_SHL, src, 2, poly_arg_none(), POLY_VOID, &dtype));
   ASSERT_FALSE(poly_dtype_from_uop(POLY_OP_SHR, src, 2, poly_arg_none(), POLY_VOID, &dtype));
@@ -4167,6 +4168,35 @@ TEST(pe, repeat_interleave_e2e) {
   PASS();
 }
 
+TEST(pe, repeat_interleave_identity_and_symbolic_axis) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  ASSERT_PTR_EQ(poly_uop_repeat_interleave(ctx, x, 1, 1), x);
+
+  PolyUOp *cap = make_buf(ctx, (int64_t[]){2, 8}, 2);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  ASSERT_NOT_NULL(n);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
+  PolyUOp *starts[] = {zero, zero};
+  PolyUOp *sizes[] = {two, n};
+  PolyUOp *view = poly_uop_shrink_symbolic(ctx, cap, starts, sizes, 2);
+  ASSERT_NOT_NULL(view);
+  PolyUOp *r = poly_uop_repeat_interleave(ctx, view, 2, 0);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
+  PolyUOp *heads = poly_uop_shape_dim(ctx, r, 0);
+  ASSERT_NOT_NULL(heads);
+  int64_t heads_c = 0;
+  ASSERT_INT_EQ(poly_uop_const_i64(heads, &heads_c), 0);
+  ASSERT_INT_EQ(heads_c, 4);
+  PolyUOp *seq = poly_uop_shape_dim(ctx, r, 1);
+  ASSERT_PTR_EQ(seq, n);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, cat_many_more_than_max_dims_e2e) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *parts[19];
@@ -4889,7 +4919,8 @@ TEST(tensor, pointwise_owners_lifetime_and_admission) {
   PolyTensor *(*unary[])(PolyCtx *, PolyTensor *) = {
       poly_tensor_log10, poly_tensor_atanh, poly_tensor_asinh, poly_tensor_acosh,
       poly_tensor_asin,  poly_tensor_acos,  poly_tensor_atan,  poly_tensor_logsigmoid,
-      poly_tensor_sinh,  poly_tensor_cosh,  poly_tensor_erf,   poly_tensor_softsign};
+      poly_tensor_sinh,  poly_tensor_cosh,  poly_tensor_erf,   poly_tensor_softsign
+  };
   for (int logical = 0; logical < 2; logical++) {
     PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
     poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);
@@ -5461,7 +5492,8 @@ TEST(tensor, conv2d_promotion_accumulation_and_bias_match_pinned_topology) {
   ASSERT_TRUE(poly_dtype_eq(poly_tensor_uop(half_explicit)->dtype, POLY_FLOAT32));
 
   PolyUOp *roots[] = {
-      poly_tensor_uop(mixed), poly_tensor_uop(half_default), poly_tensor_uop(half_explicit)};
+      poly_tensor_uop(mixed), poly_tensor_uop(half_default), poly_tensor_uop(half_explicit)
+  };
   int expected_casts[] = {1, 2, 2};
   for (int r = 0; r < 3; r++) {
     int n_topo = 0, casts = 0, muls = 0, reduces = 0, adds = 0;
@@ -5680,7 +5712,8 @@ TEST(pe, triangular_solve_matches_numpy_torch_probe) {
   float expect_lower_trans[] = {2.2708332539f, 0.9791666865f, 1.9583333731f,
                                 0.5416666865f, 2.25f,         0.75f};
   float expect_upper_trans[] = {
-      1, 0.5f, 2.6666667461f, 0.8333333135f, 0.7916666865f, 0.2708333433f};
+      1, 0.5f, 2.6666667461f, 0.8333333135f, 0.7916666865f, 0.2708333433f
+  };
   float expect_lower_unit[] = {2, 1, 5, 1, 10.5f, 4.5f};
   float expect_batch[] = {
       1, 0.5f,          2,     0.5f,          2.5f,          0.9375f,

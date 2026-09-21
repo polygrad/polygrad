@@ -11,6 +11,7 @@
 #include "../src/uop/weak.h"
 #include "../src/uop/ops.h"
 #include "../src/uop/symbolic.h"
+#include "../src/mixin/elementwise.h"
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -658,6 +659,29 @@ TEST(sym, variable_and_bind_use_current_alu_storage_topology) {
   ASSERT_TRUE(poly_dtype_eq(bound->src[1]->src[1]->dtype, POLY_WEAKINT));
   ASSERT_INT_EQ(bound->src[1]->src[1]->arg.i, 4);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, composed_sub_cancels_variable_extent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sp =
+      poly_uop_variable(ctx, "sp", poly_arg_int(0), poly_arg_int(12), POLY_WEAKINT, 1, false);
+  PolyUOp *tk =
+      poly_uop_variable(ctx, "toks", poly_arg_int(1), poly_arg_int(4), POLY_WEAKINT, 1, false);
+  ASSERT_NOT_NULL(sp);
+  ASSERT_NOT_NULL(tk);
+  PolyUOp *end = poly_uop_add(ctx, sp, tk);
+  ASSERT_NOT_NULL(end);
+  PolyUOp *raw = poly_uop_alu2(ctx, POLY_OP_SUB, end, sp);
+  ASSERT_NOT_NULL(raw);
+  ASSERT_INT_EQ(raw->op, POLY_OP_SUB);
+  PolyUOp *composed = poly_uop_sub(ctx, end, sp);
+  ASSERT_NOT_NULL(composed);
+  ASSERT_NEQ(composed->op, POLY_OP_SUB);
+  PolyUOp *folded = poly_graph_rewrite(ctx, composed, poly_symbolic());
+  ASSERT_NOT_NULL(folded);
+  ASSERT_PTR_EQ(folded, tk);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1508,7 +1532,8 @@ TEST(sym, codegen_sym_moves_range_independent_reduce_factors_like_tinygrad) {
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, max_negative, poly_sym()), max_negative);
   PolyUOp *positive = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *positive_src[2] = {
-      poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, varying, positive, poly_arg_none()), range};
+      poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, varying, positive, poly_arg_none()), range
+  };
   PolyUOp *max_positive =
       poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, positive_src, 2, poly_arg_reduce(POLY_OP_MAX, 0));
   PolyUOp *max_rewritten = poly_graph_rewrite(ctx, max_positive, poly_sym());
@@ -2991,7 +3016,8 @@ TEST(sym, minmax_bounded_param_matches_tinygrad) {
       .min_val = poly_arg_int(1),
       .max_val = poly_arg_int(8),
       .has_minmax = true,
-      .addrspace = POLY_ADDR_GLOBAL};
+      .addrspace = POLY_ADDR_GLOBAL
+  };
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());
   PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_WEAKINT, shape, poly_arg_param(&arg));
   check_mm(ctx, param, 1, 8, "PARAM[1..8]");

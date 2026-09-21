@@ -538,23 +538,26 @@ class BoundVariable:
     def __int__(self):
         return self.value
 
+    def _operand(self, other):
+        return other.uop if isinstance(other, BoundVariable) else other
+
     def __add__(self, other):
-        return self.uop + other
+        return self.uop + self._operand(other)
 
     def __radd__(self, other):
-        return other + self.uop
+        return self._operand(other) + self.uop
 
     def __sub__(self, other):
-        return self.uop - other
+        return self.uop - self._operand(other)
 
     def __rsub__(self, other):
-        return other - self.uop
+        return self._operand(other) - self.uop
 
     def __mul__(self, other):
-        return self.uop * other
+        return self.uop * self._operand(other)
 
     def __rmul__(self, other):
-        return other * self.uop
+        return self._operand(other) * self.uop
 
     def __repr__(self):
         return f"BoundVariable({self.variable.name!r}, {self.value})"

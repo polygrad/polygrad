@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include "tensor.h"
 #include "mixin/elementwise.h"
+#include "mixin/movement.h"
 #include "bigint.h"
 #include "ctx.h"
 #include "device.h"
@@ -9646,34 +9647,46 @@ PolyTensor *poly_tensor_rope(
 }
 
 PolyUOp *poly_uop_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim;
-  ndim = uop_shape(ctx, x, shape);
-  if (ndim < 1 || repeats <= 0) return NULL;
+  if (!ctx || !x || repeats <= 0) return NULL;
+  if (repeats == 1) return x;
+  int ndim = poly_uop_ndim(ctx, x);
+  if (ndim < 1 || ndim >= POLY_MAX_DIMS) return NULL;
   if (dim < 0) dim += ndim;
   if (dim < 0 || dim >= ndim) return NULL;
 
-  int64_t ins[POLY_MAX_DIMS];
+  PolyUOp *dims[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) {
+    dims[i] = poly_uop_shape_dim(ctx, x, i);
+    if (!dims[i]) return NULL;
+  }
+
+  PolyUOp *ins[POLY_MAX_DIMS];
   int ins_ndim = ndim + 1;
   for (int i = 0; i <= dim; i++)
-    ins[i] = shape[i];
-  ins[dim + 1] = 1;
+    ins[i] = dims[i];
+  ins[dim + 1] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  if (!ins[dim + 1]) return NULL;
   for (int i = dim + 1; i < ndim; i++)
-    ins[i + 1] = shape[i];
-  PolyUOp *r = poly_uop_reshape(ctx, x, ins, ins_ndim);
+    ins[i + 1] = dims[i];
+  PolyUOp *r = poly_uop_reshape_symbolic(ctx, x, ins, ins_ndim);
+  if (!r) return NULL;
 
-  int64_t exp[POLY_MAX_DIMS];
-  memcpy(exp, ins, ins_ndim * sizeof(int64_t));
-  exp[dim + 1] = repeats;
-  r = poly_uop_expand(ctx, r, exp, ins_ndim);
+  PolyUOp *exp[POLY_MAX_DIMS];
+  memcpy(exp, ins, (size_t)ins_ndim * sizeof(*exp));
+  exp[dim + 1] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(repeats));
+  if (!exp[dim + 1]) return NULL;
+  r = poly_uop_expand_symbolic(ctx, r, exp, ins_ndim);
+  if (!r) return NULL;
 
-  int64_t flat[POLY_MAX_DIMS];
+  PolyUOp *flat[POLY_MAX_DIMS];
   for (int i = 0; i < dim; i++)
-    flat[i] = shape[i];
-  flat[dim] = shape[dim] * repeats;
+    flat[i] = dims[i];
+  PolyUOp *factor = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(repeats));
+  flat[dim] = factor ? poly_uop_mul(ctx, dims[dim], factor) : NULL;
+  if (!flat[dim]) return NULL;
   for (int i = dim + 1; i < ndim; i++)
-    flat[i] = shape[i];
-  return poly_uop_reshape(ctx, r, flat, ndim);
+    flat[i] = dims[i];
+  return poly_uop_reshape_symbolic(ctx, r, flat, ndim);
 }
 
 PolyUOp *poly_uop_argmax(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {

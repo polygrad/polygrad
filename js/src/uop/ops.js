@@ -350,9 +350,17 @@ class UOp {
   }
 
   add(other) { return this._alu2('ADD', other) }
-  sub(other) { return this._alu2('SUB', other) }
+  sub(other) {
+    const b = this._coerce(other)
+    const raw = this.ffi.poly_uop_sub(this.ctx, this.raw, b.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
   mul(other) { return this._alu2('MUL', other) }
-  div(other) { return this._alu2('FDIV', other) }
+  div(other) {
+    const b = this._coerce(other)
+    const raw = this.ffi.poly_uop_div(this.ctx, this.raw, b.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
   cdiv(other) { return this._alu2('CDIV', other) }
   cmod(other) { return this._alu2('CMOD', other) }
   floordiv(other) { return this._alu2('FLOORDIV', other) }
@@ -371,7 +379,10 @@ class UOp {
   cmplt(other) { return this.lt(other) }
   cmpeq(other) { return this.eq(other) }
   cmpne(other) { return this.ne(other) }
-  neg() { return this._alu1('NEG') }
+  neg() {
+    const raw = this.ffi.poly_uop_elementwise_neg(this.ctx, this.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
   sqrt() { return this._alu1('SQRT') }
   exp2() { return this._alu1('EXP2') }
   log2() { return this._alu1('LOG2') }

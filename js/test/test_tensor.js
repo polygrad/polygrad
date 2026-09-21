@@ -5995,6 +5995,16 @@ async function runTensorTests(pg, createRuntime) {
     const labels = new Tensor([2, 99], { dtype: 'int32' })
     assertClose(await logits.sparseCategoricalCrossentropy(labels, { ignoreIndex: 99, labelSmoothing: 0.2, reduction: 'none' }).toArray(), [0.60760596, 0])
   })
+  await test('raw UOp sub matches C composed helper', async () => {
+    const a = pg.uop.variable('sp', 0, 12)
+    const b = pg.uop.variable('toks', 1, 4)
+    const end = a.add(b)
+    const composed = end.sub(a)
+    const viaC = pg._core.ffi.poly_uop_sub(a.ctx, end.raw, a.raw)
+    assert.strictEqual(composed.raw, viaC)
+    const rawSub = pg._core.ffi.poly_uop_binop(a.ctx, pg._core.ops.SUB, end.raw, a.raw)
+    assert.notStrictEqual(composed.raw, rawSub)
+  })
 
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)
   return { passed, failed, skipped }
