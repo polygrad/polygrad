@@ -757,9 +757,8 @@ TEST(rangeify, broadcast_axes_zero_size1_against_unbound_variable) {
   );
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
   PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
-  PolyUOp *view = poly_uop_shrink_symbolic(
-      ctx, full, (PolyUOp *[]){zero, zero}, (PolyUOp *[]){two, n}, 2
-  );
+  PolyUOp *view =
+      poly_uop_shrink_symbolic(ctx, full, (PolyUOp *[]){zero, zero}, (PolyUOp *[]){two, n}, 2);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, view, keep, poly_arg_none());
   ASSERT_NOT_NULL(n);
   ASSERT_NOT_NULL(keep);

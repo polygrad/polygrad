@@ -2334,12 +2334,7 @@ static PolyUOp *poly_full_from_scalar(
 
 /* CONST -> RESHAPE((1,)*ndim) -> EXPAND(dims). Same construction as concrete
  * full(buffer=False), with UOp extents so a Variable length stays symbolic. */
-static PolyUOp *poly_full_from_scalar_uop(
-    PolyCtx *ctx,
-    PolyUOp **dims,
-    int ndim,
-    PolyUOp *scalar
-) {
+static PolyUOp *poly_full_from_scalar_uop(PolyCtx *ctx, PolyUOp **dims, int ndim, PolyUOp *scalar) {
   if (!scalar || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
   if (ndim == 0) return scalar;
   if (!dims) return NULL;
