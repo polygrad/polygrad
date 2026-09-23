@@ -355,6 +355,12 @@ class Runtime:
           self.models = SimpleNamespace(**{
               name: _bound_runtime_call(self, getattr(models, name)) for name in models.__all__
           })
+          class RuntimeTransformer(models.Transformer):
+              __init__ = _bound_runtime_call(self, models.Transformer.__init__)
+          for name in ('load', 'from_bundle'):
+              setattr(RuntimeTransformer, name, staticmethod(
+                  _bound_runtime_call(self, getattr(models.Transformer, name))))
+          self.models.Transformer = RuntimeTransformer
           self.GlobalCounters = _global_counters_class(self._ctx)
           self.jit = jit
           self.compile = compile

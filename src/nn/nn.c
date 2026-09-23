@@ -710,6 +710,104 @@ PolyUOp *poly_uop_sdpa(
   return weights ? poly_uop_dot(ctx, weights, v) : NULL;
 }
 
+/* tinygrad llm/model.py:TransformerBlock._attention, from the packed cache
+ * STORE through full-base AFTER and active-prefix SDPA. Projection and RoPE
+ * stay with the caller; this composition is shared by decoder topologies. */
+static PolyUOp *cached_sdpa(
+    PolyCtx *ctx,
+    PolyUOp *q,
+    PolyUOp *k,
+    PolyUOp *v,
+    PolyUOp *cache,
+    PolyUOp *position
+) {
+  if (!q || !k || !v || !cache || !poly_ctx_owns_ptr(ctx, position) || poly_uop_ndim(ctx, q) != 4 ||
+      poly_uop_ndim(ctx, k) != 4 || poly_uop_ndim(ctx, v) != 4 || poly_uop_ndim(ctx, cache) != 5 ||
+      !poly_dtype_is_float(q->dtype) || !poly_dtype_is_float(cache->dtype))
+    return NULL;
+  int64_t c[5], kd[4], qd[4];
+  PolyUOp *n = poly_uop_shape_dim(ctx, k, 2);
+  int64_t n_lo, n_hi;
+  poly_uop_minmax(ctx, n, &n_lo, &n_hi);
+  if (n_lo < 1) return NULL;
+  for (int d = 0; d < 5; d++)
+    if (poly_uop_const_i64(poly_uop_shape_dim(ctx, cache, d), &c[d]) != 0 || c[d] <= 0) return NULL;
+  for (int d = 0; d < 4; d++) {
+    if (d == 2) {
+      if (poly_uop_shape_dim(ctx, q, d) != n || poly_uop_shape_dim(ctx, v, d) != n) return NULL;
+      kd[d] = qd[d] = n_hi;
+      continue;
+    }
+    int64_t vd;
+    if (poly_uop_const_i64(poly_uop_shape_dim(ctx, k, d), &kd[d]) != 0 ||
+        poly_uop_const_i64(poly_uop_shape_dim(ctx, v, d), &vd) != 0 || vd != kd[d] ||
+        poly_uop_const_i64(poly_uop_shape_dim(ctx, q, d), &qd[d]) != 0 || qd[d] <= 0)
+      return NULL;
+  }
+  int64_t lo, hi;
+  poly_uop_minmax(ctx, position, &lo, &hi);
+  if (c[0] != 2 || c[1] != kd[0] || c[2] != kd[1] || c[4] != kd[3] || qd[0] != kd[0] ||
+      qd[2] != kd[2] || qd[3] != kd[3] || qd[1] % c[2] || kd[2] <= 0 || kd[2] > c[3] || lo < 0 ||
+      hi > c[3] - (n->op == POLY_OP_CONST ? kd[2] : 1))
+    return NULL;
+  /* llm/model.py uses independent start_pos/toks bounds. For variable width,
+   * callers must admit position + actual width <= capacity before execution;
+   * Model enforces this on both direct and checked decoder calls. */
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *end = poly_uop_add(ctx, position, n);
+  PolyUOp *starts[] = {zero, zero, zero, position, zero};
+  PolyUOp *sizes[] = {
+      poly_uop_const_int(ctx, 2), poly_uop_const_int(ctx, c[1]), poly_uop_const_int(ctx, c[2]), n,
+      poly_uop_const_int(ctx, c[4])};
+  PolyUOp *view = poly_uop_shrink_symbolic(ctx, cache, starts, sizes, 5);
+  PolyUOp *packed = poly_uop_stack_axis(ctx, (PolyUOp *[]){k, v}, 2, 0);
+  PolyUOp *store = view && packed
+                       ? poly_uop_store_val(ctx, view, poly_uop_cast(ctx, packed, cache->dtype))
+                       : NULL;
+  PolyUOp *assigned =
+      store ? poly_uop2(ctx, POLY_OP_AFTER, cache->dtype, cache, store, poly_arg_none()) : NULL;
+  if (!assigned) return NULL;
+  starts[3] = zero;
+  sizes[0] = one;
+  sizes[3] = end;
+  PolyUOp *prefix[2];
+  for (int i = 0; i < 2; i++) {
+    starts[0] = poly_uop_const_int(ctx, i);
+    PolyUOp *plane = poly_uop_shrink_symbolic(ctx, assigned, starts, sizes, 5);
+    prefix[i] = plane ? poly_uop_reshape_symbolic(ctx, plane, sizes + 1, 4) : NULL;
+  }
+  PolyUOp *mask = kd[2] == 1 ? NULL : poly_uop_causal_mask_offset(ctx, n, position);
+  if (!prefix[0] || !prefix[1] || (kd[2] != 1 && !mask)) return NULL;
+  return poly_uop_sdpa(ctx, q, prefix[0], prefix[1], mask, 0, 1);
+}
+
+PolyTensor *poly_tensor_cached_sdpa(
+    PolyCtx *ctx,
+    PolyTensor *q,
+    PolyTensor *k,
+    PolyTensor *v,
+    PolyTensor *cache,
+    PolyUOp *position
+) {
+  if (!ctx || !q || !k || !v || !cache || !position || !poly_dtype_is_int(position->dtype))
+    return NULL;
+  PolyTensor *inputs[] = {q, k, v, cache};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 4);
+  if (logical < 0) return NULL;
+  /* The pinned cache is allocated storage, never an arithmetic expression.
+   * Decide writability from the physical root; logical roots record provenance. */
+  if (!poly_uop_get_buffer_identity(cache->uop_physical)) return NULL;
+  PolyUOp *p = cached_sdpa(
+      ctx, q->uop_physical, k->uop_physical, v->uop_physical, cache->uop_physical, position
+  );
+  PolyUOp *l = logical ? cached_sdpa(
+                             ctx, q->uop_logical, k->uop_logical, v->uop_logical,
+                             cache->uop_logical, position
+                         )
+                       : NULL;
+  return nn_tensor_result(ctx, l, p, inputs, 4);
+}
+
 static PolyUOp *dropout(PolyCtx *ctx, PolyUOp *x, PolyUOp *noise, double p) {
   if (p == 1) return poly_uop_const_like(ctx, x, poly_arg_int(0));
   PolyUOp *keep = poly_uop_contiguous(

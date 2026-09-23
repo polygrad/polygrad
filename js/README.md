@@ -247,6 +247,11 @@ More runnable scripts are in [JavaScript examples](https://github.com/polygrad/p
 
 ### Capture and input rules
 
+- `controls` declares named integer variables. Pass values through
+  `model.call(name, inputs, {controls: {...}})`. An entrypoint's `controls` mapping
+  overrides shared declarations; `{}` declares none. Controls must occur in that
+  entrypoint's graph. They are currently inference-only; combining them with a loss
+  is rejected during construction. Pass training data through Tensor inputs instead.
 - Object authors expose `forward(inputs)`; their Tensor attributes supply state
   unless `params` overrides it. With a loss, construction captures evaluation
   and training forwards against the same state. The author runs twice during
@@ -259,8 +264,9 @@ More runnable scripts are in [JavaScript examples](https://github.com/polygrad/p
   `Tensor.training`; changing it later does not recapture the graph.
 - On WebGPU, construct with `await pg.Model.fromCallableAsync(author, options)`.
   The author must remain synchronous and must not start async reads or execution.
-- Inputs may have one bounded variable leading dimension and fixed trailing
-  dimensions. Storage currently reserves maximum capacity; empty calls reject.
+- Inputs may have one bounded variable dimension after any singleton axes
+  (for example `[N, features]` or `[1, N]`); other dimensions stay fixed.
+  Storage currently reserves maximum capacity; empty calls reject.
   Flat typed arrays use the signature, or provide
   `{data: typedArray, shape: [rows, columns]}` as a Model input binding.
 - Tensor inputs must share the Model's runtime and device. Any Tensor input
@@ -307,6 +313,24 @@ and shared embedding, normalization, RoPE and attention components. For example,
 `models.GPT2` and `models.Llama` construct checkpoint-required models. Load
 weights or explicitly write every parameter before calling or exporting them.
 Partial writes do not initialize a parameter; explicitly written zeros do.
+
+For batch-one FP32 Llama decoding, set `cache_capacity` and `prefill_chunk_size`
+in the configuration; the factory returns a `pg.models.Transformer` subclass.
+After loading weights, `appendTokens(new Int32Array(ids))`
+returns last-token logits; use `await appendTokensAsync(...)` on WebGPU.
+C handles variable-width chunks up to `prefill_chunk_size` and checks capacity
+before writing the cache.
+`decodePosition` reports the committed count. `resetTransient()` (or awaited
+`resetTransientAsync()`) starts a new conversation with the same weights.
+Bundles omit cache history and load with empty caches. Reset after execution
+failure, cache-writing direct calls, weight writes or placement during a conversation.
+Read-only calls and rejected inputs preserve the conversation. Read `decodePosition` only
+after pending operations finish.
+Use `pg.models.Transformer.load(bundle)` to restore generation methods;
+`pg.Model.load(bundle)` stays generic. Iterate tokens with
+`for await (const token of model.generate(ids, {temperature:0, maxTokens:32}))`.
+Sampling runs in C; `ids` is an `Int32Array`. `prefillTokensAsync(ids)` reuses a
+matching prompt prefix; `rewind(position)` discards a suffix without clearing storage.
 
 `pg.models.list()` reports construction and checkpoint capabilities; see
 [supported models](https://github.com/polygrad/polygrad#supported-models).

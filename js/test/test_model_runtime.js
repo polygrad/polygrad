@@ -4,6 +4,226 @@ const llamaFixture = require('../../test/fixtures/llama.json')
 const componentFixture = require('../../test/fixtures/model_components.json')
 const componentOracle = require('../../test/fixtures/model_components_expected.json')
 
+async function checkCachedLlama(pg) {
+  async function appendRestored(model, tokens) {
+    const state = pg._core.Module && pg._core.Module.__polygradWebGpuState
+    if (!state) return model.appendTokensAsync(tokens)
+    const queue = state.device.queue, submit = queue.submit
+    let submissions = 0
+    queue.submit = function(...args) { submissions++; return submit.apply(this, args) }
+    try {
+      const result = await model.appendTokensAsync(tokens)
+      assert(submissions > 0, 'restored WebGPU append submitted no GPU work')
+      return result
+    } finally { queue.submit = submit }
+  }
+  for (const item of llamaFixture.cases) {
+    const config = {...item.config, max_seq_len:5}
+    const plain = await pg.models.LlamaAsync(config)
+    pg.Tensor.manual_seed(0)
+    const cached = await pg.models.LlamaAsync({...config, cache_capacity:5, prefill_chunk_size:4})
+    let restored
+    try {
+      for (const [name, shape] of Object.entries(item.weights)) {
+        const offset = Array.from(name).reduce((s,c)=>s+c.charCodeAt(0),0)
+        const values = Float32Array.from({length:shape.reduce((a,b)=>a*b,1)},(_,i)=>
+          (shape.length===1?1:0)+((i*7+offset)%23-11)*0.017)
+        await plain.writeBufferAsync(name, values)
+        await cached.writeBufferAsync(name, values)
+      }
+      assert(cached instanceof pg.Model && cached instanceof pg.models.Transformer, 'cached factory did not specialize')
+      assert(typeof plain.appendTokens === 'undefined', 'generic Model exposes generation')
+      const tokens = new Int32Array([1,4,7,2,9]), vocab = config.vocab_size
+      const expected = (await plain.forwardAsync({tokens})).logits
+      const initial = await cached.saveAsync()
+      for (const n of [1,3,2,4]) {
+        await cached.resetTransientAsync()
+        const out = await cached.callAsync('prefill', {tokens_prefill: tokens.slice(0,n)},
+          {controls: {start_pos:0}})
+        assertClose(out.logits_prefill, expected.slice((n-1)*vocab,n*vocab), 3e-5)
+      }
+      for (const chunks of [[5], [1,3,1], [2,2,1], [1,1,1,1,1]]) {
+        await cached.resetTransientAsync()
+        let pos = 0
+        for (const n of chunks) {
+          const result = await cached.appendTokensAsync(tokens.slice(pos,pos+n))
+          pos += n
+          assert(cached.decodePosition === pos, 'incorrect committed decoder position')
+          assertClose(result, expected.slice((pos-1)*vocab,pos*vocab), 3e-5)
+        }
+        let error
+        try { await cached.appendTokensAsync(tokens.slice(0,1)) } catch (e) { error=e }
+        assert(error && /capacity/.test(error.message), 'capacity overflow accepted')
+      }
+      const saved = await cached.saveAsync()
+      assert(saved.length === initial.length && saved.every((x,i)=>x===initial[i]), 'cache history was exported')
+      restored = pg.Model.load(saved)
+      assert(typeof restored.appendTokens === 'undefined', 'generic load specialized implicitly')
+      const resaved = await restored.saveAsync()
+      assert(saved.length === resaved.length && saved.every((x,i)=>x===resaved[i]), 'generic load lost metadata')
+      assert(pg.models.Transformer.fromModel(restored) === restored, 'specialization created a second owner')
+      assert(restored.decodePosition === 0, 'imported decoder has stale position')
+      assertClose(await appendRestored(restored, tokens.slice(0,2)), expected.slice(vocab,2*vocab), 3e-5)
+      const before = await restored.readBufferAsync('model.layers.0.cache_kv')
+      let overflow
+      try {
+        await restored.callAsync('prefill', {tokens_prefill:tokens.slice(0,3)},
+          {controls:{start_pos:3}})
+      } catch (e) { overflow = e }
+      assert(overflow && /precondition/.test(overflow.message), 'combined position/width overflow accepted')
+      assertClose(await restored.readBufferAsync('model.layers.0.cache_kv'), before, 0)
+      // A read must not perform deferred placement and invalidate a live decoder.
+      await restored.readBufferAsync('model.layers.0.cache_kv')
+      assert(restored.decodePosition === 2, 'readback changed restored decoder placement')
+      assertClose(await restored.appendTokensAsync(tokens.slice(2)), expected.slice(-vocab), 3e-5)
+      await restored.dispose()
+      restored = pg.models.Transformer.load(saved)
+      await restored.resetTransientAsync()
+      assertClose(await appendRestored(restored, tokens.slice(0,2)), expected.slice(vocab,2*vocab), 3e-5)
+      await restored.readBufferAsync('model.layers.0.cache_kv')
+      assert(restored.decodePosition === 2, 'reset failed to establish restored placement')
+      await cached.resetTransientAsync()
+      await cached.appendTokensAsync(tokens)
+      for (const prompt of [tokens, tokens.slice(0,3), new Int32Array([1,4,3]), new Int32Array([9])]) {
+        await restored.resetTransientAsync()
+        const reference = await restored.appendTokensAsync(prompt)
+        assertClose(await cached.prefillTokensAsync(prompt), reference, 3e-5)
+        assert(cached.decodePosition === prompt.length, 'prefix reuse cursor mismatch')
+      }
+      const cache = await cached.readBufferAsync('model.layers.0.cache_kv')
+      cached.rewind(0)
+      assertClose(await cached.readBufferAsync('model.layers.0.cache_kv'), cache, 0)
+      let badRewind
+      try { cached.rewind(1) } catch (error) { badRewind = error }
+      assert(badRewind && /prefix/.test(badRewind.message), 'invalid rewind accepted')
+      const prompt = new Int32Array([1,4]), generated = [], teacher = [1,4]
+      for (let step = 0; step < 3; step++) {
+        const padded = new Int32Array(5)
+        padded.set(teacher)
+        const values = (await plain.forwardAsync({tokens:padded})).logits.slice((teacher.length-1)*vocab,teacher.length*vocab)
+        teacher.push(values.indexOf(Math.max(...values)))
+      }
+      await restored.resetTransientAsync()
+      for await (const token of restored.generate(prompt, {temperature:0, maxTokens:99})) generated.push(token)
+      assert(JSON.stringify(generated) === JSON.stringify(teacher.slice(2)), 'generated tokens differ from uncached teacher')
+      assert(restored.decodePosition === 4, 'last generated token should not be consumed yet')
+      await restored.dispose()
+      restored = pg.models.Transformer.load(saved)
+      // No read/save/reset before generation: those would hide missing deferred placement.
+      const gpu = pg._core.Module && pg._core.Module.__polygradWebGpuState
+      const queue = gpu && gpu.device.queue, submit = queue && queue.submit
+      let submissions = 0
+      if (queue) queue.submit = function(...args) { submissions++; return submit.apply(this,args) }
+      try {
+        const cold = []
+        for await (const token of restored.generate(prompt, {maxTokens:1})) cold.push(token)
+        assert(cold.length === 1 && cold[0] === teacher[2], 'cold restored generation mismatch')
+        if (queue) assert(submissions > 0, 'cold restored generation submitted no WebGPU work')
+      } finally { if (queue) queue.submit = submit }
+      if (vocab === 11) {
+        await restored.resetTransientAsync()
+        const draws = []
+        for (let i = 0; i < 8; i++) {
+          const out = await restored.callAsync('sample', {
+            'sampling.logits':Float32Array.from({length:11},(_,j)=>-1+j/5),
+            'sampling.temperature':new Float32Array([0.7])})
+          draws.push(out['sampling.token'][0])
+        }
+        assert(JSON.stringify(draws) === '[10,10,10,10,9,10,7,5]', 'sampler differs from pinned Gumbel draws')
+      }
+    } finally {
+      if (restored) await restored.dispose()
+      await cached.dispose()
+      await plain.dispose()
+    }
+  }
+}
+
+async function checkIntegerControls(pg) {
+  const invalidPosition = pg.uop.variable('invalid_position', 0, 3)
+  const invalidInput = pg.Tensor.empty([1]), target = pg.Tensor.empty([1])
+  try {
+    for (const usesControl of [false, true]) {
+      let authorCalls = 0, model, error
+      try {
+        model = await pg.Model.fromCallableAsync(({x, pos}) => {
+          authorCalls++
+          if (!usesControl) return x.add(1)
+          const scalar = new pg.Tensor(pos)
+          try { return x.add(scalar) } finally { scalar.dispose() }
+        }, {inputs:{x:invalidInput}, targets:{y:target}, controls:{pos:invalidPosition},
+            loss:(out,{y})=>out.sub(y).square().mean()})
+      } catch (e) { error=e }
+      finally { if (model) await model.dispose() }
+      assert(error && /training.*controls/.test(error.message), 'controlled training accepted')
+      assert(authorCalls === 0, 'unsupported training invoked the author')
+    }
+    let model, error
+    try {
+      model = await pg.Model.fromCallableAsync(({x})=>x.add(1),
+        {inputs:{x:invalidInput}, controls:{pos:invalidPosition}})
+    } catch (e) { error=e }
+    finally { if (model) await model.dispose() }
+    assert(error && /control.*pos.*not used/.test(error.message), 'unused control accepted')
+  } finally {
+    await target.dispose(); await invalidInput.dispose(); invalidPosition.dispose()
+  }
+  const position = pg.uop.variable('model_position', 0, 11)
+  const x = pg.Tensor.empty([1])
+  let model, restored
+  try {
+    model = await pg.Model.fromCallableAsync(({x, position}) => {
+      const scalar = new pg.Tensor(position)
+      try { return x.add(scalar) } finally { scalar.dispose() }
+    },
+      {inputs:{x}, controls:{position}})
+    restored = pg.Model.load(await model.saveAsync())
+    for (const m of [model, restored]) {
+      for (const p of [0, 5, 11, 2]) {
+        const out = await m.callAsync('forward', {x:new Float32Array([3])}, {controls:{position:p}})
+        assertClose(out.output, [3+p], 0)
+      }
+      const input = new pg.Tensor(new Float32Array([3]))
+      let result
+      try {
+        result = (await m.callAsync('forward', {x:input}, {controls:{position:5}})).output
+        await m.callAsync('forward', {x:new Float32Array([9])}, {controls:{position:2}})
+        assertClose(await result.toArrayAsync(), [8], 0)
+      } finally {
+        if (result) await result.dispose()
+        await input.dispose()
+      }
+      for (const controls of [{}, {unknown:1}, {position:-1}, {position:12}, {position:1.5}]) {
+        let error
+        try { await m.callAsync('forward', {x:new Float32Array([9])}, {controls}) } catch (e) { error=e }
+        assert(error && /control/.test(error.message), 'invalid control accepted')
+      }
+    }
+  } finally {
+    if (restored) await restored.dispose()
+    if (model) await model.dispose()
+    await x.dispose()
+    position.dispose()
+  }
+  const p = pg.uop.variable('local_position', 0, 4)
+  const input = pg.Tensor.empty([1]), scalar = new pg.Tensor(p), plain = input.add(1), shifted = input.add(scalar)
+  let local, imported
+  try {
+    local = await pg.Model.fromTensors({inputs:{x:input}, outputs:{plain,shifted}, controls:{position:p},
+      entrypoints:[{name:'plain', inputs:['x'], outputs:['plain'], controls:{}},
+                   {name:'shift', inputs:['x'], outputs:['shifted']}]})
+    imported = pg.Model.load(await local.saveAsync())
+    for (const m of [local, imported]) {
+      assertClose((await m.callAsync('plain', {x:new Float32Array([2])})).plain, [3], 0)
+      assertClose((await m.callAsync('shift', {x:new Float32Array([2])}, {controls:{position:3}})).shifted, [5], 0)
+    }
+  } finally {
+    if (imported) await imported.dispose()
+    if (local) await local.dispose()
+    await shifted.dispose(); await plain.dispose(); await scalar.dispose(); await input.dispose(); p.dispose()
+  }
+}
+
 async function checkBoundedComponents(pg) {
   const model = await pg.models.GraphAsync(componentFixture)
   let restored
@@ -1506,6 +1726,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))
+  await test('Model integer controls survive portable import', () => checkIntegerControls(pg))
+  await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
@@ -2273,6 +2495,8 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))
+  await test('Model integer controls survive portable import', () => checkIntegerControls(pg))
+  await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))

@@ -6,6 +6,215 @@ from polygrad.model import Model, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
+def test_captured_partial_state_write_with_reduced_outputs():
+    from polygrad import Model, create
+
+    for reduce_state in (False, True):
+        rt = create(device='CPU', logical='always')
+        cache = rt.Tensor.zeros(13, 2).contiguous().realize().is_param_(False)
+
+        def author(x):
+            cache[3:5].assign(x)
+            return (cache if reduce_state else x).sum().reshape(1)
+
+        model = Model(author, inputs={'x': rt.Tensor.empty(2, 2)}, params={'cache': cache})
+        try:
+            for v in (2., 3.):
+                got = model.forward(x=np.full((2, 2), v, np.float32))['output']
+                np.testing.assert_array_equal(got, [4 * v])
+                expected = np.zeros((13, 2), np.float32)
+                expected[3:5] = v
+                np.testing.assert_array_equal(model.read_buffer('cache').reshape(13, 2), expected)
+        finally:
+            model.dispose()
+            rt.dispose()
+
+def test_control_declarations_reject_same_internal_name():
+    from polygrad import create, Variable
+    with create(device='INTERP') as rt:
+        a = Variable('same_control', 0, 3, _ctx=rt._ctx)
+        b = Variable('same_control', 0, 7, _ctx=rt._ctx)
+        with pytest.raises(ValueError, match='control'):
+            rt.Model(lambda x, a, b: x + a + b, inputs={'x':rt.Tensor.empty(1)}, controls={'a':a, 'b':b})
+
+
+@pytest.mark.parametrize('uses_control', [False, True])
+def test_callable_rejects_controlled_training_before_capture(uses_control):
+    from polygrad import create, Variable
+    with create(device='INTERP', logical='always') as rt:
+        p = Variable('training_position', 0, 3, _ctx=rt._ctx)
+        calls = []
+        def author(x, pos):
+            calls.append(True)
+            return x + pos if uses_control else x + 1
+        model = None
+        try:
+            with pytest.raises(ValueError, match='training.*controls'):
+                model = rt.Model(author, inputs={'x':rt.Tensor.empty(1)}, targets={'y':rt.Tensor.empty(1)},
+                                 controls={'pos':p}, loss=lambda output, y:(output-y).square().mean())
+            assert not calls
+        finally:
+            if model: model.dispose()
+
+
+def test_unused_control_rejected_without_poisoning_runtime():
+    from polygrad import create, Variable
+    with create(device='INTERP', logical='always') as rt:
+        p = Variable('unused_position', 0, 3, _ctx=rt._ctx)
+        model = None
+        try:
+            with pytest.raises(ValueError, match="control.*pos.*not used"):
+                model = rt.Model(lambda x, pos:x + 1, inputs={'x':rt.Tensor.empty(1)}, controls={'pos':p})
+            np.testing.assert_array_equal((rt.Tensor([2.])+1).numpy(), [3.])
+        finally:
+            if model: model.dispose()
+
+
+def test_prebuilt_objective_rejects_controls():
+    from polygrad import create, Variable
+    with create(device='INTERP', logical='always') as rt:
+        x = rt.Tensor.empty(1)
+        p = Variable('objective_position', 0, 3, _ctx=rt._ctx)
+        model = None
+        try:
+            with pytest.raises(ValueError, match='training.*controls'):
+                model = rt.Model(inputs={'x':x}, losses={'loss':(x+p).sum()}, controls={'pos':p})
+        finally:
+            if model: model.dispose()
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_capture_preserves_overlapping_write_order(device):
+    from polygrad import create
+    with create(device=device, logical='always') as rt:
+        cache = rt.Tensor.zeros(4).contiguous().realize().is_param_(False)
+        def author(x):
+            cache[:2].assign(x)
+            cache[1:3].assign(x + 1)
+            return cache.sum().reshape(1)
+        model = rt.Model(author, inputs={'x':rt.Tensor.empty(2)}, params={'cache':cache})
+        try:
+            for value in (2., 3.):
+                got = model.forward(x=np.array([value,value+1],np.float32))['output']
+                np.testing.assert_array_equal(got, [3*value+3])
+                np.testing.assert_array_equal(model.read_buffer('cache'), [value,value+1,value+2,0])
+        finally:
+            model.dispose()
+
+
+def test_named_integer_control_roundtrip_and_validation():
+    from polygrad import create, Variable
+    with create(device='INTERP', logical='always') as rt:
+        p = Variable('position', 0, 11, _ctx=rt._ctx)
+        model = rt.Model(lambda x, position: x + position, inputs={'x': rt.Tensor.empty(1)},
+                         controls={'position': p})
+        try:
+            restored = rt.Model.load(model.save())
+            try:
+                for m in (model, restored):
+                    for position in (0, 5, 11, 2):
+                        got = m.call('forward', {'x': np.array([3.], np.float32)}, controls={'position': position})
+                        np.testing.assert_array_equal(got['output'], [3 + position])
+                    x = rt.Tensor([3.]).realize()
+                    result = m.call('forward', {'x':x}, controls={'position':5})['output']
+                    try:
+                        m.call('forward', {'x':np.array([9.], np.float32)}, controls={'position':2})
+                        np.testing.assert_array_equal(result.numpy(), [8.])
+                    finally:
+                        result.dispose()
+                        x.dispose()
+                    for controls in ({}, {'typo': 1}, {'position': -1}, {'position': 12}):
+                        with pytest.raises(RuntimeError, match='control'):
+                            m.call('forward', {'x': np.array([9.], np.float32)}, controls=controls)
+                    with pytest.raises(TypeError):
+                        m.call('forward', {'x': np.array([9.], np.float32)}, controls={'position': 1.5})
+            finally:
+                restored.dispose()
+        finally:
+            model.dispose()
+
+
+def test_controls_are_entrypoint_local():
+    from polygrad import create, Variable
+    with create(device='INTERP', logical='always') as rt:
+        x = rt.Tensor.empty(1)
+        p = Variable('local_position', 0, 4, _ctx=rt._ctx)
+        model = rt.Model(inputs={'x': x}, outputs={'plain': x + 1, 'shifted': x + p},
+                      controls={'position': p}, entrypoints=[
+                          {'name': 'plain', 'inputs': ['x'], 'outputs': ['plain'], 'controls': {}},
+                          {'name': 'shift', 'inputs': ['x'], 'outputs': ['shifted']},
+                      ])
+        try:
+            for m in (model, rt.Model.load(model.save())):
+                try:
+                    np.testing.assert_array_equal(m.call('plain', x=np.array([2.], np.float32))['plain'], [3.])
+                    np.testing.assert_array_equal(m.call('shift', x=np.array([2.], np.float32),
+                                                        controls={'position': 3})['shifted'], [5.])
+                finally:
+                    if m is not model:
+                        m.dispose()
+        finally:
+            model.dispose()
+
+
+def test_transient_state_is_zero_initialized_and_not_checkpointed():
+    from polygrad import create
+    with create(device='INTERP', logical='always') as rt:
+        cache = rt.Tensor([99., 99.]).realize().is_param_(False)
+        ordinary = rt.Tensor([7., 8.]).realize().is_param_(False)
+        model = rt.Model.from_bindings([
+            {'name':'cache', 'role':'aux', 'tensor':cache, 'flags':8},
+            {'name':'ordinary', 'role':'aux', 'tensor':ordinary},
+            {'name':'output', 'role':'output', 'tensor':cache + ordinary},
+        ], [{'name':'forward', 'inputs':[], 'outputs':['output']}])
+        try:
+            np.testing.assert_array_equal(model.forward()['output'], [7, 8])
+            model.write_buffer('cache', np.array([2., 3.], np.float32))
+            np.testing.assert_array_equal(model.forward()['output'], [9, 11])
+            restored = rt.Model.load(model.save())
+            try:
+                np.testing.assert_array_equal(restored.forward()['output'], [7, 8])
+            finally:
+                restored.dispose()
+            model.reset_transient()
+            np.testing.assert_array_equal(model.forward()['output'], [7, 8])
+            np.testing.assert_array_equal(cache.numpy(), [99, 99])
+        finally:
+            model.dispose()
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_controlled_state_append_reads_only_active_prefix(device):
+    from polygrad import create, Variable
+    with create(device=device, logical='always') as rt:
+        p = Variable('append_position', 0, 6, _ctx=rt._ctx)
+        cache = rt.Tensor(np.full((8, 2), 99., np.float32)).realize().is_param_(False)
+
+        def append(x, position):
+            cache[position:position + 2].assign(x)
+            return cache[:position + 2].sum(0)
+
+        model = rt.Model(append, inputs={'x': rt.Tensor.empty(2, 2)},
+                         params={'cache': cache}, controls={'position': p})
+        try:
+            expected = np.full((8, 2), 99., np.float32)
+            for position in (0, 2, 4, 6):
+                x = np.array([[position + 1., 2.], [3., position + 4.]], np.float32)
+                expected[position:position + 2] = x
+                got = model.call('forward', {'x': x}, controls={'position': position})
+                np.testing.assert_array_equal(got['output'], expected[:position + 2].sum(0))
+                np.testing.assert_array_equal(model.read_buffer('cache').reshape(8, 2), expected)
+            restored = rt.Model.load(model.save())
+            try:
+                x = np.zeros((2, 2), np.float32)
+                expected[4:6] = x
+                got = restored.call('forward', {'x': x}, controls={'position': 4})
+                np.testing.assert_array_equal(got['output'], expected[:6].sum(0))
+            finally:
+                restored.dispose()
+        finally:
+            model.dispose()
+
 
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 def test_definition_typed_bounded_components(device):
@@ -615,6 +824,32 @@ def test_dynamic_model_results_and_portable_signature(device):
         if restored is not None: restored.dispose()
         model.dispose()
         rt.dispose()
+
+
+@pytest.mark.parametrize('prefix', [(1,), (1, 1)])
+def test_dynamic_model_singleton_prefix(prefix):
+    from polygrad import create
+    with create(device='interp', logical='always') as rt:
+        n = rt.Variable('prefix_width', 1, 4)
+        x = rt.Tensor.empty(*prefix, n.bind(3), 2)
+        model = rt.Model(lambda x: x * 2, inputs={'x': x})
+        restored = rt.Model.load(model.save())
+        try:
+            for target in (model, restored):
+                for width in (4, 1, 3):
+                    data = np.arange(width*2, dtype=np.float32).reshape(*prefix, width, 2)
+                    np.testing.assert_array_equal(target.forward(x=data)['output'], data*2)
+                    np.testing.assert_array_equal(target.forward(x=data.ravel())['output'], data*2)
+        finally:
+            restored.dispose()
+            model.dispose()
+            x.dispose()
+        invalid = rt.Tensor.empty(2, n.bind(3), 2)
+        try:
+            with pytest.raises((RuntimeError, ValueError)):
+                rt.Model(lambda x: x * 2, inputs={'x': invalid})
+        finally:
+            invalid.dispose()
 
 
 def test_empty_model_binding_rejects_before_any_input_write():

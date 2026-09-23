@@ -20,19 +20,31 @@
 
 TEST(sym, variable_divmod_factors_remainder) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *p = poly_uop_variable(ctx, "p", poly_arg_int(0), poly_arg_int(15), POLY_WEAKINT, 1, false);
-  PolyUOp *r = poly_uop_variable(ctx, "r", poly_arg_int(0), poly_arg_int(3), POLY_WEAKINT, 1, false);
-  PolyUOp *j = poly_uop_variable(ctx, "j", poly_arg_int(0), poly_arg_int(16), POLY_WEAKINT, 1, false);
+  PolyUOp *p =
+      poly_uop_variable(ctx, "p", poly_arg_int(0), poly_arg_int(15), POLY_WEAKINT, 1, false);
+  PolyUOp *r =
+      poly_uop_variable(ctx, "r", poly_arg_int(0), poly_arg_int(3), POLY_WEAKINT, 1, false);
+  PolyUOp *j =
+      poly_uop_variable(ctx, "j", poly_arg_int(0), poly_arg_int(16), POLY_WEAKINT, 1, false);
   PolyUOp *d = poly_uop_add(ctx, p, poly_uop_const_int(ctx, 1));
   PolyUOp *rem = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, j, d, poly_arg_none());
   PolyUOp *x = poly_uop_add(ctx, poly_uop_mul(ctx, r, d), rem);
-  PolyUOp *expected = poly_uop_add(ctx, r,
-      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, rem, d, poly_arg_none()));
-  ASSERT_PTR_EQ(poly_graph_rewrite(ctx,
-      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, x, d, poly_arg_none()), poly_symbolic()),
-      poly_graph_rewrite(ctx, expected, poly_symbolic()));
-  ASSERT_PTR_EQ(poly_graph_rewrite(ctx,
-      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, x, d, poly_arg_none()), poly_symbolic()), rem);
+  PolyUOp *expected =
+      poly_uop_add(ctx, r, poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, rem, d, poly_arg_none()));
+  ASSERT_PTR_EQ(
+      poly_graph_rewrite(
+          ctx, poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, x, d, poly_arg_none()),
+          poly_symbolic()
+      ),
+      poly_graph_rewrite(ctx, expected, poly_symbolic())
+  );
+  ASSERT_PTR_EQ(
+      poly_graph_rewrite(
+          ctx, poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, x, d, poly_arg_none()),
+          poly_symbolic()
+      ),
+      rem
+  );
   poly_ctx_destroy(ctx);
   PASS();
 }

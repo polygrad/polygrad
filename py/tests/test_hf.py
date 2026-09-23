@@ -278,6 +278,287 @@ def llama_weights(case):
             for name, shape in case['weights'].items()}
 
 
+def test_transformer_specialization_owns_one_model():
+    import polygrad as pg
+    from polygrad.models import Transformer
+    from polygrad.models.transformer import Transformer as Implementation
+    assert Transformer is Implementation
+    assert not hasattr(pg.Model, 'generate')
+    case = LLAMA_CASES[0]
+    with pg.create(device='interp') as rt, ExitStack() as cleanup:
+        plain = rt.models.Llama(case['config'])
+        cleanup.callback(plain.dispose)
+        assert isinstance(plain, pg.Model) and not hasattr(plain, 'append_tokens')
+        original = plain._ptr
+        with pytest.raises(ValueError, match='Transformer contract'):
+            Transformer.from_model(plain)
+        assert plain._ptr == original
+        cached = rt.models.Llama({**case['config'], 'cache_capacity':5, 'prefill_chunk_size':4})
+        cleanup.callback(cached.dispose)
+        assert isinstance(cached, Transformer) and isinstance(cached, pg.Model)
+        for name, data in llama_weights(case).items(): cached.write_buffer(name, data)
+        bundle = cached.save()
+        generic = rt.Model.load(bundle)
+        cleanup.callback(generic.dispose)
+        assert not hasattr(generic, 'append_tokens')
+        assert generic.save() == bundle  # Application metadata survives generic round trips.
+        specialized = Transformer.from_model(generic)
+        assert specialized is generic
+        assert Transformer.from_model(specialized) is specialized
+        assert specialized.decode_position == 0
+        specialized.append_tokens(np.array([1, 4], np.int32))
+        assert specialized.decode_position == 2
+        specialized.dispose()
+        specialized.dispose()
+        with pytest.raises(RuntimeError, match='disposed'):
+            specialized.append_tokens(np.array([1], np.int32))
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_transformer_generate_stays_in_c(device):
+    import polygrad as pg
+    if device == 'cuda' and not pg.Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        model = rt.models.Llama({**case['config'], 'max_seq_len':5,
+                                'cache_capacity':5, 'prefill_chunk_size':4})
+        plain = rt.models.Llama({**case['config'], 'max_seq_len':5})
+        for m in (model, plain):
+            cleanup.callback(m.dispose)
+            for name, data in llama_weights(case).items(): m.write_buffer(name, data)
+        tokens = [1, 4]
+        expected = []
+        for _ in range(3):
+            padded = np.array([tokens + [0] * (5-len(tokens))], np.int32)
+            token = int(plain.forward(tokens=padded)['logits'][0, len(tokens)-1].argmax())
+            expected.append(token)
+            tokens.append(token)
+        assert list(model.generate(np.array([1,4], np.int32), temperature=0, max_tokens=3)) == expected
+        assert model.decode_position == 4  # Last yielded token is not consumed yet, as in Tinygrad.
+        model.reset()
+        assert list(model.generate(np.array([1,4], np.int32), temperature=0, max_tokens=99)) == expected
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_transformer_sampler_matches_pinned_gumbel(device):
+    import polygrad as pg
+    if device == 'cuda' and not pg.Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt:
+        rt.Tensor.manual_seed(0)
+        model = rt.models.Llama({**case['config'], 'vocab_size':11,
+                                'cache_capacity':5, 'prefill_chunk_size':4})
+        try:
+            for binding in model.bindings():
+                if binding['name'].endswith('.weight'):
+                    model.write_buffer(binding['name'], np.zeros(binding['shape'], np.float32))
+            inputs = {'sampling.logits':np.linspace(-1,1,11,dtype=np.float32).reshape(1,11),
+                      'sampling.temperature':np.array([0.7], np.float32)}
+            # Pinned llm/model.py:378 formula, seed=0, eight sequential draws.
+            expected = [10,10,10,10,9,10,7,5]
+            saved = model.save()
+            for _ in range(2):
+                model.reset()
+                actual = [int(model.call('sample', inputs)['sampling.token'].item()) for _ in range(8)]
+                assert actual == expected
+            assert model.save() == saved
+            restored = rt.models.Transformer.load(saved)
+            try:
+                assert restored.decode_position == 0
+                assert int(restored.call('sample', inputs)['sampling.token'].item()) == expected[0]
+            finally:
+                restored.dispose()
+        finally:
+            model.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_llama_prefix_reuse_and_rewind(device):
+    import polygrad as pg
+    if device == 'cuda' and not pg.Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        config = {**case['config'], 'max_seq_len':5, 'cache_capacity':5, 'prefill_chunk_size':4}
+        model, fresh = rt.models.Llama(config), rt.models.Llama(config)
+        for m in (model, fresh):
+            cleanup.callback(m.dispose)
+            for name, data in llama_weights(case).items(): m.write_buffer(name, data)
+        initial = model.save()
+        for prompt in ([1,4,7,2], [1,4,7,2], [1,4,7,2,9], [1,4,3], [1,4], [9,2], [1]):
+            tokens = np.array(prompt, np.int32)
+            fresh.reset_transient()
+            expected = fresh.append_tokens(tokens)
+            np.testing.assert_allclose(model.prefill_tokens(tokens), expected, atol=3e-5, rtol=3e-5)
+            assert model.decode_position == len(prompt)
+        model.prefill_tokens(np.array([1,4,7,2], np.int32))
+        before = model.read_buffer('model.layers.0.cache_kv').copy()
+        model.rewind(2)
+        assert model.decode_position == 2
+        np.testing.assert_array_equal(model.read_buffer('model.layers.0.cache_kv'), before)
+        for bad in (-1, 3, 2**40):
+            with pytest.raises((ValueError, RuntimeError)): model.rewind(bad)
+            assert model.decode_position == 2
+        with pytest.raises(TypeError): model.rewind(1.5)
+        for bad in ([1,99], [1]*6, []):
+            with pytest.raises(RuntimeError): model.prefill_tokens(np.array(bad, np.int32))
+            assert model.decode_position == 2
+            np.testing.assert_array_equal(model.read_buffer('model.layers.0.cache_kv'), before)
+        fresh.reset_transient()
+        expected = fresh.append_tokens(np.array([1,4,3], np.int32))
+        np.testing.assert_allclose(model.append_tokens(np.array([3], np.int32)), expected, atol=3e-5, rtol=3e-5)
+        assert model.save() == initial
+        restored = rt.models.Transformer.load(model.save())
+        cleanup.callback(restored.dispose)
+        assert restored.decode_position == 0
+        with pytest.raises(RuntimeError): restored.rewind(1)
+        np.testing.assert_allclose(restored.prefill_tokens(np.array([1,4,3], np.int32)), expected, atol=3e-5, rtol=3e-5)
+        name, weights = next(iter(llama_weights(case).items()))
+        model.write_buffer(name, weights)
+        assert model.decode_position == -1
+        with pytest.raises(RuntimeError): model.rewind(0)
+        with pytest.raises(RuntimeError): model.prefill_tokens(np.array([1], np.int32))
+        model.reset_transient()
+        model.rewind(0)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_llama_variable_prefill_admission_and_import(device):
+    import polygrad as pg
+    if device == 'cuda' and not pg.Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        plain = rt.models.Llama({**case['config'], 'max_seq_len': 5})
+        cached = rt.models.Llama({**case['config'], 'max_seq_len': 5,
+                                  'cache_capacity': 5, 'prefill_chunk_size': 4})
+        for model in (plain, cached):
+            cleanup.callback(model.dispose)
+            for name, data in llama_weights(case).items(): model.write_buffer(name, data)
+        tokens = np.array([[1, 4, 7, 2, 9]], np.int32)
+        expected = plain.forward(tokens=tokens)['logits']
+        restored = rt.models.Transformer.load(cached.save())
+        cleanup.callback(restored.dispose)
+        for model in (cached, restored):
+            compiled = None
+            for n in (1, 3, 2, 4):
+                model.reset_transient()
+                got = model.call('prefill', {'tokens_prefill': tokens[:, :n]},
+                                 controls={'start_pos': 0})['logits_prefill']
+                np.testing.assert_allclose(got, expected[:, n-1], atol=3e-5, rtol=3e-5)
+                current = {k:v for k,v in rt.stats().items() if k in (
+                    'to_program_cache_entries', 'runtime_cache_entries', 'runtime_artifact_entries')}
+                if compiled is not None:
+                    assert current == compiled, (compiled, current)
+                compiled = current
+            model.reset_transient()
+            model.append_tokens(tokens[:, :1])
+            before = model.read_buffer('model.layers.0.cache_kv').copy()
+            # Position and width individually fit their bounds; their sum does not.
+            for tensor_io in (False, True):
+                value = rt.Tensor(tokens[:, :3]) if tensor_io else tokens[:, :3]
+                try:
+                    with pytest.raises(RuntimeError, match='precondition'):
+                        model.call('prefill', {'tokens_prefill': value}, controls={'start_pos': 3})
+                finally:
+                    if tensor_io: value.dispose()
+                assert model.decode_position == 1
+                np.testing.assert_array_equal(model.read_buffer('model.layers.0.cache_kv'), before)
+            got = model.append_tokens(tokens[:, 1:4])
+            np.testing.assert_allclose(got, expected[:, 3], atol=3e-5, rtol=3e-5)
+            got = model.append_tokens(tokens[:, 4:])
+            np.testing.assert_allclose(got, expected[:, 4], atol=3e-5, rtol=3e-5)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+@pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
+def test_llama_cached_partitions_and_fresh_import(device, case):
+    import polygrad as pg
+    if device == 'cuda' and not pg.Device.cuda_available():
+        pytest.skip('poly_cuda_available() is false in the selected library')
+    weights = llama_weights(case)
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        plain = rt.models.Llama({**case['config'], 'max_seq_len':5})
+        cached = rt.models.Llama({**case['config'], 'max_seq_len':5,
+                                  'cache_capacity':5, 'prefill_chunk_size':2})
+        for model in (plain, cached):
+            cleanup.callback(model.dispose)
+            for name, data in weights.items(): model.write_buffer(name, data)
+        assert plain.param_count == cached.param_count
+        tokens = np.array([[1,4,7,2,9]], np.int32)
+        expected = plain.forward(tokens=tokens)['logits']
+        initial_bundle = cached.save()
+        warm = None
+        for chunks in ((5,), (2, 2, 1), (1, 1, 1, 1, 1)):
+            cached.reset_transient()
+            pos = 0
+            for n in chunks:
+                got = cached.append_tokens(tokens[:, pos:pos+n])
+                pos += n
+                assert cached.decode_position == pos
+                np.testing.assert_allclose(got, expected[:, pos-1], atol=3e-5, rtol=3e-5)
+            with pytest.raises(RuntimeError, match='capacity'):
+                cached.append_tokens(tokens[:, :1])
+            assert cached.decode_position == 5
+            retained = {k:v for k,v in rt.stats().items() if k in (
+                'to_program_cache_entries', 'runtime_cache_entries', 'runtime_artifact_entries',
+                'buffer_owned_bytes')}
+            if warm is not None:
+                assert retained == warm, (warm, retained)
+            warm = retained
+        assert cached.save() == initial_bundle
+        cached.reset_transient()
+        for bad in (np.array([[1, -1]], np.int32), np.array([[1, case['config']['vocab_size']]], np.int32)):
+            with pytest.raises(RuntimeError, match='vocabulary'):
+                cached.append_tokens(bad)
+            assert cached.decode_position == 0
+        with pytest.raises(TypeError, match='int32'):
+            cached.append_tokens(tokens.astype(np.int64))
+        cached.append_tokens(tokens[:, :1])
+        # Read-only forward and rejected raw calls preserve the checked prefix.
+        np.testing.assert_allclose(cached.forward(tokens=tokens)['logits'], expected, atol=3e-5, rtol=3e-5)
+        assert cached.decode_position == 1
+        for tensor_io in (False, True):
+            t = rt.Tensor(tokens[:, :1]) if tensor_io else tokens[:, :1]
+            try:
+                with pytest.raises(RuntimeError, match='control'):
+                    cached.call('decode', {'tokens_decode': t}, controls={'start_pos': 5})
+                assert cached.decode_position == 1
+            finally:
+                if tensor_io: t.dispose()
+        t = rt.Tensor(tokens)
+        result = cached.forward(tokens=t)['logits']
+        try:
+            np.testing.assert_allclose(result.numpy(), expected, atol=3e-5, rtol=3e-5)
+            assert cached.decode_position == 1
+        finally:
+            result.dispose()
+            t.dispose()
+        np.testing.assert_allclose(cached.append_tokens(tokens[:,1:2]), expected[:,1], atol=3e-5, rtol=3e-5)
+        name, weight = next(iter(weights.items()))
+        cached.write_buffer(name, weight)
+        assert cached.decode_position == -1
+        with pytest.raises(RuntimeError, match='reset_transient'):
+            cached.append_tokens(tokens[:, :1])
+        for chunks in ((2,2,1), (1,1,1,1,1)):
+            cached.reset_transient()
+            pos = 0
+            for n in chunks:
+                ep = 'prefill' if n == 2 else 'decode'
+                out = cached.call(ep, {f'tokens_{ep}':tokens[:,pos:pos+n]}, controls={'start_pos':pos})
+                np.testing.assert_allclose(out[f'logits_{ep}'], expected[:,pos+n-1], atol=3e-5, rtol=3e-5)
+                pos += n
+        restored = rt.models.Transformer.load(cached.save())
+        cleanup.callback(restored.dispose)
+        assert restored.decode_position == 0
+        np.testing.assert_allclose(restored.append_tokens(tokens), expected[:, -1], atol=3e-5, rtol=3e-5)
+        restored.reset_transient()
+        out = restored.call('decode', {'tokens_decode':tokens[:,:1]}, controls={'start_pos':0})
+        np.testing.assert_allclose(out['logits_decode'], expected[:,0], atol=3e-5, rtol=3e-5)
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 def test_llama_omitted_epsilon_matches_hf_default(device):
     import polygrad as pg

@@ -1,7 +1,7 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current portable format: poly.ir.uops@19.
+ * Current portable format: poly.ir.uops@21 (reads @19).
  * Scope: tensor-level graphs only (pre-scheduling).
  *        Pointer dtypes are rejected. UOp shape carries storage extent.
  *
@@ -14,7 +14,7 @@
 #include "polygrad.h"
 #include <stdint.h>
 
-#define POLY_IR_VERSION 19
+#define POLY_IR_VERSION 21
 #define POLY_PROGRAM_VERSION 10
 
 #ifdef __cplusplus
@@ -44,6 +44,7 @@ typedef struct {
   int ndim;
   bool trainable; /* PARAM default when absent in old IR payloads */
   bool trainable_set;
+  bool transient_zero; /* AUX: allocate zero, omit live bytes from checkpoints */
 } PolyIrBufEntry;
 
 /* Named entrypoint (SINK) */
@@ -56,6 +57,7 @@ typedef struct {
   int n_outputs;
   const char *objective; /* nullable; must name one output when present */
   uint32_t flags;
+  PolyUOp *precondition; /* optional scalar bool over input dimensions/controls */
 } PolyIrEntrypoint;
 
 /* Exact named logical boundary used by explicit non-uniform placement. The
@@ -67,6 +69,13 @@ typedef struct {
   int n_inputs;
   PolyUOp *output;
 } PolyIrModule;
+
+/* Entrypoint-local external name for an existing bounded integer variable. */
+typedef struct {
+  const char *entrypoint;
+  const char *name;
+  PolyUOp *variable;
+} PolyIrControl;
 
 /* Full IR spec: graph context + named buffers + named entrypoints */
 typedef struct {
@@ -81,6 +90,8 @@ typedef struct {
    * caller-assembled export specs. Keep the context alive until spec_free. */
   PolyUOp **import_roots;
   int n_import_roots;
+  PolyIrControl *controls;
+  int n_controls;
 } PolyIrSpec;
 
 /* Export */

@@ -155,6 +155,20 @@ PolyTensor *poly_tensor_causal_mask(PolyCtx *ctx, int64_t T);
 PolyUOp *poly_uop_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p);
 PolyTensor *poly_tensor_causal_mask_offset(PolyCtx *ctx, PolyUOp *n, PolyUOp *p);
 
+/* Append rotated K/V and attend to the active prefix. Cache is fixed storage
+ * [2,B,Hkv,C,D], Q/K/V are [B,H,T,D]; T and position may be bounded variables.
+ * With independent bounds the caller must validate position + T <= C before
+ * execution; checked Model decoder entrypoints perform this admission.
+ * Builds STORE/AFTER, not a cache executor. Does not retarget caller handles. */
+PolyTensor *poly_tensor_cached_sdpa(
+    PolyCtx *ctx,
+    PolyTensor *q,
+    PolyTensor *k,
+    PolyTensor *v,
+    PolyTensor *cache,
+    PolyUOp *position
+);
+
 /* Multi-Head Attention */
 
 /* RandMixin.dropout. Returns an owned reference, including identity results. */

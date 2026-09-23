@@ -233,6 +233,11 @@ More runnable scripts are in [Python examples](https://github.com/polygrad/polyg
 
 ### Capture and input rules
 
+- `controls` declares named integer Variables. Pass values through
+  `model.call(..., controls={...})`. An entrypoint's `controls` mapping overrides
+  shared declarations; `{}` declares none. Controls must occur in that entrypoint's
+  graph. They are currently inference-only; combining them with a loss is rejected
+  during construction. Pass training data through Tensor inputs instead.
 - `params` defaults to named Tensor attributes of the supplied object;
   functions require explicit closure state. `model.summary()` inspects metadata without executing or
   reading weights.
@@ -244,8 +249,9 @@ More runnable scripts are in [Python examples](https://github.com/polygrad/polyg
   state. Authoring Tensor roots and training mode are restored even on failure;
   arbitrary Python side effects are not. Capture rejects parameter/input
   assignments and effectful reads.
-- Variable-size calls support one bounded leading dimension with fixed trailing
-  dimensions. Save/load preserves the signature; storage currently reserves
+- Variable-size calls support one bounded dimension after any singleton axes
+  (for example `[N, features]` or `[1, N]`); other dimensions stay fixed.
+  Save/load preserves the signature; storage currently reserves
   maximum capacity. Tensor results retain their invocation's values and shape
   across later calls and Model disposal, but require a live runtime.
 - Flat arrays use the signature. Multidimensional NumPy arrays must match the
@@ -315,9 +321,25 @@ New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
 included in saved bundles. Older bundles retain their original signatures;
 use `model.entrypoints()` to inspect them.
 
-Llama inference is fixed-window, float32, starting at position zero. It supports
-dense Llama 2/base 3 and text-only 3.x `llama3` RoPE scaling, not KV caching,
-MoE or arbitrary RoPE schemes. The loaders do not supply tokenizers/chat templates.
+Llama supports dense Llama 2/base 3 and text-only 3.x `llama3` RoPE scaling.
+Set `cache_capacity` and `prefill_chunk_size` in its configuration to enable
+batch-one FP32 cached decoding and return a `models.Transformer` subclass.
+After loading weights, `model.append_tokens(ids)`
+accepts int32 `[N]` or `[1,N]` tokens and returns last-token logits `[1,vocab]`.
+C handles variable-width chunks up to `prefill_chunk_size` and checks capacity
+before writing the cache. `model.decode_position` reports the committed
+count. `reset_transient()` starts a new conversation without changing weights.
+Saved bundles exclude cache history and load with empty caches.
+Use `models.Transformer.load(bundle)` to restore generation methods;
+`Model.load(bundle)` stays generic. `model.generate(ids, temperature=0, max_tokens=32)`
+yields token IDs sampled in C. `prefill_tokens(ids)` reuses a matching prompt
+prefix; `rewind(position)` discards a suffix without clearing cache storage.
+
+After a failed append, cache-writing direct call, weight write or placement during
+a conversation, reset before appending again. Read-only calls and rejected inputs
+preserve the conversation. Borrowed C storage pointers must not mutate an active decoder.
+Uncached `forward(tokens=...)` remains available. MoE, arbitrary RoPE schemes,
+tokenizers and chat templates are not supplied by this loader.
 
 The C Model GGUF loader converts F32/F16/BF16, I8/I16/I32 and complete
 Q4_0/Q4_1/Q8_0/Q6_K blocks. Q4_K/Q5_K metadata is readable but weight conversion

@@ -21,9 +21,7 @@
 #include "factory.h"
 #include "../utils.h"
 
-#include "layers.h"
-#include "../nn/nn.h"
-#include "../tensor.h"
+#include "transformer.h"
 #include "../model.h"
 #include <stdlib.h>
 #include <string.h>
@@ -51,167 +49,43 @@ Qwen3Config poly_qwen3_config_default(void) {
 
 /* Builder */
 
+static const ModelTransformerNames qwen3_names = {
+    .label = "Qwen3",
+    .input = "x",
+    .output = "output",
+    .cos = "rope_cos",
+    .sin = "rope_sin",
+    .embedding = "token_embd",
+    .norm = "output_norm",
+    .block = "blk.%d",
+    .attn_norm = "attn_norm",
+    .qkv = {"attn_q", "attn_k", "attn_v"},
+    .qk_norm = {"attn_q_norm", "attn_k_norm"},
+    .out = "attn_output",
+    .ffn_norm = "ffn_norm",
+    .gate = "ffn_gate",
+    .up = "ffn_up",
+    .down = "ffn_down"};
+
 static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
-  /* Validate the divisor even when the checkpoint supplies an explicit width. */
-  if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1 || cfg->n_heads < 1)
-    return NULL;
-
-  int V = cfg->vocab_size;
-  int D = cfg->dim;
-  int H = cfg->n_heads;
-  int KvH = cfg->n_kv_heads > 0 ? cfg->n_kv_heads : H;
-  int L = cfg->n_layers;
-  int FF = cfg->hidden_dim;
-  int T = cfg->max_seq_len;
-  int B = cfg->batch_size > 0 ? cfg->batch_size : 1;
-  int hd = cfg->head_dim > 0 ? cfg->head_dim : D / H;
-  double eps = cfg->norm_eps > 0 ? (double)cfg->norm_eps : 1e-6;
-  int qk_norm = cfg->qk_norm;
-
-  if (D % H != 0) {
-    fprintf(stderr, "poly_qwen3: dim (%d) not divisible by n_heads (%d)\n", D, H);
-    return NULL;
-  }
-
-  PolyModel *inst = poly_model_new(ctx, NULL);
-  if (!inst) {
-    return NULL;
-  }
-
-  int64_t x_shape[] = {B, T};
-  /* Pinned tinygrad embedding/gather requires integer token indices
-   * (mixin/__init__.py:1088-1093,1106-1124). */
-  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_INT32, x_shape, 2);
-  if (!x_tensor) goto fail_pre_build;
-
-  /* TransformerBlock owns rotary frequencies; callers supply only tokens.
-   * Fixed-position AUX also preserves these values across portable imports. */
-  PolyModelRoPEConfig rope = {.length = T, .dim = hd, .theta = cfg->rope_theta, .factor = 1};
-  PolyTensor *rope_cos = poly_model_rope_frequencies(inst, "rope_cos", &rope, false);
-  PolyTensor *rope_sin = poly_model_rope_frequencies(inst, "rope_sin", &rope, true);
-  if (!rope_cos || !rope_sin) goto fail_pre_build;
-
-  if (poly_model_scope_push(inst, "token_embd") != POLY_STATUS_OK) goto fail_pre_build;
-  int64_t token_shape[] = {V, D};
-  PolyTensor *token_tensor = poly_model_param(inst, "weight", POLY_FLOAT32, token_shape, 2);
-  if (!token_tensor) goto fail_pre_build;
-  if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
-  PolyTensor *h = poly_tensor_embedding_apply(ctx, x_tensor, token_tensor);
-  h = poly_tensor_contiguous(ctx, h);
-  if (!h) goto fail_pre_build;
-
-  PolyTensor *mask = poly_tensor_causal_mask(ctx, T);
-  mask = poly_tensor_reshape(ctx, mask, (int64_t[]){1, 1, T, T}, 4);
-  mask = poly_tensor_contiguous(ctx, mask);
-  if (!mask) goto fail_pre_build;
-
-  for (int i = 0; i < L; i++) {
-    char pf[64];
-
-    snprintf(pf, sizeof(pf), "blk.%d.attn_norm", i);
-    PolyTensor *x_norm = poly_model_rmsnorm(inst, pf, h, D, eps);
-    x_norm = poly_tensor_contiguous(ctx, x_norm);
-    if (!x_norm) goto fail_pre_build;
-
-    snprintf(pf, sizeof(pf), "blk.%d.attn_q", i);
-    PolyTensor *q = poly_model_linear(inst, pf, x_norm, D, H * hd, false);
-    q = poly_tensor_contiguous(ctx, q);
-    snprintf(pf, sizeof(pf), "blk.%d.attn_k", i);
-    PolyTensor *k = poly_model_linear(inst, pf, x_norm, D, KvH * hd, false);
-    k = poly_tensor_contiguous(ctx, k);
-    snprintf(pf, sizeof(pf), "blk.%d.attn_v", i);
-    PolyTensor *v = poly_model_linear(inst, pf, x_norm, D, KvH * hd, false);
-    v = poly_tensor_contiguous(ctx, v);
-    if (!q || !k || !v) goto fail_pre_build;
-
-    q = poly_tensor_reshape(ctx, q, (int64_t[]){B, T, H, hd}, 4);
-    q = poly_tensor_permute(ctx, q, (int64_t[]){0, 2, 1, 3}, 4);
-    k = poly_tensor_reshape(ctx, k, (int64_t[]){B, T, KvH, hd}, 4);
-    k = poly_tensor_permute(ctx, k, (int64_t[]){0, 2, 1, 3}, 4);
-    v = poly_tensor_reshape(ctx, v, (int64_t[]){B, T, KvH, hd}, 4);
-    v = poly_tensor_permute(ctx, v, (int64_t[]){0, 2, 1, 3}, 4);
-    if (!q || !k || !v) goto fail_pre_build;
-
-    if (qk_norm > 0) {
-      snprintf(pf, sizeof(pf), "blk.%d.attn_q_norm", i);
-      q = poly_model_rmsnorm(inst, pf, q, qk_norm, eps);
-      q = poly_tensor_contiguous(ctx, q);
-      snprintf(pf, sizeof(pf), "blk.%d.attn_k_norm", i);
-      k = poly_model_rmsnorm(inst, pf, k, qk_norm, eps);
-      k = poly_tensor_contiguous(ctx, k);
-      if (!q || !k) goto fail_pre_build;
-    }
-
-    q = poly_tensor_rope(ctx, q, rope_cos, rope_sin);
-    k = poly_tensor_rope(ctx, k, rope_cos, rope_sin);
-
-    PolyTensor *attn = poly_tensor_sdpa(ctx, q, k, v, mask, 0, 0, 1, 0);
-    attn = poly_tensor_contiguous(ctx, attn);
-    if (!attn) goto fail_pre_build;
-
-    attn = poly_tensor_permute(ctx, attn, (int64_t[]){0, 2, 1, 3}, 4);
-    attn = poly_tensor_reshape(ctx, attn, (int64_t[]){B, T, H * hd}, 3);
-
-    snprintf(pf, sizeof(pf), "blk.%d.attn_output", i);
-    attn = poly_model_linear(inst, pf, attn, H * hd, D, false);
-    attn = poly_tensor_contiguous(ctx, attn);
-    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, attn);
-    h = poly_tensor_contiguous(ctx, h);
-    if (!h) goto fail_pre_build;
-
-    snprintf(pf, sizeof(pf), "blk.%d.ffn_norm", i);
-    PolyTensor *h_norm = poly_model_rmsnorm(inst, pf, h, D, eps);
-    h_norm = poly_tensor_contiguous(ctx, h_norm);
-    if (!h_norm) goto fail_pre_build;
-
-    snprintf(pf, sizeof(pf), "blk.%d.ffn_gate", i);
-    PolyTensor *gate = poly_model_linear(inst, pf, h_norm, D, FF, false);
-    gate = poly_tensor_silu(ctx, gate);
-    gate = poly_tensor_contiguous(ctx, gate);
-
-    snprintf(pf, sizeof(pf), "blk.%d.ffn_up", i);
-    PolyTensor *up = poly_model_linear(inst, pf, h_norm, D, FF, false);
-    up = poly_tensor_contiguous(ctx, up);
-    if (!gate || !up) goto fail_pre_build;
-
-    PolyTensor *gated = poly_tensor_alu2(ctx, POLY_OP_MUL, gate, up);
-    gated = poly_tensor_contiguous(ctx, gated);
-
-    snprintf(pf, sizeof(pf), "blk.%d.ffn_down", i);
-    PolyTensor *ffn_out = poly_model_linear(inst, pf, gated, FF, D, false);
-    ffn_out = poly_tensor_contiguous(ctx, ffn_out);
-
-    h = poly_tensor_alu2(ctx, POLY_OP_ADD, h, ffn_out);
-    h = poly_tensor_contiguous(ctx, h);
-    if (!h) goto fail_pre_build;
-  }
-
-  h = poly_model_rmsnorm(inst, "output_norm", h, D, eps);
-  h = poly_tensor_contiguous(ctx, h);
-  if (!h) goto fail_pre_build;
-
-  PolyTensor *logits = poly_tensor_linear_apply(ctx, h, token_tensor, NULL);
-  if (!logits) goto fail_pre_build;
-
-  if (poly_model_output(inst, "output", logits) != POLY_STATUS_OK) goto fail_pre_build;
-  const char *forward_inputs[] = {"x"};
-  const char *forward_outputs[] = {"output"};
-  if (poly_model_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL) !=
-      POLY_STATUS_OK)
-    goto fail_pre_build;
-
-  PolyModelError err = {0};
-  if (poly_model_build(inst, &err) != POLY_STATUS_OK) {
-    if (err.message[0]) fprintf(stderr, "poly_qwen3: build failed: %s\n", err.message);
-    poly_model_free(inst);
-    return NULL;
-  }
-  if (poly_model_require_weights(inst) != 0) goto fail_pre_build;
-  return inst;
-
-fail_pre_build:
-  poly_model_free(inst);
-  return NULL;
+  if (!cfg || cfg->n_heads < 1 || cfg->dim < 1 || cfg->dim % cfg->n_heads) return NULL;
+  ModelTransformerConfig c = {
+      .dim = cfg->dim,
+      .hidden_dim = cfg->hidden_dim,
+      .heads = cfg->n_heads,
+      .kv_heads = cfg->n_kv_heads > 0 ? cfg->n_kv_heads : cfg->n_heads,
+      .layers = cfg->n_layers,
+      .vocab = cfg->vocab_size,
+      .batch = cfg->batch_size > 0 ? cfg->batch_size : 1,
+      .length = cfg->max_seq_len,
+      .head_dim = cfg->head_dim > 0 ? cfg->head_dim : cfg->dim / cfg->n_heads,
+      .qk_norm = cfg->qk_norm,
+      .eps = cfg->norm_eps > 0 ? (double)cfg->norm_eps : 1e-6,
+      .theta = cfg->rope_theta,
+      .factor = 1,
+      .tied = true,
+      .materialize_intermediates = true};
+  return model_transformer_build(ctx, &c, &qwen3_names, NULL);
 }
 
 /* Standalone C callers own a context through the returned Model; frontends

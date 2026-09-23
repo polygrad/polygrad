@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "model.h"
+#include "../vendor/cjson/cJSON.h"
 #include "ctx.h"
 #include "uop/ops.h"
 #include "uop/upat.h"
@@ -41,6 +42,7 @@ typedef struct {
   int64_t shape[POLY_IR_MAX_DIMS];
   int64_t current_shape[POLY_IR_MAX_DIMS]; /* last successful invocation, not capacity */
   bool dynamic;
+  int dynamic_axis;
   int ndim;
   int64_t numel;
   bool trainable; /* PARAMs can be frozen while still saved as weights */
@@ -58,20 +60,24 @@ static const PolyUOp *model_storage_identity(PolyCtx *ctx, PolyUOp *value) {
   if (ndim < 1 || ndim > POLY_IR_MAX_DIMS) return NULL;
   identity = poly_uop_get_buffer_identity(value->src[0]);
   if (!identity) return NULL;
+  bool variable = false, singleton_prefix = true;
   for (int d = 0; d < ndim; d++) {
     PolyUOp *start = ndim == 1 ? value->src[1] : value->src[1]->src[d];
     int64_t offset;
     if (poly_uop_const_i64(start, &offset) != 0 || offset != 0) return NULL;
     PolyUOp *dim = poly_uop_shape_dim(ctx, value, d);
     PolyUOp *capacity = poly_uop_shape_dim(ctx, value->src[0], d);
-    if (d == 0) {
+    if (dim && dim->op != POLY_OP_CONST) {
       int64_t lo, hi, extent;
-      if (!dim || dim->op == POLY_OP_CONST || poly_uop_const_i64(capacity, &extent) != 0)
-        return NULL;
+      if (variable || !singleton_prefix || poly_uop_const_i64(capacity, &extent) != 0) return NULL;
       poly_uop_minmax(ctx, dim, &lo, &hi);
       if (lo < 0 || hi != extent) return NULL;
-    } else if (dim != capacity)
-      return NULL;
+      variable = true;
+    } else {
+      int64_t extent;
+      if (dim != capacity || poly_uop_const_i64(dim, &extent) != 0) return NULL;
+      singleton_prefix &= extent == 1;
+    }
   }
   return identity;
 }
@@ -85,8 +91,8 @@ static PolyUOp *model_signature_dim(PolyCtx *ctx, const NamedBuf *b, int axis) {
 }
 
 /* CreationMixin.empty: capacity at vmax, then shrink_to the declared shape.
- * Model's first dynamic contract admits a variable leading axis, so each
- * invocation occupies a contiguous prefix, also for host read/write APIs. */
+ * A single variable axis may follow singleton axes: each invocation still
+ * occupies a contiguous prefix, also for host read/write APIs. */
 static PolyUOp *model_storage_view(
     PolyCtx *ctx,
     PolyUOp *buffer,
@@ -254,6 +260,7 @@ typedef struct {
   int n_outputs;
   char *objective;
   uint32_t flags;
+  PolyUOp *precondition;
 } BuildEntrypoint;
 
 typedef struct {
@@ -261,12 +268,14 @@ typedef struct {
   PolyUOp *sink; /* mutable current runtime physical root */
   PolyUOp *logical_sink; /* portable IR/inlining entrypoint */
   PolyUOp *capture_sink; /* immutable pre-policy physical root; may alias logical */
+  bool writes_state, writes_transient; /* Derived from named STORE destinations. */
   char **inputs;
   int n_inputs;
   char **outputs;
   int n_outputs;
   char *objective;
   uint32_t flags;
+  PolyUOp *precondition;
 } RuntimeEntrypoint;
 
 typedef struct {
@@ -315,6 +324,11 @@ struct PolyModel {
   RuntimeEntrypoint *entrypoints;
   int n_entrypoints;
   PolyLinearEntry *entry_executables; /* lazy compiled LINEAR per entrypoint */
+  PolyIrControl *controls;
+  int n_controls;
+
+  PolyModelStateVersion version;
+  char *metadata;
 
   /* Explicit product-layer regions used only by non-uniform place(). */
   RuntimeModule *modules;
@@ -332,6 +346,12 @@ static void runtime_modules_free(RuntimeModule *modules, int n_modules);
 static int model_place_uniform_device(PolyModel *inst, PolyUOp *device, bool set_preferred);
 static int build_trainable_param_indices(const PolyModel *inst, int **indices_out, int *count_out);
 static PolyUOp *entrypoint_store_value(PolyUOp *sink, PolyUOp *buffer);
+static int model_classify_effects(PolyModel *inst);
+static void model_mutated(PolyModel *inst, bool transient) {
+  if (!inst) return;
+  inst->version.mutation++;
+  if (transient) inst->version.transient = inst->version.mutation;
+}
 
 #ifdef POLY_TESTING
 static int test_residency_root_fail_after = -1;
@@ -414,6 +434,8 @@ static bool build_publish_roots(
       PUBLISH_ROOT(binding->declared_logical_value);
       PUBLISH_ROOT(binding->declared_physical_value);
     }
+    for (int i = 0; i < build->n_entrypoints; i++)
+      PUBLISH_ROOT(build->entrypoints[i].precondition);
   }
 
 #undef PUBLISH_ROOT
@@ -469,6 +491,8 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
     if (!model_append_residency_root(&roots, &count, &capacity, (root))) goto fail;                \
   } while (0)
   if (!build_publish_roots(state->build, &roots, &count, &capacity)) goto fail;
+  for (int i = 0; i < state->n_controls; i++)
+    ADD_MODEL_ROOT(state->controls[i].variable);
   for (int i = 0; i < state->n_bufs; i++) {
     ADD_MODEL_ROOT(state->bufs[i].buffer);
     ADD_MODEL_ROOT(state->bufs[i].logical_value);
@@ -479,6 +503,7 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
     ADD_MODEL_ROOT(state->entrypoints[i].sink);
     ADD_MODEL_ROOT(state->entrypoints[i].logical_sink);
     ADD_MODEL_ROOT(state->entrypoints[i].capture_sink);
+    ADD_MODEL_ROOT(state->entrypoints[i].precondition);
     if (state->entry_executables) ADD_MODEL_ROOT(state->entry_executables[i].linear);
   }
   for (int i = 0; i < state->n_modules; i++) {
@@ -568,7 +593,7 @@ static bool is_optimizer_binding(const NamedBuf *b) {
 }
 
 static bool should_export_weight_buf_flags(const NamedBuf *b, uint32_t flags) {
-  if (!b || (b->flags & POLY_BIND_F_NO_SAVE)) return false;
+  if (!b || (b->flags & (POLY_BIND_F_NO_SAVE | POLY_BIND_F_TRANSIENT_ZERO))) return false;
   if (is_optimizer_binding(b)) return (flags & POLY_EXPORT_WEIGHTS_OPTIMIZER) != 0;
   /* Like tinygrad's model state_dict, persistent state includes non-parameters.
    * Optimizer AUX rows belong only to the explicitly selected optimizer set. */
@@ -706,6 +731,104 @@ static bool valid_binding_name(const char *name) {
     prev = *p;
   }
   return true;
+}
+
+static void model_controls_free(PolyModel *inst) {
+  for (int i = 0; i < inst->n_controls; i++) {
+    free((char *)inst->controls[i].entrypoint);
+    free((char *)inst->controls[i].name);
+  }
+  free(inst->controls);
+  inst->controls = NULL;
+  inst->n_controls = 0;
+}
+
+/* Control declarations describe the sealed entrypoint, not an independent
+ * argument list. Validate staged declarations once their portable SINK exists;
+ * use the same check for imports and post-build frontend declarations. */
+static PolyStatus model_validate_control(
+    PolyModel *inst,
+    const char *entrypoint,
+    const char *objective,
+    PolyUOp *sink,
+    const char *name,
+    PolyUOp *variable
+) {
+  if (objective) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__,
+        "training entrypoint '%s' does not support integer controls", entrypoint
+    );
+    return POLY_STATUS_INVALID;
+  }
+  int n = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(inst->ctx, sink, &n);
+  if (!topo) {
+    poly_model_set_error(inst, POLY_STATUS_NOMEM, __func__, "cannot inspect control graph");
+    return POLY_STATUS_NOMEM;
+  }
+  bool found = false;
+  for (int i = 0; i < n && !found; i++)
+    found = topo[i] == variable;
+  poly_uop_toposort_free(topo);
+  if (!found) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "control '%s' is not used by entrypoint '%s'", name,
+        entrypoint
+    );
+    return POLY_STATUS_INVALID;
+  }
+  return POLY_STATUS_OK;
+}
+
+PolyStatus poly_model_control(
+    PolyModel *inst,
+    const char *entrypoint,
+    const char *name,
+    PolyUOp *variable
+) {
+  if (!inst || inst->stage == POLY_MODEL_FAILED || !valid_binding_name(entrypoint) ||
+      !valid_binding_name(name) || !poly_ctx_owns_ptr(inst->ctx, variable) ||
+      !poly_uop_is_variable(variable) || !poly_dtype_is_int(variable->dtype))
+    return POLY_STATUS_INVALID;
+  if (inst->ctx->execution_depth || inst->ctx->collecting || inst->ctx->active_jit_capture)
+    return POLY_STATUS_BAD_STAGE;
+  if (inst->stage == POLY_MODEL_BUILT) {
+    int ep = find_entrypoint(inst, entrypoint);
+    if (ep < 0) return POLY_STATUS_INVALID;
+    RuntimeEntrypoint *e = &inst->entrypoints[ep];
+    PolyStatus status =
+        model_validate_control(inst, entrypoint, e->objective, e->logical_sink, name, variable);
+    if (status != POLY_STATUS_OK) return status;
+  }
+  for (int i = 0; i < inst->n_controls; i++) {
+    PolyIrControl *c = &inst->controls[i];
+    if (!strcmp(c->entrypoint, entrypoint) &&
+        (!strcmp(c->name, name) || c->variable == variable ||
+         (poly_uop_expr(c->variable) && poly_uop_expr(variable) &&
+          !strcmp(poly_uop_expr(c->variable), poly_uop_expr(variable)))))
+      return POLY_STATUS_INVALID;
+  }
+  PolyIrControl *next = calloc((size_t)inst->n_controls + 1, sizeof(*next));
+  if (!next) return POLY_STATUS_NOMEM;
+  if (inst->n_controls) memcpy(next, inst->controls, (size_t)inst->n_controls * sizeof(*next));
+  next[inst->n_controls] = (PolyIrControl){dup_cstr(entrypoint), dup_cstr(name), variable};
+  PolyModel candidate = *inst;
+  candidate.controls = next;
+  candidate.n_controls++;
+  ModelResidencyRoots roots = {0};
+  if (!next[inst->n_controls].entrypoint || !next[inst->n_controls].name ||
+      model_prepare_residency_roots(&candidate, &roots) != 0) {
+    free((char *)next[inst->n_controls].entrypoint);
+    free((char *)next[inst->n_controls].name);
+    free(next);
+    return POLY_STATUS_NOMEM;
+  }
+  free(inst->controls);
+  inst->controls = next;
+  inst->n_controls++;
+  model_publish_residency_roots(inst, &roots);
+  return POLY_STATUS_OK;
 }
 
 static char *scoped_name(PolyModel *inst, const char *name) {
@@ -977,6 +1100,7 @@ static int copy_initial_buffer_data(
   if (!inst || !ctx || !build || build->n_bindings != inst->n_bufs) return -1;
   for (int i = 0; i < inst->n_bufs; i++) {
     const BuildBinding *binding = &build->bindings[i];
+    if (binding->flags & POLY_BIND_F_TRANSIENT_ZERO) continue;
     PolyUOp *source = binding->initial_data_buffer;
     PolyBuffer *physical =
         binding->physical_buffer ? poly_buffer_get(ctx, binding->physical_buffer) : NULL;
@@ -1194,6 +1318,62 @@ PolyStatus poly_model_entrypoint(
     return POLY_STATUS_NOMEM;
   }
   return POLY_STATUS_OK;
+}
+
+/* Model admission uses scalar symbolic metadata, never reads storage or executes
+ * user graphs. Keep this whitelist independent of the decoder architecture. */
+static bool model_precondition_valid(PolyCtx *ctx, PolyUOp *condition) {
+  if (!condition) return true;
+  if (!poly_ctx_owns_ptr(ctx, condition) || !poly_dtype_eq(condition->dtype, POLY_BOOL) ||
+      poly_uop_ndim(ctx, condition) != 0)
+    return false;
+  int n = 0;
+  PolyUOp **nodes = poly_uop_toposort_alloc(ctx, condition, &n);
+  bool valid = nodes != NULL;
+  for (int i = 0; valid && i < n; i++) {
+    PolyUOp *u = nodes[i];
+    if (poly_uop_is_variable(u)) continue;
+    switch (u->op) {
+    case POLY_OP_CONST:
+    case POLY_OP_ADD:
+    case POLY_OP_MUL:
+    case POLY_OP_MAX:
+    case POLY_OP_CMPLT:
+    case POLY_OP_CMPNE:
+    case POLY_OP_AND:
+    case POLY_OP_OR:
+    case POLY_OP_XOR:
+      break;
+    case POLY_OP_STACK:
+      valid = u->n_src == 0;
+      break;
+    default:
+      valid = false;
+      break;
+    }
+  }
+  poly_uop_toposort_free(nodes);
+  return valid;
+}
+
+PolyStatus poly_model_entrypoint_precondition(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyUOp *condition
+) {
+  if (!inst || inst->stage != POLY_MODEL_BUILDING) return POLY_STATUS_BAD_STAGE;
+  if (!entrypoint || !condition || !model_precondition_valid(inst->ctx, condition))
+    return POLY_STATUS_INVALID;
+  for (int i = 0; i < inst->build->n_entrypoints; i++) {
+    BuildEntrypoint *ep = &inst->build->entrypoints[i];
+    if (strcmp(ep->name, entrypoint)) continue;
+    if (ep->precondition || ep->objective) return POLY_STATUS_INVALID;
+    ep->precondition = condition;
+    if (model_refresh_residency_roots(inst) == 0) return POLY_STATUS_OK;
+    ep->precondition = NULL;
+    return POLY_STATUS_NOMEM;
+  }
+  return POLY_STATUS_INVALID;
 }
 
 static BuildBinding *find_build_storage_binding(
@@ -1735,6 +1915,16 @@ static PolyStatus validate_build_entrypoints(PolyModel *inst) {
   return POLY_STATUS_OK;
 }
 
+/* Tensor.assign embeds view writes as AFTER(base, AFTER(view, STORE(...))).
+ * Capture adds that storage value beside its output. Unwrap only the effect
+ * chain; STORE's target/value retain earlier dependencies and write ordering. */
+static PolyUOp *model_capture_store(PolyUOp *effect) {
+  if (!effect || effect->op != POLY_OP_AFTER) return NULL;
+  while (effect->op == POLY_OP_AFTER && effect->n_src == 2)
+    effect = effect->src[1];
+  return effect->op == POLY_OP_STORE ? effect : NULL;
+}
+
 PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
   if (require_stage(inst, POLY_MODEL_BUILDING, __func__) != POLY_STATUS_OK) {
     poly_model_copy_error(inst, err);
@@ -1809,6 +1999,7 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
         .ndim = b->ndim,
         .trainable = b->trainable,
         .trainable_set = true,
+        .transient_zero = (b->flags & POLY_BIND_F_TRANSIENT_ZERO) != 0,
     };
     if (b->ndim > 0) memcpy(bufs[i].shape, b->shape, (size_t)b->ndim * sizeof(int64_t));
   }
@@ -1840,13 +2031,11 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
        * chains. Assignment and CALL results stay intact. */
       bool capture_effects = logical_value->op == POLY_OP_AFTER && logical_value->n_src > 1;
       for (int k = 1; capture_effects && k < logical_value->n_src; k++) {
-        PolyUOp *effect = logical_value->src[k];
-        capture_effects = effect->op == POLY_OP_AFTER && effect->n_src == 2 &&
-                          effect->src[1]->op == POLY_OP_STORE;
+        capture_effects = model_capture_store(logical_value->src[k]) != NULL;
       }
       if (capture_effects) {
         for (int k = 1; k < logical_value->n_src; k++) {
-          PolyUOp *store = logical_value->src[k]->src[1];
+          PolyUOp *store = model_capture_store(logical_value->src[k]);
           bool duplicate = false;
           for (int e = ep->n_outputs; e < n_stores; e++)
             duplicate |= logical_stores[e] == store;
@@ -1869,6 +2058,7 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
     eps[i].n_outputs = ep->n_outputs;
     eps[i].objective = ep->objective;
     eps[i].flags = ep->flags;
+    eps[i].precondition = ep->precondition;
     free(logical_stores);
     if (!eps[i].sink) {
       poly_model_set_error(
@@ -1879,12 +2069,33 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
     }
   }
 
+  for (int i = 0; i < inst->n_controls; i++) {
+    PolyIrControl *control = &inst->controls[i];
+    int ep = 0;
+    while (ep < build->n_entrypoints && strcmp(eps[ep].name, control->entrypoint))
+      ep++;
+    if (ep == build->n_entrypoints) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "control '%s' references unknown entrypoint '%s'",
+          control->name, control->entrypoint
+      );
+      st = POLY_STATUS_INVALID;
+      goto pack_fail;
+    }
+    st = model_validate_control(
+        inst, eps[ep].name, eps[ep].objective, eps[ep].sink, control->name, control->variable
+    );
+    if (st != POLY_STATUS_OK) goto pack_fail;
+  }
+
   PolyIrSpec spec = {
       .ctx = inst->ctx,
       .bufs = bufs,
       .n_bufs = build->n_bindings,
       .entrypoints = eps,
       .n_entrypoints = build->n_entrypoints,
+      .controls = inst->controls,
+      .n_controls = inst->n_controls,
   };
   PolyDevice default_device = poly_ctx_get_preferred_device(inst->ctx);
   if (!poly_device_can_execute(default_device)) default_device = poly_device_default();
@@ -1915,6 +2126,8 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
   for (int i = 0; i < inst->n_residency_roots; i++)
     poly_uop_release(inst->ctx, inst->residency_roots[i]);
   free(inst->residency_roots);
+  model_controls_free(inst);
+  built->metadata = inst->metadata;
   *inst = *built;
   free(built);
   inst->stage = POLY_MODEL_BUILT;
@@ -2337,6 +2550,14 @@ static PolyModel *model_from_spec(
     inst->bufs[i].name = strdup(spec->bufs[i].name);
     if (!inst->bufs[i].name) goto fail;
     inst->bufs[i].role = spec->bufs[i].role;
+    if (spec->bufs[i].transient_zero) {
+      if (spec->bufs[i].role != POLY_ROLE_AUX || !value_identity || spec->bufs[i].trainable)
+        goto fail;
+      inst->bufs[i].flags |= POLY_BIND_F_TRANSIENT_ZERO;
+    }
+    if (alias >= 0 &&
+        ((inst->bufs[alias].flags ^ inst->bufs[i].flags) & POLY_BIND_F_TRANSIENT_ZERO))
+      goto fail;
     inst->bufs[i].trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
                                                           : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].logical_value = logical_value;
@@ -2367,18 +2588,22 @@ static PolyModel *model_from_spec(
       PolyUOp *dim = model_signature_dim(spec->ctx, &inst->bufs[i], d);
       if (!dim) goto fail;
       if (dim->op == POLY_OP_CONST) continue;
-      /* No implicit specialization of unsupported signatures. State stays
-       * fixed; input leading dimensions are direct bounded Variables. */
-      if (d != 0 || model_role_is_state(inst->bufs[i].role) ||
+      /* Singleton prefixes, e.g. [1,N], preserve packed prefix storage. A
+       * non-singleton prefix would require strided host upload/readback. */
+      bool prefix = true;
+      for (int k = 0; k < d; k++)
+        prefix &= inst->bufs[i].shape[k] == 1;
+      if (!prefix || inst->bufs[i].dynamic || model_role_is_state(inst->bufs[i].role) ||
           (model_role_is_abi_input(inst->bufs[i].role) && !poly_uop_unbind_var(dim))) {
         fprintf(
             stderr,
-            "poly_model: '%s' requires fixed state and a direct variable leading input axis\n",
+            "poly_model: '%s' requires fixed state and one variable axis after singleton axes\n",
             inst->bufs[i].name
         );
         goto fail;
       }
       inst->bufs[i].dynamic = true;
+      inst->bufs[i].dynamic_axis = d;
     }
 
     /* Alias names share the same ctx-owned residency. */
@@ -2460,6 +2685,10 @@ static PolyModel *model_from_spec(
     inst->entrypoints[i].objective = dup_cstr(spec->entrypoints[i].objective);
     if (spec->entrypoints[i].objective && !inst->entrypoints[i].objective) goto fail;
     inst->entrypoints[i].flags = spec->entrypoints[i].flags;
+    inst->entrypoints[i].precondition = spec->entrypoints[i].precondition;
+    if (!model_precondition_valid(inst->ctx, inst->entrypoints[i].precondition) ||
+        (inst->entrypoints[i].precondition && inst->entrypoints[i].objective))
+      goto fail;
   }
 
   /* Portable PGIR v10 retains the same exact logical module boundaries used
@@ -2487,6 +2716,11 @@ static PolyModel *model_from_spec(
   }
   if (spec->n_modules > 0 && !runtime_modules_valid(inst, inst->modules, inst->n_modules))
     goto fail;
+  for (int i = 0; i < spec->n_controls; i++) {
+    PolyIrControl *c = &spec->controls[i];
+    if (poly_model_control(inst, c->entrypoint, c->name, c->variable) != POLY_STATUS_OK) goto fail;
+  }
+  if (model_classify_effects(inst) != 0) goto fail;
 
   /* Default optimizer: none */
   inst->training.optim.kind = POLY_OPTIM_NONE;
@@ -2571,6 +2805,7 @@ static int model_validate_checkpoint_views(
     for (int j = 0; j < i; j++)
       if (strcmp(views[i].name, views[j].name) == 0) return -1;
     int bi = find_buf_by_name(inst, views[i].name);
+    if (bi >= 0 && (inst->bufs[bi].flags & POLY_BIND_F_TRANSIENT_ZERO)) return -1;
     if (bi >= 0 && !model_checkpoint_row_matches(&inst->bufs[bi], &views[i])) return -1;
   }
   if (!require_state) return 0;
@@ -2990,6 +3225,7 @@ static void runtime_modules_free(RuntimeModule *modules, int n_modules) {
 
 void poly_model_free(PolyModel *inst) {
   if (!inst) return;
+  free(inst->metadata);
 
   for (int i = 0; i < inst->n_residency_roots; i++)
     poly_uop_release(inst->ctx, inst->residency_roots[i]);
@@ -2999,6 +3235,7 @@ void poly_model_free(PolyModel *inst) {
 
   build_state_free(inst->build);
   inst->build = NULL;
+  model_controls_free(inst);
 
   /* Free named buffers */
   for (int i = 0; i < inst->n_bufs; i++) {
@@ -3430,6 +3667,9 @@ int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) 
 
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  if (src_len > named_buf_nbytes(&inst->bufs[i])) return -1;
+  if (inst->bufs[i].role == POLY_ROLE_PARAM || inst->bufs[i].role == POLY_ROLE_AUX)
+    model_mutated(inst, (inst->bufs[i].flags & POLY_BIND_F_TRANSIENT_ZERO) != 0);
   int rc = poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
   if (!rc && src_len == named_buf_nbytes(&inst->bufs[i])) model_weight_written(inst, i);
   return rc;
@@ -3536,6 +3776,7 @@ uint8_t *poly_model_export_weights(PolyModel *inst, int *out_len) {
 
 int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
   if (!inst || inst->stage != POLY_MODEL_BUILT) return -1;
+  model_mutated(inst, false);
 
   int n_views = 0;
   char *metadata = NULL;
@@ -3643,6 +3884,7 @@ uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
     bufs[i].ndim = inst->bufs[i].ndim;
     bufs[i].trainable = inst->bufs[i].trainable;
     bufs[i].trainable_set = true;
+    bufs[i].transient_zero = (inst->bufs[i].flags & POLY_BIND_F_TRANSIENT_ZERO) != 0;
     memcpy(bufs[i].shape, inst->bufs[i].shape, inst->bufs[i].ndim * sizeof(int64_t));
   }
 
@@ -3656,6 +3898,7 @@ uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
     eps[i].n_outputs = inst->entrypoints[i].n_outputs;
     eps[i].objective = inst->entrypoints[i].objective;
     eps[i].flags = inst->entrypoints[i].flags;
+    eps[i].precondition = inst->entrypoints[i].precondition;
   }
 
   PolyIrModule *modules =
@@ -3681,6 +3924,8 @@ uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
       .n_entrypoints = inst->n_entrypoints,
       .modules = modules,
       .n_modules = inst->n_modules,
+      .controls = inst->controls,
+      .n_controls = inst->n_controls,
   };
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   free(bufs);
@@ -3770,9 +4015,33 @@ static PolyLinearEntry *model_ensure_entry_executable(PolyModel *inst, int entry
 }
 
 uint8_t *poly_model_export_program(PolyModel *inst, int *out_len) {
-  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!out_len) return NULL;
   *out_len = 0;
+  if (inst)
+    for (int i = 0; i < inst->n_entrypoints; i++)
+      if (inst->entrypoints[i].precondition) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "bound-program export does not support entrypoint preconditions"
+        );
+        return NULL;
+      }
+  if (inst && inst->n_controls) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "bound-program export does not support controls"
+    );
+    return NULL;
+  }
+  if (inst)
+    for (int i = 0; i < inst->n_bufs; i++)
+      if (inst->bufs[i].flags & POLY_BIND_F_TRANSIENT_ZERO) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "bound-program export does not support transient state"
+        );
+        return NULL;
+      }
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!inst || inst->stage != POLY_MODEL_BUILT || inst->n_entrypoints <= 0 || !inst->entrypoints ||
       !inst->entry_executables || !model_weights_ready(inst))
     return NULL;
@@ -4056,6 +4325,7 @@ static int model_publish_placement(
     PolyDevice preferred
 ) {
   if (!inst || !target_bindings || !placed_roots) return -1;
+  model_mutated(inst, false);
   size_t nb = (size_t)(unsigned)inst->n_bufs;
   size_t ne = (size_t)(unsigned)inst->n_entrypoints;
   uint8_t *target_existed = calloc(nb, sizeof(*target_existed));
@@ -4420,7 +4690,11 @@ static bool model_bound_dim(
   if (ok) {
     /* Use the core's symbolic constant folding, not a Model expression evaluator. */
     bound = poly_graph_rewrite(ctx, bound, poly_symbolic());
-    ok = poly_uop_const_i64(bound, value) == 0;
+    if (bound && bound->op == POLY_OP_CONST && bound->arg.kind == POLY_ARG_BOOL) {
+      *value = bound->arg.b;
+      ok = true;
+    } else
+      ok = poly_uop_const_i64(bound, value) == 0;
   }
   free(to);
   free(from);
@@ -4460,13 +4734,57 @@ static int bind_model_io(
     const RuntimeEntrypoint *entry,
     PolyIOBinding *io,
     int n_io,
+    const PolyControlBinding *controls,
+    int n_controls,
     ModelInvocation *inv
 ) {
   if (!inst || !inst->ctx || !entry || n_io < 0 || (n_io > 0 && !io)) return -1;
   if (inst->ctx->tensor_capture) return -1;
   inv->shapes = calloc((size_t)(inst->n_bufs ? inst->n_bufs : 1), sizeof(*inv->shapes));
-  inv->vars = calloc((size_t)(n_io ? n_io : 1), sizeof(*inv->vars));
+  if (n_controls < 0 || (n_controls && !controls)) return -1;
+  inv->vars = calloc((size_t)n_io + (size_t)n_controls + 1, sizeof(*inv->vars));
   if (!inv->shapes || !inv->vars) return -1;
+  /* Validate controls before any input upload or state write. BIND samples
+   * are not substituted into the graph: these values feed PolyVarBinding. */
+  for (int i = 0; i < inst->n_controls; i++) {
+    const PolyIrControl *c = &inst->controls[i];
+    if (strcmp(c->entrypoint, entry->name)) continue;
+    int found = -1;
+    for (int j = 0; j < n_controls; j++) {
+      if (!controls[j].name || strcmp(c->name, controls[j].name)) continue;
+      if (found >= 0) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "duplicate control '%s'", c->name
+        );
+        return -1;
+      }
+      found = j;
+    }
+    if (found < 0) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "missing control '%s' for '%s'", c->name, entry->name
+      );
+      return -1;
+    }
+    int64_t lo, hi, value = controls[found].value;
+    poly_uop_minmax(inst->ctx, c->variable, &lo, &hi);
+    const PolyParamArg *arg = c->variable->arg.param;
+    if (value < lo || value > hi ||
+        (arg->has_multiple_of && (arg->multiple_of <= 0 || value % arg->multiple_of != 0))) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "control '%s' is outside its declared bounds",
+          c->name
+      );
+      return -1;
+    }
+    inv->vars[inv->n_vars++] = (PolyVarBinding){c->variable, value};
+  }
+  if (inv->n_vars != n_controls) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "unknown control for '%s'", entry->name
+    );
+    return -1;
+  }
   for (int i = 0; i < inst->n_bufs; i++)
     memcpy(
         inv->shapes[i], inst->bufs[i].dynamic ? inst->bufs[i].current_shape : inst->bufs[i].shape,
@@ -4598,12 +4916,13 @@ static int bind_model_io(
       }
     }
     if (!io[i].tensor && !io[i].shape && b->dynamic) {
-      int64_t width = poly_shape_numel_checked(b->shape + 1, b->ndim - 1);
+      int axis = b->dynamic_axis;
+      int64_t width = poly_shape_numel_checked(b->shape + axis + 1, b->ndim - axis - 1);
       size_t itemsize = poly_dtype_itemsize(b->buffer->dtype);
       if (width <= 0 || !itemsize || (uint64_t)width > SIZE_MAX / itemsize) return -1;
       size_t stride = (size_t)width * itemsize;
       if (io[i].nbytes % stride || io[i].nbytes / stride > INT64_MAX) return -1;
-      shape[0] = (int64_t)(io[i].nbytes / stride);
+      shape[axis] = (int64_t)(io[i].nbytes / stride);
     }
     for (int d = 0; d < b->ndim; d++) {
       PolyUOp *dim = model_signature_dim(inst->ctx, b, d);
@@ -4668,6 +4987,16 @@ static int bind_model_io(
     }
   }
 
+  if (entry->precondition) {
+    int64_t admitted;
+    if (!model_bound_dim(inst->ctx, entry->precondition, inv, &admitted) || !admitted) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s': input/control precondition failed",
+          entry->name
+      );
+      return -1;
+    }
+  }
   for (int i = 0; i < entry->n_outputs; i++) {
     int bi = find_buf_by_name(inst, entry->outputs[i]);
     if (bi < 0) return -1;
@@ -4835,7 +5164,7 @@ static int run_model_sink(
     PolyLinearEntry *cached_executable
 ) {
   ModelInvocation inv = {0};
-  int ret = bind_model_io(inst, entry, io, n_io, &inv);
+  int ret = bind_model_io(inst, entry, io, n_io, NULL, 0, &inv);
   if (ret == 0) ret = run_model_sink_bound(inst, entry, sink, io, n_io, cached_executable, &inv);
   if (ret == 0) model_publish_invocation(inst, &inv);
   model_invocation_free(&inv);
@@ -4843,7 +5172,20 @@ static int run_model_sink(
 }
 
 int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, int n_io) {
-  if (!inst || inst->stage != POLY_MODEL_BUILT || !entrypoint) return -1;
+  return poly_model_call_with_controls(inst, entrypoint, io, n_io, NULL, 0);
+}
+
+int poly_model_call_with_controls(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls
+) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || !entrypoint || inst->ctx->execution_depth ||
+      inst->ctx->collecting || inst->ctx->active_jit_capture)
+    return -1;
   poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!model_weights_ready(inst)) return -1;
 
@@ -4856,7 +5198,15 @@ int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
   PolyLinearEntry *cached_executable =
       inst->entry_executables ? &inst->entry_executables[ep_idx] : NULL;
-  int rc = run_model_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached_executable);
+  ModelInvocation inv = {0};
+  const RuntimeEntrypoint *entry = &inst->entrypoints[ep_idx];
+  int rc = bind_model_io(inst, entry, io, n_io, controls, n_controls, &inv);
+  if (rc == 0) {
+    if (entry->writes_state) model_mutated(inst, entry->writes_transient);
+    rc = run_model_sink_bound(inst, entry, sink, io, n_io, cached_executable, &inv);
+  }
+  if (rc == 0) model_publish_invocation(inst, &inv);
+  model_invocation_free(&inv);
   if (rc && !inst->last_error.code)
     poly_model_set_error(
         inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' execution failed", entrypoint
@@ -4872,6 +5222,21 @@ int poly_model_call_tensors(
     PolyTensor **outputs,
     int n_outputs
 ) {
+  return poly_model_call_tensors_with_controls(
+      inst, entrypoint, io, n_io, NULL, 0, outputs, n_outputs
+  );
+}
+
+int poly_model_call_tensors_with_controls(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls,
+    PolyTensor **outputs,
+    int n_outputs
+) {
   if (n_outputs < 0 || (n_outputs && !outputs)) return -1;
   for (int i = 0; i < n_outputs; i++)
     outputs[i] = NULL;
@@ -4883,7 +5248,7 @@ int poly_model_call_tensors(
   if (!model_weights_ready(inst)) return -1;
   if (ep < 0 || inst->entrypoints[ep].n_outputs != n_outputs) return -1;
   ModelInvocation inv = {0};
-  if (bind_model_io(inst, &inst->entrypoints[ep], io, n_io, &inv) != 0) {
+  if (bind_model_io(inst, &inst->entrypoints[ep], io, n_io, controls, n_controls, &inv) != 0) {
     model_invocation_free(&inv);
     return -1;
   }
@@ -4905,6 +5270,8 @@ int poly_model_call_tensors(
     if (!stores[i]) goto cleanup;
     poly_uop_retain(inst->ctx, stores[i]);
   }
+  if (inst->entrypoints[ep].writes_state)
+    model_mutated(inst, inst->entrypoints[ep].writes_transient);
   if (run_model_sink_bound(
           inst, &inst->entrypoints[ep], inst->entrypoints[ep].sink, io, n_io,
           &inst->entry_executables[ep], &inv
@@ -4975,6 +5342,122 @@ const char *poly_model_entrypoint_output_name(
 }
 
 /* Convenience wrapper */
+
+static int model_classify_effects(PolyModel *inst) {
+  /* Inspect portable STORE destinations once; placement does not change the
+   * named state identities. Read-only calls do not advance the mutation epoch. */
+  for (int i = 0; i < inst->n_entrypoints; i++) {
+    RuntimeEntrypoint *e = &inst->entrypoints[i];
+    int n = 0;
+    PolyUOp **topo =
+        poly_uop_toposort_ex_alloc(inst->ctx, e->logical_sink, &n, model_effect_gate, false);
+    if (!topo) return -1;
+    e->writes_state = e->writes_transient = false;
+    for (int j = 0; j < n; j++) {
+      if (topo[j]->op != POLY_OP_STORE || topo[j]->n_src != 2) continue;
+      PolyUOp *target = poly_uop_buf_uop(inst->ctx, topo[j]->src[0]);
+      for (int k = 0; k < inst->n_bufs; k++) {
+        NamedBuf *b = &inst->bufs[k];
+        if (target != b->logical_buffer) continue;
+        e->writes_state |= b->role == POLY_ROLE_PARAM || b->role == POLY_ROLE_AUX;
+        e->writes_transient |= (b->flags & POLY_BIND_F_TRANSIENT_ZERO) != 0;
+      }
+    }
+    free(topo);
+  }
+  return 0;
+}
+
+PolyModelStateVersion poly_model_state_version(const PolyModel *inst) {
+  return inst->version;
+}
+bool poly_model_has_transient(const PolyModel *inst) {
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (inst->bufs[i].flags & POLY_BIND_F_TRANSIENT_ZERO) return true;
+  return false;
+}
+bool poly_model_is_busy(const PolyModel *inst) {
+  return !inst || inst->stage != POLY_MODEL_BUILT || inst->ctx->execution_depth ||
+         inst->ctx->collecting || inst->ctx->active_jit_capture;
+}
+int poly_model_check_ready(PolyModel *inst) {
+  return inst && inst->stage == POLY_MODEL_BUILT && model_weights_ready(inst) ? 0 : -1;
+}
+bool poly_model_entrypoint_has_precondition(const PolyModel *inst, const char *entrypoint) {
+  int i = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
+  return i >= 0 && inst->entrypoints[i].precondition;
+}
+int poly_model_control_count(const PolyModel *inst, const char *entrypoint) {
+  if (!inst || !entrypoint || find_entrypoint(inst, entrypoint) < 0) return -1;
+  int n = 0;
+  for (int i = 0; i < inst->n_controls; i++)
+    n += !strcmp(inst->controls[i].entrypoint, entrypoint);
+  return n;
+}
+static const PolyIrControl *model_control_at(
+    const PolyModel *inst,
+    const char *entrypoint,
+    int index
+) {
+  if (!inst || !entrypoint || index < 0) return NULL;
+  for (int i = 0; i < inst->n_controls; i++)
+    if (!strcmp(inst->controls[i].entrypoint, entrypoint) && index-- == 0)
+      return &inst->controls[i];
+  return NULL;
+}
+const char *poly_model_control_name(const PolyModel *inst, const char *entrypoint, int index) {
+  const PolyIrControl *c = model_control_at(inst, entrypoint, index);
+  return c ? c->name : NULL;
+}
+int poly_model_control_bounds(
+    const PolyModel *inst,
+    const char *entrypoint,
+    int index,
+    int64_t *lower,
+    int64_t *upper
+) {
+  const PolyIrControl *c = model_control_at(inst, entrypoint, index);
+  if (!c || !lower || !upper) return -1;
+  poly_uop_minmax(inst->ctx, c->variable, lower, upper);
+  return 0;
+}
+int poly_model_set_metadata(PolyModel *inst, const char *json) {
+  if (!inst || (inst->stage != POLY_MODEL_BUILDING && poly_model_is_busy(inst))) return -1;
+  cJSON *object = json ? cJSON_Parse(json) : NULL;
+  if (json && !cJSON_IsObject(object)) {
+    cJSON_Delete(object);
+    return -1;
+  }
+  char *copy = object ? cJSON_PrintUnformatted(object) : NULL;
+  cJSON_Delete(object);
+  if (json && !copy) return -1;
+  free(inst->metadata);
+  inst->metadata = copy;
+  model_mutated(inst, false);
+  return 0;
+}
+const char *poly_model_metadata(const PolyModel *inst) {
+  return inst ? inst->metadata : NULL;
+}
+
+int poly_model_reset_transient(PolyModel *inst) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || inst->ctx->execution_depth ||
+      inst->ctx->collecting || inst->ctx->active_jit_capture)
+    return -1;
+  model_mutated(inst, true);
+  for (int i = 0; i < inst->n_bufs; i++) {
+    NamedBuf *b = &inst->bufs[i];
+    if (!(b->flags & POLY_BIND_F_TRANSIENT_ZERO)) continue;
+    size_t bytes = named_buf_nbytes(b);
+    void *zero = calloc(1, bytes ? bytes : 1);
+    if (!zero) return -1;
+    int rc = poly_buffer_write(inst->ctx, b->buffer, zero, bytes);
+    free(zero);
+    if (rc != 0) return rc;
+  }
+  inst->version.reset = inst->version.transient;
+  return 0;
+}
 
 int poly_model_forward(PolyModel *inst, PolyIOBinding *inputs, int n_inputs) {
   return poly_model_call(inst, "forward", inputs, n_inputs);
@@ -5266,6 +5749,18 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
   return 0;
 }
 
+static bool model_training_controls_valid(PolyModel *inst, const char *entrypoint) {
+  for (int i = 0; i < inst->n_controls; i++) {
+    if (strcmp(inst->controls[i].entrypoint, entrypoint)) continue;
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__,
+        "training entrypoint '%s' does not support integer controls", entrypoint
+    );
+    return false;
+  }
+  return true;
+}
+
 int poly_model_value_and_grad(
     PolyModel *inst,
     const char *entrypoint,
@@ -5275,6 +5770,8 @@ int poly_model_value_and_grad(
 ) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !inst->has_portable_source || !entrypoint)
     return -1;
+  if (!model_training_controls_valid(inst, entrypoint)) return -1;
+  model_mutated(inst, false);
   if (!model_weights_ready(inst)) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
@@ -5622,6 +6119,8 @@ int poly_model_train_step(
     poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "no selected objective entrypoint");
     return -1;
   }
+  if (!model_training_controls_valid(inst, inst->entrypoints[ep_idx].name)) return -1;
+  model_mutated(inst, false);
   if (inst->training.optim.kind == POLY_OPTIM_NONE) {
     poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "no optimizer configured");
     return -1;
@@ -5804,7 +6303,7 @@ int poly_model_inline_entrypoint(
     return -1;
   PolyCtx *dst_ctx = parent->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
-  if (ep_idx < 0) return -1;
+  if (ep_idx < 0 || child->entrypoints[ep_idx].precondition) return -1;
   PolyUOp *logical_sink = child->entrypoints[ep_idx].logical_sink;
   /* A Tensor-built child may retain an exact bound pre-policy snapshot.  A
    * portable IR import has no such product and must inline its current root,

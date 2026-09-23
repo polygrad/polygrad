@@ -139,6 +139,19 @@ function roleId(role) {
   return Number(role)
 }
 
+function controlEntries(controls) {
+  return Object.entries(controls || {}).map(([name, value]) => {
+    if (typeof value !== 'bigint' && !Number.isSafeInteger(value)) {
+      throw new TypeError(`polygrad: control '${name}' requires an exact integer`)
+    }
+    const integer = BigInt(value)
+    if (integer < -(1n << 63n) || integer >= (1n << 63n)) {
+      throw new RangeError(`polygrad: control '${name}' is outside int64`)
+    }
+    return [name, integer]
+  })
+}
+
 function entryNameList(names) {
   if (names == null) return []
   if (typeof names === 'string') return [names]
@@ -187,7 +200,8 @@ function entryFields(entry) {
       inputs: entry.inputs,
       outputs: entry.outputs,
       objective: entry.objective || null,
-      flags: entry.flags || 0
+      flags: entry.flags || 0,
+      controls: entry.controls
     }
   }
   throw new TypeError('polygrad: Model entrypoints must be objects or [name, inputs, outputs] arrays')
@@ -260,7 +274,7 @@ function createBoundModelClass(runtime) {
       model._closing = true
     }
     if (!owner.state.alive || !owner.core || !owner.handle) return undefined
-    const free = () => owner.core.model.free(owner.handle)
+    const free = () => owner.release(owner.resource)
     if (owner.asyncHost && owner.core.enqueueAsync) return owner.core.enqueueAsync(free)
     free()
     return undefined
@@ -303,6 +317,12 @@ function createBoundModelClass(runtime) {
     // Capture is synchronous host graph construction. Never enter suspended Wasm.
     if (_runtime._activeAsync > 0) throw new Error('Model capture requires an idle Runtime; await pending operations first')
     const { inputs = {}, targets = {}, loss = null, entrypoints } = options
+    if (loss != null && Object.keys(options.controls || {}).length) {
+      throw new TypeError('Model training does not support integer controls')
+    }
+    if (Object.keys(options.controls || {}).some(name => name in inputs || name in targets)) {
+      throw new TypeError('Model input and control names overlap')
+    }
     if (options.outputs != null || options.losses != null || options.modules != null) {
       throw new TypeError('Callable Model cannot be combined with prebuilt outputs, losses or modules')
     }
@@ -343,7 +363,7 @@ function createBoundModelClass(runtime) {
       try {
         for (const training of (loss == null ? [Boolean(mode)] : [false,true])) {
           Tensor.training = training
-          const produced = fn(inputs)
+          const produced = fn({...inputs, ...options.controls})
           if (isPromiseLike(produced)) throw new TypeError('Model authoring must be synchronous')
           const values = training && loss != null ? loss(produced, targets) : produced
           if (isPromiseLike(values)) throw new TypeError('Model loss must be synchronous')
@@ -389,7 +409,7 @@ function createBoundModelClass(runtime) {
           if (training && loss != null) losses = completed
           else result = completed
         }
-        return {inputs,targets,outputs:result,losses,params:{...params,...rng},entrypoints,
+        return {inputs,targets,outputs:result,losses,params:{...params,...rng},entrypoints,controls:options.controls,
           [captureOwners]:owned}
       } catch(error) {
         for (const tensor of owned) tensor.dispose()
@@ -402,13 +422,26 @@ function createBoundModelClass(runtime) {
     })
   }
 
-  function sealBindings(ctx, bindings, entries, modules, async = false) {
+  function sealBindings(ctx, bindings, entries, modules, async = false, controls = null) {
+    for (const entry of entries) {
+      if (entry.objective && Object.keys(entry.controls === undefined ? controls || {} : entry.controls).length) {
+        throw new TypeError('Model training does not support integer controls')
+      }
+    }
     const api = _runtime._core.model
     if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
     const finish = handle => {
       if (!handle) throw new Error('polygrad: failed to create Model from tensor bindings')
       try {
         defineModulesOnHandle(handle, modules, ctx)
+        for (const entry of entries) {
+          for (const [name, variable] of Object.entries(entry.controls === undefined ? controls || {} : entry.controls)) {
+            const uop = variable.uop || variable
+            if (uop.ctx !== ctx || api.control(handle, entry.name, name, uop.raw) !== 0) {
+              throw new Error(api.lastError(handle).trim() || `polygrad: invalid Model control '${name}'`)
+            }
+          }
+        }
       } catch (err) {
         api.free(handle)
         throw err
@@ -474,7 +507,8 @@ function createBoundModelClass(runtime) {
           inputs: entryNameList(e.inputs),
           outputs: entryNameList(e.outputs),
           objective: e.objective == null ? null : String(e.objective),
-          flags: Number(e.flags || 0)
+          flags: Number(e.flags || 0),
+          controls: e.controls
         })
       }
     } else {
@@ -494,7 +528,7 @@ function createBoundModelClass(runtime) {
       }
     }
 
-    return sealBindings(ctx, bindings, entries, modules, async)
+    return sealBindings(ctx, bindings, entries, modules, async, spec.controls)
   }
 
   class Model {
@@ -531,6 +565,8 @@ function createBoundModelClass(runtime) {
         state: _runtime._lifetime,
         core: _runtime._core,
         handle,
+        resource: handle,
+        release: _runtime._core.model.free,
         asyncHost: this._asyncHostBridge,
         active: true,
         ref: typeof WeakRef === 'undefined' ? null : new WeakRef(this)
@@ -664,7 +700,8 @@ function createBoundModelClass(runtime) {
           inputs: entryNameList(e.inputs),
           outputs: entryNameList(e.outputs),
           objective: e.objective == null ? null : String(e.objective),
-          flags: Number(e.flags || 0)
+          flags: Number(e.flags || 0),
+          controls: e.controls
         }
       })
 
@@ -1108,6 +1145,21 @@ function createBoundModelClass(runtime) {
       return this
     }
 
+    resetTransient() {
+      this._requireSync('resetTransient()', 'resetTransientAsync()')
+      if (this._rt._core.model.resetTransient(this._handle) !== 0) throw this._error('transient reset failed')
+      return this
+    }
+
+    resetTransientAsync() {
+      this._requireOpen()
+      const run = async () => {
+        if (await this._rt._core.model.resetTransient(this._handle) !== 0) throw this._error('transient reset failed')
+        return this
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
+    }
+
     forward(io) {
       return this.call('forward', io)
     }
@@ -1133,14 +1185,15 @@ function createBoundModelClass(runtime) {
       return new Error(this._rt._core.model.lastError(this._handle).trim() || fallback)
     }
 
-    call(entrypoint, io) {
+    call(entrypoint, io, { controls = null } = {}) {
       this._requireSync('call()', 'callAsync()')
+      const controlRows = controlEntries(controls)
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
       if (tensors) {
         return this._wrapTensorOutputs(String(entrypoint),
-          this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays))
+          this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays, controlRows))
       }
-      const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays)
+      const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays, controlRows)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
       if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
       return this._collectOutputsRaw(String(entrypoint))
@@ -1150,16 +1203,17 @@ function createBoundModelClass(runtime) {
       return this.callAsync('forward', io)
     }
 
-    callAsync(entrypoint, io) {
+    callAsync(entrypoint, io, { controls = null } = {}) {
       entrypoint = String(entrypoint)
+      const controlRows = controlEntries(controls)
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
       const run = () => {
         if (tensors) {
-          const handles = this._rt._core.model.callTensors(this._handle, entrypoint, names, arrays)
+          const handles = this._rt._core.model.callTensors(this._handle, entrypoint, names, arrays, controlRows)
           return isPromiseLike(handles) ? handles.then(v => this._wrapTensorOutputs(entrypoint, v))
             : this._wrapTensorOutputs(entrypoint, handles)
         }
-        const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays)
+        const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays, controlRows)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
             if (v !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${v})`)

@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 101
+POLYGRAD_ABI_VERSION = 103
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -30,6 +30,10 @@ _uintptr = ctypes.c_size_t
 
 class PolyVarBinding(ctypes.Structure):
     _fields_ = [('var', _ptr), ('value', ctypes.c_int64)]
+
+class PolyControlBinding(ctypes.Structure):
+    _fields_ = [('name', ctypes.c_char_p), ('value', ctypes.c_int64)]
+
 
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
@@ -1497,6 +1501,44 @@ def _declare_signatures(lib):
     lib.poly_model_call.restype = ctypes.c_int
     lib.poly_model_call.argtypes = [
         _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+    lib.poly_model_control.restype = ctypes.c_int
+    lib.poly_model_reset_transient.restype = ctypes.c_int
+    lib.poly_model_reset_transient.argtypes = [_ptr]
+    lib.poly_transformer_from_model.restype = _ptr
+    lib.poly_transformer_from_model.argtypes = [_ptr, ctypes.POINTER(PolyModelError)]
+    lib.poly_transformer_available.restype = ctypes.c_bool
+    lib.poly_transformer_available.argtypes = [_ptr]
+    lib.poly_transformer_last_error.restype = ctypes.POINTER(PolyModelError)
+    lib.poly_transformer_last_error.argtypes = [_ptr]
+    lib.poly_transformer_reset.restype = ctypes.c_int
+    lib.poly_transformer_reset.argtypes = [_ptr]
+    lib.poly_transformer_start.restype = ctypes.c_int
+    lib.poly_transformer_start.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]
+    lib.poly_transformer_next.restype = ctypes.c_int
+    lib.poly_transformer_next.argtypes = [_ptr, ctypes.c_float, ctypes.POINTER(ctypes.c_int32)]
+    lib.poly_transformer_free.restype = None
+    lib.poly_transformer_free.argtypes = [_ptr]
+    lib.poly_transformer_vocab.restype = ctypes.c_int
+    lib.poly_transformer_vocab.argtypes = [_ptr]
+    lib.poly_transformer_position.restype = ctypes.c_int
+    lib.poly_transformer_position.argtypes = [_ptr]
+    lib.poly_transformer_rewind.restype = ctypes.c_int
+    lib.poly_transformer_rewind.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_transformer_prefill.restype = ctypes.c_int
+    lib.poly_transformer_prefill.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int32), ctypes.c_int,
+                                             ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+    lib.poly_transformer_append.restype = ctypes.c_int
+    lib.poly_transformer_append.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int32), ctypes.c_int,
+                                            ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+    lib.poly_model_control.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_char_p, _ptr]
+    lib.poly_model_call_with_controls.restype = ctypes.c_int
+    lib.poly_model_call_with_controls.argtypes = [
+        _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int,
+        ctypes.POINTER(PolyControlBinding), ctypes.c_int]
+    lib.poly_model_call_tensors_with_controls.restype = ctypes.c_int
+    lib.poly_model_call_tensors_with_controls.argtypes = [
+        _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int,
+        ctypes.POINTER(PolyControlBinding), ctypes.c_int, ctypes.POINTER(_ptr), ctypes.c_int]
     lib.poly_model_call_tensors.restype = ctypes.c_int
     lib.poly_model_call_tensors.argtypes = [
         _ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int,

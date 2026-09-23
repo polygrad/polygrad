@@ -62,13 +62,34 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 101
+  const EXPECTED_ABI = 103
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
       `polygrad native ABI mismatch: expected version ${EXPECTED_ABI}, got ${abi}. ` +
       'Rebuild the native addon with: npm run build:native'
     )
+  }
+
+  const transformer = {
+    available(inst) { return binding.poly_transformer_available(inst) },
+    fromModel(inst) { return binding.poly_transformer_from_model(inst) },
+    free(handle) { binding.poly_transformer_free(handle) },
+    lastError(handle) { return binding.poly_transformer_last_error(handle) },
+    decodePosition(handle) { return binding.poly_transformer_position(handle) },
+    rewind(handle, position) { return binding.poly_transformer_rewind(handle, position) },
+    start(handle, tokens) { return binding.poly_transformer_start(handle, tokens) },
+    next(handle, temperature) {
+      const output = new Int32Array(1)
+      const status = binding.poly_transformer_next(handle, temperature, output)
+      return {status, token:output[0]}
+    },
+    appendTokens(handle, tokens, reuse = false) {
+      const n = binding.poly_transformer_vocab(handle)
+      const result = new Float32Array(n)
+      const call = reuse ? binding.poly_transformer_prefill : binding.poly_transformer_append
+      return call(handle, tokens, result) === 0 ? result : null
+    }
   }
 
   const model = {
@@ -235,11 +256,15 @@ function createNativeCore(device) {
     forward(inst, names, arrays) {
       return binding.poly_model_forward(inst, names, arrays)
     },
-    call(inst, entrypoint, names, arrays) {
-      return binding.poly_model_call(inst, entrypoint, names, arrays)
+    resetTransient(inst) { return binding.poly_model_reset_transient(inst) },
+    control(inst, entrypoint, name, variable) {
+      return binding.poly_model_control(inst, entrypoint, name, variable)
     },
-    callTensors(inst, entrypoint, names, arrays) {
-      return binding.poly_model_call(inst, entrypoint, names, arrays, true)
+    call(inst, entrypoint, names, arrays, controls = []) {
+      return binding.poly_model_call(inst, entrypoint, names, arrays, false, controls)
+    },
+    callTensors(inst, entrypoint, names, arrays, controls = []) {
+      return binding.poly_model_call(inst, entrypoint, names, arrays, true, controls)
     },
     entrypointOutputCount(inst, entrypoint) {
       return binding.poly_model_entrypoint_output_count(inst, entrypoint)
@@ -259,6 +284,7 @@ function createNativeCore(device) {
     ffi: binding,
     dtypeIds,
     model,
+    transformer,
     ctx,
     ops,
     deviceIds: makeDeviceIds(binding),

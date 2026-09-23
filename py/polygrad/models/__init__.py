@@ -1,17 +1,17 @@
 """Registered model types and their construction/import capabilities.
 
-These constructors call C model-family builders and return generic
-``Model`` runtime objects. This module owns named architecture factories; Model.from_hf/from_gguf are
-format-loading conveniences delegating to the C loaders.
+Constructors use the C registry and return Model objects; cached causal models
+specialize as Transformer. Model.from_hf/from_gguf delegate to format loaders.
 """
 
 import json
 import ctypes
 
-from . import _ffi
-from .device import _device_id
-from .model import Model
-from .model import _import_context
+from .. import _ffi
+from ..device import _device_id
+from ..model import Model
+from ..model import _import_context
+from .transformer import Transformer
 
 
 def _normalize_spec(spec):
@@ -49,7 +49,7 @@ def MLP(spec=None, *, layers=None, activation="relu", bias=True, loss="none",
 
 
 
-def _build(family, spec, runtime=None, device=None):
+def _build(family, spec, runtime=None, device=None, *, specialize=True):
     ctx = _import_context(runtime)
     data = _normalize_spec(spec)
     err = _ffi.PolyModelError()
@@ -58,7 +58,14 @@ def _build(family, spec, runtime=None, device=None):
         _device_id(device) if device is not None else 0, ctypes.byref(err))
     if not ptr:
         raise ValueError(bytes(err.message).decode('utf-8', 'replace'))
-    return Model._from_handle(ptr, ctx)
+    model = Model._from_handle(ptr, ctx)
+    if specialize and _ffi.get_lib().poly_transformer_available(ptr):
+        try:
+            return Transformer.from_model(model)
+        except BaseException:
+            model.dispose()
+            raise
+    return model
 
 
 def Sequential(spec, *, runtime=None):
@@ -85,10 +92,11 @@ def Llama(spec, *, runtime=None):
     """Construct a dense Llama from HF-style config in the owning C runtime.
 
     Fixed int32 ``tokens[batch_size,max_seq_len]`` -> float32 ``logits``.
-    Supports unscaled/Llama-3 RoPE and tied embeddings. No KV cache or sampler.
+    Supports unscaled/Llama-3 RoPE and tied embeddings. Cached configurations return Transformer.
     Populate parameters explicitly, or use Model.from_hf for pretrained weights.
     """
     return _build('llama', spec, runtime)
+
 
 
 def _type_factory(name):
@@ -127,7 +135,7 @@ def list(*, runtime=None):
     return result
 
 
-__all__ = ['list']
+__all__ = ['list', 'Transformer']
 for entry in list():
     name = entry['name']
     __all__.append(name)

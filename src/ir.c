@@ -658,11 +658,23 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   if (!out_len) return NULL;
   *out_len = 0;
   if (!spec || !spec->ctx) return NULL;
-
   if (spec->n_entrypoints <= 0 || !spec->entrypoints) {
     fprintf(stderr, "%s: no entrypoints\n", executable ? "poly_program_export" : "poly_ir_export");
     return NULL;
   }
+  if (spec->n_controls < 0 || (spec->n_controls && (!spec->controls || executable))) return NULL;
+  for (int i = 0; i < spec->n_controls; i++) {
+    const PolyIrControl *c = &spec->controls[i];
+    if (!c->entrypoint || !c->name || !poly_ctx_owns_ptr(spec->ctx, c->variable) ||
+        !poly_uop_is_variable(c->variable))
+      return NULL;
+    bool found = false;
+    for (int j = 0; j < spec->n_entrypoints; j++)
+      if (spec->entrypoints[j].name && !strcmp(c->entrypoint, spec->entrypoints[j].name))
+        found = true;
+    if (!found) return NULL;
+  }
+
   for (int i = 0; i < spec->n_entrypoints; i++) {
     if (!spec->entrypoints[i].name || !spec->entrypoints[i].sink ||
         (executable && spec->entrypoints[i].sink->op != POLY_OP_LINEAR)) {
@@ -675,6 +687,9 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   }
   if (spec->n_bufs < 0 || (spec->n_bufs > 0 && !spec->bufs)) return NULL;
   for (int i = 0; i < spec->n_bufs; i++) {
+    if (spec->bufs[i].transient_zero &&
+        (executable || spec->bufs[i].role != POLY_IR_ROLE_AUX || spec->bufs[i].trainable))
+      return NULL;
     if (!spec->bufs[i].name || !spec->bufs[i].buffer || spec->bufs[i].role > POLY_IR_ROLE_AUX ||
         !ir_interface_shape_valid(&spec->bufs[i])) {
       fprintf(stderr, "poly_ir_export: invalid interface row %d\n", i);
@@ -726,10 +741,18 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   /* PGIR owns one unique node list, not the sum of overlapping traversals.
    * Root order remains entrypoints then named state. A non-NULL root always
    * has at least one node: NULL/zero means allocation failure, not an empty graph. */
-  for (int group = 0; group < 2; group++) {
-    int n_roots = group == 0 ? spec->n_entrypoints : spec->n_bufs;
+  for (int group = 0; group < 4; group++) {
+    int n_roots = group == 1 ? spec->n_bufs : group == 2 ? spec->n_controls : spec->n_entrypoints;
     for (int i = 0; i < n_roots; i++) {
-      PolyUOp *root = group == 0 ? spec->entrypoints[i].sink : spec->bufs[i].buffer;
+      PolyUOp *root = group == 0   ? spec->entrypoints[i].sink
+                      : group == 1 ? spec->bufs[i].buffer
+                      : group == 2 ? spec->controls[i].variable
+                                   : spec->entrypoints[i].precondition;
+      if (group == 3 && !root) continue;
+      if (group == 3 && executable) {
+        free(topo);
+        return NULL;
+      }
       PolyScratchMark scratch = poly_ctx_scratch_mark(spec->ctx);
       int count = 0;
       PolyUOp **nodes = ir_toposort(spec->ctx, root, &count, true);
@@ -922,6 +945,10 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     st_add_entrypoint_strings(&strings, &spec->entrypoints[i]);
   for (int i = 0; i < spec->n_modules; i++)
     st_add(&strings, spec->modules[i].name);
+  for (int i = 0; i < spec->n_controls; i++) {
+    st_add(&strings, spec->controls[i].entrypoint);
+    st_add(&strings, spec->controls[i].name);
+  }
 
   /* Compute flags */
   uint32_t flags = 0;
@@ -1206,7 +1233,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     /* Interface flags: bit0 is trainable; bit1 marks explicit metadata. */
     bool trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
                                                  : (spec->bufs[i].role == POLY_IR_ROLE_PARAM);
-    bb_u8(&buf, 2 | (trainable ? 1 : 0));
+    bb_u8(&buf, 2 | (trainable ? 1 : 0) | (spec->bufs[i].transient_zero ? 4 : 0));
     bb_u8(&buf, 0);
     bb_u8(&buf, 0); /* padding */
     uint32_t nidx = FIND_IDX(spec->bufs[i].buffer);
@@ -1231,6 +1258,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u32(&buf, st_add(&strings, ep->inputs[j]));
     for (int j = 0; j < ep->n_outputs; j++)
       bb_u32(&buf, st_add(&strings, ep->outputs[j]));
+    if (!executable) bb_u32(&buf, ep->precondition ? FIND_IDX(ep->precondition) : UINT32_MAX);
   }
 
   /* Exact logical module boundaries. Devices are intentionally absent: the
@@ -1244,6 +1272,14 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     bb_u32(&buf, FIND_IDX(module->output));
   }
 
+  if (!executable) {
+    bb_u32(&buf, (uint32_t)spec->n_controls);
+    for (int i = 0; i < spec->n_controls; i++) {
+      bb_u32(&buf, st_add(&strings, spec->controls[i].entrypoint));
+      bb_u32(&buf, st_add(&strings, spec->controls[i].name));
+      bb_u32(&buf, FIND_IDX(spec->controls[i].variable));
+    }
+  }
 #undef FIND_IDX
 
   free(node_map);
@@ -1348,7 +1384,7 @@ static int poly_graph_import(
     return -1;
   }
   uint32_t version = br_u32(&r);
-  if (version != (executable ? POLY_PROGRAM_VERSION : POLY_IR_VERSION)) {
+  if (executable ? version != POLY_PROGRAM_VERSION : version != POLY_IR_VERSION && version != 19) {
     fprintf(
         stderr, "%s: unsupported version %u\n",
         executable ? "poly_program_import" : "poly_ir_import", version
@@ -2112,6 +2148,9 @@ static int poly_graph_import(
     out->bufs[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     if (!out->bufs[i].name) goto fail_bufs;
     out->bufs[i].role = role;
+    out->bufs[i].transient_zero = !executable && version >= 20 && (iface_flags & 4);
+    if (out->bufs[i].transient_zero && (role != POLY_IR_ROLE_AUX || (iface_flags & 1)))
+      goto fail_bufs;
     out->bufs[i].trainable_set = (iface_flags & 2) != 0;
     out->bufs[i].trainable =
         out->bufs[i].trainable_set ? ((iface_flags & 1) != 0) : (role == POLY_IR_ROLE_PARAM);
@@ -2177,6 +2216,14 @@ static int poly_graph_import(
         if (!outputs[j]) goto fail_ep;
       }
     }
+    if (!executable && version >= 21) {
+      if (br_remaining(&r) < 4) goto fail_ep;
+      uint32_t condition = br_u32(&r);
+      if (condition != UINT32_MAX) {
+        if (condition >= n_nodes) goto fail_ep;
+        out->entrypoints[i].precondition = nodes[condition];
+      }
+    }
   }
 
   /* Exact logical placement modules. */
@@ -2207,8 +2254,24 @@ static int poly_graph_import(
     out->modules[i].output = nodes[output_idx];
   }
 
-  if (executable && r.pos != r.len) {
-    fprintf(stderr, "poly_program_import: trailing bytes\n");
+  if (!executable && version >= 20) {
+    if (br_remaining(&r) < 4) goto fail_modules;
+    uint32_t count = br_u32(&r);
+    if (count > INT_MAX || count > (uint32_t)br_remaining(&r) / 12) goto fail_modules;
+    out->controls = count ? calloc(count, sizeof(*out->controls)) : NULL;
+    if (count && !out->controls) goto fail_modules;
+    out->n_controls = (int)count;
+    for (uint32_t i = 0; i < count; i++) {
+      uint32_t ep = br_u32(&r), name = br_u32(&r), node = br_u32(&r);
+      if (ep >= n_strings || name >= n_strings || node >= n_nodes ||
+          !poly_uop_is_variable(nodes[node]))
+        goto fail_modules;
+      out->controls[i] = (PolyIrControl){strdup(strings[ep]), strdup(strings[name]), nodes[node]};
+      if (!out->controls[i].entrypoint || !out->controls[i].name) goto fail_modules;
+    }
+  }
+  if (r.pos != r.len) {
+    fprintf(stderr, "%s: trailing bytes\n", executable ? "poly_program_import" : "poly_ir_import");
     goto fail_modules;
   }
 
@@ -2227,6 +2290,11 @@ static int poly_graph_import(
   return 0;
 
 fail_modules:
+  for (int i = 0; i < out->n_controls; i++) {
+    free((char *)out->controls[i].entrypoint);
+    free((char *)out->controls[i].name);
+  }
+  free(out->controls);
   for (int i = 0; i < out->n_modules; i++)
     free_ir_module(&out->modules[i]);
   free(out->modules);
@@ -2269,6 +2337,13 @@ int poly_program_graph_import(const uint8_t *data, int len, PolyIrSpec *out) {
 
 void poly_ir_spec_free(PolyIrSpec *spec) {
   if (!spec) return;
+  for (int i = 0; i < spec->n_controls; i++) {
+    free((char *)spec->controls[i].entrypoint);
+    free((char *)spec->controls[i].name);
+  }
+  free(spec->controls);
+  spec->controls = NULL;
+  spec->n_controls = 0;
   for (int i = 0; i < spec->n_import_roots; i++)
     poly_uop_release(spec->ctx, spec->import_roots[i]);
   free(spec->import_roots);

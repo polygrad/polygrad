@@ -1,6 +1,7 @@
 'use strict'
 
-const { PolyAsyncRequired } = require('./errors')
+const { PolyAsyncRequired } = require('../errors')
+const { createBoundTransformerClass } = require('./transformer')
 
 function normalizeSpec(spec) {
   if (typeof spec === 'string') return spec
@@ -8,7 +9,7 @@ function normalizeSpec(spec) {
   throw new TypeError('polygrad: model spec must be an object or JSON string')
 }
 
-function buildModel(runtime, family, spec, async = false) {
+function buildModel(runtime, family, spec, async = false, specialize = true) {
   if (runtime._closing || !runtime._core) throw new Error('polygrad runtime has been disposed')
   if (runtime._activeAsync > 0) throw new Error('Model construction requires an idle Runtime')
   const api = runtime._core.model
@@ -20,7 +21,13 @@ function buildModel(runtime, family, spec, async = false) {
     throw new PolyAsyncRequired('Model construction', `models.${family || 'Graph'}Async()`)
   const wrap = handle => {
     if (!handle) throw new Error('polygrad: Model construction failed')
-    return runtime.Model._fromHandle(handle)
+    const model = runtime.Model._fromHandle(handle)
+    if (specialize && runtime._core.transformer.available(handle)) {
+      // Native adoption only inspects metadata; it cannot suspend or execute.
+      try { return runtime.models.Transformer._adoptBuilt(model) }
+      catch (error) { model.dispose(); throw error }
+    }
+    return model
   }
   if (async && runtime._usesAsyncHostBridge()) {
     // Register ownership before releasing async admission.
@@ -48,6 +55,7 @@ function createBoundModels(runtime) {
       result[name + 'Async'] = async () => reject()
     }
   }
+  result.Transformer = createBoundTransformerClass(runtime)
   result.list = () => types.map(type => ({ ...type }))
   return result
 }

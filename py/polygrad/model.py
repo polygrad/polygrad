@@ -8,6 +8,7 @@ architecture factories live in ``polygrad.models``.
 import ctypes
 import ctypes.util
 import math
+import operator
 import pathlib
 import inspect
 import weakref
@@ -275,7 +276,11 @@ def _entrypoint_spec(name, inputs, outputs, objective=None, flags=0, keepalive=N
     )
 
 
-def _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
+def _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive, control_rows=()):
+    declarations = dict(control_rows)
+    for entry in entry_rows:
+        if entry.objective and declarations.get(entry.name.decode()):
+            raise ValueError('Model training does not support integer controls')
     bindings = (_ffi.PolyBindingSpec * len(binding_rows))(*binding_rows)
     entries = (_ffi.PolyEntrypointSpec * len(entry_rows))(*entry_rows)
     keepalive.extend([bindings, entries])
@@ -294,7 +299,17 @@ def _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
         func = err.func.decode('utf-8', 'replace') if err.func else 'poly_model_from_bindings'
         detail = f'{func}: {msg}' if msg else func
         raise RuntimeError(f'poly_model_from_bindings failed: {detail}')
-    return Model._from_handle(ptr, ctx)
+    inst = Model._from_handle(ptr, ctx)
+    try:
+        for entrypoint, controls in control_rows:
+            for name, variable in controls.items():
+                uop = variable.uop if hasattr(variable, 'uop') else variable
+                if _ffi._lib.poly_model_control(ptr, _name_bytes(entrypoint), _name_bytes(name), uop.raw) != 0:
+                    raise ValueError(str(inst._error(f'invalid Model control {name!r} on {entrypoint!r}')))
+    except Exception:
+        inst.dispose()
+        raise
+    return inst
 
 
 class Model:
@@ -306,26 +321,26 @@ class Model:
 
     def __init__(self, source=None, *, inputs=None, targets=None,
                  outputs=None, entrypoints=None, params=None, losses=None,
-                 loss=None, modules=None, runtime=None):
+                 loss=None, modules=None, runtime=None, controls=None):
         self._ptr = self._ctx = None
         if inspect.isclass(source):
             raise TypeError('Model expects an object, not a class; instantiate it first')
         if isinstance(source, dict):
-            if any(v is not None for v in (inputs, targets, outputs, entrypoints, params, losses, loss, modules)):
+            if any(v is not None for v in (inputs, targets, outputs, entrypoints, params, losses, loss, modules, controls)):
                 raise TypeError('Model configuration cannot be combined with Tensor bindings or a callable loss')
             from .models import _build
-            self._adopt(_build(None, source, runtime))
+            self._adopt(_build(None, source, runtime, specialize=False))
             return
         if callable(source):
             if outputs is not None or losses is not None or modules is not None:
                 raise TypeError('Callable Model cannot be combined with prebuilt outputs, losses or modules')
             built = Model.from_callable(source, inputs=inputs, targets=targets, loss=loss,
-                                        params=params, entrypoints=entrypoints, runtime=runtime)
+                                        params=params, entrypoints=entrypoints, runtime=runtime, controls=controls)
             self._adopt(built)
             return
         if loss is not None:
             raise TypeError('loss requires a callable Model source; use losses for prebuilt tensors')
-        spec_args = (inputs, targets, outputs, entrypoints, params, losses, modules)
+        spec_args = (inputs, targets, outputs, entrypoints, params, losses, modules, controls)
         has_spec = any(v is not None for v in spec_args)
         if has_spec:
             if source is not None:
@@ -339,6 +354,7 @@ class Model:
                 entrypoints=entrypoints,
                 modules=modules,
                 runtime=runtime,
+                controls=controls,
             )
             self._adopt(built)
             return
@@ -466,11 +482,12 @@ class Model:
             keepalive.append(name_b)
             binding_rows.append(_ffi.PolyBindingSpec(name_b, role, tensor._tensor, flags))
 
-        entry_rows = []
+        entry_rows, control_rows = [], []
         for entry in entrypoints:
             name, inputs, outputs, objective, flags = _entry_fields(entry)
             if name is None:
                 raise ValueError('Model entrypoint is missing a name')
+            control_rows.append((name, entry.get('controls', {}) if isinstance(entry, dict) else {}))
             entry_rows.append(_entrypoint_spec(
                 name,
                 _entry_name_list(inputs),
@@ -480,7 +497,7 @@ class Model:
                 keepalive=keepalive,
             ))
 
-        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive, control_rows)
         if modules is not None:
             try:
                 inst.define_modules(modules)
@@ -491,7 +508,7 @@ class Model:
 
     @staticmethod
     def from_callable(fn, *, inputs, targets=None, loss=None, params=None,
-                      entrypoints=None, runtime=None):
+                      entrypoints=None, runtime=None, controls=None):
         """Capture ``fn(**inputs)`` and seal its Tensor outputs.
 
         ``loss(result, **targets)`` returns a Tensor or a named loss dictionary.
@@ -512,6 +529,13 @@ class Model:
                 raise TypeError('Model author and loss must be synchronous')
         from .tensor import _ptr_value
         inputs = dict(inputs or {})
+        controls = dict(controls or {})
+        if loss is not None and controls:
+            raise ValueError('Model training does not support integer controls')
+        controls = {name: value.uop if hasattr(value, 'uop') else value
+                    for name, value in controls.items()}
+        if inputs.keys() & controls.keys():
+            raise ValueError('Model input and control names overlap')
         targets = dict(targets or {})
         collect_object = params is None and not inspect.isroutine(fn)
         if params is None:
@@ -544,7 +568,7 @@ class Model:
             result, losses, initial_params = None, None, None
             for training in ([False, True] if loss is not None else [bool(mode)]):
                 TRAINING.value = int(training)
-                produced = _synchronous_result(fn(**inputs))
+                produced = _synchronous_result(fn(**inputs, **controls))
                 values = _normalize_named_tensors(
                     _synchronous_result(loss(produced, **targets)) if training and loss is not None else produced,
                     'loss' if training and loss is not None else 'output')
@@ -604,7 +628,8 @@ class Model:
             lib.poly_ctx_set_logical_policy(ctx, policy)
         try:
             return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
-                                      losses=losses, params={**params, **rng}, entrypoints=entrypoints)
+                                      losses=losses, params={**params, **rng}, entrypoints=entrypoints,
+                                      controls=controls)
         finally:
             for tensor in owned: tensor.dispose()
 
@@ -619,6 +644,7 @@ class Model:
         entrypoints=None,
         modules=None,
         runtime=None,
+        controls=None,
     ):
         """Package named Tensor roots as a runnable/exportable Model."""
         from .tensor import _ptr_value
@@ -664,12 +690,14 @@ class Model:
         for name, tensor in losses.items():
             add_binding(name, ROLE_OUTPUT, tensor)
 
-        entry_rows = []
+        entry_rows, control_rows = [], []
         if entrypoints is not None:
             for entry in entrypoints:
                 name, entry_inputs, entry_outputs, objective, flags = _entry_fields(entry)
                 if name is None:
                     raise ValueError('Model entrypoint is missing a name')
+                control_rows.append((name, entry.get('controls', controls or {})
+                                     if isinstance(entry, dict) else controls or {}))
                 entry_rows.append(_entrypoint_spec(
                     name,
                     _entry_name_list(entry_inputs),
@@ -690,7 +718,9 @@ class Model:
                     objective=objective, keepalive=keepalive
                 ))
 
-        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
+        if entrypoints is None:
+            control_rows = [(row.name.decode(), controls or {}) for row in entry_rows]
+        inst = _model_from_binding_specs(ctx, binding_rows, entry_rows, keepalive, control_rows)
         if modules is not None:
             try:
                 inst.define_modules(modules)
@@ -1079,6 +1109,11 @@ class Model:
         if ret != 0:
             raise RuntimeError(f'set_optimizer failed (ret={ret})')
 
+    def reset_transient(self):
+        """Zero declared transient state without changing parameters or ordinary AUX."""
+        if _get_lib().poly_model_reset_transient(self._ptr) != 0:
+            raise self._error('reset of transient Model state failed')
+
     def forward(self, **inputs):
         """Run forward pass. Pass input arrays as keyword args (name=array).
 
@@ -1091,7 +1126,7 @@ class Model:
         message = error.contents.message.decode('utf-8', 'replace').strip() if error else ''
         return RuntimeError(message or fallback)
 
-    def call(self, entrypoint, inputs=None, **kwargs):
+    def call(self, entrypoint, inputs=None, *, controls=None, **kwargs):
         """Run an entrypoint. Tensor inputs select owned, device-resident Tensor outputs.
 
         Results are eager snapshots, not differentiable calls through the Model.
@@ -1102,6 +1137,13 @@ class Model:
             raise TypeError('Model.call accepts either an input mapping or keyword inputs')
         io = dict(inputs or kwargs)
         bindings, n = self._make_bindings(io)
+        control_rows = []
+        for name, value in (controls or {}).items():
+            value = operator.index(value)
+            if not -(1 << 63) <= value < (1 << 63):
+                raise OverflowError(f'control {name!r} is not representable as int64')
+            control_rows.append(_ffi.PolyControlBinding(_name_bytes(name), value))
+        control_array = (_ffi.PolyControlBinding * len(control_rows))(*control_rows)
         from .tensor import Tensor
         if any(isinstance(value, Tensor) for value in io.values()):
             lib = _get_lib()
@@ -1109,7 +1151,8 @@ class Model:
             count = lib.poly_model_entrypoint_output_count(self._ptr, ep)
             if count < 0: raise ValueError(f"unknown entrypoint: {entrypoint}")
             handles = (_ffi._ptr * count)()
-            if lib.poly_model_call_tensors(self._ptr, ep, bindings, n, handles, count) != 0:
+            if lib.poly_model_call_tensors_with_controls(self._ptr, ep, bindings, n,
+                    control_array, len(control_rows), handles, count) != 0:
                 raise self._error(f"Tensor call('{entrypoint}') failed")
             result = {}
             try:
@@ -1122,8 +1165,8 @@ class Model:
                 for handle in handles:
                     if handle: lib.poly_tensor_release(handle)
             return result
-        ret = _get_lib().poly_model_call(
-            self._ptr, str(entrypoint).encode('utf-8'), bindings, n)
+        ret = _get_lib().poly_model_call_with_controls(
+            self._ptr, str(entrypoint).encode('utf-8'), bindings, n, control_array, len(control_rows))
         if ret != 0:
             raise self._error(f"call('{entrypoint}') failed")
         return self._collect_outputs(str(entrypoint))

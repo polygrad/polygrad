@@ -71,6 +71,7 @@
         "csrc/src/models/distilgpt2.c",
         "csrc/src/models/qwen3.c",
         "csrc/src/models/llama.c",
+        "csrc/src/models/transformer.c",
         "csrc/src/models/vision.c",
         "csrc/src/models/clip.c",
         "csrc/src/models/vit.c",

@@ -47,6 +47,8 @@ function testNodeCjsRoot() {
     const rt = pg.create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
     if (pg.Model.fromDefinition || typeof pg.models.Graph !== 'function') throw new Error('incorrect factory namespace')
+    if (!(rt.models.Transformer.prototype instanceof rt.Model)) throw new Error('missing Transformer subclass')
+    if ('appendTokens' in rt.Model.prototype) throw new Error('generic Model exposes generation')
     const model = rt.models.Sequential({input:{name:'x',shape:[1],dtype:'float32'},layers:[{name:'copy',type:'identity'}],output:'prediction'})
     if (model.forward({x:new Float32Array([7])}).prediction[0] !== 7) throw new Error('packaged Sequential failed')
     model.dispose()

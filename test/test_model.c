@@ -25,8 +25,106 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include "../src/models/transformer.h"
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
+
+TEST(model, decoder_rejects_before_writes_and_invalidates_partial_execution) {
+  const char *json =
+      "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":1,"
+      "\"num_hidden_layers\":1,\"vocab_size\":3,\"cache_capacity\":4,\"prefill_chunk_size\":2}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *m =
+      poly_model_from_config(ctx, "llama", json, (int)strlen(json), POLY_DEVICE_INTERP, NULL);
+  ASSERT_NOT_NULL(m);
+  PolyTransformer *g = poly_transformer_from_model(m, NULL);
+  ASSERT_NOT_NULL(g);
+  for (int i = 0; i < poly_model_buf_count(m); i++) {
+    if (poly_model_buf_role(m, i) != POLY_ROLE_PARAM) continue;
+    size_t bytes = poly_model_buf_nbytes(m, i);
+    float *data = malloc(bytes);
+    ASSERT_NOT_NULL(data);
+    for (size_t j = 0; j < bytes / sizeof(float); j++)
+      data[j] = 0.125f;
+    ASSERT_EQ(poly_model_write_buf(m, i, data, bytes), 0);
+    free(data);
+  }
+  float out[3], cache[32], before[32];
+  int ir_len = 0;
+  uint8_t *ir = poly_model_export_ir(m, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyIrSpec spec = {0};
+  ASSERT_EQ(poly_ir_import(ir, ir_len, &spec), 0);
+  bool found_sample = false;
+  for (int i = 0; i < spec.n_entrypoints; i++) {
+    if (strcmp(spec.entrypoints[i].name, "sample")) continue;
+    found_sample = true;
+    int n = 0, random = 0, logs = 0, stores = 0;
+    PolyUOp **nodes = poly_uop_toposort_alloc(spec.ctx, spec.entrypoints[i].sink, &n);
+    ASSERT_NOT_NULL(nodes);
+    for (int j = 0; j < n; j++) {
+      random += nodes[j]->op == POLY_OP_THREEFRY;
+      logs += nodes[j]->op == POLY_OP_LOG2;
+      stores += nodes[j]->op == POLY_OP_STORE;
+    }
+    poly_uop_toposort_free(nodes);
+    /* Pinned Gumbel-max needs both logarithms, graph RNG and its state write. */
+    ASSERT_TRUE(random > 0 && logs >= 2 && stores >= 2);
+  }
+  ASSERT_TRUE(found_sample);
+  PolyCtx *import_ctx = spec.ctx;
+  poly_ir_spec_free(&spec);
+  poly_ctx_destroy(import_ctx);
+  free(ir);
+  int32_t tokens[] = {0, 1, 2}, bad[] = {1, 3};
+  ASSERT_EQ(poly_transformer_append(g, tokens, 2, out, 3), 0);
+  ASSERT_EQ(poly_transformer_position(g), 2);
+  PolyIOBinding input = POLY_IO_BINDING_BYTES("tokens_decode", tokens, sizeof(int32_t), POLY_INT32);
+  PolyControlBinding invalid = {"start_pos", 4};
+  ASSERT_TRUE(poly_model_call_with_controls(m, "decode", &input, 1, &invalid, 1) != 0);
+  ASSERT_EQ(poly_transformer_position(g), 2);
+  input.name = "tokens";
+  ASSERT_EQ(poly_model_call(m, "forward", &input, 1), 0);
+  ASSERT_EQ(poly_transformer_position(g), 2);
+  ASSERT_EQ(poly_model_read_buf_named(m, "model.layers.0.cache_kv", before, sizeof(before)), 0);
+  ASSERT_TRUE(poly_transformer_append(g, bad, 2, out, 3) != 0);
+  ASSERT_EQ(poly_transformer_position(g), 2);
+  ASSERT_EQ(poly_model_read_buf_named(m, "model.layers.0.cache_kv", cache, sizeof(cache)), 0);
+  ASSERT_EQ(memcmp(cache, before, sizeof(cache)), 0);
+  ASSERT_EQ(poly_model_reset_transient(m), 0);
+  poly_transformer_test_fail_after(g, 1);
+  ASSERT_TRUE(poly_transformer_append(g, tokens, 3, out, 3) != 0);
+  ASSERT_EQ(poly_transformer_position(g), -1);
+  ASSERT_EQ(poly_model_read_buf_named(m, "model.layers.0.cache_kv", cache, sizeof(cache)), 0);
+  ASSERT_TRUE(cache[0] != 0); /* A real prefix write preceded the injected failure. */
+  ASSERT_TRUE(poly_transformer_append(g, tokens, 1, out, 3) != 0);
+  ASSERT_EQ(poly_model_reset_transient(m), 0);
+  ASSERT_EQ(poly_transformer_position(g), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "model.layers.0.cache_kv", cache, sizeof(cache)), 0);
+  for (int i = 0; i < 32; i++)
+    ASSERT_FLOAT_EQ(cache[i], 0, 0);
+  ASSERT_EQ(poly_transformer_append(g, tokens, 3, out, 3), 0);
+  ASSERT_EQ(poly_transformer_position(g), 3);
+  input.name = "tokens_decode";
+  PolyControlBinding valid = {"start_pos", 0};
+  ASSERT_EQ(poly_model_call_with_controls(m, "decode", &input, 1, &valid, 1), 0);
+  ASSERT_EQ(poly_transformer_position(g), -1);
+  ASSERT_EQ(poly_transformer_reset(g), 0);
+  ASSERT_EQ(poly_transformer_start(g, tokens, 2), 0);
+  int32_t next = -1;
+  ASSERT_TRUE(poly_transformer_next(g, -1, &next) != 0);
+  ASSERT_EQ(poly_transformer_position(g), 2);
+  ASSERT_EQ(poly_transformer_next(g, 0, &next), 0);
+  ASSERT_TRUE(next >= 0 && next < 3);
+  poly_transformer_test_fail_after(g, 1);
+  ASSERT_TRUE(poly_transformer_next(g, 0, &next) != 0);
+  ASSERT_EQ(poly_transformer_position(g), -1);
+  ASSERT_EQ(poly_transformer_reset(g), 0);
+  ASSERT_EQ(poly_transformer_position(g), 0);
+  poly_transformer_free(g);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(model, portable_factory_allocates_only_active_binding_storage) {
   PolyCtx *ctx = poly_ctx_new();
@@ -145,6 +243,108 @@ TEST(model, capture_rejects_execution_and_undeclared_writes) {
   poly_tensor_release(one);
   poly_tensor_release(state);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, integer_controls_validate_before_writes_and_survive_import) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *m = poly_model_new(ctx, NULL);
+  PolyUOp *p =
+      poly_uop_variable(ctx, "position", poly_arg_int(0), poly_arg_int(6), POLY_WEAKINT, 2, false);
+  PolyTensor *x = poly_model_input(m, "x", POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyTensor *position =
+      poly_tensor_create_with_roots(ctx, p, p, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+  PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_ADD, x, position);
+  ASSERT_NOT_NULL(y);
+  ASSERT_EQ(poly_model_output(m, "y", y), POLY_STATUS_OK);
+  ASSERT_EQ(
+      poly_model_entrypoint(m, "forward", (const char *[]){"x"}, 1, (const char *[]){"y"}, 1, NULL),
+      POLY_STATUS_OK
+  );
+  ASSERT_EQ(poly_model_control(m, "forward", "start", p), POLY_STATUS_OK);
+  ASSERT_EQ(poly_model_control(m, "forward", "start", p), POLY_STATUS_INVALID);
+  ASSERT_EQ(poly_model_build(m, NULL), POLY_STATUS_OK);
+  int program_len = 123;
+  ASSERT_TRUE(poly_model_export_program(m, &program_len) == NULL);
+  ASSERT_EQ(program_len, 0);
+  PolyUOp *unused =
+      poly_uop_variable(ctx, "unused", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false);
+  ASSERT_EQ(poly_model_control(m, "forward", "unused", unused), POLY_STATUS_INVALID);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not used") != NULL);
+  float input[] = {3}, output[1];
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", input, POLY_FLOAT32);
+  PolyControlBinding c[] = {{"start", 4}, {"start", 4}};
+  float loss = 123;
+  ASSERT_TRUE(poly_model_train_step(m, "forward", &io, 1, &loss) != 0);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "training") != NULL);
+  ASSERT_TRUE(poly_model_value_and_grad(m, "forward", &io, 1, &loss) != 0);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "training") != NULL);
+  ASSERT_FLOAT_EQ(loss, 123, 0);
+  ASSERT_EQ(poly_model_call_with_controls(m, "forward", &io, 1, c, 1), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "y", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 7, 0);
+  input[0] = 99;
+  ASSERT_TRUE(poly_model_call_with_controls(m, "forward", &io, 1, c, 2) != 0);
+  ASSERT_TRUE(poly_model_call(m, "forward", &io, 1) != 0);
+  c[0].value = 3; /* The variable also declares divisibility, not just a range. */
+  ASSERT_TRUE(poly_model_call_with_controls(m, "forward", &io, 1, c, 1) != 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "x", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 3, 0);
+  int ir_len = 0;
+  uint8_t *ir = poly_model_export_ir(m, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  /* The new table is last. Every partial row must release import ownership
+   * without touching this live Model or its runtime. */
+  for (int cut = ir_len - 16; cut < ir_len; cut++) {
+    PolyIrSpec partial = {0};
+    ASSERT_EQ(poly_ir_import_into(ctx, ir, cut, &partial), -1);
+    ASSERT_EQ(partial.import_roots, NULL);
+  }
+  PolyModel *loaded = poly_model_from_ir_into(ctx, ir, ir_len, NULL, 0, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(loaded);
+  c[0].value = 6;
+  ASSERT_EQ(poly_model_call_with_controls(loaded, "forward", &io, 1, c, 1), 0);
+  ASSERT_EQ(poly_model_read_buf_named(loaded, "y", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 105, 0);
+  poly_model_free(loaded);
+  free(ir);
+  poly_model_free(m);
+  poly_tensor_release(y);
+  poly_tensor_release(position);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, staged_controls_reject_unused_and_objective_declarations) {
+  for (int objective = 0; objective < 2; objective++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+    PolyModel *m = poly_model_new(ctx, NULL);
+    PolyTensor *x = poly_model_input(m, "x", POLY_FLOAT32, (int64_t[]){1}, 1);
+    PolyUOp *p =
+        poly_uop_variable(ctx, "p", poly_arg_int(0), poly_arg_int(3), POLY_WEAKINT, 1, false);
+    PolyTensor *position =
+        poly_tensor_create_with_roots(ctx, p, p, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+    PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_ADD, x, objective ? position : x);
+    ASSERT_EQ(poly_model_output(m, "y", y), POLY_STATUS_OK);
+    PolyEntrypointOptions opts = {.objective = objective ? "y" : NULL};
+    ASSERT_EQ(
+        poly_model_entrypoint(
+            m, "forward", (const char *[]){"x"}, 1, (const char *[]){"y"}, 1, &opts
+        ),
+        POLY_STATUS_OK
+    );
+    ASSERT_EQ(poly_model_control(m, "forward", "pos", p), POLY_STATUS_OK);
+    PolyModelError err = {0};
+    ASSERT_EQ(poly_model_build(m, &err), POLY_STATUS_INVALID);
+    ASSERT_TRUE(strstr(err.message, objective ? "training" : "not used") != NULL);
+    poly_tensor_release(y);
+    poly_tensor_release(position);
+    poly_model_free(m);
+    poly_ctx_destroy(ctx);
+  }
   PASS();
 }
 

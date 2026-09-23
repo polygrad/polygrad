@@ -1,6 +1,129 @@
 #include "test_harness.h"
 #include "../src/models/models.h"
 #include "../src/models/registry.h"
+#include "../src/models/factory.h"
+#include "../src/models/transformer.h"
+
+/* Same dense block with Qwen's per-head norms and head_dim != dim/heads.
+ * The shared builder must not inherit Llama's narrower head-width assumption. */
+TEST(llama, shared_dense_qk_norm_cached_and_uncached) {
+  /* Pinned llm/model.py TransformerBlock, same weights as below, FP32 cache
+   * explicitly selected and output tied to token_embd. Last-position logits
+   * also agree with the Python Polygrad Transformer (dense_reference.py probe). */
+  const float reference[2][11] = {
+      {.4031510353f, -.1170670763f, .3597702086f, -.1842437834f, .3163893521f, .0629191995f,
+       .2730085552f, -.4285599291f, .2296277434f, -.4448931813f, .1862469465f},
+      {.3968558013f, -.1096408293f, .3542748690f, -.1700790524f, .3116938770f, .0751177371f,
+       .2691128850f, -.4423021674f, .2265319228f, -.4519312382f, .1839509606f}};
+  const ModelTransformerNames names = {
+      .label = "dense test",
+      .input = "x",
+      .output = "output",
+      .cos = "rope_cos",
+      .sin = "rope_sin",
+      .embedding = "token_embd",
+      .norm = "output_norm",
+      .block = "blk.%d",
+      .attn_norm = "attn_norm",
+      .qkv = {"attn_q", "attn_k", "attn_v"},
+      .qk_norm = {"attn_q_norm", "attn_k_norm"},
+      .out = "attn_output",
+      .ffn_norm = "ffn_norm",
+      .gate = "ffn_gate",
+      .up = "ffn_up",
+      .down = "ffn_down"};
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  for (int normalized = 0; normalized < 2; normalized++) {
+    Qwen3Config q = poly_qwen3_config_default();
+    q.vocab_size = 11;
+    q.dim = 12;
+    q.n_heads = 2;
+    q.n_kv_heads = 1;
+    q.n_layers = 2;
+    q.hidden_dim = 16;
+    q.head_dim = 4;
+    q.max_seq_len = 3;
+    q.qk_norm = normalized ? 4 : 0;
+    PolyModel *plain = poly_qwen3_into(ctx, &q, POLY_DEVICE_INTERP);
+    ASSERT_NOT_NULL(plain);
+    ModelTransformerConfig c = {
+        .dim = q.dim,
+        .hidden_dim = q.hidden_dim,
+        .heads = q.n_heads,
+        .kv_heads = q.n_kv_heads,
+        .layers = q.n_layers,
+        .vocab = q.vocab_size,
+        .batch = 1,
+        .length = q.max_seq_len,
+        .head_dim = q.head_dim,
+        .qk_norm = q.qk_norm,
+        .cache_capacity = 5,
+        .prefill_chunk = 4,
+        .eps = q.norm_eps,
+        .theta = q.rope_theta,
+        .factor = 1,
+        .tied = true,
+        .materialize_intermediates = true};
+    PolyModelFactoryScope scope;
+    ASSERT_TRUE(model_factory_begin(&scope, ctx, POLY_DEVICE_INTERP));
+    PolyModelError err = {0};
+    PolyModel *cached = model_factory_end(&scope, model_transformer_build(ctx, &c, &names, &err));
+    if (!cached) {
+      poly_model_free(plain);
+      poly_ctx_destroy(ctx);
+      FAIL("shared cached construction: %s", err.message);
+    }
+    ASSERT_EQ(poly_model_param_count(plain), poly_model_param_count(cached));
+    for (int i = 0; i < poly_model_buf_count(plain); i++) {
+      if (poly_model_buf_role(plain, i) != POLY_ROLE_PARAM) continue;
+      const char *name = poly_model_buf_name(plain, i);
+      int64_t n = poly_model_buf_numel_named(plain, name);
+      float *data = malloc((size_t)n * sizeof(*data));
+      ASSERT_NOT_NULL(data);
+      for (int64_t j = 0; j < n; j++)
+        data[j] = (strstr(name, "norm") ? 1.f : 0.f) + (float)(j % 23 - 11) * .017f;
+      ASSERT_EQ(poly_model_write_buf_named(plain, name, data, (size_t)n * sizeof(*data)), 0);
+      ASSERT_EQ(poly_model_write_buf_named(cached, name, data, (size_t)n * sizeof(*data)), 0);
+      free(data);
+    }
+    PolyTransformer *g = poly_transformer_from_model(cached, NULL);
+    ASSERT_NOT_NULL(g);
+    int32_t tokens[] = {1, 4, 2};
+    PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", tokens, POLY_INT32);
+    ASSERT_EQ(poly_model_call(plain, "forward", &io, 1), 0);
+    float expected[33], actual[11];
+    ASSERT_EQ(poly_model_read_buf_named(plain, "output", expected, sizeof(expected)), 0);
+    for (int j = 0; j < 11; j++)
+      ASSERT_FLOAT_EQ(expected[22 + j], reference[normalized][j], 3e-5);
+    for (int partition = 0; partition < 3; partition++) {
+      ASSERT_EQ(poly_model_reset_transient(cached), 0);
+      for (int pos = 0; pos < 3;) {
+        int count = partition == 0 && pos == 0 ? 2 : partition == 2 ? 3 : 1;
+        ASSERT_EQ(poly_transformer_append(g, tokens + pos, count, actual, 11), 0);
+        pos += count;
+        ASSERT_EQ(poly_transformer_position(g), pos);
+        for (int j = 0; j < 11; j++)
+          ASSERT_FLOAT_EQ(actual[j], expected[(pos - 1) * 11 + j], 3e-5);
+      }
+    }
+    /* Both bindings fit independently. Reject their combined write window
+     * before invalidating the completed prefix or touching cache storage. */
+    PolyIOBinding invalid = POLY_IO_BINDING_ARRAY("tokens_prefill", tokens, POLY_INT32);
+    PolyControlBinding control = {"start_pos", 3};
+    float before[40], after[40];
+    ASSERT_EQ(poly_model_read_buf_named(cached, "blk.0.cache_kv", before, sizeof(before)), 0);
+    ASSERT_TRUE(poly_model_call_with_controls(cached, "prefill", &invalid, 1, &control, 1) != 0);
+    ASSERT_EQ(poly_transformer_position(g), 3);
+    ASSERT_EQ(poly_model_read_buf_named(cached, "blk.0.cache_kv", after, sizeof(after)), 0);
+    ASSERT_EQ(memcmp(before, after, sizeof(before)), 0);
+    poly_transformer_free(g);
+    poly_model_free(plain);
+    poly_ctx_collect(ctx);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 /* Shared deterministic oracle, generated by test/generate_llama_fixture.py. */
 static cJSON *llama_fixture(void) {

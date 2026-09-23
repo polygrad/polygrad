@@ -18,6 +18,7 @@
 #include "nn/nn.h"
 #include "nn/optim.h"
 #include "model.h"
+#include "models/transformer.h"
 #include "tokenizer.h"
 #include "loaders/hf_decode.h"
 #include "loaders/gguf_decode.h"
@@ -31,6 +32,7 @@ static bool napi_is_nullish(napi_env env, napi_value value);
 #include "models/models.h"
 #include "engine/schedule.h"
 #include "engine/realize.h"
+#include <limits.h>
 
 /* ── Error-checking macro ──────────────────────────────────────────────── */
 
@@ -6173,9 +6175,175 @@ static napi_value napi_poly_model_forward(napi_env env, napi_callback_info info)
   return result;
 }
 
+static napi_value napi_poly_model_reset_transient(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int rc = poly_model_reset_transient(get_external(env, argv[0]));
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_transformer_from_model(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyModelError error = {0};
+  PolyTransformer *t = poly_transformer_from_model(get_external(env, argv[0]), &error);
+  if (!t) {
+    napi_throw_error(env, NULL, error.message);
+    return NULL;
+  }
+  return make_external(env, t);
+}
+static napi_value napi_poly_transformer_available(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env, napi_get_boolean(env, poly_transformer_available(get_external(env, argv[0])), &result)
+  );
+  return result;
+}
+static napi_value napi_poly_transformer_last_error(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  const PolyModelError *error = poly_transformer_last_error(get_external(env, argv[0]));
+  NAPI_CALL(
+      env, napi_create_string_utf8(env, error ? error->message : "", NAPI_AUTO_LENGTH, &result)
+  );
+  return result;
+}
+static napi_value napi_poly_transformer_free(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  poly_transformer_free(get_external(env, argv[0]));
+  NAPI_CALL(env, napi_get_undefined(env, &result));
+  return result;
+}
+
+static napi_value napi_poly_transformer_position(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env, napi_create_int32(env, poly_transformer_position(get_external(env, argv[0])), &result)
+  );
+  return result;
+}
+
+static napi_value napi_poly_transformer_vocab(napi_env env, napi_callback_info info) {
+  napi_value argv[1], result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env, napi_create_int32(env, poly_transformer_vocab(get_external(env, argv[0])), &result)
+  );
+  return result;
+}
+
+static napi_value napi_poly_transformer_rewind(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  int32_t position;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &position));
+  int rc = poly_transformer_rewind(get_external(env, argv[0]), position);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_model_decode_tokens(napi_env env, napi_callback_info info, bool reuse) {
+  napi_value argv[3], arraybuf, result;
+  size_t argc = 3, count, n_logits, offset;
+  void *tokens, *logits;
+  napi_typedarray_type input_type, output_type;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env, napi_get_typedarray_info(env, argv[1], &input_type, &count, &tokens, &arraybuf, &offset)
+  );
+  NAPI_CALL(
+      env,
+      napi_get_typedarray_info(env, argv[2], &output_type, &n_logits, &logits, &arraybuf, &offset)
+  );
+  if (input_type != napi_int32_array || output_type != napi_float32_array || count > INT_MAX ||
+      n_logits > INT_MAX) {
+    napi_throw_type_error(env, NULL, "decoder requires int32 tokens and float32 logits");
+    return NULL;
+  }
+  int rc =
+      (reuse ? poly_transformer_prefill : poly_transformer_append
+      )(get_external(env, argv[0]), tokens, (int)count, logits, (int)n_logits);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_transformer_append(napi_env env, napi_callback_info info) {
+  return napi_model_decode_tokens(env, info, false);
+}
+
+static napi_value napi_poly_transformer_prefill(napi_env env, napi_callback_info info) {
+  return napi_model_decode_tokens(env, info, true);
+}
+
+static napi_value napi_poly_transformer_start(napi_env env, napi_callback_info info) {
+  napi_value argv[2], arraybuf, result;
+  size_t argc = 2, count, offset;
+  void *tokens;
+  napi_typedarray_type type;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(
+      env, napi_get_typedarray_info(env, argv[1], &type, &count, &tokens, &arraybuf, &offset)
+  );
+  if (type != napi_int32_array || count > INT_MAX) {
+    napi_throw_type_error(env, NULL, "Transformer requires int32 tokens");
+    return NULL;
+  }
+  int rc = poly_transformer_start(get_external(env, argv[0]), tokens, (int)count);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_transformer_next(napi_env env, napi_callback_info info) {
+  napi_value argv[3], arraybuf, result;
+  size_t argc = 3, count, offset;
+  void *token;
+  double temperature;
+  napi_typedarray_type type;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_double(env, argv[1], &temperature));
+  NAPI_CALL(env, napi_get_typedarray_info(env, argv[2], &type, &count, &token, &arraybuf, &offset));
+  if (type != napi_int32_array || count != 1) {
+    napi_throw_type_error(env, NULL, "Transformer requires an int32 token output");
+    return NULL;
+  }
+  int rc = poly_transformer_next(get_external(env, argv[0]), (float)temperature, token);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_model_control(napi_env env, napi_callback_info info) {
+  napi_value argv[4], result;
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char *entrypoint = read_utf8_arg(env, argv[1], NULL);
+  char *name = read_utf8_arg(env, argv[2], NULL);
+  int rc = entrypoint && name
+               ? poly_model_control(
+                     get_external(env, argv[0]), entrypoint, name, get_external(env, argv[3])
+                 )
+               : POLY_STATUS_INVALID;
+  free(entrypoint);
+  free(name);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
 static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
+  napi_value argv[6];
+  size_t argc = 6;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyModel *inst = get_external(env, argv[0]);
   char *entrypoint = read_utf8_arg(env, argv[1], NULL);
@@ -6191,13 +6359,39 @@ static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
 
   bool tensor_outputs = false;
   if (argc > 4) napi_get_value_bool(env, argv[4], &tensor_outputs);
+  uint32_t n_controls = 0;
+  if (argc > 5 && napi_get_array_length(env, argv[5], &n_controls) != napi_ok) goto bad_controls;
+  PolyControlBinding *controls = n_controls ? calloc(n_controls, sizeof(*controls)) : NULL;
+  if (n_controls && !controls) goto bad_controls;
+  bool controls_ok = true;
+  for (uint32_t i = 0; controls_ok && i < n_controls; i++) {
+    napi_value row, name, value;
+    bool lossless = false;
+    controls_ok = napi_get_element(env, argv[5], i, &row) == napi_ok &&
+                  napi_get_element(env, row, 0, &name) == napi_ok &&
+                  napi_get_element(env, row, 1, &value) == napi_ok;
+    if (controls_ok) {
+      controls[i].name = read_utf8_arg(env, name, NULL);
+      controls_ok =
+          controls[i].name &&
+          napi_get_value_bigint_int64(env, value, &controls[i].value, &lossless) == napi_ok &&
+          lossless;
+    }
+  }
   int count = tensor_outputs ? poly_model_entrypoint_output_count(inst, entrypoint) : 0;
   PolyTensor **outputs =
       tensor_outputs && count >= 0 ? calloc((size_t)(count ? count : 1), sizeof(*outputs)) : NULL;
   int rc =
-      tensor_outputs
-          ? (outputs ? poly_model_call_tensors(inst, entrypoint, bindings, n, outputs, count) : -1)
-          : poly_model_call(inst, entrypoint, bindings, n);
+      !controls_ok ? -1
+      : tensor_outputs
+          ? (outputs ? poly_model_call_tensors_with_controls(
+                           inst, entrypoint, bindings, n, controls, (int)n_controls, outputs, count
+                       )
+                     : -1)
+          : poly_model_call_with_controls(inst, entrypoint, bindings, n, controls, (int)n_controls);
+  for (uint32_t i = 0; i < n_controls; i++)
+    free((char *)controls[i].name);
+  free(controls);
   free_io_bindings(names, bindings, n);
   free(entrypoint);
 
@@ -6226,6 +6420,11 @@ static napi_value napi_poly_model_call(napi_env env, napi_callback_info info) {
   }
   NAPI_CALL(env, napi_create_int32(env, rc, &result));
   return result;
+bad_controls:
+  free_io_bindings(names, bindings, n);
+  free(entrypoint);
+  napi_throw_type_error(env, NULL, "invalid Model controls");
+  return NULL;
 }
 
 static napi_value napi_poly_model_entrypoints(napi_env env, napi_callback_info info) {
@@ -7544,6 +7743,19 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_set_optimizer", napi_poly_model_set_optimizer),
       DECLARE_NAPI_METHOD("poly_model_forward", napi_poly_model_forward),
       DECLARE_NAPI_METHOD("poly_model_call", napi_poly_model_call),
+      DECLARE_NAPI_METHOD("poly_model_control", napi_poly_model_control),
+      DECLARE_NAPI_METHOD("poly_model_reset_transient", napi_poly_model_reset_transient),
+      DECLARE_NAPI_METHOD("poly_transformer_from_model", napi_poly_transformer_from_model),
+      DECLARE_NAPI_METHOD("poly_transformer_available", napi_poly_transformer_available),
+      DECLARE_NAPI_METHOD("poly_transformer_last_error", napi_poly_transformer_last_error),
+      DECLARE_NAPI_METHOD("poly_transformer_free", napi_poly_transformer_free),
+      DECLARE_NAPI_METHOD("poly_transformer_position", napi_poly_transformer_position),
+      DECLARE_NAPI_METHOD("poly_transformer_vocab", napi_poly_transformer_vocab),
+      DECLARE_NAPI_METHOD("poly_transformer_append", napi_poly_transformer_append),
+      DECLARE_NAPI_METHOD("poly_transformer_prefill", napi_poly_transformer_prefill),
+      DECLARE_NAPI_METHOD("poly_transformer_start", napi_poly_transformer_start),
+      DECLARE_NAPI_METHOD("poly_transformer_next", napi_poly_transformer_next),
+      DECLARE_NAPI_METHOD("poly_transformer_rewind", napi_poly_transformer_rewind),
       DECLARE_NAPI_METHOD(
           "poly_model_entrypoint_output_count", napi_poly_model_entrypoint_output_count
       ),

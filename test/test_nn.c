@@ -30,6 +30,143 @@ static int nn_param_index(PolyModel *inst, const char *name) {
 
 /* Convenience builder tests */
 
+TEST(nn, cached_attention_requires_storage_target) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *q =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 1, 2}, 4, POLY_DEVICE_INTERP);
+  PolyTensor *cache =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 1, 1, 4, 2}, 5, POLY_DEVICE_INTERP);
+  PolyTensor *computed = poly_tensor_alu2(ctx, POLY_OP_ADD, cache, cache);
+  ASSERT_NOT_NULL(computed);
+  PolyTensor *out = poly_tensor_cached_sdpa(ctx, q, q, q, computed, poly_uop_const_int(ctx, 0));
+  bool rejected = out == NULL;
+  if (out) poly_tensor_release(out);
+  poly_tensor_release(computed);
+  poly_tensor_release(cache);
+  poly_tensor_release(q);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
+TEST(nn, cached_attention_variable_width_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n =
+      poly_uop_variable(ctx, "toks", poly_arg_int(1), poly_arg_int(4), POLY_WEAKINT, 1, false);
+  PolyUOp *p =
+      poly_uop_variable(ctx, "position", poly_arg_int(0), poly_arg_int(5), POLY_WEAKINT, 1, false);
+  PolyUOp *one = poly_uop_const_int(ctx, 1), *two = poly_uop_const_int(ctx, 2);
+  PolyTensor *q = poly_tensor_empty_uop(
+      ctx, POLY_FLOAT32, (PolyUOp *[]){one, one, n, two}, 4, POLY_DEVICE_INTERP
+  );
+  PolyTensor *cache =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 1, 1, 6, 2}, 5, POLY_DEVICE_INTERP);
+  PolyTensor *out = poly_tensor_cached_sdpa(ctx, q, q, q, cache, p);
+  ASSERT_NOT_NULL(out);
+  /* Pinned TransformerBlock._attention: STORE [p:p+n], AFTER(full cache),
+   * then read [0:p+n]. Independent bounds must survive graph construction. */
+  int count = 0, writes = 0, prefixes = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, out->uop_physical, &count);
+  PolyUOp *end = poly_uop_add(ctx, p, n);
+  for (int i = 0; i < count; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_STORE) {
+      writes++;
+      ASSERT_EQ(u->src[0]->op, POLY_OP_SHRINK);
+      ASSERT_TRUE(poly_uop_shape_dim(ctx, u->src[0], 3) == n);
+    }
+    if (u->op == POLY_OP_SHRINK && u->src[0]->op == POLY_OP_AFTER) {
+      prefixes++;
+      ASSERT_TRUE(poly_uop_shape_dim(ctx, u, 3) == end);
+    }
+  }
+  ASSERT_EQ(writes, 1);
+  ASSERT_EQ(prefixes, 2);
+  ASSERT_TRUE(poly_uop_shape_dim(ctx, out->uop_physical, 2) == n);
+  poly_uop_toposort_free(topo);
+  poly_tensor_release(out);
+  poly_tensor_release(cache);
+  poly_tensor_release(q);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cached_attention_appends_and_masks_active_prefix) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *m = poly_model_new(ctx, NULL);
+  PolyTensor *q = poly_model_input(m, "q", POLY_FLOAT32, (int64_t[]){1, 4, 2, 2}, 4);
+  PolyTensor *k = poly_model_input(m, "k", POLY_FLOAT32, (int64_t[]){1, 2, 2, 2}, 4);
+  PolyTensor *v = poly_model_input(m, "v", POLY_FLOAT32, (int64_t[]){1, 2, 2, 2}, 4);
+  PolyTensor *cache =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2, 1, 2, 6, 2}, 5, POLY_DEVICE_INTERP);
+  ASSERT_EQ(poly_model_aux(m, "cache", cache, POLY_BIND_F_TRANSIENT_ZERO), POLY_STATUS_OK);
+  PolyUOp *p = poly_uop_variable(
+      ctx, "cache_position", poly_arg_int(0), poly_arg_int(4), POLY_WEAKINT, 1, false
+  );
+  PolyTensor *out = poly_tensor_cached_sdpa(ctx, q, k, v, cache, p);
+  ASSERT_NOT_NULL(out);
+  int nodes = 0, writes = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, out->uop_logical, &nodes);
+  for (int i = 0; i < nodes; i++)
+    if (topo[i]->op == POLY_OP_STORE) {
+      writes++;
+      ASSERT_EQ(poly_uop_ndim(ctx, topo[i]->src[0]), 5);
+      ASSERT_EQ(topo[i]->src[0]->op, POLY_OP_SHRINK);
+    }
+  poly_uop_toposort_free(topo);
+  ASSERT_EQ(writes, 1);
+  ASSERT_EQ(poly_model_output(m, "out", out), POLY_STATUS_OK);
+  ASSERT_EQ(
+      poly_model_entrypoint(
+          m, "forward", (const char *[]){"q", "k", "v"}, 3, (const char *[]){"out"}, 1, NULL
+      ),
+      POLY_STATUS_OK
+  );
+  ASSERT_EQ(poly_model_control(m, "forward", "position", p), POLY_STATUS_OK);
+  ASSERT_EQ(poly_model_build(m, NULL), POLY_STATUS_OK);
+  float qdata[16] = {0}, kdata[8] = {0}, vdata[8], got[16], state[48], expected[48];
+  for (int i = 0; i < 48; i++)
+    expected[i] = 99;
+  ASSERT_EQ(poly_model_write_buf_named(m, "cache", expected, sizeof(expected)), 0);
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("q", qdata, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("k", kdata, POLY_FLOAT32),
+      POLY_IO_BINDING_ARRAY("v", vdata, POLY_FLOAT32)};
+  for (int pos = 0; pos <= 4; pos += 2) {
+    for (int h = 0; h < 2; h++)
+      for (int t = 0; t < 2; t++)
+        for (int d = 0; d < 2; d++) {
+          float value = (float)(10 * h + pos + t + d);
+          vdata[h * 4 + t * 2 + d] = value;
+          expected[h * 12 + (pos + t) * 2 + d] = 0;
+          expected[24 + h * 12 + (pos + t) * 2 + d] = value;
+        }
+    PolyControlBinding control = {"position", pos};
+    ASSERT_EQ(poly_model_call_with_controls(m, "forward", io, 3, &control, 1), 0);
+    ASSERT_EQ(poly_model_read_buf_named(m, "out", got, sizeof(got)), 0);
+    for (int h = 0; h < 4; h++)
+      for (int t = 0; t < 2; t++)
+        for (int d = 0; d < 2; d++)
+          ASSERT_FLOAT_EQ(got[h * 4 + t * 2 + d], 10 * (h / 2) + (pos + t) * 0.5f + d, 1e-5);
+    ASSERT_EQ(poly_model_read_buf_named(m, "cache", state, sizeof(state)), 0);
+    for (int i = 0; i < 48; i++)
+      ASSERT_FLOAT_EQ(state[i], expected[i], 0);
+  }
+  ASSERT_EQ(poly_model_reset_transient(m), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "cache", state, sizeof(state)), 0);
+  for (int i = 0; i < 48; i++)
+    ASSERT_FLOAT_EQ(state[i], 0, 0);
+  poly_model_free(m);
+  poly_tensor_release(out);
+  poly_tensor_release(cache);
+  poly_tensor_release(q);
+  poly_tensor_release(k);
+  poly_tensor_release(v);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, model_aux_from_host_owns_snapshot) {
   PolyCtx *ctx = poly_ctx_new();
   PolyModel *model = poly_model_new(ctx, NULL);

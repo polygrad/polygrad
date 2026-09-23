@@ -2057,7 +2057,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 101
+  const EXPECTED_ABI = 103
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2101,6 +2101,76 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // --- Model API ---
+  const transformer = {
+    available(inst) { return Boolean(Module._poly_transformer_available(inst)) },
+    fromModel(inst) {
+      const error = malloc(264)
+      try {
+        const result = Module._poly_transformer_from_model(inst, error)
+        if (!result) throw new Error(readCString(error + 8) || 'Transformer adoption failed')
+        return result
+      } finally { Module._free(error) }
+    },
+    free(handle) {
+      pendingModelDevices.delete(Module._poly_transformer_model(handle))
+      Module._poly_transformer_free(handle)
+    },
+    lastError(handle) {
+      const error = Module._poly_transformer_last_error(handle)
+      return error ? readCString(error + 8) : ''
+    },
+    decodePosition(instPtr) { return Module._poly_transformer_position(instPtr) },
+    rewind(instPtr, position) { return Module._poly_transformer_rewind(instPtr, position) },
+    start(handle, tokens) {
+      const input = allocBytes(new Uint8Array(tokens.buffer, tokens.byteOffset, tokens.byteLength))
+      try {
+        if (deviceName === 'webgpu' && Module.ccall)
+          return ensureModelDevice(Module._poly_transformer_model(handle))
+            .then(() => Module.ccall('poly_transformer_start', 'number', ['number','number','number'],
+              [handle, input, tokens.length], {async:true})).finally(() => Module._free(input))
+        const rc = Module._poly_transformer_start(handle, input, tokens.length)
+        Module._free(input)
+        return rc
+      } catch (error) { Module._free(input); throw error }
+    },
+    next(handle, temperature) {
+      const output = malloc(4)
+      const read = status => ({status, token:heap32()[output >>> 2]})
+      try {
+        if (deviceName === 'webgpu' && Module.ccall)
+          return ensureModelDevice(Module._poly_transformer_model(handle))
+            .then(() => Module.ccall('poly_transformer_next', 'number', ['number','number','number'],
+              [handle, temperature, output], {async:true})).then(read).finally(() => Module._free(output))
+        const result = read(Module._poly_transformer_next(handle, temperature, output))
+        Module._free(output)
+        return result
+      } catch (error) { Module._free(output); throw error }
+    },
+    appendTokens(instPtr, tokens, reuse = false) {
+      const operation = reuse ? 'poly_transformer_prefill' : 'poly_transformer_append'
+      const g = instPtr
+      const vocab = Module._poly_transformer_vocab(g)
+      if (vocab <= 0) throw new Error('Model has no checked decoder entrypoints')
+      let input = 0, output = 0
+      const cleanup = () => { Module._free(input); Module._free(output) }
+      const read = rc => rc === 0 ? heapF32().slice(output >>> 2, (output >>> 2) + vocab) : null
+      try {
+        input = malloc(tokens.byteLength || 4)
+        output = malloc(vocab * 4)
+        heap32().set(tokens, input >>> 2)
+        const args = [g, input, tokens.length, output, vocab]
+        if (deviceName === 'webgpu' && Module.ccall) {
+          return ensureModelDevice(Module._poly_transformer_model(instPtr)).then(() => Module.ccall(operation, 'number',
+            ['number','number','number','number','number'], args, {async:true})).then(read).finally(cleanup)
+        }
+        const call = reuse ? Module._poly_transformer_prefill : Module._poly_transformer_append
+        const result = read(call(...args))
+        cleanup()
+        return result
+      } catch (error) { cleanup(); throw error }
+    },
+  }
+
   const model = {
     fromIR(irBytes, weightsBytes) {
       const irPtr = allocBytes(irBytes)
@@ -2662,14 +2732,34 @@ function createWasmCoreFromModule(Module, device) {
         instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)
     },
 
-    call(instPtr, entrypoint, names, arrays, tensorOutputs = false) {
+    resetTransient(instPtr) {
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return ensureModelDevice(instPtr).then(() =>
+          Module.ccall('poly_model_reset_transient', 'number', ['number'], [instPtr], {async:true}))
+      }
+      return Module._poly_model_reset_transient(instPtr)
+    },
+    control(instPtr, entrypoint, name, variable) {
+      const entryPtr = allocString(entrypoint), namePtr = allocString(name)
+      try { return Module._poly_model_control(instPtr, entryPtr, namePtr, variable) }
+      finally { Module._free(entryPtr); Module._free(namePtr) }
+    },
+
+    call(instPtr, entrypoint, names, arrays, controls = [], tensorOutputs = false) {
       const n = names.length
       const bindings = packModelBindings(names, arrays)
       const bindingPtr = bindings.ptr
       const cleanup = bindings.free
-      let entrypointPtr, count, outputPtr
+      let entrypointPtr, count, outputPtr, controlPtr
       try {
         entrypointPtr = bindings.string(entrypoint)
+        // wasm32 PolyControlBinding has an 8-byte-aligned int64 at offset 8.
+        controlPtr = controls.length ? bindings.alloc(controls.length * 16) : 0
+        for (let i = 0; i < controls.length; i++) {
+          const namePtr = bindings.string(controls[i][0])
+          heap32()[(controlPtr + i * 16) >>> 2] = namePtr
+          new DataView(heapU8().buffer).setBigInt64(controlPtr + i * 16 + 8, controls[i][1], true)
+        }
         count = tensorOutputs ? Module._poly_model_entrypoint_output_count(instPtr, entrypointPtr) : 0
         if (count < 0) throw new Error('Model Tensor output signature failed')
         outputPtr = tensorOutputs ? bindings.alloc(Math.max(1, count) * 4) : 0
@@ -2679,8 +2769,8 @@ function createWasmCoreFromModule(Module, device) {
         if (rc !== 0) throw new Error(this.lastError(instPtr) || 'Model Tensor call failed')
         return Array.from(heap32().subarray(outputPtr >>> 2, (outputPtr >>> 2) + count))
       }
-      const symbol = tensorOutputs ? 'poly_model_call_tensors' : 'poly_model_call'
-      const args = [instPtr, entrypointPtr, bindingPtr, n]
+      const symbol = tensorOutputs ? 'poly_model_call_tensors_with_controls' : 'poly_model_call_with_controls'
+      const args = [instPtr, entrypointPtr, bindingPtr, n, controlPtr, controls.length]
       if (tensorOutputs) args.push(outputPtr, count)
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
@@ -2695,14 +2785,14 @@ function createWasmCoreFromModule(Module, device) {
       }
       try {
         const rc = tensorOutputs
-          ? Module._poly_model_call_tensors(instPtr, entrypointPtr, bindingPtr, n, outputPtr, count)
-          : Module._poly_model_call(instPtr, entrypointPtr, bindingPtr, n)
+          ? Module._poly_model_call_tensors_with_controls(...args)
+          : Module._poly_model_call_with_controls(...args)
         return finish(rc)
       } finally { cleanup() }
     },
 
-    callTensors(instPtr, entrypoint, names, arrays) {
-      return this.call(instPtr, entrypoint, names, arrays, true)
+    callTensors(instPtr, entrypoint, names, arrays, controls = []) {
+      return this.call(instPtr, entrypoint, names, arrays, controls, true)
     },
 
     forward(instPtr, names, arrays) {
@@ -2775,6 +2865,7 @@ function createWasmCoreFromModule(Module, device) {
     ctx,
     ops,
     model,
+    transformer,
     int64: BigInt,
     readShape: readOutShape,
     canRunOp,

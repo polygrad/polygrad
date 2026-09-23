@@ -6,6 +6,7 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "model.h"
+#include "../vendor/cjson/cJSON.h"
 #include <stdbool.h>
 #include <limits.h>
 #include <stdint.h>
@@ -122,7 +123,7 @@ static void jb_add_string_array(JsonBuf *b, const char *key, const char **items,
   jb_add(b, "]");
 }
 
-static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len) {
+static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len, const char *application) {
   PolyIrSpec spec;
   if (poly_ir_import(ir_data, ir_len, &spec) != 0) return NULL;
 
@@ -151,7 +152,12 @@ static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len) {
     jb_add_u32(&b, ep->flags);
     jb_add(&b, "}");
   }
-  jb_add(&b, "]}");
+  jb_add(&b, "]");
+  if (application) {
+    jb_add(&b, ",\"application\":");
+    jb_add(&b, application);
+  }
+  jb_add(&b, "}");
 
   poly_ir_spec_free(&spec);
   poly_ctx_destroy(spec.ctx);
@@ -348,7 +354,7 @@ uint8_t *poly_model_save_bundle_ex(PolyModel *inst, int *out_len, uint32_t weigh
   uint8_t *weights_data = poly_model_export_weights_ex(inst, &weights_len, weight_flags);
   /* weights_data may be NULL if no params -- that's ok */
 
-  char *metadata_json = bundle_metadata_from_ir(ir_data, ir_len);
+  char *metadata_json = bundle_metadata_from_ir(ir_data, ir_len, poly_model_metadata(inst));
   if (!metadata_json) {
     free(ir_data);
     free(weights_data);
@@ -369,12 +375,32 @@ uint8_t *poly_model_save_bundle(PolyModel *inst, int *out_len) {
   return poly_model_save_bundle_ex(inst, out_len, POLY_EXPORT_WEIGHTS_DEFAULT);
 }
 
+static PolyModel *bundle_restore_metadata(PolyModel *model, const PolyBundleSections *sections) {
+  if (!model || !sections->metadata_json) return model;
+  cJSON *meta = cJSON_ParseWithLength(sections->metadata_json, (size_t)sections->metadata_len);
+  cJSON *application = cJSON_GetObjectItemCaseSensitive(meta, "application");
+  char *json = application ? cJSON_PrintUnformatted(application) : NULL;
+  bool valid = cJSON_IsObject(meta) &&
+               (!application ||
+                (cJSON_IsObject(application) && json && poly_model_set_metadata(model, json) == 0));
+  free(json);
+  cJSON_Delete(meta);
+  if (!valid) {
+    poly_model_free(model);
+    return NULL;
+  }
+  return model;
+}
+
 PolyModel *poly_model_from_bundle(const uint8_t *data, int len) {
   PolyBundleSections sections;
   if (poly_bundle_decode(data, len, &sections) != 0) return NULL;
 
-  return poly_model_from_ir(
-      sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len
+  return bundle_restore_metadata(
+      poly_model_from_ir(
+          sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len
+      ),
+      &sections
   );
 }
 
@@ -386,7 +412,11 @@ PolyModel *poly_model_from_bundle_into(
 ) {
   PolyBundleSections sections;
   if (poly_bundle_decode(data, len, &sections) != 0) return NULL;
-  return poly_model_from_ir_into(
-      ctx, sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len, device
+  return bundle_restore_metadata(
+      poly_model_from_ir_into(
+          ctx, sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len,
+          device
+      ),
+      &sections
   );
 }

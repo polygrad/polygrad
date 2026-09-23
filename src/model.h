@@ -100,12 +100,26 @@ typedef struct {
 #define POLY_ROLE_OUTPUT 3
 #define POLY_ROLE_AUX 4
 
-/* Binding flags for model-local ABI state. The current IR payload preserves
- * roles/trainability; these flags are runtime/package policy for now. */
+/* Binding flags for model-local state. PGIR21 also preserves TRANSIENT_ZERO
+ * so portable imports recreate cache storage without exporting its contents. */
 #define POLY_BIND_F_NONE 0u
 #define POLY_BIND_F_NO_SAVE (1u << 0)
 #define POLY_BIND_F_OPTIM (1u << 1)
 #define POLY_BIND_F_FROZEN (1u << 2)
+#define POLY_BIND_F_TRANSIENT_ZERO (1u << 3)
+
+/* Zero only explicitly transient AUX state; ordinary AUX/parameters survive.
+ * A failed reset may have written a prefix of the reset set. */
+int poly_model_reset_transient(PolyModel *inst);
+
+/* Optional admission predicate over declared integer controls/input dimensions.
+ * Checked before any input upload or state mutation; retained and serialized.
+ * This is product metadata, not an executable graph or another scheduler. */
+PolyStatus poly_model_entrypoint_precondition(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyUOp *condition
+);
 
 /* Model state: parameters and persistent non-optimizer AUX buffers. */
 #define POLY_EXPORT_WEIGHTS_PARAMS (1u << 0)
@@ -130,6 +144,22 @@ PolyModel *poly_model_new(PolyCtx *ctx, const PolyModelOptions *opts);
 
 PolyModelStage poly_model_stage(const PolyModel *inst);
 const PolyModelError *poly_model_last_error(const PolyModel *inst);
+
+/* Declare the exact unbound integer UOp used by this entrypoint. Names are
+ * entrypoint-local; a declaration never changes the graph or its variable ID.
+ * Controls must occur in the portable graph and are unsupported on objective
+ * entrypoints. Staged declarations are checked when the Model is built. */
+PolyStatus poly_model_control(
+    PolyModel *inst,
+    const char *entrypoint,
+    const char *name,
+    PolyUOp *variable
+);
+
+typedef struct {
+  const char *name;
+  int64_t value;
+} PolyControlBinding;
 
 /* Checkpoint-only builders call this after sealing. Each PARAM storage identity
  * then needs a successful complete write/checkpoint import before execution or
@@ -375,6 +405,7 @@ int poly_model_set_device_map_arrays(
 );
 
 #ifdef POLY_TESTING
+
 /* Deterministically fail Model owner-root preparation after N additions. */
 void poly_model_test_fail_residency_roots_after(int additions);
 bool poly_model_test_has_vag(const PolyModel *inst);
@@ -436,6 +467,24 @@ typedef struct {
  * model-owned buffers (retrieve via poly_model_buf_data).
  * Returns 0 on success. */
 int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, int n_io);
+int poly_model_call_with_controls(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls
+);
+int poly_model_call_tensors_with_controls(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls,
+    PolyTensor **outputs,
+    int n_outputs
+);
 
 /* Eager, non-differentiable invocation. Outputs are independent device storage,
  * in entrypoint output order, each with one caller-owned Tensor reference.
@@ -574,6 +623,30 @@ int poly_model_inline_entrypoint(
 
 /* Copy parameter host values from src into dst using prefix+src_param_name. */
 int poly_model_copy_prefixed_weights(PolyModel *dst, PolyModel *src, const char *prefix);
+
+/* Generic mutation tracking for adapters holding derived state. A mutation
+ * version is invalidation evidence, not a synchronization primitive. */
+typedef struct {
+  uint64_t mutation, transient, reset;
+} PolyModelStateVersion;
+PolyModelStateVersion poly_model_state_version(const PolyModel *model);
+bool poly_model_is_busy(const PolyModel *model);
+int poly_model_check_ready(PolyModel *model);
+bool poly_model_has_transient(const PolyModel *model);
+bool poly_model_entrypoint_has_precondition(const PolyModel *model, const char *entrypoint);
+int poly_model_control_count(const PolyModel *model, const char *entrypoint);
+const char *poly_model_control_name(const PolyModel *model, const char *entrypoint, int index);
+int poly_model_control_bounds(
+    const PolyModel *model,
+    const char *entrypoint,
+    int index,
+    int64_t *lower,
+    int64_t *upper
+);
+/* Optional application JSON. Copied and preserved by bundle load/save; not
+ * executable metadata. NULL clears it. Raw IR export does not include it. */
+int poly_model_set_metadata(PolyModel *model, const char *json);
+const char *poly_model_metadata(const PolyModel *model);
 
 #ifdef __cplusplus
 }

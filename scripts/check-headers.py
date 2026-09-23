@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h", "models/models.h")
+PUBLIC = ("polygrad.h", "tensor.h", "frontend.h", "model.h", "nn/nn.h", "nn/optim.h", "models/layers.h", "models/models.h", "models/transformer.h")
 OWNERS = ("core.h", "mixin/elementwise.h", "mixin/movement.h", "mixin/creation.h",
           "mixin/composite.h", "mixin/gradient.h", "uop/ops.h", "placer.h", "device.h", "engine/jit.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
@@ -43,6 +43,14 @@ def check_api_owners():
 
 def main():
     check_api_owners()
+    # The Transformer is a client of Model, not a friend of its representation.
+    model_api = (ROOT / "src/model.h").read_text() + (ROOT / "src/models/layers.h").read_text()
+    transformer = (ROOT / "src/models/transformer.c").read_text()
+    calls = set(re.findall(r'\b(poly_model_\w+)\s*\(', transformer))
+    declared = set(re.findall(r'\b(poly_model_\w+)\s*\(', model_api))
+    assert calls <= declared, f"Transformer uses undeclared Model API: {calls - declared}"
+    assert not re.search(r'\bmodel_(?:state_version|entry_view|binding_dim|single_control|is_idle|ready|error)\s*\(', transformer)
+    assert not re.search(r'#include\s+"[^"]*(?:ctx|model_internal)\.h"', transformer)
     (ROOT / 'temp').mkdir(exist_ok=True)
     # A linkable core must also run independently of Model/codec objects. Two
     # fresh processes exercise ASLR-independent UOp content keys, not pointers.
