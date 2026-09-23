@@ -334,6 +334,8 @@ Use `models.Transformer.load(bundle)` to restore generation methods;
 `Model.load(bundle)` stays generic. `model.generate(ids, temperature=0, max_tokens=32)`
 yields token IDs sampled in C. `prefill_tokens(ids)` reuses a matching prompt
 prefix; `rewind(position)` discards a suffix without clearing cache storage.
+Load or adopt only trusted Transformer bundles: bounds checks do not verify
+the causal, append-only cache semantics required by prefix reuse and rewind.
 The separate `polygrad.llm.model.Transformer` is the Tensor/TinyJit port used for
 Tinygrad compatibility; `models.Transformer` is the portable C-backed API shared
 with JavaScript.

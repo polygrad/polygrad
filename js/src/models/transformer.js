@@ -10,6 +10,7 @@ function createBoundTransformerClass(runtime) {
       catch (error) { model.dispose(); throw error }
     }
 
+    // Trusted producers only: admission does not prove causal, append-only caches.
     static fromModel(model) {
       if (!(model instanceof runtime.Model)) throw new TypeError('Transformer.fromModel requires this Runtime\'s Model')
       model._requireOpen()

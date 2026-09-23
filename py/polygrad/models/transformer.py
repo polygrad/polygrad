@@ -13,6 +13,8 @@ class Transformer(Model):
 
     from_model specializes the supplied object in place: aliases refer to the
     same owner. It does not create a second owner of the underlying Model.
+    Load/adopt only trusted producers: checks do not prove causal, append-only
+    cache semantics required by prefix reuse and rewind.
     """
     def __init__(self, spec, *, runtime=None, model_type='llama'):
         from . import _build
@@ -91,7 +93,7 @@ class Transformer(Model):
         """Append int32 tokens; return last-token logits [1,vocabulary].
 
         C owns chunking, capacity checks and the cursor. After a failed execution
-        or a direct state-changing Model operation, reset_transient is required.
+        or a direct state-changing Model operation, reset() is required.
         """
         return self._decode_tokens(tokens, _ffi.get_lib().poly_transformer_append)
 

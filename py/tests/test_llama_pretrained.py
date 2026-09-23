@@ -1,10 +1,11 @@
 """Opt-in real-checkpoint gate; downloading is a separate Make target.
 
 Xenova/llama2.c-stories15M at 17c2f1eabe1e163acc15ad35e225794e7b907682
-is a trained Llama 2-style model, not a Meta Llama 2/3 checkpoint. This gate
-does not certify cached decoding: each invocation recomputes the fixed window.
+is a trained Llama 2-style model, not a Meta Llama 2/3 checkpoint. Covers
+uncached forward and cached generation, including portable cache reset.
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -82,3 +83,47 @@ def test_pretrained_llama_logits_replay_and_bundle(checkpoint, reference, device
                 restored.dispose()
         finally:
             model.dispose()
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_pretrained_llama_cached_generation_and_bundle(checkpoint, reference, device):
+    import polygrad as pg
+
+    window = reference[-1][0].shape[1]
+    config = json.loads((checkpoint / 'config.json').read_text())
+    config.update(cache_capacity=32, prefill_chunk_size=8)
+    with pg.create(device=device) as rt:
+        # The ordinary HF adapter already accepts builder configuration. No
+        # separate checkpoint loader or second copy of the parameters is needed.
+        model = rt.models.Transformer.from_model(rt.Model.from_hf(
+            config_json=json.dumps(config),
+            weight_bytes_list=[(checkpoint / 'model.safetensors').read_bytes()],
+            max_seq_len=window))
+        try:
+            expected_tokens = [int(logits[0, -1].argmax()) for _, logits in reference]
+            for step, (tokens, expected) in enumerate(reference):
+                actual = model.append_tokens(tokens if step == 0 else tokens[:, -1:])
+                np.testing.assert_allclose(actual, expected[:, -1], atol=3e-4, rtol=3e-4)
+                assert model.decode_position == tokens.shape[1]
+                assert int(actual.argmax()) == expected_tokens[step]
+                print(f'{device}: cached length={tokens.shape[1]} '
+                      f'max_abs={np.max(np.abs(actual-expected[:, -1])):.8g} token={int(actual.argmax())}')
+            # An uncached, read-only forward must not invalidate the conversation.
+            uncached = model.forward(tokens=reference[-1][0])['logits'][:, -1]
+            np.testing.assert_allclose(actual, uncached, atol=3e-4, rtol=3e-4)
+            assert model.decode_position == window
+            saved = model.save(include_optimizer=False)
+        finally:
+            model.dispose()
+        restored = rt.models.Transformer.load(saved)
+        try:
+            assert restored.decode_position == 0
+            for layer in range(config['num_hidden_layers']):
+                cache = restored.read_buffer(f'model.layers.{layer}.cache_kv')
+                assert np.count_nonzero(cache) == 0
+            assert list(restored.generate(reference[0][0], temperature=0, max_tokens=3)) == expected_tokens
+            restored.reset()
+            np.testing.assert_allclose(restored.append_tokens(reference[0][0]), reference[0][1][:, -1],
+                                       atol=3e-4, rtol=3e-4)
+        finally:
+            restored.dispose()

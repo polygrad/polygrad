@@ -9,7 +9,9 @@ extern "C" {
 
 /* Causal decoder only (tinygrad llm/model.py), not a base for vision encoders.
  * Successful adoption transfers Model ownership. Failure leaves it with caller.
- * The borrowed model accessor permits ordinary poly_model_* operations. */
+ * The borrowed model accessor permits ordinary poly_model_* operations.
+ * Adopt only trusted producers: signature/bounds checks do not prove causality
+ * or the append-only cache semantics required by prefix reuse and rewind. */
 typedef struct PolyTransformer PolyTransformer;
 bool poly_transformer_available(const PolyModel *model);
 PolyTransformer *poly_transformer_from_model(PolyModel *model, PolyModelError *error);

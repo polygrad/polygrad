@@ -331,6 +331,8 @@ Use `pg.models.Transformer.load(bundle)` to restore generation methods;
 `for await (const token of model.generate(ids, {temperature:0, maxTokens:32}))`.
 Sampling runs in C; `ids` is an `Int32Array`. `prefillTokensAsync(ids)` reuses a
 matching prompt prefix; `rewind(position)` discards a suffix without clearing storage.
+Load or adopt only trusted Transformer bundles: bounds checks do not verify
+the causal, append-only cache semantics required by prefix reuse and rewind.
 
 `pg.models.list()` reports construction and checkpoint capabilities; see
 [supported models](https://github.com/polygrad/polygrad#supported-models).
