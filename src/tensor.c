@@ -5023,13 +5023,15 @@ static PolyUOp *arange_default_int(PolyCtx *ctx, int64_t start, int64_t stop, in
   return poly_uop_arange_int_dtype(ctx, start, stop, step, dtype);
 }
 
-/* 0..n-1. A concrete or bound n uses the existing arange. A symbolic n
+/* 0..n-1. A constant n uses the existing arange. A symbolic n
  * materializes 0..vmax-1 then shrinks to n so the live length stays a UOp
  * without a symbolic pool window. */
 PolyUOp *poly_uop_arange_extent(PolyCtx *ctx, PolyUOp *n) {
   if (!ctx || !n) return NULL;
   int64_t bound = 0;
-  if (poly_uop_bind_value(n, &bound) == 0 || poly_uop_const_i64(n, &bound) == 0) {
+  /* A BIND is a sample for capture, not a constant: dropping it here freezes
+   * the length of every later replay. Keep it in the prefix view. */
+  if (poly_uop_const_i64(n, &bound) == 0) {
     if (bound < 0) return NULL;
     return arange_default_int(ctx, 0, bound, 1);
   }
@@ -5085,7 +5087,7 @@ static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) 
 }
 
 static bool uop_extent_concrete(PolyUOp *u, int64_t *out) {
-  return u && (poly_uop_bind_value(u, out) == 0 || poly_uop_const_i64(u, out) == 0);
+  return u && poly_uop_const_i64(u, out) == 0;
 }
 
 /* mixin/op.py:233-234 with sint r, c, and diagonal. Unbound extents use a

@@ -533,6 +533,44 @@ def test_tinyjit_symbolic_input_view_replays_current_binding():
     assert add_hundred.captured
 
 
+def test_tinyjit_contiguous_symbolic_slice_materializes_current_binding():
+    # A bound sample is not the constant offset required by UOp.contiguous_view.
+    source = Tensor([[1, 4, 7, 0, 0, 0, 0, 0]], dtype=dtypes.int32).realize()
+    position = Variable('jit_contiguous_position', 0, 7)
+
+    @TinyJit
+    def add_one(value, pos):
+        return (value + 1).realize()
+
+    for start, expected in ((0, 2), (1, 5), (2, 8), (3, 1)):
+        pos = position.bind(start)
+        value = source[:, pos:pos + 1].contiguous().realize()
+        assert value.uop_physical.op_name == 'RESHAPE'
+        assert value.uop_physical.src[0].op_name == 'BUFFER'
+        assert add_one(value, pos).item() == expected
+
+
+@pytest.mark.parametrize('chunk', [1, 3])
+def test_python_transformer_cached_generation_matches_pinned(chunk):
+    from itertools import islice
+    from polygrad.llm.model import Transformer, TransformerConfig
+    from polygrad.nn.state import get_state_dict
+
+    config = TransformerConfig(num_blocks=1, dim=8, hidden_dim=12, n_heads=2,
+        n_kv_heads=1, norm_eps=1e-5, vocab_size=11, head_dim=4, rope_theta=10000,
+        rope_dim=4, v_head_dim=4, max_context=8)
+    with Context(DEV='CPU'):
+        model = Transformer(config)
+        for name, tensor in get_state_dict(model).items():
+            values = ((np.arange(np.prod(tensor.shape)) * 7 + sum(name.encode())) % 23 - 11) * .017
+            if tensor.ndim == 1:
+                values += 1
+            tensor.assign(Tensor(values.astype(np.float32).reshape(tensor.shape))).realize()
+        # Pinned tinygrad/llm/model.py with identical weights and prompt, both
+        # chunk partitions. Three generated tokens exercise captured replay.
+        assert list(islice(model.generate([1, 4, 7], chunk_size=chunk), 3)) == [6, 5, 4]
+
+
 def test_tinyjit_movement_view_replays_against_new_base():
     # tinygrad engine/jit.py:_prepare_jit_inputs keeps the movement UOp in the
     # input signature/function graph while parameterizing its recursive base.

@@ -4702,6 +4702,8 @@ static PolyUOp *try_nest_by_factor(
   return best;
 }
 
+static PolyUOp *divide_exact(PolyCtx *ctx, PolyUOp *u, PolyUOp *v);
+
 static PolyUOp *try_factor_remainder(
     PolyCtx *ctx,
     PolyUOp *root,
@@ -4712,8 +4714,8 @@ static PolyUOp *try_factor_remainder(
     int64_t y_min
 ) {
   if (y_min < 0 || x_min < 0) return NULL;
-  if (y->op != POLY_OP_CONST || y->arg.kind != POLY_ARG_INT || y->arg.i <= 0) return NULL;
-  int64_t c = y->arg.i;
+  bool constant = y->op == POLY_OP_CONST && y->arg.kind == POLY_ARG_INT && y->arg.i > 0;
+  int64_t c = constant ? y->arg.i : 1;
 
   PolyUOp **quo = calloc((size_t)(n_terms > 0 ? n_terms : 1), sizeof(*quo));
   PolyUOp **rem = calloc((size_t)(n_terms > 0 ? n_terms : 1), sizeof(*rem));
@@ -4726,7 +4728,7 @@ static PolyUOp *try_factor_remainder(
   int n_quo = 0, n_rem = 0;
   for (int i = 0; i < n_terms; i++) {
     PolyUOp *u = all_terms[i];
-    PolyUOp *q = uop_divides(ctx, u, c);
+    PolyUOp *q = divide_exact(ctx, u, y);
     if (q) {
       quo[n_quo++] = q;
       continue;
@@ -4734,7 +4736,7 @@ static PolyUOp *try_factor_remainder(
 
     int64_t f = uop_const_factor(u);
     int64_t f_rem = poly_floormod(f, c);
-    if (f_rem != f) {
+    if (constant && f_rem != f) {
       PolyUOp *base = uop_divides(ctx, u, f);
       if (!base) goto cleanup;
       rem[n_rem++] = uop_mul_const_i64(ctx, root->dtype, base, f_rem);
@@ -4766,6 +4768,133 @@ cleanup:
   free(quo);
   free(rem);
   return result;
+}
+
+/* UOp.gcd: intersect multiplicative factors with their multiplicities, then
+ * append the integer gcd. Reuse the arbitrary-precision const_factor/divides
+ * helpers; a bound variable stays a symbolic factor, never its sample. */
+static PolyUOp *symbolic_gcd(PolyCtx *ctx, PolyUOp **uops, int n) {
+  PolyAddTermList common, terms;
+  add_term_list_init(&common);
+  add_term_list_init(&terms);
+  PolyInt gcd = {0};
+  PolyUOp *ret = NULL;
+  if (!poly_int_from_i64(&gcd, 0)) goto done;
+  for (int i = 0; i < n; i++) {
+    PolyInt factor = {0}, next = {0};
+    PolyUOp *term = NULL;
+    bool ok = lt_uop_const_factor(uops[i], &factor) &&
+              (term = lt_uop_divides(ctx, uops[i], &factor)) &&
+              lt_poly_int_gcd(&next, &gcd, &factor);
+    poly_int_free(&factor);
+    if (!ok) {
+      poly_int_free(&next);
+      goto done;
+    }
+    poly_int_free(&gcd);
+    gcd = next;
+    terms.count = 0;
+    if (!collect_mul_terms(term, &terms)) goto done;
+    if (i == 0) {
+      for (int j = 0; j < terms.count; j++)
+        if (!add_term_list_push(&common, terms.items[j])) goto done;
+    } else {
+      int kept = 0;
+      for (int j = 0; j < common.count; j++)
+        for (int k = 0; k < terms.count; k++)
+          if (common.items[j] == terms.items[k]) {
+            common.items[kept++] = common.items[j];
+            terms.items[k] = NULL;
+            break;
+          }
+      common.count = kept;
+    }
+  }
+  if (!add_term_list_push(&common, poly_uop_const_like(ctx, uops[0], poly_int_as_arg(&gcd))))
+    goto done;
+  ret = product_terms(ctx, uops[0]->dtype, common.items, common.count, uops[0]);
+done:
+  poly_int_free(&gcd);
+  add_term_list_free(&common);
+  add_term_list_free(&terms);
+  return ret;
+}
+
+/* Pinned UOp.divide_exact. Cancellation is structural and preserves repeated
+ * factors; it does not infer divisibility from min/max or a current binding. */
+static PolyUOp *divide_exact(PolyCtx *ctx, PolyUOp *u, PolyUOp *v) {
+  if (u == v) return poly_uop_const_like_int(ctx, u, 1);
+  if (v->op == POLY_OP_CONST) {
+    PolyInt factor = {0};
+    PolyUOp *ret = poly_int_from_arg(&factor, v->arg) ? lt_uop_divides(ctx, u, &factor) : NULL;
+    poly_int_free(&factor);
+    return ret;
+  }
+  if (u->op == POLY_OP_ADD && u->n_src == 2) {
+    PolyUOp *a = divide_exact(ctx, u->src[0], v), *b = divide_exact(ctx, u->src[1], v);
+    return a && b ? poly_uop2(ctx, POLY_OP_ADD, u->dtype, a, b, poly_arg_none()) : NULL;
+  }
+  if (u->op != POLY_OP_MUL) return NULL;
+  PolyAddTermList factors, divisors;
+  add_term_list_init(&factors);
+  add_term_list_init(&divisors);
+  PolyInt a = {0}, b = {0}, quotient = {0}, remainder = {0};
+  PolyUOp *ret = NULL, *uf = u, *vf = v;
+  if (!poly_int_from_i64(&a, 1) || !poly_int_from_i64(&b, 1)) goto done;
+  if (u->src[1]->op == POLY_OP_CONST) {
+    uf = u->src[0];
+    poly_int_free(&a);
+    if (!poly_int_from_arg(&a, u->src[1]->arg)) goto done;
+  }
+  if (v->op == POLY_OP_MUL && v->src[1]->op == POLY_OP_CONST) {
+    vf = v->src[0];
+    poly_int_free(&b);
+    if (!poly_int_from_arg(&b, v->src[1]->arg)) goto done;
+  }
+  if (poly_int_is_zero(&b) || !poly_int_divmod(&quotient, &remainder, &a, &b, false) ||
+      !poly_int_is_zero(&remainder) || !collect_mul_terms(uf, &factors) ||
+      !collect_mul_terms(vf, &divisors))
+    goto done;
+  for (int i = 0; i < divisors.count; i++) {
+    int j = 0;
+    while (j < factors.count && factors.items[j] != divisors.items[i])
+      j++;
+    if (j == factors.count) goto done;
+    factors.items[j] = NULL;
+  }
+  ret = poly_uop_const_like(ctx, u, poly_int_as_arg(&quotient));
+  for (int i = 0; i < factors.count; i++)
+    if (factors.items[i])
+      ret = poly_uop2(ctx, POLY_OP_MUL, u->dtype, ret, factors.items[i], poly_arg_none());
+done:
+  poly_int_free(&a);
+  poly_int_free(&b);
+  poly_int_free(&quotient);
+  poly_int_free(&remainder);
+  add_term_list_free(&factors);
+  add_term_list_free(&divisors);
+  return ret;
+}
+
+/* divandmod.py: variable-denominator divide_by_gcd. The positive-constant
+ * path below already implements its integer-factor rules. */
+static PolyUOp *fold_variable_divmod_gcd(PolyCtx *ctx, PolyUOp *root) {
+  PolyAddTermList terms;
+  add_term_list_init(&terms);
+  PolyUOp *ret = NULL;
+  if (!collect_add_terms(root->src[0], &terms) || !add_term_list_push(&terms, root->src[1]))
+    goto done;
+  PolyUOp *gcd = symbolic_gcd(ctx, terms.items, terms.count);
+  if (!gcd || !(gcd = poly_graph_rewrite(ctx, gcd, poly_symbolic()))) goto done;
+  if (gcd->op == POLY_OP_CONST && gcd->arg.kind == POLY_ARG_INT && gcd->arg.i == 1) goto done;
+  PolyUOp *x = divide_exact(ctx, root->src[0], gcd), *y = divide_exact(ctx, root->src[1], gcd);
+  if (!x || !y) goto done;
+  ret = poly_uop2(ctx, root->op, root->dtype, x, y, poly_arg_none());
+  if (root->op == POLY_OP_FLOORMOD)
+    ret = poly_uop2(ctx, POLY_OP_MUL, root->dtype, ret, gcd, poly_arg_none());
+done:
+  add_term_list_free(&terms);
+  return ret;
 }
 
 /* fold_divmod_general (port of tinygrad divandmod.py) */
@@ -4800,8 +4929,18 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
     }
   }
 
-  /* Constant positive denominator required for remaining rules */
-  if (y->op != POLY_OP_CONST || y->arg.i <= 0) return NULL;
+  /* Pinned variable-denominator fallback: gcd cancellation precedes
+   * factor_remainder, whose sign guards apply to the remainder as well. */
+  if (y->op != POLY_OP_CONST || y->arg.kind != POLY_ARG_INT || y->arg.i <= 0) {
+    PolyUOp *ret = fold_variable_divmod_gcd(ctx, root);
+    if (ret) return ret;
+    PolyAddTermList terms;
+    add_term_list_init(&terms);
+    if (collect_add_terms(x, &terms))
+      ret = try_factor_remainder(ctx, root, y, terms.items, terms.count, x_min, y_min);
+    add_term_list_free(&terms);
+    return ret;
+  }
   int64_t c = y->arg.i;
 
   /* 2. nested_div_mod: (x%(k*c))//c → (x//c)%k, (x%(k*c))%c → x%c */

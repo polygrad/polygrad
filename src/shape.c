@@ -129,10 +129,8 @@ int poly_uop_broadcast_axes(
     n_axes++;
   }
   for (int axis = 0; axis < src_ndim; axis++) {
-    /* Indexing must zero a proven-1 source axis whenever the consumer axis is
-     * not also proven 1. tinygrad's resolve(out != 1) misses a Variable whose
-     * vmin is 1; passing that RANGE into a size-1 keepdim buffer folds it into
-     * a sibling axis via reshape ((row+k)%nrows) and breaks softmax/dot. */
+    /* tinygrad broadcast_axes: resolve(src == 1, False), resolve(out != 1).
+     * The second resolve defaults True for an uncertain symbolic extent. */
     if (!shape_dim_proven_one(ctx, src, axis)) continue;
     if (shape_dim_proven_one(ctx, out, nleft + axis)) continue;
     if (axes && n_axes < max_axes) axes[n_axes] = nleft + axis;

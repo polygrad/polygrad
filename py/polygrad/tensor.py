@@ -2585,33 +2585,12 @@ class Tensor:
             Tensor.arange(r, **opts).unsqueeze(-1) + diagonal
         ) <= Tensor.arange(c, **opts)
 
-    def _tri_diagonal_uop(self, diagonal):
-        if isinstance(diagonal, (Variable, BoundVariable)):
-            diagonal = diagonal.uop
-        if isinstance(diagonal, UOp):
-            return diagonal
-        return UOp.const(int(diagonal), ctx=self._ctx)
-
     def triu(self, diagonal=0):
-        if _shape_has_symbolic(self.shape) or _is_symbolic_dim(diagonal):
-            raw = _ffi._lib.poly_uop_triu_uop(
-                self._ctx, self.uop_physical.raw, self._tri_diagonal_uop(diagonal).raw
-            )
-            if not raw:
-                raise RuntimeError('poly_uop_triu_uop failed')
-            return Tensor(UOp(self._ctx, raw), _ctx=self._ctx, device=self._device)
         r, c = self.shape[-2], self.shape[-1]
         mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device, _ctx=self._ctx)
         return mask.where(self, self.const_like(0))
 
     def tril(self, diagonal=0):
-        if _shape_has_symbolic(self.shape) or _is_symbolic_dim(diagonal):
-            raw = _ffi._lib.poly_uop_tril_uop(
-                self._ctx, self.uop_physical.raw, self._tri_diagonal_uop(diagonal).raw
-            )
-            if not raw:
-                raise RuntimeError('poly_uop_tril_uop failed')
-            return Tensor(UOp(self._ctx, raw), _ctx=self._ctx, device=self._device)
         r, c = self.shape[-2], self.shape[-1]
         mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device, _ctx=self._ctx)
         return mask.where(self.const_like(0), self)
@@ -3603,7 +3582,7 @@ class Tensor:
             raw = _ffi._lib.poly_uop_arange_extent(ctx, _shape_dim_uop_raw(ctx, stop))
             if not raw:
                 raise RuntimeError('poly_uop_arange_extent failed')
-            return Tensor(UOp(ctx, raw), _ctx=ctx, device=dev)
+            return Tensor(UOp(ctx, raw), dtype=kwargs.get('dtype', dtypes.default_int), _ctx=ctx, device=dev)
 
         lo, hi = (start, stop-step) if step > 0 else (stop-step, start)
         inferred = kwargs.get('dtype')

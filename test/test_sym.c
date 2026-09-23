@@ -18,6 +18,66 @@
 
 /* Helper: apply symbolic_simple via graph_rewrite */
 
+TEST(sym, variable_divmod_factors_remainder) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *p = poly_uop_variable(ctx, "p", poly_arg_int(0), poly_arg_int(15), POLY_WEAKINT, 1, false);
+  PolyUOp *r = poly_uop_variable(ctx, "r", poly_arg_int(0), poly_arg_int(3), POLY_WEAKINT, 1, false);
+  PolyUOp *j = poly_uop_variable(ctx, "j", poly_arg_int(0), poly_arg_int(16), POLY_WEAKINT, 1, false);
+  PolyUOp *d = poly_uop_add(ctx, p, poly_uop_const_int(ctx, 1));
+  PolyUOp *rem = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, j, d, poly_arg_none());
+  PolyUOp *x = poly_uop_add(ctx, poly_uop_mul(ctx, r, d), rem);
+  PolyUOp *expected = poly_uop_add(ctx, r,
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, rem, d, poly_arg_none()));
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx,
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, x, d, poly_arg_none()), poly_symbolic()),
+      poly_graph_rewrite(ctx, expected, poly_symbolic()));
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx,
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, x, d, poly_arg_none()), poly_symbolic()), rem);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, variable_divmod_cancels_symbolic_common_factors) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x =
+      poly_uop_variable(ctx, "gcd_x", poly_arg_int(1), poly_arg_int(8), POLY_WEAKINT, 1, false);
+  PolyUOp *y =
+      poly_uop_variable(ctx, "gcd_y", poly_arg_int(2), poly_arg_int(9), POLY_WEAKINT, 1, false);
+  PolyUOp *z =
+      poly_uop_variable(ctx, "gcd_z", poly_arg_int(1), poly_arg_int(7), POLY_WEAKINT, 1, false);
+  PolyUOp *xx = poly_uop_mul(ctx, x, x), *xy = poly_uop_mul(ctx, x, y);
+  PolyUOp *bound = poly_uop_bind(ctx, x, 3);
+  PolyUOp *numerators[] = {
+      xy, poly_uop_mul(ctx, xx, y), poly_uop_add(ctx, xy, poly_uop_mul(ctx, x, z)),
+      poly_uop_mul(ctx, bound, poly_uop_const_int(ctx, -8)),
+      poly_uop_mul(ctx, x, poly_uop_const_int(ctx, 6))};
+  PolyUOp *denominators[] = {
+      x, xx, x, poly_uop_mul(ctx, bound, poly_uop_const_int(ctx, -1)),
+      poly_uop_mul(ctx, x, poly_uop_const_int(ctx, 4))};
+  PolyUOp *quotients[] = {
+      y, y, poly_uop_add(ctx, y, z), poly_uop_const_int(ctx, 8), poly_uop_const_int(ctx, 1)};
+  for (int i = 0; i < 5; i++) {
+    PolyUOp *div = poly_uop2(
+        ctx, POLY_OP_FLOORDIV, POLY_WEAKINT, numerators[i], denominators[i], poly_arg_none()
+    );
+    PolyUOp *mod = poly_uop2(
+        ctx, POLY_OP_FLOORMOD, POLY_WEAKINT, numerators[i], denominators[i], poly_arg_none()
+    );
+    PolyUOp *remainder =
+        i == 4 ? poly_uop_mul(ctx, x, poly_uop_const_int(ctx, 2)) : poly_uop_const_int(ctx, 0);
+    ASSERT_PTR_EQ(
+        poly_graph_rewrite(ctx, div, poly_symbolic()),
+        poly_graph_rewrite(ctx, quotients[i], poly_symbolic())
+    );
+    ASSERT_PTR_EQ(
+        poly_graph_rewrite(ctx, mod, poly_symbolic()),
+        poly_graph_rewrite(ctx, remainder, poly_symbolic())
+    );
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sym, where_to_max_preserves_comparison_operand_order) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
@@ -1532,8 +1592,7 @@ TEST(sym, codegen_sym_moves_range_independent_reduce_factors_like_tinygrad) {
   ASSERT_PTR_EQ(poly_graph_rewrite(ctx, max_negative, poly_sym()), max_negative);
   PolyUOp *positive = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *positive_src[2] = {
-      poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, varying, positive, poly_arg_none()), range
-  };
+      poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, varying, positive, poly_arg_none()), range};
   PolyUOp *max_positive =
       poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, positive_src, 2, poly_arg_reduce(POLY_OP_MAX, 0));
   PolyUOp *max_rewritten = poly_graph_rewrite(ctx, max_positive, poly_sym());
@@ -3016,8 +3075,7 @@ TEST(sym, minmax_bounded_param_matches_tinygrad) {
       .min_val = poly_arg_int(1),
       .max_val = poly_arg_int(8),
       .has_minmax = true,
-      .addrspace = POLY_ADDR_GLOBAL
-  };
+      .addrspace = POLY_ADDR_GLOBAL};
   PolyUOp *shape = poly_uop(ctx, POLY_OP_STACK, POLY_VOID, NULL, 0, poly_arg_none());
   PolyUOp *param = poly_uop1(ctx, POLY_OP_PARAM, POLY_WEAKINT, shape, poly_arg_param(&arg));
   check_mm(ctx, param, 1, 8, "PARAM[1..8]");

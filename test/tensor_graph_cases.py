@@ -2622,6 +2622,16 @@ for _storage in (False, True):
             'tensor', lambda s=_storage, r=_result: chained_assignment_graph(s, r))
 
 
+def inferred_symbolic_reshape_graph():
+    extent = (UOp.variable('reshape_tokens', 1, 4) if ENGINE == 'tinygrad'
+              else Variable('reshape_tokens', 1, 4)).bind(3)
+    out = Tensor.full((1, extent, 2, 4), 1.0, buffer=False).reshape(1, extent, -1)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+CASES['inferred_symbolic_reshape'] = ('tensor', inferred_symbolic_reshape_graph)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

@@ -32,6 +32,22 @@
 
 /* Helper: build vecadd kernel IR (tensor-level) */
 
+TEST(cuda, empty_stack_emits_no_value) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *empty = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
+  /* Two structural consumers used to force a void-valued local declaration. */
+  PolyUOp *a = poly_uop1(ctx, POLY_OP_GROUP, POLY_VOID, empty, poly_arg_none());
+  PolyUOp *b = poly_uop2(ctx, POLY_OP_GROUP, POLY_VOID, empty, a, poly_arg_none());
+  PolyUOp *ops[] = {empty, a, b};
+  char *source = poly_render_cuda(ctx, ops, 3, "empty_stack", 1);
+  ASSERT_NOT_NULL(source);
+  bool invalid = strstr(source, "void vec") || strstr(source, "(void)0");
+  free(source);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(!invalid);
+  PASS();
+}
+
 TEST(cuda, beam_nvrtc_failure_is_compile_error) {
   SKIP_IF_NO_CUDA();
   PolyCtx *ctx = poly_ctx_new();

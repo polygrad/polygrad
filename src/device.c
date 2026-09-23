@@ -960,8 +960,10 @@ bool poly_uop_contiguous_view_info(
     for (int d = shape.ndim - 1; d >= 0; d--) {
       int64_t begin = 0, end = 0;
       int64_t bound_length = 0;
-      if (poly_uop_bind_value(start_items[d], &begin) != 0 ||
-          poly_uop_bind_value(size_items[d], &bound_length) != 0 ||
+      /* UOp.contiguous_view requires a constant offset. A BIND sample must
+       * not turn a symbolic view into a fixed residency alias. */
+      if (poly_uop_const_i64(start_items[d], &begin) != 0 ||
+          poly_uop_const_i64(size_items[d], &bound_length) != 0 ||
           __builtin_add_overflow(begin, bound_length, &end)) {
         ok = false;
         break;

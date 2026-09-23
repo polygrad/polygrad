@@ -707,6 +707,8 @@ char *poly_render_cuda(
     PolyUOp *u = uops[i];
 
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
+    /* CStyleLanguage._render skips empty dependency tuples, not value locals. */
+    if (u->op == POLY_OP_STACK && u->n_src == 0) continue;
 
     if (u->op != POLY_OP_END) {
       for (int j = 0; j < u->n_src; j++) {

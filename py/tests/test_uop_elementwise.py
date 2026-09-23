@@ -1,7 +1,23 @@
 """Raw UOp wrappers must match the C elementwise helpers, not raw ALU ops."""
 import numpy as np
 
-from polygrad import Tensor, UOp, Variable, _ffi, dtypes
+from polygrad import Tensor, UOp, Variable, TinyJit, _ffi, dtypes
+
+def test_symbolic_reshape_infers_cancelled_dimension():
+    extent = Variable('reshape_tokens', 1, 4)
+    for n in (3, 1, 4):
+        size = extent.bind(n)
+        x = Tensor.full((1, size, 2, 4), 1.0, buffer=False)
+        y = x.reshape(1, size, -1)
+        assert y.shape[-1] == 8
+        assert y.sum().item() == 8 * n
+
+def test_symbolic_arange_preserves_requested_dtype():
+    p = Variable('arange_float_extent', 1, 4)
+    for n in (3, 1, 4):
+        x = Tensor.arange(p.bind(n), dtype=dtypes.float32)
+        assert x.dtype == dtypes.float32
+        assert x.sum().item() == n * (n - 1) // 2
 
 
 def test_uop_sub_div_neg_match_c_helpers():
@@ -103,3 +119,31 @@ def test_offset_mask_matches_j_le_p_plus_i():
         j = np.arange(s)[None, :]
         np.testing.assert_array_equal(allowed, j <= i)
 
+
+def test_symbolic_arange_rebinds_during_jit_replay():
+    position = Variable('arange_position', 0, 11)
+
+    @TinyJit
+    def run(x, p):
+        return (Tensor.arange(p + 1).sum() + x).realize()
+
+    for p in (0, 1, 3, 7, 11):
+        assert run(Tensor([0.0]).realize(), position.bind(p)).item() == p * (p + 1) // 2
+    assert run.schedule_count == 1
+
+
+def test_symbolic_offset_mask_rebinds_in_attention():
+    position = Variable('mask_position', 0, 11)
+    k = Tensor.zeros(1, 1, 13, 2).contiguous().realize()
+    v = Tensor(np.arange(26, dtype=np.float32).reshape(1, 1, 13, 2)).realize()
+
+    @TinyJit
+    def run(q, p):
+        mask = Tensor.full((1, 1, 2, p + 2), float('-inf'), buffer=False).triu(p + 1)
+        assert mask.ndim == 4
+        return q.scaled_dot_product_attention(k[:, :, :p + 2], v[:, :, :p + 2], attn_mask=mask).realize()
+
+    for p in (0, 1, 3, 7, 11):
+        out = run(Tensor.zeros(1, 1, 2, 2).contiguous().realize(), position.bind(p)).numpy()
+        np.testing.assert_allclose(out, np.array([p, p + 1, p + 1, p + 2]).reshape(1, 1, 2, 2), atol=1e-5)
+    assert run.schedule_count == 1
