@@ -30,6 +30,27 @@ const PolyModelType *model_type_find(const char *name);
 #else
 #define MODEL_IMPORT_INTERNAL
 #endif
+/* Private dense topology shared by registry adapters. Defaults and checkpoint
+ * naming/layout conversion belong to those adapters, not the public runtime. */
+typedef struct {
+  int dim, hidden_dim, heads, kv_heads, layers, vocab, batch, length;
+  int head_dim, qk_norm, cache_capacity, prefill_chunk;
+  double eps, theta, factor, low_freq, high_freq, original_context;
+  bool tied;
+  /* Existing Qwen execution boundaries; remove only with checkpoint/backend evidence. */
+  bool materialize_intermediates;
+} ModelTransformerConfig;
+
+typedef struct {
+  const char *label, *input, *output, *cos, *sin;
+  const char *embedding, *norm, *head;
+  const char *block, *attn_norm, *qkv[3], *qk_norm[2], *out, *ffn_norm;
+  const char *gate, *up, *down;
+} ModelTransformerNames;
+
+MODEL_IMPORT_INTERNAL PolyModel *
+model_transformer_build(PolyCtx *, const ModelTransformerConfig *, const ModelTransformerNames *, PolyModelError *);
+
 MODEL_IMPORT_INTERNAL PolyModel *
 model_gpt2_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
 MODEL_IMPORT_INTERNAL PolyModel *

@@ -134,6 +134,45 @@ def test_named_integer_control_roundtrip_and_validation():
             model.dispose()
 
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'CUDA'])
+@pytest.mark.parametrize('nested', [False, True])
+def test_symbolic_read_bounds_before_mutation(device, nested):
+    from polygrad import create
+    with create(device=device, logical='always') as rt:
+        p = rt.Variable('p', -1, 9)
+        buf = rt.Tensor(np.arange(8, dtype=np.float32)).realize()
+        x = rt.Tensor.empty(2)
+        def read(x, p):
+            source = buf.shrink(((2, 6),)) if nested else buf
+            return x * source.shrink(((p, p + 2),))
+        model = rt.Model(read, inputs={'x': x}, params={'buf': buf}, controls={'p': p})
+        restored = rt.Model.load(model.save())
+        try:
+            for m in (model, restored):
+                for tensor_input in (False, True):
+                    value = rt.Tensor.ones(2).realize() if tensor_input else np.ones(2, np.float32)
+                    try:
+                        extent, good = (4, 2) if nested else (8, 6)
+                        before = m.read_buffer('buf').copy()
+                        for bad in (-1, extent - 1, extent, extent + 1):
+                            with pytest.raises(RuntimeError, match=rf'view bounds.*p={bad}'):
+                                m.call('forward', {'x': value}, controls={'p': bad})
+                        np.testing.assert_array_equal(m.read_buffer('buf'), before)
+                        out = m.call('forward', {'x': value}, controls={'p': good})['output']
+                        try:
+                            np.testing.assert_array_equal(out.numpy() if tensor_input else out,
+                                                          [4, 5] if nested else [6, 7])
+                        finally:
+                            if tensor_input: out.dispose()
+                    finally:
+                        if tensor_input: value.dispose()
+        finally:
+            restored.dispose()
+            model.dispose()
+            x.dispose()
+            buf.dispose()
+
+
 def test_controls_are_entrypoint_local():
     from polygrad import create, Variable
     with create(device='INTERP', logical='always') as rt:

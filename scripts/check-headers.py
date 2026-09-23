@@ -43,6 +43,9 @@ def check_api_owners():
 
 def main():
     check_api_owners()
+    transformer_header = (ROOT / "src/models/transformer.h").read_text()
+    assert not re.search(r'\b(?:ModelTransformer\w*|model_transformer_build)\b', transformer_header), \
+        'private Transformer construction leaked into the public runtime API'
     # The Transformer is a client of Model, not a friend of its representation.
     model_api = (ROOT / "src/model.h").read_text() + (ROOT / "src/models/layers.h").read_text()
     transformer = (ROOT / "src/models/transformer.c").read_text()

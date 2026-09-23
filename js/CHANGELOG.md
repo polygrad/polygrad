@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (KV branch)
+
+- Require C ABI104/PGIR22 (reads PGIR19). Add Model integer controls and transient
+  state, with admission before mutation.
+- Add `models.Transformer` for cached C-backed generation, including WebGPU.
+  `reset()`/`resetAsync()` clear KV without rewinding sampling. Bundles preserve
+  RNG state and start with empty KV. Constructor options accept `modelType`.
+
 ## 0.5.2 (2026-09-19)
 
 This release requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate

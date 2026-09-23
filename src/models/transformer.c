@@ -1,4 +1,5 @@
 #include "transformer.h"
+#include "registry.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <string.h>
 #include "layers.h"
@@ -50,8 +51,8 @@ static int transformer_sampler(PolyModel *m, int vocab) {
       ) != 0)
     goto done;
   if (poly_model_aux(m, "sampling.seed", seed, 0) != POLY_STATUS_OK ||
-      poly_model_aux(m, "sampling.counter", counter, POLY_BIND_F_TRANSIENT_ZERO) !=
-          POLY_STATUS_OK ||
+      /* Conversation resets clear KV, not the RNG stream (Tinygrad.generate). */
+      poly_model_aux(m, "sampling.counter", counter, 0) != POLY_STATUS_OK ||
       poly_model_output(m, "sampling.token", wrapped) != POLY_STATUS_OK ||
       poly_model_entrypoint(
           m, "sample", (const char *[]){"sampling.logits", "sampling.temperature"}, 2,
@@ -308,11 +309,7 @@ model_transformer_build(
           poly_model_entrypoint(
               m, entries[i], (const char *[]){input}, 1, (const char *[]){output}, 1, NULL
           ) != POLY_STATUS_OK ||
-          poly_model_control(m, entries[i], "start_pos", p) != POLY_STATUS_OK ||
-          poly_model_entrypoint_precondition(
-              m, entries[i],
-              poly_uop_le(ctx, poly_uop_add(ctx, p, n), poly_uop_const_int(ctx, c->cache_capacity))
-          ) != POLY_STATUS_OK)
+          poly_model_control(m, entries[i], "start_pos", p) != POLY_STATUS_OK)
         goto fail;
     }
   }
@@ -427,8 +424,7 @@ PolyTransformer *poly_transformer_from_model(PolyModel *model, PolyModelError *e
     const char *e = entries[i];
     if (poly_model_entrypoint_input_count(model, e) != 1 ||
         poly_model_entrypoint_output_count(model, e) != 1 ||
-        poly_model_entrypoint_objective(model, e) || poly_model_control_count(model, e) != 1 ||
-        !poly_model_entrypoint_has_precondition(model, e))
+        poly_model_entrypoint_objective(model, e) || poly_model_control_count(model, e) != 1)
       goto invalid;
     const char *input = poly_model_entrypoint_input_name(model, e, 0);
     const char *output = poly_model_entrypoint_output_name(model, e, 0);
@@ -532,7 +528,7 @@ int poly_transformer_position(PolyTransformer *g) {
 static const char *transformer_error(PolyTransformer *g) {
   if (g->busy || poly_model_is_busy(g->model)) return "decoder requires an idle runtime";
   transformer_observe(g);
-  return g->valid ? NULL : "decoder state is invalid; reset_transient before continuing";
+  return g->valid ? NULL : "decoder state is invalid; reset the Transformer before continuing";
 }
 
 int poly_transformer_rewind(PolyTransformer *g, int position) {

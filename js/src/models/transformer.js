@@ -2,10 +2,10 @@
 
 function createBoundTransformerClass(runtime) {
   return class Transformer extends runtime.Model {
-    constructor(spec) {
+    constructor(spec, {modelType = 'Llama'} = {}) {
       // Factory owns creation; specialization below preserves its finalizer.
       const { buildModel } = require('./index')
-      const model = buildModel(runtime, 'Llama', spec, false, false)
+      const model = buildModel(runtime, modelType, spec, false, false)
       try { return Transformer.fromModel(model) }
       catch (error) { model.dispose(); throw error }
     }
@@ -55,6 +55,9 @@ function createBoundTransformerClass(runtime) {
       return this
     }
 
+    reset() { return this.resetTransient() }
+    resetAsync() { return this.resetTransientAsync() }
+
     appendTokens(tokens) { return this._decodeTokens(tokens, false) }
     prefillTokens(tokens) { return this._decodeTokens(tokens, true) }
     appendTokensAsync(tokens) { return this._decodeTokensAsync(tokens, false) }
@@ -87,7 +90,7 @@ function createBoundTransformerClass(runtime) {
       this._requireSync(`${name}()`, `${name}Async()`)
       if (!(tokens instanceof Int32Array)) throw new TypeError('decoder expects Int32Array tokens')
       const out = this._rt._core.transformer.appendTokens(this._transformer, tokens, reuse)
-      if (out == null) throw this._transformerError('decoder append failed; resetTransient before retrying')
+      if (out == null) throw this._transformerError('decoder append failed; reset the Transformer before retrying')
       return out
     }
 
@@ -98,7 +101,7 @@ function createBoundTransformerClass(runtime) {
       tokens = tokens.slice()
       const run = async () => {
         const out = await this._rt._core.transformer.appendTokens(this._transformer, tokens, reuse)
-        if (out == null) throw this._transformerError('decoder append failed; resetTransient before retrying')
+        if (out == null) throw this._transformerError('decoder append failed; reset the Transformer before retrying')
         return out
       }
       return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()

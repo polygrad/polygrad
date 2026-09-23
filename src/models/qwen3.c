@@ -18,6 +18,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "qwen3.h"
+#include "registry.h"
 #include "factory.h"
 #include "../utils.h"
 
@@ -100,7 +101,6 @@ PolyModel *poly_qwen3_into(PolyCtx *ctx, const Qwen3Config *cfg, PolyDevice devi
 
 #include "../loaders/gguf_decode.h"
 #include "../loaders/bind.h"
-#include "registry.h"
 #include "../loaders/import_error.h"
 
 PolyModel *model_qwen3_from_gguf_decoded(

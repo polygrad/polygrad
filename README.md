@@ -318,7 +318,7 @@ Use `save()` / `load()` for a portable graph-and-weights bundle.
 Polygrad 0.5.2 requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
 artifacts are rejected.
 
-The KV development branch uses ABI103 and PGIR21 (also reads PGIR19).
+The KV development branch uses ABI104 and PGIR22 (also reads PGIR19).
 Cached models save their program and weights, not conversation history.
 
 For separate artifacts:

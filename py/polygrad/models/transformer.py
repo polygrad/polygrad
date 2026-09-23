@@ -155,5 +155,5 @@ class Transformer(Model):
         if fn(transformer,
                 tokens.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)), tokens.size,
                 result.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), vocab) != 0:
-            raise self._transformer_error('decoder append failed; reset_transient before retrying')
+            raise self._transformer_error('decoder append failed; reset the Transformer before retrying')
         return result

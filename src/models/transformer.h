@@ -7,33 +7,6 @@
 extern "C" {
 #endif
 
-/* Internal dense Transformer configuration. Checkpoint adapters own defaults,
- * name/layout conversion and validation of their external config dialects. */
-typedef struct {
-  int dim, hidden_dim, heads, kv_heads, layers, vocab, batch, length;
-  int head_dim, qk_norm, cache_capacity, prefill_chunk;
-  double eps, theta, factor, low_freq, high_freq, original_context;
-  bool tied;
-  /* Preserve the existing Qwen execution boundaries during consolidation. */
-  bool materialize_intermediates;
-} ModelTransformerConfig;
-
-typedef struct {
-  const char *label, *input, *output, *cos, *sin;
-  const char *embedding, *norm, *head;
-  const char *block, *attn_norm, *qkv[3], *qk_norm[2], *out, *ffn_norm;
-  const char *gate, *up, *down;
-} ModelTransformerNames;
-
-/* Uses the caller's factory scope; returns an ordinary checkpoint-required
- * Model. No new execution path or public C ABI. */
-PolyModel *model_transformer_build(
-    PolyCtx *ctx,
-    const ModelTransformerConfig *config,
-    const ModelTransformerNames *names,
-    PolyModelError *err
-);
-
 /* Causal decoder only (tinygrad llm/model.py), not a base for vision encoders.
  * Successful adoption transfers Model ownership. Failure leaves it with caller.
  * The borrowed model accessor permits ordinary poly_model_* operations. */

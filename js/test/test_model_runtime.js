@@ -70,7 +70,8 @@ async function checkCachedLlama(pg) {
         await restored.callAsync('prefill', {tokens_prefill:tokens.slice(0,3)},
           {controls:{start_pos:3}})
       } catch (e) { overflow = e }
-      assert(overflow && /precondition/.test(overflow.message), 'combined position/width overflow accepted')
+      assert(overflow && /view bounds.*start_pos=3.*tokens_prefill\[1\]=3/.test(overflow.message),
+        'combined position/width overflow must report its bound values')
       assertClose(await restored.readBufferAsync('model.layers.0.cache_kv'), before, 0)
       // A read must not perform deferred placement and invalidate a live decoder.
       await restored.readBufferAsync('model.layers.0.cache_kv')
@@ -78,7 +79,9 @@ async function checkCachedLlama(pg) {
       assertClose(await restored.appendTokensAsync(tokens.slice(2)), expected.slice(-vocab), 3e-5)
       await restored.dispose()
       restored = pg.models.Transformer.load(saved)
-      await restored.resetTransientAsync()
+      assert(typeof restored.reset === 'function' && typeof restored.resetAsync === 'function',
+        'Transformer must expose reset in both frontend styles')
+      await restored.resetAsync()
       assertClose(await appendRestored(restored, tokens.slice(0,2)), expected.slice(vocab,2*vocab), 3e-5)
       await restored.readBufferAsync('model.layers.0.cache_kv')
       assert(restored.decodePosition === 2, 'reset failed to establish restored placement')
@@ -121,15 +124,20 @@ async function checkCachedLlama(pg) {
         if (queue) assert(submissions > 0, 'cold restored generation submitted no WebGPU work')
       } finally { if (queue) queue.submit = submit }
       if (vocab === 11) {
-        await restored.resetTransientAsync()
+        // Freshly loaded RNG starts at the checkpoint, not at a conversation reset.
+        await restored.dispose()
+        restored = pg.models.Transformer.load(initial)
+        await restored.resetAsync()
         const draws = []
-        for (let i = 0; i < 8; i++) {
+        for (let i = 0; i < 16; i++) {
+          if (i === 8) await restored.resetAsync()
           const out = await restored.callAsync('sample', {
             'sampling.logits':Float32Array.from({length:11},(_,j)=>-1+j/5),
             'sampling.temperature':new Float32Array([0.7])})
           draws.push(out['sampling.token'][0])
         }
-        assert(JSON.stringify(draws) === '[10,10,10,10,9,10,7,5]', 'sampler differs from pinned Gumbel draws')
+        assert(JSON.stringify(draws) === '[10,10,10,10,9,10,7,5,6,6,2,0,0,10,10,10]',
+          'conversation reset must not rewind pinned Gumbel draws')
       }
     } finally {
       if (restored) await restored.dispose()
@@ -204,6 +212,35 @@ async function checkIntegerControls(pg) {
     if (model) await model.dispose()
     await x.dispose()
     position.dispose()
+  }
+  const offset = pg.uop.variable('read_position', 0, 7), width = pg.uop.constant(2)
+  const values = new pg.Tensor(new Float32Array([0,1,2,3,4,5,6,7]))
+  const readInput = pg.Tensor.empty([2])
+  let reader, readerCopy
+  try {
+    await values.realizeAsync()
+    reader = await pg.Model.fromCallableAsync(({x, p}) => {
+      // Tensor.shrink currently takes static bounds in JS. Use its existing
+      // symbolic UOp interface to exercise Model admission on both JS cores.
+      const roots = [values.uopLogical, values.uopPhysical]
+      const views = roots.map(root => pg._core.ffi.poly_uop_shrink_symbolic(
+        root.ctx, root.raw, [p.raw], [width.raw], 1))
+      const view = values._makeResultFromCore(values._coreCreateWithRoots(views[0], views[1], 0))
+      try { return x.mul(view) } finally { view.dispose(); roots.forEach(root => root.dispose()) }
+    }, {inputs:{x:readInput}, params:{buf:values}, controls:{p:offset}})
+    readerCopy = pg.Model.load(await reader.saveAsync())
+    for (const m of [reader, readerCopy]) {
+      let error
+      try {
+        await m.callAsync('forward', {x:new Float32Array([1,1])}, {controls:{p:7}})
+      } catch (e) { error=e }
+      assert(error && /view bounds.*p=7/.test(error.message), 'out-of-bounds read accepted')
+      assertClose((await m.callAsync('forward', {x:new Float32Array([1,1])}, {controls:{p:6}})).output, [6,7], 0)
+    }
+  } finally {
+    if (readerCopy) await readerCopy.dispose()
+    if (reader) await reader.dispose()
+    await readInput.dispose(); await values.dispose(); width.dispose(); offset.dispose()
   }
   const p = pg.uop.variable('local_position', 0, 4)
   const input = pg.Tensor.empty([1]), scalar = new pg.Tensor(p), plain = input.add(1), shifted = input.add(scalar)

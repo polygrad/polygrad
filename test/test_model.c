@@ -29,6 +29,59 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, imported_store_bounds_preserve_cache_bytes) {
+  const char *json =
+      "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":1,"
+      "\"num_hidden_layers\":1,\"vocab_size\":3,\"cache_capacity\":4,\"prefill_chunk_size\":2}";
+  PolyModel *source =
+      poly_model_from_config(NULL, "llama", json, (int)strlen(json), POLY_DEVICE_INTERP, NULL);
+  ASSERT_NOT_NULL(source);
+  for (int i = 0; i < poly_model_buf_count(source); i++) {
+    if (poly_model_buf_role(source, i) != POLY_ROLE_PARAM) continue;
+    size_t bytes = poly_model_buf_nbytes(source, i);
+    void *zeros = calloc(1, bytes);
+    ASSERT_NOT_NULL(zeros);
+    ASSERT_EQ(poly_model_write_buf(source, i, zeros, bytes), 0);
+    free(zeros);
+  }
+  int len = 0, weight_len = 0;
+  uint8_t *ir = poly_model_export_ir(source, &len);
+  uint8_t *weights = poly_model_export_weights(source, &weight_len);
+  ASSERT_NOT_NULL(ir);
+  ASSERT_NOT_NULL(weights);
+  PolyModel *model = poly_model_from_ir(ir, len, weights, weight_len);
+  ASSERT_NOT_NULL(model);
+  ASSERT_EQ(poly_model_set_device(model, POLY_DEVICE_INTERP), 0);
+  int cache_index = test_find_model_buf(model, "model.layers.0.cache_kv");
+  ASSERT_TRUE(cache_index >= 0);
+  size_t bytes = poly_model_buf_nbytes(model, cache_index);
+  unsigned char *before_bytes = malloc(bytes), *after_bytes = malloc(bytes);
+  ASSERT_NOT_NULL(before_bytes);
+  ASSERT_NOT_NULL(after_bytes);
+  memset(before_bytes, 0x3e, bytes);
+  ASSERT_EQ(poly_model_write_buf(model, cache_index, before_bytes, bytes), 0);
+  int32_t tokens[] = {1, 2};
+  PolyIOBinding input = POLY_IO_BINDING_ARRAY("tokens_prefill", tokens, POLY_INT32);
+  PolyControlBinding control = {"start_pos", 3};
+  PolyModelStateVersion before = poly_model_state_version(model);
+  int rc = poly_model_call_with_controls(model, "prefill", &input, 1, &control, 1);
+  bool rejected = rc != 0 && strstr(poly_model_last_error(model)->message, "view bounds") &&
+                  strstr(poly_model_last_error(model)->message, "start_pos=3") &&
+                  strstr(poly_model_last_error(model)->message, "tokens_prefill[1]=2");
+  bool unchanged = poly_model_state_version(model).mutation == before.mutation;
+  unchanged &= poly_model_read_buf(model, cache_index, after_bytes, bytes) == 0 &&
+               memcmp(before_bytes, after_bytes, bytes) == 0;
+  free(after_bytes);
+  free(before_bytes);
+  poly_model_free(model);
+  free(weights);
+  free(ir);
+  poly_model_free(source);
+  ASSERT_TRUE(rejected);
+  ASSERT_TRUE(unchanged);
+  PASS();
+}
+
 TEST(model, decoder_rejects_before_writes_and_invalidates_partial_execution) {
   const char *json =
       "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":1,"

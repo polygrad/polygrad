@@ -42,13 +42,18 @@
       "status": "approved",
       "stages": ["product", "model", "export"],
       "area": "PolyModel",
-      "tinygrad": "No language-neutral ABI package equivalent",
-      "polygrad": "PolyModel owns named bindings, entrypoints, objectives, and package metadata",
-      "rationale": "PolyModel is an intentional Polygrad superset feature.",
-      "approval": "AGENTS.md Core Invariants",
+      "tinygrad": "No language-neutral ABI package equivalent; symbolic SHRINK has no call-time bounds admission. Transformer sampling advances global Tensor RNG, outside state_dict.",
+      "polygrad": "PolyModel owns named bindings, entrypoints, objectives, and package metadata. Call admission derives SHRINK bounds for reads and writes from each entrypoint graph, before input/state mutation. Transformer sampling RNG is ordinary Model AUX state: reset preserves progress and bundles checkpoint it.",
+      "rationale": "Model-only safety and portable state extend the product contract without changing ordinary Tensor or TinyJit semantics. Derived view admission is not a sandbox for arbitrary graph programs.",
+      "approval": "AGENTS.md Core Invariants; user-approved Model read/write bounds and persistent sampling RNG, 2026-09-23",
       "evidence": [
         "ARCHITECTURE.md:PolyModel",
-        "src/model.c"
+        "src/model.c",
+        "src/models/transformer.c",
+        "py/tests/test_model.py:test_symbolic_read_bounds_before_mutation",
+        "test/test_model.c:imported_store_bounds_preserve_cache_bytes",
+        "py/tests/test_hf.py",
+        "references/tinygrad_latest/tinygrad/llm/model.py"
       ],
       "close_when": null
     },

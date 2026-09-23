@@ -320,9 +320,9 @@ After loading weights, `appendTokens(new Int32Array(ids))`
 returns last-token logits; use `await appendTokensAsync(...)` on WebGPU.
 C handles variable-width chunks up to `prefill_chunk_size` and checks capacity
 before writing the cache.
-`decodePosition` reports the committed count. `resetTransient()` (or awaited
-`resetTransientAsync()`) starts a new conversation with the same weights.
-Bundles omit cache history and load with empty caches. Reset after execution
+`decodePosition` reports the committed count. `reset()` (or awaited `resetAsync()`)
+starts a new conversation without changing weights or rewinding sampling.
+Bundles preserve RNG state but load with empty KV caches. Reset after execution
 failure, cache-writing direct calls, weight writes or placement during a conversation.
 Read-only calls and rejected inputs preserve the conversation. Read `decodePosition` only
 after pending operations finish.

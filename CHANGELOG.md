@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (KV branch)
+
+- Require C ABI104 and write PGIR22; continue reading PGIR19. PGPM10 is unchanged.
+- Add entrypoint-local integer controls, transient Model state and pre-write
+  admission, including bounds derived from read/write views on build/import.
+  Remove the unreleased author-precondition API and serialized predicate field.
+- Share dense Llama/Qwen construction and add the owning C Transformer API,
+  Python/JavaScript subclasses, variable-width prefill, prefix reuse and sampling.
+  Conversation reset clears KV but preserves RNG progress; bundles omit KV history
+  and retain RNG state. Generic Model has no generation methods.
+
 ## 0.5.2 (2026-09-19)
 
 This release requires C ABI101; PGIR19 and PGPM10 are unchanged. Intermediate

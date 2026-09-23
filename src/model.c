@@ -260,7 +260,6 @@ typedef struct {
   int n_outputs;
   char *objective;
   uint32_t flags;
-  PolyUOp *precondition;
 } BuildEntrypoint;
 
 typedef struct {
@@ -269,13 +268,13 @@ typedef struct {
   PolyUOp *logical_sink; /* portable IR/inlining entrypoint */
   PolyUOp *capture_sink; /* immutable pre-policy physical root; may alias logical */
   bool writes_state, writes_transient; /* Derived from named STORE destinations. */
+  PolyUOp *view_bounds; /* Derived from read/write views, never serialized. */
   char **inputs;
   int n_inputs;
   char **outputs;
   int n_outputs;
   char *objective;
   uint32_t flags;
-  PolyUOp *precondition;
 } RuntimeEntrypoint;
 
 typedef struct {
@@ -434,8 +433,6 @@ static bool build_publish_roots(
       PUBLISH_ROOT(binding->declared_logical_value);
       PUBLISH_ROOT(binding->declared_physical_value);
     }
-    for (int i = 0; i < build->n_entrypoints; i++)
-      PUBLISH_ROOT(build->entrypoints[i].precondition);
   }
 
 #undef PUBLISH_ROOT
@@ -503,7 +500,7 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
     ADD_MODEL_ROOT(state->entrypoints[i].sink);
     ADD_MODEL_ROOT(state->entrypoints[i].logical_sink);
     ADD_MODEL_ROOT(state->entrypoints[i].capture_sink);
-    ADD_MODEL_ROOT(state->entrypoints[i].precondition);
+    ADD_MODEL_ROOT(state->entrypoints[i].view_bounds);
     if (state->entry_executables) ADD_MODEL_ROOT(state->entry_executables[i].linear);
   }
   for (int i = 0; i < state->n_modules; i++) {
@@ -1320,62 +1317,6 @@ PolyStatus poly_model_entrypoint(
   return POLY_STATUS_OK;
 }
 
-/* Model admission uses scalar symbolic metadata, never reads storage or executes
- * user graphs. Keep this whitelist independent of the decoder architecture. */
-static bool model_precondition_valid(PolyCtx *ctx, PolyUOp *condition) {
-  if (!condition) return true;
-  if (!poly_ctx_owns_ptr(ctx, condition) || !poly_dtype_eq(condition->dtype, POLY_BOOL) ||
-      poly_uop_ndim(ctx, condition) != 0)
-    return false;
-  int n = 0;
-  PolyUOp **nodes = poly_uop_toposort_alloc(ctx, condition, &n);
-  bool valid = nodes != NULL;
-  for (int i = 0; valid && i < n; i++) {
-    PolyUOp *u = nodes[i];
-    if (poly_uop_is_variable(u)) continue;
-    switch (u->op) {
-    case POLY_OP_CONST:
-    case POLY_OP_ADD:
-    case POLY_OP_MUL:
-    case POLY_OP_MAX:
-    case POLY_OP_CMPLT:
-    case POLY_OP_CMPNE:
-    case POLY_OP_AND:
-    case POLY_OP_OR:
-    case POLY_OP_XOR:
-      break;
-    case POLY_OP_STACK:
-      valid = u->n_src == 0;
-      break;
-    default:
-      valid = false;
-      break;
-    }
-  }
-  poly_uop_toposort_free(nodes);
-  return valid;
-}
-
-PolyStatus poly_model_entrypoint_precondition(
-    PolyModel *inst,
-    const char *entrypoint,
-    PolyUOp *condition
-) {
-  if (!inst || inst->stage != POLY_MODEL_BUILDING) return POLY_STATUS_BAD_STAGE;
-  if (!entrypoint || !condition || !model_precondition_valid(inst->ctx, condition))
-    return POLY_STATUS_INVALID;
-  for (int i = 0; i < inst->build->n_entrypoints; i++) {
-    BuildEntrypoint *ep = &inst->build->entrypoints[i];
-    if (strcmp(ep->name, entrypoint)) continue;
-    if (ep->precondition || ep->objective) return POLY_STATUS_INVALID;
-    ep->precondition = condition;
-    if (model_refresh_residency_roots(inst) == 0) return POLY_STATUS_OK;
-    ep->precondition = NULL;
-    return POLY_STATUS_NOMEM;
-  }
-  return POLY_STATUS_INVALID;
-}
-
 static BuildBinding *find_build_storage_binding(
     PolyModelBuildState *build,
     const PolyUOp *storage
@@ -2058,7 +1999,6 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err) {
     eps[i].n_outputs = ep->n_outputs;
     eps[i].objective = ep->objective;
     eps[i].flags = ep->flags;
-    eps[i].precondition = ep->precondition;
     free(logical_stores);
     if (!eps[i].sink) {
       poly_model_set_error(
@@ -2685,10 +2625,6 @@ static PolyModel *model_from_spec(
     inst->entrypoints[i].objective = dup_cstr(spec->entrypoints[i].objective);
     if (spec->entrypoints[i].objective && !inst->entrypoints[i].objective) goto fail;
     inst->entrypoints[i].flags = spec->entrypoints[i].flags;
-    inst->entrypoints[i].precondition = spec->entrypoints[i].precondition;
-    if (!model_precondition_valid(inst->ctx, inst->entrypoints[i].precondition) ||
-        (inst->entrypoints[i].precondition && inst->entrypoints[i].objective))
-      goto fail;
   }
 
   /* Portable PGIR v10 retains the same exact logical module boundaries used
@@ -3898,7 +3834,6 @@ uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
     eps[i].n_outputs = inst->entrypoints[i].n_outputs;
     eps[i].objective = inst->entrypoints[i].objective;
     eps[i].flags = inst->entrypoints[i].flags;
-    eps[i].precondition = inst->entrypoints[i].precondition;
   }
 
   PolyIrModule *modules =
@@ -4017,15 +3952,6 @@ static PolyLinearEntry *model_ensure_entry_executable(PolyModel *inst, int entry
 uint8_t *poly_model_export_program(PolyModel *inst, int *out_len) {
   if (!out_len) return NULL;
   *out_len = 0;
-  if (inst)
-    for (int i = 0; i < inst->n_entrypoints; i++)
-      if (inst->entrypoints[i].precondition) {
-        poly_model_set_error(
-            inst, POLY_STATUS_INVALID, __func__,
-            "bound-program export does not support entrypoint preconditions"
-        );
-        return NULL;
-      }
   if (inst && inst->n_controls) {
     poly_model_set_error(
         inst, POLY_STATUS_INVALID, __func__, "bound-program export does not support controls"
@@ -4707,6 +4633,42 @@ static void model_invocation_free(ModelInvocation *inv) {
   free(inv->vars);
 }
 
+static void model_admission_error(
+    PolyModel *inst,
+    const RuntimeEntrypoint *entry,
+    const ModelInvocation *inv,
+    const char *reason
+) {
+  char values[192] = {0};
+  size_t used = 0;
+  for (int i = 0; i < inst->n_controls; i++) {
+    const PolyIrControl *c = &inst->controls[i];
+    if (strcmp(c->entrypoint, entry->name)) continue;
+    for (int j = 0; j < inv->n_vars && used < sizeof(values) - 1; j++)
+      if (model_same_var(c->variable, inv->vars[j].var)) {
+        int n = snprintf(
+            values + used, sizeof(values) - used, "%s%s=%lld", used ? ", " : "", c->name,
+            (long long)inv->vars[j].value
+        );
+        if (n > 0)
+          used += (size_t)n < sizeof(values) - used ? (size_t)n : sizeof(values) - used - 1;
+      }
+  }
+  for (int i = 0; i < entry->n_inputs && used < sizeof(values) - 1; i++) {
+    int bi = find_buf_by_name(inst, entry->inputs[i]);
+    if (bi < 0 || !inst->bufs[bi].dynamic) continue;
+    int axis = inst->bufs[bi].dynamic_axis;
+    int n = snprintf(
+        values + used, sizeof(values) - used, "%s%s[%d]=%lld", used ? ", " : "", entry->inputs[i],
+        axis, (long long)inv->shapes[bi][axis]
+    );
+    if (n > 0) used += (size_t)n < sizeof(values) - used ? (size_t)n : sizeof(values) - used - 1;
+  }
+  poly_model_set_error(
+      inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s': %s (%s)", entry->name, reason, values
+  );
+}
+
 static void model_publish_invocation(PolyModel *inst, const ModelInvocation *inv) {
   for (int i = 0; i < inst->n_bufs; i++)
     if (inst->bufs[i].dynamic)
@@ -4987,13 +4949,10 @@ static int bind_model_io(
     }
   }
 
-  if (entry->precondition) {
+  if (entry->view_bounds) {
     int64_t admitted;
-    if (!model_bound_dim(inst->ctx, entry->precondition, inv, &admitted) || !admitted) {
-      poly_model_set_error(
-          inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s': input/control precondition failed",
-          entry->name
-      );
+    if (!model_bound_dim(inst->ctx, entry->view_bounds, inv, &admitted) || !admitted) {
+      model_admission_error(inst, entry, inv, "view bounds failed");
       return -1;
     }
   }
@@ -5353,15 +5312,65 @@ static int model_classify_effects(PolyModel *inst) {
         poly_uop_toposort_ex_alloc(inst->ctx, e->logical_sink, &n, model_effect_gate, false);
     if (!topo) return -1;
     e->writes_state = e->writes_transient = false;
+    e->view_bounds = NULL;
     for (int j = 0; j < n; j++) {
-      if (topo[j]->op != POLY_OP_STORE || topo[j]->n_src != 2) continue;
-      PolyUOp *target = poly_uop_buf_uop(inst->ctx, topo[j]->src[0]);
+      /* SHRINK records start and size, not an end index. Validate each view
+       * against its immediate source shape, including nested movement views.
+       * Independent variable bounds cannot prove start+size <= extent. Derive
+       * this once on import/build for reads AND writes. Admission precedes any
+       * call-side mutation; producer metadata is not a bounds guarantee. */
+      PolyUOp *v = topo[j];
+      if (v->op == POLY_OP_SHRINK) {
+        PolyUOp *starts[POLY_IR_MAX_DIMS], *sizes[POLY_IR_MAX_DIMS];
+        int rank = v->n_src == 3 ? poly_uop_ndim(inst->ctx, v->src[0]) : -1;
+        if (rank < 0 || rank > POLY_IR_MAX_DIMS ||
+            poly_uop_as_shape(inst->ctx, v->src[1], starts, POLY_IR_MAX_DIMS) != rank ||
+            poly_uop_as_shape(inst->ctx, v->src[2], sizes, POLY_IR_MAX_DIMS) != rank) {
+          free(topo);
+          return -1;
+        }
+        PolyUOp *zero = poly_uop_const_int(inst->ctx, 0);
+        for (int d = 0; d < rank; d++) {
+          PolyUOp *extent = poly_uop_shape_dim(inst->ctx, v->src[0], d);
+          PolyUOp *checks[] = {
+              poly_uop_ge(inst->ctx, starts[d], zero), poly_uop_ge(inst->ctx, sizes[d], zero),
+              poly_uop_le(inst->ctx, starts[d], extent),
+              poly_uop_le(inst->ctx, sizes[d], poly_uop_sub(inst->ctx, extent, starts[d]))};
+          for (int k = 0; k < 4; k++) {
+            if (!checks[k]) {
+              free(topo);
+              return -1;
+            }
+            e->view_bounds = e->view_bounds ? poly_uop2(
+                                                  inst->ctx, POLY_OP_AND, POLY_BOOL, e->view_bounds,
+                                                  checks[k], poly_arg_none()
+                                              )
+                                            : checks[k];
+            if (!e->view_bounds) {
+              free(topo);
+              return -1;
+            }
+          }
+        }
+      }
+      if (v->op != POLY_OP_STORE || v->n_src != 2) continue;
+      PolyUOp *target = poly_uop_buf_uop(inst->ctx, v->src[0]);
       for (int k = 0; k < inst->n_bufs; k++) {
         NamedBuf *b = &inst->bufs[k];
         if (target != b->logical_buffer) continue;
         e->writes_state |= b->role == POLY_ROLE_PARAM || b->role == POLY_ROLE_AUX;
         e->writes_transient |= (b->flags & POLY_BIND_F_TRANSIENT_ZERO) != 0;
       }
+    }
+    if (e->view_bounds) {
+      e->view_bounds = poly_graph_rewrite(inst->ctx, e->view_bounds, poly_symbolic());
+      if (!e->view_bounds) {
+        free(topo);
+        return -1;
+      }
+      if (e->view_bounds->op == POLY_OP_CONST && e->view_bounds->arg.kind == POLY_ARG_BOOL &&
+          e->view_bounds->arg.b)
+        e->view_bounds = NULL;
     }
     free(topo);
   }
@@ -5382,10 +5391,6 @@ bool poly_model_is_busy(const PolyModel *inst) {
 }
 int poly_model_check_ready(PolyModel *inst) {
   return inst && inst->stage == POLY_MODEL_BUILT && model_weights_ready(inst) ? 0 : -1;
-}
-bool poly_model_entrypoint_has_precondition(const PolyModel *inst, const char *entrypoint) {
-  int i = inst && entrypoint ? find_entrypoint(inst, entrypoint) : -1;
-  return i >= 0 && inst->entrypoints[i].precondition;
 }
 int poly_model_control_count(const PolyModel *inst, const char *entrypoint) {
   if (!inst || !entrypoint || find_entrypoint(inst, entrypoint) < 0) return -1;
@@ -6303,7 +6308,7 @@ int poly_model_inline_entrypoint(
     return -1;
   PolyCtx *dst_ctx = parent->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
-  if (ep_idx < 0 || child->entrypoints[ep_idx].precondition) return -1;
+  if (ep_idx < 0) return -1;
   PolyUOp *logical_sink = child->entrypoints[ep_idx].logical_sink;
   /* A Tensor-built child may retain an exact bound pre-policy snapshot.  A
    * portable IR import has no such product and must inline its current root,

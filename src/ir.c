@@ -741,18 +741,12 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   /* PGIR owns one unique node list, not the sum of overlapping traversals.
    * Root order remains entrypoints then named state. A non-NULL root always
    * has at least one node: NULL/zero means allocation failure, not an empty graph. */
-  for (int group = 0; group < 4; group++) {
+  for (int group = 0; group < 3; group++) {
     int n_roots = group == 1 ? spec->n_bufs : group == 2 ? spec->n_controls : spec->n_entrypoints;
     for (int i = 0; i < n_roots; i++) {
       PolyUOp *root = group == 0   ? spec->entrypoints[i].sink
                       : group == 1 ? spec->bufs[i].buffer
-                      : group == 2 ? spec->controls[i].variable
-                                   : spec->entrypoints[i].precondition;
-      if (group == 3 && !root) continue;
-      if (group == 3 && executable) {
-        free(topo);
-        return NULL;
-      }
+                                   : spec->controls[i].variable;
       PolyScratchMark scratch = poly_ctx_scratch_mark(spec->ctx);
       int count = 0;
       PolyUOp **nodes = ir_toposort(spec->ctx, root, &count, true);
@@ -1258,7 +1252,6 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u32(&buf, st_add(&strings, ep->inputs[j]));
     for (int j = 0; j < ep->n_outputs; j++)
       bb_u32(&buf, st_add(&strings, ep->outputs[j]));
-    if (!executable) bb_u32(&buf, ep->precondition ? FIND_IDX(ep->precondition) : UINT32_MAX);
   }
 
   /* Exact logical module boundaries. Devices are intentionally absent: the
@@ -2214,14 +2207,6 @@ static int poly_graph_import(
         if (executable && idx >= n_strings) goto fail_ep;
         outputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
         if (!outputs[j]) goto fail_ep;
-      }
-    }
-    if (!executable && version >= 21) {
-      if (br_remaining(&r) < 4) goto fail_ep;
-      uint32_t condition = br_u32(&r);
-      if (condition != UINT32_MAX) {
-        if (condition >= n_nodes) goto fail_ep;
-        out->entrypoints[i].precondition = nodes[condition];
       }
     }
   }

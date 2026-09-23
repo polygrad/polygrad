@@ -100,7 +100,7 @@ typedef struct {
 #define POLY_ROLE_OUTPUT 3
 #define POLY_ROLE_AUX 4
 
-/* Binding flags for model-local state. PGIR21 also preserves TRANSIENT_ZERO
+/* Binding flags for model-local state. PGIR22 also preserves TRANSIENT_ZERO
  * so portable imports recreate cache storage without exporting its contents. */
 #define POLY_BIND_F_NONE 0u
 #define POLY_BIND_F_NO_SAVE (1u << 0)
@@ -111,15 +111,6 @@ typedef struct {
 /* Zero only explicitly transient AUX state; ordinary AUX/parameters survive.
  * A failed reset may have written a prefix of the reset set. */
 int poly_model_reset_transient(PolyModel *inst);
-
-/* Optional admission predicate over declared integer controls/input dimensions.
- * Checked before any input upload or state mutation; retained and serialized.
- * This is product metadata, not an executable graph or another scheduler. */
-PolyStatus poly_model_entrypoint_precondition(
-    PolyModel *inst,
-    const char *entrypoint,
-    PolyUOp *condition
-);
 
 /* Model state: parameters and persistent non-optimizer AUX buffers. */
 #define POLY_EXPORT_WEIGHTS_PARAMS (1u << 0)
@@ -633,7 +624,6 @@ PolyModelStateVersion poly_model_state_version(const PolyModel *model);
 bool poly_model_is_busy(const PolyModel *model);
 int poly_model_check_ready(PolyModel *model);
 bool poly_model_has_transient(const PolyModel *model);
-bool poly_model_entrypoint_has_precondition(const PolyModel *model, const char *entrypoint);
 int poly_model_control_count(const PolyModel *model, const char *entrypoint);
 const char *poly_model_control_name(const PolyModel *model, const char *entrypoint, int index);
 int poly_model_control_bounds(

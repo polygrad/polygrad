@@ -1,7 +1,7 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current portable format: poly.ir.uops@21 (reads @19).
+ * Current portable format: poly.ir.uops@22 (reads @19).
  * Scope: tensor-level graphs only (pre-scheduling).
  *        Pointer dtypes are rejected. UOp shape carries storage extent.
  *
@@ -14,7 +14,7 @@
 #include "polygrad.h"
 #include <stdint.h>
 
-#define POLY_IR_VERSION 21
+#define POLY_IR_VERSION 22
 #define POLY_PROGRAM_VERSION 10
 
 #ifdef __cplusplus
@@ -57,7 +57,6 @@ typedef struct {
   int n_outputs;
   const char *objective; /* nullable; must name one output when present */
   uint32_t flags;
-  PolyUOp *precondition; /* optional scalar bool over input dimensions/controls */
 } PolyIrEntrypoint;
 
 /* Exact named logical boundary used by explicit non-uniform placement. The

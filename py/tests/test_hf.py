@@ -318,7 +318,7 @@ def test_transformer_specialization_owns_one_model():
 def test_transformer_generate_stays_in_c(device):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+        pytest.fail('requested CUDA Transformer lane: poly_cuda_available() is false')
     case = LLAMA_CASES[0]
     with pg.create(device=device) as rt, ExitStack() as cleanup:
         model = rt.models.Llama({**case['config'], 'max_seq_len':5,
@@ -344,7 +344,7 @@ def test_transformer_generate_stays_in_c(device):
 def test_transformer_sampler_matches_pinned_gumbel(device):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+        pytest.fail('requested CUDA Transformer lane: poly_cuda_available() is false')
     case = LLAMA_CASES[0]
     with pg.create(device=device) as rt:
         rt.Tensor.manual_seed(0)
@@ -357,13 +357,21 @@ def test_transformer_sampler_matches_pinned_gumbel(device):
             inputs = {'sampling.logits':np.linspace(-1,1,11,dtype=np.float32).reshape(1,11),
                       'sampling.temperature':np.array([0.7], np.float32)}
             # Pinned llm/model.py:378 formula, seed=0, eight sequential draws.
-            expected = [10,10,10,10,9,10,7,5]
+            expected = [10,10,10,10,9,10,7,5,6,6,2,0,0,10,10,10]
             saved = model.save()
-            for _ in range(2):
+            for run in range(2):
                 model.reset()
                 actual = [int(model.call('sample', inputs)['sampling.token'].item()) for _ in range(8)]
-                assert actual == expected
-            assert model.save() == saved
+                assert actual == expected[run*8:(run+1)*8]
+            # Conversation reset preserves RNG progress; checkpoints carry it.
+            assert model.save() != saved
+            progressed = rt.models.Transformer.load(model.save())
+            try:
+                np.testing.assert_array_equal(progressed.read_buffer('sampling.counter'),
+                                              model.read_buffer('sampling.counter'))
+                assert progressed.call('sample', inputs)['sampling.token'].item() == model.call('sample', inputs)['sampling.token'].item()
+            finally:
+                progressed.dispose()
             restored = rt.models.Transformer.load(saved)
             try:
                 assert restored.decode_position == 0
@@ -378,7 +386,7 @@ def test_transformer_sampler_matches_pinned_gumbel(device):
 def test_llama_prefix_reuse_and_rewind(device):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+        pytest.fail('requested CUDA Transformer lane: poly_cuda_available() is false')
     case = LLAMA_CASES[0]
     with pg.create(device=device) as rt, ExitStack() as cleanup:
         config = {**case['config'], 'max_seq_len':5, 'cache_capacity':5, 'prefill_chunk_size':4}
@@ -428,7 +436,7 @@ def test_llama_prefix_reuse_and_rewind(device):
 def test_llama_variable_prefill_admission_and_import(device):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+        pytest.fail('requested CUDA Transformer lane: poly_cuda_available() is false')
     case = LLAMA_CASES[0]
     with pg.create(device=device) as rt, ExitStack() as cleanup:
         plain = rt.models.Llama({**case['config'], 'max_seq_len': 5})
@@ -460,7 +468,7 @@ def test_llama_variable_prefill_admission_and_import(device):
             for tensor_io in (False, True):
                 value = rt.Tensor(tokens[:, :3]) if tensor_io else tokens[:, :3]
                 try:
-                    with pytest.raises(RuntimeError, match='precondition'):
+                    with pytest.raises(RuntimeError, match=r'start_pos=3.*tokens_prefill\[1\]=3'):
                         model.call('prefill', {'tokens_prefill': value}, controls={'start_pos': 3})
                 finally:
                     if tensor_io: value.dispose()
@@ -477,7 +485,7 @@ def test_llama_variable_prefill_admission_and_import(device):
 def test_llama_cached_partitions_and_fresh_import(device, case):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+        pytest.fail('requested CUDA Transformer lane: poly_cuda_available() is false')
     weights = llama_weights(case)
     with pg.create(device=device) as rt, ExitStack() as cleanup:
         plain = rt.models.Llama({**case['config'], 'max_seq_len':5})
@@ -540,7 +548,7 @@ def test_llama_cached_partitions_and_fresh_import(device, case):
         name, weight = next(iter(weights.items()))
         cached.write_buffer(name, weight)
         assert cached.decode_position == -1
-        with pytest.raises(RuntimeError, match='reset_transient'):
+        with pytest.raises(RuntimeError, match='reset the Transformer'):
             cached.append_tokens(tokens[:, :1])
         for chunks in ((2,2,1), (1,1,1,1,1)):
             cached.reset_transient()

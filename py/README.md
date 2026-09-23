@@ -328,12 +328,15 @@ After loading weights, `model.append_tokens(ids)`
 accepts int32 `[N]` or `[1,N]` tokens and returns last-token logits `[1,vocab]`.
 C handles variable-width chunks up to `prefill_chunk_size` and checks capacity
 before writing the cache. `model.decode_position` reports the committed
-count. `reset_transient()` starts a new conversation without changing weights.
-Saved bundles exclude cache history and load with empty caches.
+count. `reset()` starts a new conversation without changing weights or rewinding
+the sampling RNG. Saved bundles preserve RNG state but load with empty KV caches.
 Use `models.Transformer.load(bundle)` to restore generation methods;
 `Model.load(bundle)` stays generic. `model.generate(ids, temperature=0, max_tokens=32)`
 yields token IDs sampled in C. `prefill_tokens(ids)` reuses a matching prompt
 prefix; `rewind(position)` discards a suffix without clearing cache storage.
+The separate `polygrad.llm.model.Transformer` is the Tensor/TinyJit port used for
+Tinygrad compatibility; `models.Transformer` is the portable C-backed API shared
+with JavaScript.
 
 After a failed append, cache-writing direct call, weight write or placement during
 a conversation, reset before appending again. Read-only calls and rejected inputs
