@@ -5101,6 +5101,12 @@ static int run_model_sink_bound(
     );
   free(effective);
   if (!cached_executable) cached_executable_clear(&local);
+  /* Match Tensor's already-backed realization boundary: replay alone does
+   * not justify a scan, but a retired storage owner must be reclaimed even
+   * when a steady-state Model never allocates again. */
+  if (ret == 0 && (inst->ctx->collection_requested || poly_ctx_ir_collection_due(inst->ctx)) &&
+      poly_ctx_collect_at_safe_point(inst->ctx) != 0)
+    ret = -1;
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(

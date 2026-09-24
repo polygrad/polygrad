@@ -367,7 +367,7 @@ EM_JS(void, js_webgpu_free_search_pipeline, (uintptr_t id), {
   if (st) st.pipelines.delete(id);
 });
 
-EM_ASYNC_JS(
+EM_JS(
     int,
     js_webgpu_dispatch,
     (uintptr_t pipeline_id,
@@ -380,7 +380,12 @@ EM_ASYNC_JS(
      int debug_level,
      double *elapsed_us),
     {
-      const st = await Module.__polygradEnsureWebGPU();
+      // Rewinding reenters this import to retrieve its completed result; do not
+      // allocate uniforms or submit the timed/debug launch a second time.
+      if (Asyncify.state === Asyncify.State.Rewinding)
+        return Asyncify.handleAsync(() => {});
+      const st = Module.__polygradWebGpuState;
+      if (!st || !st.device) return -1;
       const rec = st.pipelines.get(pipeline_id);
       if (!rec) return -1;
       // Pinned WebGPU wait uses device timestamps, not queue wall time.
@@ -390,6 +395,16 @@ EM_ASYNC_JS(
       const tempUniforms = [];
       const tempCopies = [];
       let querySet = null, queryBuffer = null, queryReadback = null;
+      let deferredCleanup = false;
+      const cleanup = () => {
+        if (queryReadback) queryReadback.destroy();
+        if (queryBuffer) queryBuffer.destroy();
+        if (querySet) querySet.destroy();
+        // WebGPU defers reclamation until already-submitted uses complete
+        // (spec section Buffer Destruction). No queue fence is needed here.
+        for (const buf of tempUniforms) buf.destroy();
+        for (const buf of tempCopies) buf.destroy();
+      };
       try {
       const outHandle = n_params > 0 ? HEAPU32[args >> 2] : 0;
 
@@ -445,7 +460,7 @@ EM_ASYNC_JS(
       `grid=${gx},${gy},${gz} n_params=${n_params} n_args=${n_args} ${desc}`);
       }
 
-      if (debug_level >= 8) {
+      const dumpInputs = async () => {
         const dumpBuffer = async (handle, label) => {
           const src = st.buffers.get(handle);
           const nbytes = st.bufferSizes.get(handle) || 0;
@@ -479,8 +494,9 @@ EM_ASYNC_JS(
                 handle, `param${i}`
             );
         }
-      }
+      };
 
+      const submit = () => {
       const bindGroup =
           st.device.createBindGroup({layout : rec.bindGroupLayout, entries : bgEntries});
 
@@ -504,27 +520,36 @@ EM_ASYNC_JS(
         encoder.copyBufferToBuffer(queryBuffer, 0, queryReadback, 0, 16);
       }
       st.device.queue.submit([encoder.finish()]);
+      };
 
-      if (elapsed_us) {
-        await queryReadback.mapAsync(GPUMapMode.READ);
-        const times = new BigUint64Array(queryReadback.getMappedRange());
-        HEAPF64[elapsed_us >> 3] = Number(times[1] - times[0]) / 1000;
-        queryReadback.unmap();
-      } else if (tempUniforms.length || tempCopies.length) {
-        await st.device.queue.onSubmittedWorkDone();
+      // Ordinary launches only enqueue, like pinned WebGPUProgram(wait=False).
+      // Keep Asyncify for actual host readback: diagnostics and BEAM timestamps.
+      if (elapsed_us || debug_level >= 8) {
+        deferredCleanup = true;
+        return Asyncify.handleAsync(async () => {
+          try {
+            if (debug_level >= 8) await dumpInputs();
+            submit();
+            if (elapsed_us) {
+              await queryReadback.mapAsync(GPUMapMode.READ);
+              const times = new BigUint64Array(queryReadback.getMappedRange());
+              HEAPF64[elapsed_us >> 3] = Number(times[1] - times[0]) / 1000;
+              queryReadback.unmap();
+            }
+            return 0;
+          } catch (error) {
+            console.error('polygrad: WebGPU dispatch failed:', error);
+            return -1;
+          } finally { cleanup(); }
+        });
       }
+      submit();
       return 0;
       } catch (error) {
         console.error('polygrad: WebGPU dispatch failed:', error);
         return -1;
       } finally {
-      if (queryReadback) queryReadback.destroy();
-      if (queryBuffer) queryBuffer.destroy();
-      if (querySet) querySet.destroy();
-      for (const ubuf of tempUniforms)
-        ubuf.destroy();
-      for (const buf of tempCopies)
-        buf.destroy();
+      if (!deferredCleanup) cleanup();
       }
     }
 )

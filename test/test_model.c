@@ -108,10 +108,11 @@ TEST(model, decoder_rejects_before_writes_and_invalidates_partial_execution) {
   ASSERT_NOT_NULL(ir);
   PolyIrSpec spec = {0};
   ASSERT_EQ(poly_ir_import(ir, ir_len, &spec), 0);
-  bool found_sample = false;
+  int found_sample = 0;
   for (int i = 0; i < spec.n_entrypoints; i++) {
-    if (strcmp(spec.entrypoints[i].name, "sample")) continue;
-    found_sample = true;
+    bool fused = !strcmp(spec.entrypoints[i].name, "decode_sample");
+    if (!fused && strcmp(spec.entrypoints[i].name, "sample")) continue;
+    found_sample++;
     int n = 0, random = 0, logs = 0, stores = 0;
     PolyUOp **nodes = poly_uop_toposort_alloc(spec.ctx, spec.entrypoints[i].sink, &n);
     ASSERT_NOT_NULL(nodes);
@@ -123,8 +124,9 @@ TEST(model, decoder_rejects_before_writes_and_invalidates_partial_execution) {
     poly_uop_toposort_free(nodes);
     /* Pinned Gumbel-max needs both logarithms, graph RNG and its state write. */
     ASSERT_TRUE(random > 0 && logs >= 2 && stores >= 2);
+    if (fused) ASSERT_TRUE(stores >= 3); /* Packed KV, RNG and sampled-token writes. */
   }
-  ASSERT_TRUE(found_sample);
+  ASSERT_EQ(found_sample, 2);
   PolyCtx *import_ctx = spec.ctx;
   poly_ir_spec_free(&spec);
   poly_ctx_destroy(import_ctx);
@@ -175,6 +177,47 @@ TEST(model, decoder_rejects_before_writes_and_invalidates_partial_execution) {
   ASSERT_EQ(poly_transformer_reset(g), 0);
   ASSERT_EQ(poly_transformer_position(g), 0);
   poly_transformer_free(g);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, transformer_generation_reuses_output_storage) {
+  const char *json =
+      "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":1,"
+      "\"num_hidden_layers\":1,\"vocab_size\":3,\"cache_capacity\":16,\"prefill_chunk_size\":2}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *m =
+      poly_model_from_config(ctx, "llama", json, (int)strlen(json), POLY_DEVICE_INTERP, NULL);
+  ASSERT_NOT_NULL(m);
+  for (int i = 0; i < poly_model_buf_count(m); i++) {
+    if (poly_model_buf_role(m, i) != POLY_ROLE_PARAM) continue;
+    size_t bytes = poly_model_buf_nbytes(m, i);
+    float *data = malloc(bytes);
+    ASSERT_NOT_NULL(data);
+    for (size_t j = 0; j < bytes / sizeof(float); j++)
+      data[j] = 0.125f;
+    ASSERT_EQ(poly_model_write_buf(m, i, data, bytes), 0);
+    free(data);
+  }
+  PolyTransformer *g = poly_transformer_from_model(m, NULL);
+  ASSERT_NOT_NULL(g);
+  int32_t tokens[] = {0, 1}, next = -1;
+  ASSERT_EQ(poly_transformer_start(g, tokens, 2), 0);
+  for (int i = 0; i < 3; i++)
+    ASSERT_EQ(poly_transformer_next(g, 0, &next), 0);
+  uint64_t order = ctx->next_tensor_order, bytes = ctx->mem_used;
+  size_t misses = ctx->runtime_cache_misses;
+  for (int i = 0; i < 8; i++) {
+    ASSERT_EQ(poly_transformer_next(g, 0, &next), 0);
+    ASSERT_TRUE(next >= 0 && next < 3);
+    /* A Model-owned scalar output needs neither fresh Tensor snapshots nor
+     * additional residency or compilation as the cache position advances. */
+    ASSERT_EQ(ctx->next_tensor_order, order);
+    ASSERT_EQ(ctx->mem_used, bytes);
+    ASSERT_EQ(ctx->runtime_cache_misses, misses);
+  }
+  poly_transformer_free(g);
+  poly_ctx_collect(ctx);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -8,14 +8,16 @@ async function checkCachedLlama(pg) {
   async function appendRestored(model, tokens) {
     const state = pg._core.Module && pg._core.Module.__polygradWebGpuState
     if (!state) return model.appendTokensAsync(tokens)
-    const queue = state.device.queue, submit = queue.submit
-    let submissions = 0
+    const queue = state.device.queue, submit = queue.submit, wait = queue.onSubmittedWorkDone
+    let submissions = 0, waits = 0
     queue.submit = function(...args) { submissions++; return submit.apply(this, args) }
+    queue.onSubmittedWorkDone = function(...args) { waits++; return wait.apply(this, args) }
     try {
       const result = await model.appendTokensAsync(tokens)
       assert(submissions > 0, 'restored WebGPU append submitted no GPU work')
+      assert(waits === 0, 'ordinary WebGPU dispatch waited for the entire GPU queue')
       return result
-    } finally { queue.submit = submit }
+    } finally { queue.submit = submit; queue.onSubmittedWorkDone = wait }
   }
   for (const item of llamaFixture.cases) {
     const config = {...item.config, max_seq_len:5}
@@ -107,7 +109,20 @@ async function checkCachedLlama(pg) {
         teacher.push(values.indexOf(Math.max(...values)))
       }
       await restored.resetTransientAsync()
-      for await (const token of restored.generate(prompt, {temperature:0, maxTokens:99})) generated.push(token)
+      let retiredBaseline
+      for await (const token of restored.generate(prompt, {temperature:0, maxTokens:99})) {
+        if (generated.length === 2)
+          assert(pg.stats().coreStats.memUsed <= retiredBaseline, 'decode retained dropped storage')
+        generated.push(token)
+        if (generated.length === 2) {
+          retiredBaseline = pg.stats().coreStats.memUsed
+          const scratch = pg.Tensor.empty([1 << 20])
+          try {
+            await scratch.toArrayAsync()
+            assert(pg.stats().coreStats.memUsed >= (4 << 20), 'scratch storage was not allocated')
+          } finally { await scratch.dispose() }
+        }
+      }
       assert(JSON.stringify(generated) === JSON.stringify(teacher.slice(2)), 'generated tokens differ from uncached teacher')
       assert(restored.decodePosition === 4, 'last generated token should not be consumed yet')
       await restored.dispose()

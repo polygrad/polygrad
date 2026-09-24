@@ -20,7 +20,7 @@ typedef struct {
 
 /* tinygrad llm/model.py: Transformer.forward sampling. RNG capture uses the
  * same Model AUX/effect contract as Tensor-authored models, not a host sampler. */
-static int transformer_sampler(PolyModel *m, int vocab) {
+static int transformer_sampler(PolyModel *m, int vocab, PolyTensor *decode, PolyUOp *position) {
   PolyCtx *ctx = poly_model_ctx(m);
   PolyTensor *logits =
       poly_model_input(m, "sampling.logits", POLY_FLOAT32, (int64_t[]){1, vocab}, 2);
@@ -59,12 +59,34 @@ static int transformer_sampler(PolyModel *m, int vocab) {
           (const char *[]){"sampling.token"}, 1, NULL
       ) != POLY_STATUS_OK)
     goto done;
+  /* Reuse the captured sampler, including its exact seed/counter identities.
+   * Substituting logits fuses rollout like Tinygrad.forward without introducing
+   * a second RNG stream or an owned output snapshot between Model calls. */
+  PolyUOp *logical =
+      poly_uop_substitute(ctx, wrapped->uop_logical, &logits->uop_logical, &decode->uop_logical, 1);
+  PolyUOp *physical = poly_uop_substitute(
+      ctx, wrapped->uop_physical, &logits->uop_physical, &decode->uop_physical, 1
+  );
+  PolyTensor *fused =
+      logical && physical
+          ? poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, decode->device)
+          : NULL;
+  if (!fused) goto done;
+  bool ok = poly_model_output(m, "sampling.decode_token", fused) == POLY_STATUS_OK &&
+            poly_model_entrypoint(
+                m, "decode_sample", (const char *[]){"tokens_decode", "sampling.temperature"}, 2,
+                (const char *[]){"sampling.decode_token"}, 1, NULL
+            ) == POLY_STATUS_OK;
+  poly_tensor_release(fused);
+  if (!ok) goto done;
   rc = 0;
 done:
   poly_tensor_capture_end(capture);
   if (seed) poly_tensor_release(seed);
   if (counter) poly_tensor_release(counter);
   if (wrapped) poly_tensor_release(wrapped);
+  if (!rc && poly_model_control(m, "decode_sample", "start_pos", position) != POLY_STATUS_OK)
+    rc = -1;
   return rc;
 }
 
@@ -282,11 +304,14 @@ model_transformer_build(
           m, "forward", (const char *[]){names->input}, 1, (const char *[]){names->output}, 1, NULL
       ) != POLY_STATUS_OK)
     goto fail;
+  PolyTensor *decode_logits = NULL;
+  PolyUOp *decode_position = NULL;
   if (c->cache_capacity) {
-    const char *entries[] = {"prefill", "decode"};
-    for (int i = 0; i < 2; i++) {
+    const char *entries[] = {"prefill", "decode", "prefill_full"};
+    for (int i = 0; i < 3; i++) {
+      stage = entries[i];
       ModelTransformerConfig step = *c;
-      step.length = i ? 1 : c->prefill_chunk;
+      step.length = i == 1 ? 1 : c->prefill_chunk;
       char input[32], output[32], variable[32];
       snprintf(input, sizeof(input), "tokens_%s", entries[i]);
       snprintf(output, sizeof(output), "logits_%s", entries[i]);
@@ -295,9 +320,10 @@ model_transformer_build(
           ctx, variable, poly_arg_int(0), poly_arg_int(c->cache_capacity - 1), POLY_WEAKINT, 1,
           false
       );
-      PolyUOp *n = step.length == 1 ? poly_uop_const_int(ctx, 1)
+      PolyUOp *n = step.length == 1 ? poly_uop_const_int(ctx, step.length)
                                     : poly_uop_variable(
-                                          ctx, "prefill.toks", poly_arg_int(1),
+                                          ctx, i == 2 ? "prefill_full.toks" : "prefill.toks",
+                                          poly_arg_int(i == 2 ? step.length : 1),
                                           poly_arg_int(step.length), POLY_WEAKINT, 1, false
                                       );
       PolyTensor *t = poly_model_input_uop(
@@ -311,9 +337,15 @@ model_transformer_build(
           ) != POLY_STATUS_OK ||
           poly_model_control(m, entries[i], "start_pos", p) != POLY_STATUS_OK)
         goto fail;
+      if (i == 1) {
+        decode_logits = out;
+        decode_position = p;
+      }
     }
   }
-  if (c->cache_capacity && transformer_sampler(m, c->vocab) != 0) goto fail;
+  stage = "sampler";
+  if (c->cache_capacity && transformer_sampler(m, c->vocab, decode_logits, decode_position) != 0)
+    goto fail;
   if (poly_model_build(m, err) != POLY_STATUS_OK) goto fail;
   if (poly_model_require_weights(m) != 0) goto fail;
   if (c->cache_capacity) {
@@ -347,12 +379,13 @@ struct PolyTransformer {
   PolyModel *model;
   struct {
     const char *name, *input, *output;
-  } entries[2];
+  } entries[3];
   PolyModelError error;
   PolyTensor *logits; /* Owned device snapshot for the sampler; never a host mirror. */
   int32_t token;
   bool pending_token;
-  const char *controls[2];
+  const char *controls[3];
+  bool fused_decode;
   PolyModelStateVersion observed;
   int capacity, chunk, vocab, position;
   bool valid, busy;
@@ -419,9 +452,12 @@ PolyTransformer *poly_transformer_from_model(PolyModel *model, PolyModelError *e
     goto invalid;
   g->capacity = cap->valueint;
   g->chunk = chunk->valueint;
-  const char *entries[] = {"prefill", "decode"};
-  for (int i = 0; i < 2; i++) {
+  const char *entries[] = {"prefill", "decode", "prefill_full"};
+  for (int i = 0; i < 3; i++) {
     const char *e = entries[i];
+    /* These are optional optimizations; portable producers may expose only
+     * the original dynamic prefill/decode contract. */
+    if (i == 2 && poly_model_entrypoint_input_count(model, e) < 0) continue;
     if (poly_model_entrypoint_input_count(model, e) != 1 ||
         poly_model_entrypoint_output_count(model, e) != 1 ||
         poly_model_entrypoint_objective(model, e) || poly_model_control_count(model, e) != 1)
@@ -432,8 +468,9 @@ PolyTransformer *poly_transformer_from_model(PolyModel *model, PolyModelError *e
     int64_t xmin[2], xmax[2], ymin[2], ymax[2], lo, hi;
     if (x < 0 || y < 0 || poly_model_buf_shape_bounds(model, x, xmin, xmax, 2) != 2 ||
         poly_model_buf_shape_bounds(model, y, ymin, ymax, 2) != 2 || xmin[0] != 1 || xmax[0] != 1 ||
-        ymin[0] != 1 || ymax[0] != 1 || xmin[1] != 1 || xmax[1] != (i ? 1 : g->chunk) ||
-        ymin[1] < 1 || ymax[1] > INT_MAX || ymin[1] != ymax[1] || (i && ymax[1] != g->vocab))
+        ymin[0] != 1 || ymax[0] != 1 || xmin[1] != (i == 2 ? g->chunk : 1) ||
+        xmax[1] != (i == 1 ? 1 : g->chunk) || ymin[1] < 1 || ymax[1] > INT_MAX ||
+        ymin[1] != ymax[1] || (i && ymax[1] != g->vocab))
       goto invalid;
     PolyUOp *xb = poly_model_get_buffer(model, input), *yb = poly_model_get_buffer(model, output);
     if (!xb || !yb || !poly_dtype_eq(xb->dtype, POLY_INT32) ||
@@ -445,6 +482,28 @@ PolyTransformer *poly_transformer_from_model(PolyModel *model, PolyModelError *e
     g->entries[i].output = output;
     g->controls[i] = poly_model_control_name(model, e, 0);
     g->vocab = (int)ymax[1];
+  }
+  if (poly_model_entrypoint_input_count(model, "decode_sample") >= 0) {
+    const char *a = poly_model_entrypoint_input_name(model, "decode_sample", 0);
+    const char *b = poly_model_entrypoint_input_name(model, "decode_sample", 1);
+    const char *y = poly_model_entrypoint_output_name(model, "decode_sample", 0);
+    int64_t lo, hi, shape_lo[2], shape_hi[2];
+    int bi = y ? binding_index(model, y) : -1;
+    PolyUOp *buffer = y ? poly_model_get_buffer(model, y) : NULL;
+    if (poly_model_entrypoint_input_count(model, "decode_sample") != 2 ||
+        poly_model_entrypoint_output_count(model, "decode_sample") != 1 ||
+        poly_model_entrypoint_objective(model, "decode_sample") || !a ||
+        strcmp(a, g->entries[1].input) || !b || strcmp(b, "sampling.temperature") || !y ||
+        strcmp(y, "sampling.decode_token") || !buffer ||
+        !poly_dtype_eq(buffer->dtype, POLY_INT32) ||
+        poly_model_buf_shape_bounds(model, bi, shape_lo, shape_hi, 2) != 2 || shape_lo[0] != 1 ||
+        shape_hi[0] != 1 || shape_lo[1] != 1 || shape_hi[1] != 1 ||
+        poly_model_control_count(model, "decode_sample") != 1 ||
+        strcmp(poly_model_control_name(model, "decode_sample", 0), g->controls[1]) ||
+        poly_model_control_bounds(model, "decode_sample", 0, &lo, &hi) || lo != 0 ||
+        hi != g->capacity - 1)
+      goto invalid;
+    g->fused_decode = true;
   }
   if (poly_model_entrypoint_input_count(model, "sample") != 2 ||
       poly_model_entrypoint_output_count(model, "sample") != 1 ||
@@ -592,6 +651,7 @@ static int transformer_tokens(
   while (used < count) {
     int n = count - used >= g->chunk ? g->chunk : count - used;
     last = n > 1 || n == g->chunk ? 0 : 1;
+    if (n == g->chunk && g->entries[2].name) last = 2;
     const char *entry = g->entries[last].name;
     PolyIOBinding io = POLY_IO_BINDING_BYTES(
         g->entries[last].input, (void *)(tokens + used), (size_t)n * sizeof(*tokens), POLY_INT32
@@ -677,6 +737,36 @@ int poly_transformer_next(PolyTransformer *t, float temperature, int32_t *token)
   if (error) return -1;
   /* Like Tinygrad.generate, the last emitted token is not in the cache yet. */
   if (t->position >= t->capacity || (t->pending_token && t->position == t->capacity - 1)) return 1;
+  if (t->pending_token && t->fused_decode) {
+    int32_t previous = t->token;
+    PolyIOBinding io[] = {
+        POLY_IO_BINDING_BYTES(t->entries[1].input, &previous, sizeof(previous), POLY_INT32),
+        POLY_IO_BINDING_BYTES(
+            "sampling.temperature", &temperature, sizeof(temperature), POLY_FLOAT32
+        )};
+    PolyControlBinding control = {t->controls[1], t->position};
+    t->busy = true;
+    int rc = poly_model_call_with_controls(t->model, "decode_sample", io, 2, &control, 1);
+    if (!rc)
+      rc =
+          poly_model_read_buf_named(t->model, "sampling.decode_token", &t->token, sizeof(t->token));
+    t->observed = poly_model_state_version(t->model);
+    if (rc) t->error = *poly_model_last_error(t->model);
+#ifdef POLY_TESTING
+    if (!rc && t->fail_after > 0 && --t->fail_after == 0) {
+      transformer_set_error(t, __func__, "injected decoder execution failure");
+      rc = -1;
+    }
+#endif
+    t->valid = rc == 0;
+    if (!rc) {
+      if (t->tokens) t->tokens[t->position] = previous;
+      t->position++;
+      *token = t->token;
+    }
+    t->busy = false;
+    return rc;
+  }
   if (t->pending_token && transformer_tokens(t, &t->token, 1, NULL, 0, false, true) != 0) return -1;
   PolyIOBinding io[] = {
       {.name = "sampling.logits", .tensor = t->logits},

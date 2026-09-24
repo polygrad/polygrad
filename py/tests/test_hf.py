@@ -341,6 +341,59 @@ def test_transformer_generate_stays_in_c(device):
 
 
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_transformer_specialized_entries_share_sampling_state(device):
+    import polygrad as pg
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        rt.Tensor.manual_seed(0)
+        model = rt.models.Llama({**case['config'], 'cache_capacity':8, 'prefill_chunk_size':4})
+        cleanup.callback(model.dispose)
+        for name, data in llama_weights(case).items(): model.write_buffer(name, data)
+        saved = model.save()
+        other = rt.models.Transformer.load(saved)
+        cleanup.callback(other.dispose)
+        prompt = np.array([[1,4,7,2]], np.int32)
+        expected = model.call('prefill', {'tokens_prefill':prompt}, controls={'start_pos':0})['logits_prefill']
+        actual = other.call('prefill_full', {'tokens_prefill_full':prompt}, controls={'start_pos':0})['logits_prefill_full']
+        np.testing.assert_allclose(actual, expected, atol=3e-5, rtol=3e-5)
+        for pos, temperature in [(4,0.7),(5,0.0),(6,1.2)]:
+            token = np.array([[3]], np.int32)
+            logits = model.call('decode', {'tokens_decode':token}, controls={'start_pos':pos})['logits_decode']
+            temp = np.array([temperature], np.float32)
+            want = model.call('sample', {'sampling.logits':logits,'sampling.temperature':temp})['sampling.token']
+            got = other.call('decode_sample', {'tokens_decode':token,'sampling.temperature':temp},
+                             controls={'start_pos':pos})['sampling.decode_token']
+            np.testing.assert_array_equal(got, want)
+            np.testing.assert_array_equal(other.read_buffer('sampling.counter'), model.read_buffer('sampling.counter'))
+            for layer in range(case['config']['num_hidden_layers']):
+                name = f'model.layers.{layer}.cache_kv'
+                np.testing.assert_allclose(other.read_buffer(name), model.read_buffer(name), atol=3e-5, rtol=3e-5)
+        before = other.read_buffer('model.layers.0.cache_kv').copy()
+        with pytest.raises(RuntimeError, match='view bounds'):
+            other.call('prefill_full', {'tokens_prefill_full':prompt}, controls={'start_pos':7})
+        np.testing.assert_array_equal(other.read_buffer('model.layers.0.cache_kv'), before)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
+def test_transformer_generation_reclaims_dropped_storage(device):
+    import polygrad as pg
+    case = LLAMA_CASES[0]
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        model = rt.models.Llama({**case['config'], 'cache_capacity':8, 'prefill_chunk_size':4})
+        cleanup.callback(model.dispose)
+        for name, data in llama_weights(case).items(): model.write_buffer(name, data)
+        tokens = model.generate(np.array([1,4], np.int32), temperature=0, max_tokens=6)
+        for _ in range(3): next(tokens)
+        baseline = rt.GlobalCounters.mem_used
+        scratch = rt.Tensor.empty(1 << 20)
+        scratch.numpy()
+        assert rt.GlobalCounters.mem_used >= (4 << 20)
+        scratch.dispose()
+        next(tokens)
+        assert rt.GlobalCounters.mem_used <= baseline
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_transformer_sampler_matches_pinned_gumbel(device):
     import polygrad as pg
     if device == 'cuda' and not pg.Device.cuda_available():

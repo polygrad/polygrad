@@ -6001,9 +6001,9 @@ async function runTensorTests(pg, createRuntime) {
     const end = a.add(b)
     const composed = end.sub(a)
     const viaC = pg._core.ffi.poly_uop_sub(a.ctx, end.raw, a.raw)
-    assert.strictEqual(composed.raw, viaC)
+    assert(composed.raw === viaC, 'raw subtraction differs from C composition')
     const rawSub = pg._core.ffi.poly_uop_binop(a.ctx, pg._core.ops.SUB, end.raw, a.raw)
-    assert.notStrictEqual(composed.raw, rawSub)
+    assert(composed.raw !== rawSub, 'composed subtraction emitted a primitive SUB')
   })
 
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)
