@@ -550,25 +550,75 @@ def test_tinyjit_contiguous_symbolic_slice_materializes_current_binding():
         assert add_one(value, pos).item() == expected
 
 
-@pytest.mark.parametrize('chunk', [1, 3])
-def test_python_transformer_cached_generation_matches_pinned(chunk):
-    from itertools import islice
-    from polygrad.llm.model import Transformer, TransformerConfig
-    from polygrad.nn.state import get_state_dict
+def test_only_c_backed_transformer_is_packaged():
+    from polygrad import Model, models
+    from polygrad.llm.model import Transformer
 
-    config = TransformerConfig(num_blocks=1, dim=8, hidden_dim=12, n_heads=2,
+    assert issubclass(models.Transformer, Model)
+    assert models.Transformer.__module__ == 'polygrad.models.transformer'
+    assert Transformer is models.Transformer
+
+
+@pytest.mark.parametrize('chunk', [1, 3])
+def test_c_transformer_cached_generation_matches_pinned(chunk, tmp_path):
+    import json
+    import shlex
+    from polygrad import Runtime
+    from polygrad.llm.model import Transformer
+
+    config = dict(num_blocks=1, dim=8, hidden_dim=12, n_heads=2,
         n_kv_heads=1, norm_eps=1e-5, vocab_size=11, head_dim=4, rope_theta=10000,
         rope_dim=4, v_head_dim=4, max_context=8)
-    with Context(DEV='CPU'):
-        model = Transformer(config)
-        for name, tensor in get_state_dict(model).items():
-            values = ((np.arange(np.prod(tensor.shape)) * 7 + sum(name.encode())) % 23 - 11) * .017
-            if tensor.ndim == 1:
-                values += 1
-            tensor.assign(Tensor(values.astype(np.float32).reshape(tensor.shape))).realize()
-        # Pinned tinygrad/llm/model.py with identical weights and prompt, both
-        # chunk partitions. Three generated tokens exercise captured replay.
-        assert list(islice(model.generate([1, 4, 7], chunk_size=chunk), 3)) == [6, 5, 4]
+    root = Path(__file__).resolve().parents[2]
+    weights_path = tmp_path / 'weights.npz'
+    # Run the unmodified reference, not another Polygrad decoder. Its cache is
+    # FP16 while the C builder uses FP32; this fixture compares greedy tokens,
+    # not bitwise logits or stochastic draws across different RNG owners.
+    script = '''
+import json, sys
+from itertools import islice
+import numpy as np
+from tinygrad import Tensor
+from tinygrad.llm.model import Transformer, TransformerConfig
+from tinygrad.nn.state import get_state_dict
+model = Transformer(TransformerConfig(**json.loads(sys.argv[1])))
+weights = {}
+for name, tensor in get_state_dict(model).items():
+    values = ((np.arange(np.prod(tensor.shape)) * 7 + sum(name.encode())) % 23 - 11) * .017
+    weights[name] = (values + (tensor.ndim == 1)).astype(np.float32).reshape(tensor.shape)
+    tensor.assign(Tensor(weights[name])).realize()
+np.savez(sys.argv[2], **weights)
+print(json.dumps(list(islice(model.generate([1, 4, 7], chunk_size=int(sys.argv[3])), 3))))
+'''
+    python = shlex.split(os.environ.get('PARITY_PY', str(root / 'references/.venv-tinygrad-py311/bin/python')))
+    env = {k: v for k, v in os.environ.items() if k not in ('DEV', 'POLY_DEV', 'DEBUG', 'POLY_DEBUG')}
+    env.update(PYTHONPATH=str(root / 'references/tinygrad_014'), DEV='CPU', DEBUG='0')
+    result = subprocess.run([*python, '-c', script, json.dumps(config), str(weights_path), str(chunk)],
+                            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    expected = json.loads(result.stdout)
+    names = {'token_embd': 'model.embed_tokens', 'output_norm': 'model.norm', 'output': 'lm_head'}
+    names.update({'blk.0.' + key: 'model.layers.0.' + value for key, value in {
+        'attn_norm': 'input_layernorm', 'ffn_norm': 'post_attention_layernorm',
+        'attn_q': 'self_attn.q_proj', 'attn_k': 'self_attn.k_proj',
+        'attn_v': 'self_attn.v_proj', 'attn_output': 'self_attn.o_proj',
+        'ffn_gate': 'mlp.gate_proj', 'ffn_up': 'mlp.up_proj', 'ffn_down': 'mlp.down_proj',
+    }.items()})
+    with Runtime(device='CPU') as rt:
+        model = Transformer(dict(hidden_size=config['dim'], intermediate_size=config['hidden_dim'],
+            num_attention_heads=config['n_heads'], num_key_value_heads=config['n_kv_heads'],
+            num_hidden_layers=config['num_blocks'], rms_norm_eps=config['norm_eps'],
+            vocab_size=config['vocab_size'], rope_theta=config['rope_theta'],
+            cache_capacity=config['max_context'], prefill_chunk_size=chunk), runtime=rt)
+        try:
+            with np.load(weights_path) as weights:
+                assert set(weights.files) == {name + '.weight' for name in names}
+                for name, destination in names.items():
+                    model.write_buffer(destination + '.weight', weights[name + '.weight'])
+            assert list(model.generate(np.array([1, 4, 7], np.int32), max_tokens=3)) == expected
+            assert expected == [6, 5, 4]
+        finally:
+            model.dispose()
 
 
 def test_tinyjit_movement_view_replays_against_new_base():

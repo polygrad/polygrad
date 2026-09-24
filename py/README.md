@@ -336,9 +336,8 @@ yields token IDs sampled in C. `prefill_tokens(ids)` reuses a matching prompt
 prefix; `rewind(position)` discards a suffix without clearing cache storage.
 Load or adopt only trusted Transformer bundles: bounds checks do not verify
 the causal, append-only cache semantics required by prefix reuse and rewind.
-The separate `polygrad.llm.model.Transformer` is the Tensor/TinyJit port used for
-Tinygrad compatibility; `models.Transformer` is the portable C-backed API shared
-with JavaScript.
+`polygrad.llm.model.Transformer` aliases `models.Transformer`; it does not
+provide Tinygrad constructor or method compatibility.
 
 After a failed append, cache-writing direct call, weight write or placement during
 a conversation, reset before appending again. Read-only calls and rejected inputs
