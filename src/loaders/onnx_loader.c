@@ -704,7 +704,8 @@ static PolyTensor *onnx_index_axes(
     PolyTensor *x,
     PolyTensor **indices,
     int offset,
-    int count
+    int count,
+    PolyTensor *value
 ) {
   int nr = rank(d, x), kinds[ONNX_RANK];
   int64_t steps[ONNX_RANK];
@@ -718,7 +719,8 @@ static PolyTensor *onnx_index_axes(
     sizes[i] = poly_uop_const_int(d->ctx, shape(d, x)[i]);
     steps[i] = 1;
   }
-  return poly_tensor_getitem(d->ctx, x, kinds, starts, sizes, steps, rows, nr);
+  if (!value) return poly_tensor_getitem(d->ctx, x, kinds, starts, sizes, steps, rows, nr);
+  return poly_tensor_indexed_update(d->ctx, x, kinds, starts, sizes, steps, rows, nr, value);
 }
 
 /* onnx.py:_resolve_pool_pads. Padding is reversed only at the Tensor boundary. */
@@ -776,6 +778,39 @@ static bool onnx_spatial(
     padding[2 * (dims - i - 1)] = pads[i];
     padding[2 * (dims - i - 1) + 1] = pads[i + dims];
   }
+  return true;
+}
+
+static PolyTensor *onnx_conv(Import *d, Node *n, PolyTensor *x, PolyTensor *w, PolyTensor *bias) {
+  if (!x || !w || !attrs(d, n, "|auto_pad||dilations||group||kernel_shape||pads||strides|") ||
+      rank(d, x) < 3 || rank(d, x) != rank(d, w))
+    return NULL;
+  int dims = rank(d, x) - 2;
+  int64_t stride[ONNX_RANK], dilation[ONNX_RANK], padding[2 * ONNX_RANK], kernel[ONNX_RANK];
+  const int64_t *sx = shape(d, x), *sw = shape(d, w);
+  if (!onnx_spatial(d, n, x, sw + 2, kernel, stride, dilation, padding, false)) return NULL;
+  int64_t groups = attr_int(d, n, "group", 1);
+  if (groups < 1 || groups > INT_MAX || sx[1] % groups || sw[0] % groups ||
+      sw[1] != sx[1] / groups || !same_dtype(x, w))
+    return NULL;
+  for (int i = 0; i < dims; i++)
+    if (sx[i + 2] + padding[2 * (dims - i - 1)] + padding[2 * (dims - i - 1) + 1] <
+        dilation[i] * (sw[i + 2] - 1) + 1)
+      return NULL;
+  if (bias && (rank(d, bias) != 1 || shape(d, bias)[0] != sw[0] || !same_dtype(x, bias)))
+    return NULL;
+  return poly_tensor_conv2d(d->ctx, x, w, bias, (int)groups, stride, dilation, padding, 2 * dims);
+}
+
+static bool onnx_quant8(PolyTensor *x) {
+  return x && (poly_dtype_eq(x->uop_physical->dtype, POLY_UINT8) ||
+               poly_dtype_eq(x->uop_physical->dtype, POLY_INT8));
+}
+
+static bool onnx_single(Import *d, PolyTensor *x) {
+  if (!x) return false;
+  for (int i = 0; i < rank(d, x); i++)
+    if (shape(d, x)[i] != 1) return false;
   return true;
 }
 
@@ -913,7 +948,7 @@ static PolyTensor *onnx_resize(Import *d, Node *n, bool legacy) {
           sizes, spatial
       );
     }
-    x = onnx_index_axes(d, x, indexes, 2, spatial);
+    x = onnx_index_axes(d, x, indexes, 2, spatial, NULL);
   } else {
     for (int i = 0; i < spatial; i++) {
       PolyTensor *index = indexes[i],
@@ -1105,7 +1140,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     if (!arity(d, n, 2, 2) || !attrs(d, n, "") || rank(d, x) < 1 ||
         !poly_dtype_is_int(y->uop_physical->dtype))
       return NULL;
-    return onnx_index_axes(d, x, &y, rank(d, x) - 1, 1);
+    return onnx_index_axes(d, x, &y, rank(d, x) - 1, 1, NULL);
   }
   if (!strcmp(op, "Binarizer")) {
     if (!arity(d, n, 1, 1) || !attrs(d, n, "|threshold|")) return NULL;
@@ -1377,6 +1412,123 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
         d, poly_tensor_alu2(ctx, POLY_OP_ADD, out, n->inputs[7]->tensor), n->inputs[7]->dtype
     );
   }
+  if (!strcmp(op, "ConvInteger") || !strcmp(op, "QLinearConv")) {
+    bool quantized = !strcmp(op, "QLinearConv");
+    if (!arity(d, n, quantized ? 8 : 2, quantized ? 9 : 4)) return NULL;
+    PolyTensor *w = quantized ? n->inputs[3]->tensor : y;
+    if (!onnx_quant8(x) || !onnx_quant8(w)) return NULL;
+    PolyTensor *xz = quantized                    ? n->inputs[2]->tensor
+                     : n->nin > 2 && n->inputs[2] ? n->inputs[2]->tensor
+                                                  : NULL;
+    PolyTensor *wz = quantized                    ? n->inputs[5]->tensor
+                     : n->nin > 3 && n->inputs[3] ? n->inputs[3]->tensor
+                                                  : NULL;
+    if ((xz && (!same_dtype(x, xz) || !onnx_single(d, xz))) || (wz && !same_dtype(w, wz)))
+      return NULL;
+    if (!quantized && wz && !onnx_single(d, wz)) {
+      fail(
+          d, POLY_IMPORT_ERR_UNSUPPORTED_OP,
+          "ConvInteger per-channel zero points lack pinned broadcast correspondence"
+      );
+      return NULL;
+    }
+    PolyTensor *bias = quantized && n->nin > 8 && n->inputs[8] ? n->inputs[8]->tensor : NULL;
+    if (quantized) {
+      PolyTensor *ws = n->inputs[4]->tensor, *ys = n->inputs[6]->tensor, *yz = n->inputs[7]->tensor;
+      if (rank(d, x) != 4 || rank(d, w) != 4 || !onnx_single(d, y) || !onnx_single(d, ys) ||
+          !onnx_single(d, yz) || !onnx_quant8(yz) ||
+          !poly_dtype_eq(y->uop_physical->dtype, POLY_FLOAT32) || !same_dtype(y, ws) ||
+          !same_dtype(y, ys) || rank(d, ws) > 1 || rank(d, wz) > 1 ||
+          (!onnx_single(d, ws) && shape(d, ws)[0] != shape(d, w)[0]) ||
+          (!onnx_single(d, wz) && shape(d, wz)[0] != shape(d, w)[0]))
+        return NULL;
+      int64_t dims[4] = {onnx_single(d, wz) ? 1 : shape(d, w)[0], 1, 1, 1};
+      wz = poly_tensor_reshape(ctx, wz, dims, 4);
+    }
+    x = onnx_sub(d, poly_tensor_cast(ctx, x, POLY_INT32), xz ? xz : onnx_int(d, 0));
+    w = onnx_sub(d, poly_tensor_cast(ctx, w, POLY_INT32), wz ? wz : onnx_int(d, 0));
+    PolyTensor *out = onnx_conv(d, n, x, w, bias);
+    if (!out || !quantized) return out;
+    PolyTensor *ws = n->inputs[4]->tensor;
+    int64_t dims[4] = {1, onnx_single(d, ws) ? 1 : shape(d, w)[0], 1, 1};
+    ws = poly_tensor_reshape(ctx, ws, dims, 4);
+    PolyTensor *scales = poly_tensor_alu2(ctx, POLY_OP_MUL, y, ws);
+    out = poly_tensor_round(
+        ctx, poly_tensor_div(
+                 ctx, poly_tensor_alu2(ctx, POLY_OP_MUL, out, scales), n->inputs[6]->tensor, 0
+             )
+    );
+    return onnx_quant_cast(
+        d, poly_tensor_alu2(ctx, POLY_OP_ADD, out, n->inputs[7]->tensor), n->inputs[7]->dtype
+    );
+  }
+  if (!strcmp(op, "ScatterND")) {
+    if (!arity(d, n, 3, 3) || !attrs(d, n, d->opset >= 16 ? "|reduction|" : "") ||
+        !poly_dtype_eq(y->uop_physical->dtype, POLY_INT64))
+      return NULL;
+    PolyTensor *updates = n->inputs[2]->tensor;
+    int nx = rank(d, x), ni = rank(d, y), nu = rank(d, updates);
+    if (nx < 1 || ni < 2 || !same_dtype(x, updates)) return NULL;
+    const int64_t *is = shape(d, y), *us = shape(d, updates), *xs = shape(d, x);
+    int64_t count = is[ni - 1];
+    if (count < 1 || count > nx || nu != ni - 1 + nx - count || is[0] > 2048) return NULL;
+    for (int i = 0; i < nu; i++)
+      if (us[i] != (i < ni - 1 ? is[i] : xs[i - ni + 1 + count])) return NULL;
+    char reduction[ONNX_NAME];
+    if (!attr_text(d, n, "reduction", "none", reduction)) return NULL;
+    int reduce = !strcmp(reduction, "none")  ? 0
+                 : !strcmp(reduction, "add") ? 1
+                 : !strcmp(reduction, "mul") ? 2
+                 : !strcmp(reduction, "min") ? 3
+                 : !strcmp(reduction, "max") ? 4
+                                             : -1;
+    if (reduce < 0 || (reduce >= 3 && d->opset < 18)) return NULL;
+    /* The pin updates one axis-0 slice at a time via _getitem(indices, value).
+     * Keep the functional result: ONNX values are immutable, not mutable state. */
+    PolyTensor *out = x;
+    for (int64_t row = 0; row < is[0]; row++) {
+      int64_t pairs[ONNX_RANK][2], dims[ONNX_RANK];
+      PolyTensor *indices[ONNX_RANK];
+      for (int64_t a = 0; a < count; a++) {
+        for (int i = 0; i < ni; i++) {
+          pairs[i][0] = 0;
+          pairs[i][1] = is[i];
+        }
+        pairs[0][0] = row;
+        pairs[0][1] = row + 1;
+        pairs[ni - 1][0] = a;
+        pairs[ni - 1][1] = a + 1;
+        for (int i = 1; i < ni - 1; i++)
+          dims[i - 1] = is[i];
+        indices[a] = poly_tensor_reshape(ctx, poly_tensor_shrink(ctx, y, pairs, ni), dims, ni - 2);
+        if (!indices[a]) return NULL;
+      }
+      for (int i = 0; i < nu; i++) {
+        pairs[i][0] = 0;
+        pairs[i][1] = us[i];
+      }
+      pairs[0][0] = row;
+      pairs[0][1] = row + 1;
+      for (int i = 1; i < nu; i++)
+        dims[i - 1] = us[i];
+      PolyTensor *value =
+          poly_tensor_reshape(ctx, poly_tensor_shrink(ctx, updates, pairs, nu), dims, nu - 1);
+      if (reduce) {
+        PolyTensor *previous = onnx_index_axes(d, out, indices, 0, (int)count, NULL);
+        value = reduce == 3 ? poly_tensor_minimum(ctx, previous, value)
+                            : poly_tensor_alu2(
+                                  ctx,
+                                  reduce == 1   ? POLY_OP_ADD
+                                  : reduce == 2 ? POLY_OP_MUL
+                                                : POLY_OP_MAX,
+                                  previous, value
+                              );
+      }
+      out = value ? onnx_index_axes(d, out, indices, 0, (int)count, value) : NULL;
+      if (!out) return NULL;
+    }
+    return out;
+  }
   if (!strcmp(op, "ScatterElements") || !strcmp(op, "Scatter")) {
     if (!arity(d, n, 3, 3) || !attrs(d, n, "|axis||reduction|") ||
         !poly_dtype_is_int(y->uop_physical->dtype))
@@ -1450,7 +1602,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
       pairs[ni - 1][1] = j + 1;
       indices[nt++] = poly_tensor_reshape(ctx, poly_tensor_shrink(ctx, y, pairs, ni), rs, ni - 1);
     }
-    PolyTensor *out = onnx_index_axes(d, x, indices, 0, nt);
+    PolyTensor *out = onnx_index_axes(d, x, indices, 0, nt, NULL);
     if (!out || !batch) return out;
     int64_t result[ONNX_RANK];
     int nr = 0;
@@ -2280,26 +2432,9 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
                                         : poly_tensor_mean(ctx, x, axes, nr - 2, true);
   }
   if (!strcmp(op, "Conv")) {
-    if (!arity(d, n, 2, 3) ||
-        !attrs(d, n, "|auto_pad||dilations||group||kernel_shape||pads||strides|") ||
-        rank(d, x) < 3 || rank(d, x) != rank(d, y))
-      return NULL;
-    int dims = rank(d, x) - 2;
-    int64_t stride[ONNX_RANK], dilation[ONNX_RANK], padding[2 * ONNX_RANK], kernel[ONNX_RANK];
-    const int64_t *sx = shape(d, x), *sw = shape(d, y);
-    if (!onnx_spatial(d, n, x, sw + 2, kernel, stride, dilation, padding, false)) return NULL;
-    int64_t groups = attr_int(d, n, "group", 1);
-    if (groups < 1 || groups > INT_MAX || sx[1] % groups || sw[0] % groups ||
-        sw[1] != sx[1] / groups || !same_dtype(x, y))
-      return NULL;
-    for (int i = 0; i < dims; i++)
-      if (sx[i + 2] + padding[2 * (dims - i - 1)] + padding[2 * (dims - i - 1) + 1] <
-          dilation[i] * (sw[i + 2] - 1) + 1)
-        return NULL;
+    if (!arity(d, n, 2, 3)) return NULL;
     PolyTensor *bias = n->nin == 3 && n->inputs[2] ? n->inputs[2]->tensor : NULL;
-    if (bias && (rank(d, bias) != 1 || shape(d, bias)[0] != sw[0] || !same_dtype(x, bias)))
-      return NULL;
-    return poly_tensor_conv2d(ctx, x, y, bias, (int)groups, stride, dilation, padding, 2 * dims);
+    return onnx_conv(d, n, x, y, bias);
   }
   if (!strcmp(op, "MaxPool") || !strcmp(op, "AveragePool")) {
     bool maximum = !strcmp(op, "MaxPool");

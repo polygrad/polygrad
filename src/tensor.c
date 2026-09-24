@@ -4169,6 +4169,23 @@ PolyTensor *poly_tensor_getitem(
   return tensor_getitem_impl(ctx, self, kinds, starts, sizes, steps, indices, n, NULL);
 }
 
+PolyTensor *poly_tensor_indexed_update(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n,
+    PolyTensor *value
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, self) || !tensor_roots_owned_by_ctx(ctx, value) ||
+      !poly_dtype_eq(self->uop_physical->dtype, value->uop_physical->dtype))
+    return NULL;
+  return tensor_getitem_impl(ctx, self, kinds, starts, sizes, steps, indices, n, value);
+}
+
 /* Tensor.__setitem__ admission is a live-owner property, not a renderer fix. */
 static int tensor_setitem(
     PolyCtx *ctx,

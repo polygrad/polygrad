@@ -226,6 +226,36 @@ def fixtures():
                h.make_node('CenterCropPad',['x','size'],['cropped'],axes=[2,3])],
                {'x':f((2,5,4,2))}, {'normalized':(2,5,4,2),'cropped':(2,5,2,4)},
                {'size':np.array([2,4],np.int64)},opset=18)
+    yield case('conv_integer', [h.make_node('Cast',['x'],['q'],to=T.UINT8),
+               h.make_node('ConvInteger',['q','w','xz','wz'],['acc'],pads=[1,0,0,1]),
+               h.make_node('Cast',['acc'],['y'],to=T.FLOAT)],
+               {'x':np.arange(32,dtype=np.float32).reshape(1,2,4,4)}, {'y':(1,3,4,4)},
+               {'w':np.arange(24,dtype=np.uint8).reshape(3,2,2,2),
+                'xz':np.array(12,np.uint8),'wz':np.array(10,np.uint8)})
+    yield case('round_ties', [h.make_node('Round',['x'],['y'])],
+               {'x':np.array([-9.5,-8.5,-3.5,-2.5,-1.5,-.5,.5,1.5,2.5,3.5,8.5,9.5],np.float32)},
+               {'y':(12,)}, {})
+    yield case('qlinear_conv', [h.make_node('Cast',['x'],['q'],to=T.UINT8),
+               h.make_node('QLinearConv',['q','xs','xz','w','ws','wz','ys','yz','bias'],['quantized'],group=2),
+               h.make_node('Cast',['quantized'],['y'],to=T.FLOAT)],
+               {'x':np.arange(32,dtype=np.float32).reshape(1,2,4,4)}, {'y':(1,4,3,3)},
+               {'w':(np.arange(16,dtype=np.int8)-8).reshape(4,1,2,2),
+                'xs':np.array(.25,np.float32),'xz':np.array(12,np.uint8),
+                'ws':np.array([.125,.25,.5,1],np.float32),'wz':np.zeros(4,np.int8),
+                'ys':np.array(1,np.float32),'yz':np.array(113,np.uint8),'bias':np.array([1,3,-2,5],np.int32)})
+    for reduction in ['none','add','mul','min','max']:
+        yield case('scatter_nd_'+reduction,
+                   [h.make_node('ScatterND',['x','indices','updates'],['y'],reduction=reduction)],
+                   {'x':np.arange(12,dtype=np.float32).reshape(3,4)}, {'y':(3,4)},
+                   {'indices':np.array([[0],[-1]],np.int64),
+                    'updates':np.array([[5,4,3,2],[-2,-3,-4,-5]],np.float32)},opset=18)
+    yield case('scatter_nd_batched_indices',
+               [h.make_node('Cast',['x'],['integers'],to=T.INT32),
+                h.make_node('ScatterND',['integers','indices','updates'],['updated'],reduction='add'),
+                h.make_node('Cast',['updated'],['y'],to=T.FLOAT)],
+               {'x':np.arange(12,dtype=np.float32).reshape(3,4)}, {'y':(3,4)},
+               {'indices':np.array([[[0,1],[2,3]],[[0,1],[-1,-1]]],np.int64),
+                'updates':np.array([[4,8],[2,3]],np.int32)},opset=18)
     yield case('spatial', [h.make_node('MaxPool',['x'],['max','idx'],kernel_shape=[2,2],strides=[2,2]),
                h.make_node('Cast',['idx'],['indices'],to=T.FLOAT),
                h.make_node('AveragePool',['x'],['avg'],kernel_shape=[3,3],strides=[2,2],auto_pad='SAME_UPPER'),

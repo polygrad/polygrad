@@ -633,6 +633,20 @@ PolyTensor *poly_tensor_getitem(
     int n
 );
 
+/* Functional Tensor._getitem(indices, value): returns the updated value without
+ * mutating self or introducing storage. Uses the same normalized indices. */
+PolyTensor *poly_tensor_indexed_update(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    const int *kinds,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    const int64_t *steps,
+    PolyTensor **indices,
+    int n,
+    PolyTensor *value
+);
+
 /* Same normalized arguments; success0, invalid-1, conflicting live uses-2,
  * dtype mismatch-3, weak target-4, unsupported advanced DISK write-5,
  * incompatible index broadcast-6. */

@@ -38,6 +38,21 @@ def test_onnx_model_and_bundle(case):
             model.dispose()
 
 
+def test_onnx_scatter_preserves_caller_tensor():
+    case = next(c for c in CASES if c['name'] == 'scatter_nd_add')
+    original = np.array(case['inputs']['x']['values'], np.float32).reshape(3, 4)
+    with pg.Runtime(device='CPU') as rt:
+        model = rt.Model.from_onnx(base64.b64decode(case['onnx']))
+        try:
+            x = rt.Tensor(original).realize()
+            for _ in range(2):
+                out = model.call('forward', {'x': x})['y']
+                np.testing.assert_array_equal(out.numpy(), np.array(case['outputs']['y']['values']).reshape(3, 4))
+                np.testing.assert_array_equal(x.numpy(), original)
+        finally:
+            model.dispose()
+
+
 def _varint(n):
     out = bytearray()
     while n > 127:
