@@ -17,7 +17,8 @@
       "An open_debt or pending_evidence entry gives a known failure an ID but never turns it into a pass.",
       "A resolved entry preserves the audit trail but is never assigned to a current finding and never suppresses a recurrence.",
       "An unregistered mismatch is a hard failure.",
-      "An entry with stale reference evidence cannot suppress a mismatch."
+      "An entry with stale reference evidence cannot suppress a mismatch.",
+      "Wasm renderer-local independent-lane SIMD packing preserves shared graphs and reduction order; it grants no numeric mismatch allowance."
     ]
   },
   "entries": [

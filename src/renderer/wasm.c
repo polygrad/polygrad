@@ -567,9 +567,12 @@ static PolyRendererCaps poly_wasm_renderer_caps(void) {
       .device = "WASM",
       .has_mulacc = true,
       .has_threefry = false,
-      .has_exp2 = true,
-      .has_log2 = true,
-      .has_sin = true,
+      /* Like pinned ClangRenderer, lower transcendental ops to kernel arithmetic.
+       * Wasm has no native instructions for them; host imports cross into JS
+       * once per element. */
+      .has_exp2 = false,
+      .has_log2 = false,
+      .has_sin = false,
       .has_fdiv = true,
       .supports_float16 = false,
       .supports_bfloat16 = false,
@@ -1794,6 +1797,117 @@ static void wasm_plan_structural_vecs(
   free(covered);
 }
 
+typedef struct {
+  int owner, lane, local;
+  int roots[4];
+} WasmScalarPack;
+
+static PolyOps wasm_scalar_pack_op(PolyUOp *u) {
+  /* The Wasm MULACC emitter already uses separate multiply/add instructions,
+   * not fused FMA. Pack its product; leave the accumulator addition in place. */
+  return u->op == POLY_OP_MULACC ? POLY_OP_MUL : u->op;
+}
+
+static int wasm_scalar_pack_n_src(PolyUOp *u) {
+  return u->op == POLY_OP_MULACC ? 2 : u->n_src;
+}
+
+/* Recover independent lane arithmetic even when its consumers are scalar
+ * reductions, not STACKs. This is renderer-local SLP: the original scalar
+ * consumer tree and its rounding order remain unchanged. */
+static int wasm_scalar_pack_lane(PolyCtx *ctx, PolyUOp *u) {
+  if (!u || !poly_dtype_eq(u->dtype, POLY_FLOAT32) || poly_uop_max_numel(ctx, u) != 1) return -1;
+  PolyOps op = wasm_scalar_pack_op(u);
+  if (op != POLY_OP_ADD && op != POLY_OP_SUB && op != POLY_OP_MUL && op != POLY_OP_FDIV &&
+      op != POLY_OP_NEG && op != POLY_OP_SQRT)
+    return -1;
+  int lane = -1;
+  for (int s = 0; s < wasm_scalar_pack_n_src(u); s++) {
+    PolyUOp *v = u->src[s];
+    if (v->op != POLY_OP_INDEX || v->n_src < 2 || !wasm_uop_value_is_v128(ctx, v->src[0])) continue;
+    int index;
+    if (!poly_dtype_eq(v->src[0]->dtype, POLY_FLOAT32) || poly_uop_max_numel(ctx, v->src[0]) != 4 ||
+        !wasm_const_index_checked(v->src[1], &index) || index < 0 || index >= 4 ||
+        (lane >= 0 && lane != index))
+      return -1;
+    lane = index;
+  }
+  return lane;
+}
+
+static WasmScalarPack *wasm_plan_scalar_packs(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    const bool *skip
+) {
+  WasmScalarPack *packs = calloc((size_t)n, sizeof(*packs));
+  if (!packs) return NULL;
+  LocalMap positions;
+  lm_init(&positions, n * 2);
+  for (int i = 0; i < n; i++)
+    lm_set(&positions, uops[i], i);
+  for (int i = 0; i < n; i++) {
+    if (packs[i].owner || (skip && skip[i])) continue;
+    PolyUOp *first = uops[i];
+    int lane = wasm_scalar_pack_lane(ctx, first);
+    if (lane < 0) continue;
+    PolyUOp *lanes[4] = {0};
+    int roots[4] = {0}, found = 1;
+    lanes[lane] = first;
+    roots[lane] = i;
+    for (int j = i + 1; j < n && found < 4; j++) {
+      PolyUOp *v = uops[j];
+      /* Never move arithmetic across effects or control-flow boundaries.
+       * In particular a REG LOAD may alias a mutable Wasm local. */
+      if (v->op == POLY_OP_STORE || v->op == POLY_OP_RANGE || v->op == POLY_OP_END ||
+          v->op == POLY_OP_IF || v->op == POLY_OP_ENDIF)
+        break;
+      if (packs[j].owner || (skip && skip[j]) ||
+          wasm_scalar_pack_op(v) != wasm_scalar_pack_op(first) ||
+          wasm_scalar_pack_n_src(v) != wasm_scalar_pack_n_src(first))
+        continue;
+      int other = wasm_scalar_pack_lane(ctx, v);
+      if (other < 0 || lanes[other]) continue;
+      bool matches = true;
+      for (int s = 0; s < wasm_scalar_pack_n_src(first); s++) {
+        PolyUOp *a = first->src[s], *b = v->src[s];
+        if (a == b) continue;
+        if (a->op != POLY_OP_INDEX || b->op != POLY_OP_INDEX || a->n_src < 2 || b->n_src < 2 ||
+            a->src[0] != b->src[0] || !wasm_uop_value_is_v128(ctx, a->src[0]))
+          matches = false;
+      }
+      if (matches) {
+        lanes[other] = v;
+        roots[other] = j;
+        found++;
+      }
+    }
+    if (found != 4) continue;
+    bool ready = true;
+    for (int s = 0; s < wasm_scalar_pack_n_src(first); s++) {
+      PolyUOp *operands[4];
+      for (int k = 0; k < 4; k++)
+        operands[k] = lanes[k]->src[s];
+      if (!wasm_structural_vec_expr(ctx, operands, 4)) ready = false;
+      PolyUOp *value = first->src[s];
+      if (value->op == POLY_OP_INDEX && value->n_src >= 2 &&
+          wasm_uop_value_is_v128(ctx, value->src[0]))
+        value = value->src[0];
+      int pos = lm_get(&positions, value);
+      if (pos < 0 || pos >= i || (skip && skip[pos])) ready = false;
+    }
+    if (!ready) continue;
+    for (int k = 0; k < 4; k++) {
+      packs[roots[k]].owner = i + 1;
+      packs[roots[k]].lane = k;
+      packs[i].roots[k] = roots[k];
+    }
+  }
+  lm_destroy(&positions);
+  return packs;
+}
+
 static bool wasm_emit_structural_vec_expr(
     PolyCtx *ctx,
     WasmBuf *body,
@@ -2117,6 +2231,7 @@ static void build_code_scalar(
   bool *fused_stack = calloc((size_t)n, sizeof(*fused_stack));
   bool *skip = calloc((size_t)n, sizeof(*skip));
   if (fused_stack && skip) wasm_plan_structural_vecs(ctx, uops, n, fused_stack, skip);
+  WasmScalarPack *packs = wasm_plan_scalar_packs(ctx, uops, n, skip);
 
   /* Same direct-edge count as pinned CStyleLanguage._render, including
    * repeated operands. Keep counting and emission on the same alias rule. */
@@ -2136,6 +2251,7 @@ static void build_code_scalar(
   /* First pass: count locals */
   for (int i = 0; i < n; i++) {
     if (skip && skip[i]) continue;
+    if (packs && packs[i].owner == i + 1) n_locals_v128++;
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_PARAM && poly_uop_is_alu_param(u))
       count_local(
@@ -2729,6 +2845,34 @@ static void build_code_scalar(
 
     /* --- ALU --- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
+      if (packs && packs[i].owner) {
+        WasmScalarPack *pack = &packs[packs[i].owner - 1];
+        if (packs[i].owner == i + 1) {
+          pack->local = next_v128++;
+          for (int s = 0; s < wasm_scalar_pack_n_src(u); s++) {
+            PolyUOp *operands[4];
+            for (int k = 0; k < 4; k++)
+              operands[k] = uops[pack->roots[k]]->src[s];
+            wasm_emit_structural_vec_expr(ctx, &body, &locals, operands, 4);
+          }
+          emit_alu_simd_f32x4(&body, wasm_scalar_pack_op(u));
+          wb_byte(&body, WASM_OP_LOCAL_SET);
+          wb_uleb128(&body, pack->local);
+        }
+        int local = next_f32++;
+        if (u->op == POLY_OP_MULACC) {
+          wb_byte(&body, WASM_OP_LOCAL_GET);
+          wb_uleb128(&body, lm_get(&locals, u->src[2]));
+        }
+        wb_byte(&body, WASM_OP_LOCAL_GET);
+        wb_uleb128(&body, pack->local);
+        emit_v128_extract_lane(&body, POLY_FLOAT32, packs[i].lane);
+        if (u->op == POLY_OP_MULACC) wb_byte(&body, WASM_OP_F32_ADD);
+        wb_byte(&body, WASM_OP_LOCAL_SET);
+        wb_uleb128(&body, local);
+        lm_set(&locals, u, local);
+        continue;
+      }
       bool vector_alu = wasm_vector_alu_has_direct_simd(ctx, u);
       bool vector_lane_fallback = wasm_vector_alu_needs_lane_fallback(ctx, u);
       PolyDType local_dt = wasm_local_value_dtype(u);
@@ -2833,6 +2977,7 @@ static void build_code_scalar(
   lm_destroy(&child_count);
   free(skip);
   free(fused_stack);
+  free(packs);
 }
 
 /* Build code section (SIMD) */

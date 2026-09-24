@@ -1001,6 +1001,42 @@ TEST(wasm, rewrite_legalizes_non_native_f16_storage_like_python_renderer) {
   PASS();
 }
 
+TEST(wasm, transcendental_lowering_stays_inside_kernel) {
+  const PolyOps ops[] = {POLY_OP_EXP2, POLY_OP_LOG2, POLY_OP_SIN};
+  for (int op = 0; op < 3; op++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 2, 0);
+    PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
+    PolyUOp *src = poly_uop_index(ctx, out, &one, 1);
+    PolyUOp *dst = poly_uop_index(ctx, out, &zero, 1);
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, src, poly_arg_none());
+    PolyUOp *value = poly_uop1(ctx, ops[op], POLY_FLOAT32, load, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, value, poly_arg_none());
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "wasm_transcendental");
+    PolyUOp *rewritten = poly_rewrite_wasm(ctx, sink);
+    ASSERT_NOT_NULL(rewritten);
+    int count = 0;
+    PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &count);
+    for (int i = 0; i < count; i++) {
+      ASSERT_TRUE(
+          topo[i]->op != POLY_OP_EXP2 && topo[i]->op != POLY_OP_LOG2 && topo[i]->op != POLY_OP_SIN
+      );
+    }
+    int n = 0, size = 0;
+    PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n);
+    uint8_t *wasm = poly_render_wasm(ctx, lin, n, &size, true);
+    ASSERT_NOT_NULL(wasm);
+    const char *path = "temp/polygrad_test_transcendental.wasm";
+    ASSERT_INT_EQ(wasm_write_module(path, wasm, size), 0);
+    const float expected[] = {4.0f, 1.0f, 0.9092974268f};
+    ASSERT_INT_EQ(node_run_wasm_f32_buffer(path, expected[op]), 0);
+    free(wasm);
+    free(lin);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(wasm, render_vecadd) {
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
   PolyCtx *ctx = k.ctx;
@@ -1538,6 +1574,64 @@ TEST(wasm, structural_vectorized_add_uses_direct_simd) {
   free(wasm);
   free(lin);
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, scalar_lane_products_preserve_reduction_tree) {
+  for (int mulacc = 0; mulacc < 2; mulacc++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, 10, 0);
+    PolyUOp *loads[2], *products[4];
+    for (int j = 0; j < 2; j++) {
+      PolyUOp *start[] = {poly_uop_const_int(ctx, 1 + 4 * j)};
+      PolyUOp *size[] = {poly_uop_const_int(ctx, 4)};
+      loads[j] = poly_uop1(
+          ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop_shrink_symbolic(ctx, buf, start, size, 1),
+          poly_arg_none()
+      );
+    }
+    for (int j = 0; j < 4; j++) {
+      PolyUOp *index = poly_uop_const_int(ctx, j);
+      products[j] = poly_uop2(
+          ctx, POLY_OP_MUL, POLY_FLOAT32, poly_uop_index(ctx, loads[0], &index, 1),
+          poly_uop_index(ctx, loads[1], &index, 1), poly_arg_none()
+      );
+    }
+    PolyUOp *sum = products[0];
+    for (int j = 1; j < 4; j++)
+      sum = mulacc ? poly_uop3(
+                         ctx, POLY_OP_MULACC, POLY_FLOAT32, products[j]->src[0],
+                         products[j]->src[1], sum, poly_arg_none()
+                     )
+                   : poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum, products[j], poly_arg_none());
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *sink =
+        poly_uop_sink1(ctx, poly_uop_store(ctx, poly_uop_index(ctx, buf, &zero, 1), sum));
+    int n = 0, size = 0;
+    PolyUOp **linear = poly_uop_toposort_alloc(ctx, sink, &n);
+    uint8_t *wasm = poly_render_wasm(ctx, linear, n, &size, true);
+    bool packed = wasm_count_simd_opcode(wasm, size, WASM_SIMD_F32X4_MUL) == 1;
+    const char *path = "temp/polygrad_test_scalar_lane_products.wasm";
+    int written = wasm ? wasm_write_module(path, wasm, size) : -1;
+    free(wasm);
+    free(linear);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(written, 0);
+    ASSERT_TRUE(packed);
+    const char *node = poly_test_node_cmd_for_wasm(path);
+    ASSERT_NOT_NULL(node);
+    char cmd[2048];
+    snprintf(
+        cmd, sizeof(cmd),
+        "%s -e \"const fs=require('fs'),memory=new WebAssembly.Memory({initial:1});"
+        "const x=new Float32Array(memory.buffer);x.set([0,1e20,-1e20,3,4,1,1,1,1]);"
+        "const m=new WebAssembly.Instance(new "
+        "WebAssembly.Module(fs.readFileSync('%s')),{env:{memory}});"
+        "m.exports.kernel(0);if(x[0]!==7)throw Error('sum grouping changed: '+x[0]);\"",
+        node, path
+    );
+    ASSERT_INT_EQ(system(cmd), 0);
+  }
   PASS();
 }
 
@@ -3358,6 +3452,79 @@ TEST(wasm, memory_structural_vector_keeps_shared_scalar_dependencies) {
   );
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(rc, 0);
+  PASS();
+}
+
+TEST(wasm, scalar_lane_packs_keep_consumers_and_effect_boundaries) {
+  struct {
+    PolyOps op;
+    int opcode;
+    const char *expected;
+  } cases[] = {
+      {POLY_OP_ADD, WASM_SIMD_F32X4_ADD, "[2,3,4,5,2]"},
+      {POLY_OP_SUB, WASM_SIMD_F32X4_SUB, "[0,1,2,3,0]"},
+      {POLY_OP_MUL, WASM_SIMD_F32X4_MUL, "[1,2,3,4,1]"},
+      {POLY_OP_FDIV, WASM_SIMD_F32X4_DIV, "[1,2,3,4,1]"},
+      {POLY_OP_NEG, WASM_SIMD_F32X4_NEG, "[-1,-2,-3,-4,-1]"},
+      {POLY_OP_SQRT, WASM_SIMD_F32X4_SQRT,
+       "[1,Math.fround(Math.sqrt(2)),Math.fround(Math.sqrt(3)),2,1]"},
+  };
+  int failures = 0;
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    for (int barrier = 0; barrier < 2; barrier++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 5, 0);
+      PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+      PolyUOp *ops[64], *indices[5], *sums[4];
+      int n = 0;
+      ops[n++] = out->src[0];
+      ops[n++] = in->src[0];
+      ops[n++] = out;
+      ops[n++] = in;
+      for (int i = 0; i < 5; i++)
+        ops[n++] = indices[i] = poly_uop_const_int(ctx, i);
+      PolyUOp *one = wasm_test_literal(ctx, POLY_FLOAT32, 1);
+      ops[n++] = one;
+      PolyUOp *slice =
+          poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, indices[0], indices[4], poly_arg_none());
+      ops[n++] = slice;
+      PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+      ops[n++] = load;
+      PolyUOp *last = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, indices[4], poly_arg_none());
+      ops[n++] = last;
+      /* Encounter lane 1 before lane 0, as in lowered dot products. */
+      int order[] = {1, 0, 3, 2};
+      for (int j = 0; j < 4; j++) {
+        int i = order[j];
+        PolyUOp *lane =
+            poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, load, indices[i], poly_arg_none());
+        ops[n++] = lane;
+        ops[n++] = sums[i] =
+            cases[c].op == POLY_OP_NEG || cases[c].op == POLY_OP_SQRT
+                ? poly_uop1(ctx, cases[c].op, POLY_FLOAT32, lane, poly_arg_none())
+                : poly_uop2(ctx, cases[c].op, POLY_FLOAT32, lane, one, poly_arg_none());
+        if (barrier && j == 1)
+          ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, last, sums[0], poly_arg_none());
+      }
+      for (int i = 0; i < 4; i++) {
+        PolyUOp *address =
+            poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, indices[i], poly_arg_none());
+        ops[n++] = address;
+        ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, sums[i], poly_arg_none());
+      }
+      ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, last, sums[0], poly_arg_none());
+      int size = 0;
+      uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+      if (!wasm || wasm_count_simd_opcode(wasm, size, cases[c].opcode) != !barrier) failures++;
+      free(wasm);
+      failures += wasm_check_memory_module(
+                      ctx, ops, n, true, "Float32Array", cases[c].expected,
+                      "new Float32Array(mem.buffer,256,4).set([1,2,3,4])", "64,256"
+                  ) != 0;
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_INT_EQ(failures, 0);
   PASS();
 }
 
