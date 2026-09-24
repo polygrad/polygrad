@@ -205,6 +205,38 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
 
 static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n);
 
+TEST(tensor, round_half_ties_match_pinned_even_parity) {
+  float values[] = {-9.5f, -8.5f, -3.5f, -2.5f, -1.5f, -.5f, .5f, 1.5f, 2.5f, 3.5f, 8.5f, 9.5f};
+  float expected[] = {-10, -8, -4, -2, -2, 0, 0, 2, 2, 4, 8, 10}, got[12];
+  PolyDevice devices[] = {POLY_DEVICE_INTERP, POLY_DEVICE_CPU};
+  for (int device = 0; device < 2; device++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_preferred_device(ctx, devices[device]);
+    PolyTensor *x =
+        poly_tensor_from_host(ctx, values, sizeof(values), POLY_FLOAT32, (int64_t[]){12}, 1);
+    PolyTensor *out = poly_tensor_round(ctx, x);
+    ASSERT_NOT_NULL(out);
+    /* Pinned round tests trunc(b) == b, where b = trunc(x)/2. */
+    PolyUOp *root = out->uop_physical;
+    ASSERT_EQ(root->op, POLY_OP_WHERE);
+    int count = 0, parity_checks = 0;
+    PolyUOp **nodes = poly_uop_toposort(ctx, root->src[0], &count);
+    for (int i = 0; i < count; i++) {
+      PolyUOp *u = nodes[i];
+      if (u->op == POLY_OP_CMPNE && u->src[0]->op == POLY_OP_TRUNC &&
+          u->src[0]->src[0] == u->src[1] && u->src[1]->op == POLY_OP_FDIV)
+        parity_checks++;
+    }
+    ASSERT_EQ(parity_checks, 1); /* eq is logical_not(CMPNE), as in the pin. */
+    ASSERT_EQ(read_tensor_f32(ctx, out, got, 12), 0);
+    for (int i = 0; i < 12; i++)
+      ASSERT_FLOAT_EQ(got[i], expected[i], 0);
+    poly_tensor_release(out);
+    poly_tensor_release(x);
+    poly_ctx_destroy(ctx);
+  }
+}
+
 TEST(tensor, cat_handles_reuse_shared_uop_and_reject_foreign_owner) {
   PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
   poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);

@@ -739,18 +739,16 @@ PolyUOp *poly_uop_floor(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_round(PolyCtx *ctx, PolyUOp *x) {
-  /* round(x) with banker's rounding (round half to even):
-   * (x > 0) == (trunc(x/2) == trunc(trunc(x)/2)) ? ceil(x-0.5) : floor(x+0.5) */
+  /* Pinned ElementwiseMixin.round: the truncated integer is even precisely
+   * when b = trunc(x)/2 equals trunc(b). Comparing two truncations loses ties. */
   PolyUOp *half = poly_uop_elementwise_float_const(ctx, x, 0.5);
   PolyUOp *two = poly_uop_elementwise_float_const(ctx, x, 2.0);
   PolyUOp *b = poly_uop_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *x_gt_0 =
       poly_uop_alu2(ctx, POLY_OP_CMPLT, poly_uop_elementwise_float_const(ctx, x, 0.0), x);
   PolyUOp *b_half = poly_uop_alu2(ctx, POLY_OP_FDIV, b, two);
-  PolyUOp *x_half = poly_uop_alu2(ctx, POLY_OP_FDIV, x, two);
   PolyUOp *trunc_b_half = poly_uop_alu1(ctx, POLY_OP_TRUNC, b_half);
-  PolyUOp *trunc_x_half = poly_uop_alu1(ctx, POLY_OP_TRUNC, x_half);
-  PolyUOp *halves_eq = poly_uop_eq(ctx, trunc_b_half, trunc_x_half);
+  PolyUOp *halves_eq = poly_uop_eq(ctx, trunc_b_half, b_half);
   PolyUOp *cond = poly_uop_eq(ctx, x_gt_0, halves_eq);
   return poly_uop_alu3(
       ctx, POLY_OP_WHERE, cond, poly_uop_ceil(ctx, poly_uop_alu2(ctx, POLY_OP_SUB, x, half)),
