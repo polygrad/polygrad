@@ -6,6 +6,7 @@ architecture factories live in ``polygrad.models``.
 """
 
 import ctypes
+import json
 import ctypes.util
 import math
 import operator
@@ -828,6 +829,33 @@ class Model:
             detail = _get_lib().poly_import_last_error_message()
             message = detail.decode('utf-8', errors='replace') if detail else ''
             raise RuntimeError('poly_gguf_load returned NULL' + (f': {message}' if message else ''))
+        return Model._from_handle(ptr, ctx)
+
+    @staticmethod
+    def from_onnx(data, *, dimensions=None, external_data=None, device=None, runtime=None):
+        """Import fixed/specialized ONNX inference graphs through the C loader.
+
+        dimensions maps symbolic dimension names to positive integers.
+        external_data maps exact ONNX locations to bytes; no files are fetched.
+        Initializers are copied into frozen Model state. Returns a generic Model.
+        """
+        if isinstance(data, (str, pathlib.Path)):
+            data = pathlib.Path(data).read_bytes()
+        data = bytes(data)
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        entries = list((external_data or {}).items())
+        names = (ctypes.c_char_p * len(entries))(*[_name_bytes(k) for k, _ in entries])
+        buffers = [(ctypes.c_uint8 * len(v)).from_buffer_copy(v) for _, v in entries]
+        pointers = (ctypes.POINTER(ctypes.c_uint8) * len(entries))(*buffers)
+        sizes = (ctypes.c_int64 * len(entries))(*[len(v) for _, v in entries])
+        opts = _ffi.PolyOnnxOptions(json.dumps(dimensions or {}, allow_nan=False).encode(), names,
+                                    pointers, sizes, len(entries))
+        ctx = _import_context(runtime)
+        ptr = _get_lib().poly_onnx_load_into(ctx, buf, len(data), ctypes.byref(opts),
+                                           _device_id(device) if device is not None else 0)
+        if not ptr:
+            detail = _get_lib().poly_import_last_error_message()
+            raise ValueError(detail.decode('utf-8', 'replace') if detail else 'ONNX import failed')
         return Model._from_handle(ptr, ctx)
 
     # ── Param Enumeration ────────────────────────────────────────────

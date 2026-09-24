@@ -301,6 +301,19 @@ reapply the optimizer configuration after loading.
 See [export products](https://github.com/polygrad/polygrad#export-products)
 for portable bundles, bound programs and weights, including JavaScript methods.
 
+### ONNX Import
+
+`pg.Model.fromONNX(modelBytes, { dimensions: { batch: 2 } })` imports a supported
+ONNX graph as an ordinary inference Model. Omit `dimensions` for fixed shapes.
+Pass inputs by their ONNX names to `model.forward(inputs)` or, on WebGPU,
+`await model.forwardAsync(inputs)`. Outputs retain their ONNX names.
+
+For external weights, pass `externalData: { 'weights.bin': weightBytes }`;
+the loader does not fetch files. Initializers are copied into frozen state.
+Placement and bundle save/load work as for other Models; training objectives
+and Transformer generation methods are not inferred. See the
+[supported ONNX subset](https://github.com/polygrad/polygrad#onnx-import).
+
 ### Pretrained And Configured Models
 
 For C-built model types and `models.Sequential` / `models.Graph`, see

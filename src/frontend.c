@@ -236,11 +236,10 @@ PolyTensor *poly_tensor_arange_int_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *value_uop = poly_uop_arange_int_by_id(ctx, start, stop, step, dtype_id);
-  if (!value_uop) return NULL;
-  return poly_tensor_create_with_roots(
-      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
-  );
+  PolyDType dtype;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_tensor_arange_int(ctx, start, stop, step, dtype, (PolyDevice)device_id)
+             : NULL;
 }
 
 PolyTensor *poly_tensor_arange_float_by_id(
@@ -251,11 +250,10 @@ PolyTensor *poly_tensor_arange_float_by_id(
     int dtype_id,
     int device_id
 ) {
-  PolyUOp *value_uop = poly_uop_arange_float_by_id(ctx, start, stop, step, dtype_id);
-  if (!value_uop) return NULL;
-  return poly_tensor_create_with_roots(
-      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
-  );
+  PolyDType dtype;
+  return poly_dtype_by_id(dtype_id, &dtype)
+             ? poly_tensor_arange_float(ctx, start, stop, step, dtype, (PolyDevice)device_id)
+             : NULL;
 }
 
 PolyTensor *poly_tensor_linspace_by_id(

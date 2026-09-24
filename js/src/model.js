@@ -760,6 +760,27 @@ function createBoundModelClass(runtime) {
       return Model._fromHandle(handle)
     }
 
+    static fromONNX(onnxBytes, opts = {}) {
+      if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model ONNX load requires an idle Runtime')
+      const bytes = normalizeBytes(onnxBytes, 'onnx')
+      const dimensions = opts.dimensions || {}
+      for (const [name, value] of Object.entries(dimensions)) {
+        if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`ONNX dimension '${name}' must be a positive integer`)
+      }
+      const external = Object.entries(opts.externalData || {}).map(([name, value]) => {
+        if (!name || name.includes('\0')) throw new TypeError('ONNX external name must be nonempty and contain no NUL')
+        return [name, normalizeBytes(value, 'ONNX external data')]
+      })
+      const api = _runtime._core.model
+      const handle = api.loadONNX(bytes, JSON.stringify(dimensions), external)
+      if (!handle) {
+        const err = api.importLastError()
+        throw new Error(err ? err.message : 'ONNX import failed')
+      }
+      return Model._fromHandle(handle)
+    }
+
     dispose() {
       if (this._disposePromise) return this._disposePromise
       if (!this._handle) return undefined

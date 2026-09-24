@@ -2675,6 +2675,26 @@ function createWasmCoreFromModule(Module, device) {
       return configureModelDevice(inst)
     },
 
+    loadONNX(bytes, dimensions, external) {
+      const allocated = []
+      const own = ptr => { allocated.push(ptr); return ptr }
+      try {
+        const data = own(allocBytes(bytes)), dims = own(allocString(dimensions))
+        const names = own(malloc(external.length * 4)), buffers = own(malloc(external.length * 4))
+        const lengths = own(malloc(external.length * 8)), options = own(malloc(20))
+        for (let i = 0; i < external.length; i++) {
+          const name = own(allocString(external[i][0])), buffer = own(allocBytes(external[i][1]))
+          heap32()[(names >>> 2) + i] = name
+          heap32()[(buffers >>> 2) + i] = buffer
+          new DataView(heapU8().buffer).setBigInt64(lengths + i * 8, BigInt(external[i][1].length), true)
+        }
+        // PolyOnnxOptions is four Wasm32 pointers followed by an int count.
+        heap32().set([dims, names, buffers, lengths, external.length], options >>> 2)
+        return configureModelDevice(Module._poly_onnx_load_into(ctx, data, BigInt(bytes.length), options,
+          deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId))
+      } finally { for (const ptr of allocated) Module._free(ptr) }
+    },
+
     importLastError() {
       const code = Module._poly_import_last_error_code()
       if (code === 0) return null

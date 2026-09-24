@@ -35,6 +35,14 @@ class PolyControlBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p), ('value', ctypes.c_int64)]
 
 
+class PolyOnnxOptions(ctypes.Structure):
+    _fields_ = [('dimensions_json', ctypes.c_char_p),
+                ('external_names', ctypes.POINTER(ctypes.c_char_p)),
+                ('external_data', ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8))),
+                ('external_lengths', ctypes.POINTER(ctypes.c_int64)),
+                ('n_external', ctypes.c_int)]
+
+
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
                 ('data', ctypes.c_void_p),
@@ -1584,6 +1592,10 @@ def _declare_signatures(lib):
     lib.poly_gguf_load_into.restype = _ptr
     lib.poly_gguf_load_into.argtypes = [
         _ptr, _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int
+    ]
+    lib.poly_onnx_load_into.restype = _ptr
+    lib.poly_onnx_load_into.argtypes = [
+        _ptr, _u8p, ctypes.c_int64, ctypes.POINTER(PolyOnnxOptions), ctypes.c_int
     ]
 
     # --- Shape-on-UOp accessors ---

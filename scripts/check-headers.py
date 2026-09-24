@@ -13,7 +13,7 @@ OWNERS = ("core.h", "mixin/elementwise.h", "mixin/movement.h", "mixin/creation.h
           "mixin/composite.h", "mixin/gradient.h", "uop/ops.h", "placer.h", "device.h", "engine/jit.h",
           "engine/schedule.h", "engine/realize.h", "schedule/schedule.h",
           "models/mlp.h", "models/gpt2.h", "models/qwen3.h",
-          "models/hf_loader.h", "loaders/gguf_loader.h")
+          "models/hf_loader.h", "loaders/gguf_loader.h", "loaders/onnx_loader.h")
 
 
 def check_api_owners():

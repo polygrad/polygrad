@@ -312,6 +312,17 @@ result through existing Model bundle or graph/weights APIs.
 
 </details>
 
+### ONNX Import
+
+Python `Model.from_onnx` and JavaScript `Model.fromONNX` share a C loader that
+lowers into ordinary Tensor/UOp graphs and seals a portable Model. No ONNX
+runtime or Python dependency is needed at execution. See the
+[Python](py/README.md#onnx-import) and [JavaScript](js/README.md#onnx-import) calls.
+
+Call the imported Model with its ONNX input names, or save it as a Polygrad
+bundle to run elsewhere without redefining the model. Import is currently
+inference-only; unsupported operators and shapes produce an import error.
+
 ### Export Products
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.

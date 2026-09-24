@@ -1,5 +1,50 @@
 'use strict'
 
+const onnxFixture = require('../../test/fixtures/onnx.json')
+
+async function checkOnnxImport(pg) {
+  const bytes = str => Uint8Array.from(typeof atob === 'function' ? atob(str) : Buffer.from(str, 'base64').toString('binary'), c => c.charCodeAt(0))
+  async function forward(model, inputs, name) {
+    const state = pg._core.Module && pg._core.Module.__polygradWebGpuState
+    if (!state || name !== 'encoder') return model.forwardAsync(inputs)
+    const queue = state.device.queue, submit = queue.submit
+    let submissions = 0
+    queue.submit = function(...args) { submissions++; return submit.apply(this, args) }
+    try {
+      const result = await model.forwardAsync(inputs)
+      assert(submissions > 0, 'imported ONNX encoder submitted no WebGPU work')
+      return result
+    } finally { queue.submit = submit }
+  }
+  for (const item of onnxFixture.cases) {
+    const source = bytes(item.onnx)
+    const external = Object.fromEntries(Object.entries(item.external).map(([k,v]) => [k, bytes(v)]))
+    const model = pg.Model.fromONNX(source, { dimensions: item.dimensions, externalData: external })
+    let restored
+    try {
+      source.fill(0)
+      for (const data of Object.values(external)) data.fill(0)
+      const inputs = Object.fromEntries(Object.entries(item.inputs).map(([k,v]) => [k, new Float32Array(v.values)]))
+      const first = await forward(model, inputs, item.name)
+      for (const [name, value] of Object.entries(item.outputs)) assertClose(first[name], value.values, 2e-5)
+      restored = pg.Model.load(await model.saveAsync())
+      const result = await forward(restored, inputs, item.name)
+      for (const [name, value] of Object.entries(item.outputs)) assertClose(result[name], value.values, 2e-5)
+      assert(!(model instanceof pg.models.Transformer), 'ONNX imported as Transformer')
+    } finally {
+      if (restored) await restored.dispose()
+      await model.dispose()
+    }
+  }
+  let rejected = false
+  try { pg.Model.fromONNX(new Uint8Array([0x80])) } catch (e) { rejected = /ONNX/.test(e.message) }
+  assert(rejected, 'truncated ONNX accepted')
+  rejected = false
+  const external = onnxFixture.cases.find(item => item.name === 'external')
+  try { pg.Model.fromONNX(bytes(external.onnx)) } catch (e) { rejected = /was not supplied/.test(e.message) }
+  assert(rejected, 'missing external weights accepted')
+}
+
 const llamaFixture = require('../../test/fixtures/llama.json')
 const componentFixture = require('../../test/fixtures/model_components.json')
 const componentOracle = require('../../test/fixtures/model_components_expected.json')
@@ -1766,6 +1811,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   console.log('\n== Model ==')
 
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
+  await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
 
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
@@ -2541,6 +2587,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   console.log('\n== Model ==')
 
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
+  await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))

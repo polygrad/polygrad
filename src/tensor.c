@@ -7367,6 +7367,81 @@ PolyTensor *poly_tensor_tan(PolyCtx *ctx, PolyTensor *src) {
   );
 }
 
+/* Tensor._apply_uop: paired ownership for existing ElementwiseMixin programs. */
+#define TENSOR_UNARY_COMPOSITION(name, build)                                                      \
+  PolyTensor *poly_tensor_##name(PolyCtx *ctx, PolyTensor *src) {                                  \
+    int logical = tensor_unary_builds_logical(ctx, src);                                           \
+    if (logical < 0 || !tensor_current_uop(src)) return NULL;                                      \
+    return tensor_unary_result(                                                                    \
+        ctx, src, logical ? build(ctx, src->uop_logical) : NULL, build(ctx, src->uop_physical)     \
+    );                                                                                             \
+  }
+TENSOR_UNARY_COMPOSITION(abs, poly_uop_abs)
+TENSOR_UNARY_COMPOSITION(sign, poly_uop_sign)
+TENSOR_UNARY_COMPOSITION(floor, poly_uop_floor)
+TENSOR_UNARY_COMPOSITION(ceil, poly_uop_ceil)
+TENSOR_UNARY_COMPOSITION(round, poly_uop_round)
+TENSOR_UNARY_COMPOSITION(isnan, poly_uop_isnan)
+TENSOR_UNARY_COMPOSITION(isinf, poly_uop_isinf)
+TENSOR_UNARY_COMPOSITION(mish, poly_uop_mish)
+TENSOR_UNARY_COMPOSITION(hardswish, poly_uop_hardswish)
+#undef TENSOR_UNARY_COMPOSITION
+
+PolyTensor *poly_tensor_reciprocal(PolyCtx *ctx, PolyTensor *src) {
+  return poly_tensor_alu1(ctx, POLY_OP_RECIPROCAL, src);
+}
+
+PolyTensor *poly_tensor_arange_int(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    PolyDType dtype,
+    PolyDevice device
+) {
+  PolyUOp *value = poly_uop_arange_int_dtype(ctx, start, stop, step, dtype);
+  return value ? poly_tensor_create_with_roots(ctx, value, value, POLY_TENSOR_VALUE, device) : NULL;
+}
+
+PolyTensor *poly_tensor_arange_float(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    PolyDType dtype,
+    PolyDevice device
+) {
+  PolyUOp *value = poly_uop_arange_float_dtype(ctx, start, stop, step, dtype);
+  return value ? poly_tensor_create_with_roots(ctx, value, value, POLY_TENSOR_VALUE, device) : NULL;
+}
+
+#define TENSOR_TRIANGULAR(name)                                                                    \
+  PolyTensor *poly_tensor_##name(PolyCtx *ctx, PolyTensor *src, int diagonal) {                    \
+    int logical = tensor_unary_builds_logical(ctx, src);                                           \
+    if (logical < 0 || !tensor_current_uop(src)) return NULL;                                      \
+    return tensor_unary_result(                                                                    \
+        ctx, src, logical ? poly_uop_##name(ctx, src->uop_logical, diagonal) : NULL,               \
+        poly_uop_##name(ctx, src->uop_physical, diagonal)                                          \
+    );                                                                                             \
+  }
+TENSOR_TRIANGULAR(triu)
+TENSOR_TRIANGULAR(tril)
+#undef TENSOR_TRIANGULAR
+
+#define TENSOR_SCALAR_COMPOSITION(name, build)                                                     \
+  PolyTensor *poly_tensor_##name(PolyCtx *ctx, PolyTensor *src, double value) {                    \
+    int logical = tensor_unary_builds_logical(ctx, src);                                           \
+    if (logical < 0 || !tensor_current_uop(src)) return NULL;                                      \
+    return tensor_unary_result(                                                                    \
+        ctx, src, logical ? build(ctx, src->uop_logical, value) : NULL,                            \
+        build(ctx, src->uop_physical, value)                                                       \
+    );                                                                                             \
+  }
+TENSOR_SCALAR_COMPOSITION(softplus, poly_uop_softplus)
+TENSOR_SCALAR_COMPOSITION(elu, poly_uop_elu)
+TENSOR_SCALAR_COMPOSITION(leaky_relu, poly_uop_leaky_relu)
+#undef TENSOR_SCALAR_COMPOSITION
+
 PolyTensor *poly_tensor_log10(PolyCtx *ctx, PolyTensor *x) {
   PolyTensor *inputs[1] = {x};
   int n_inputs = 1;

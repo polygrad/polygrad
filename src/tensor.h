@@ -73,6 +73,25 @@ PolyTensor *poly_tensor_retain(PolyTensor *tensor);
 
 void poly_tensor_release(PolyTensor *tensor);
 
+PolyTensor *poly_tensor_arange_int(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    PolyDType dtype,
+    PolyDevice device
+);
+PolyTensor *poly_tensor_arange_float(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    PolyDType dtype,
+    PolyDevice device
+);
+PolyTensor *poly_tensor_triu(PolyCtx *ctx, PolyTensor *src, int diagonal);
+PolyTensor *poly_tensor_tril(PolyCtx *ctx, PolyTensor *src, int diagonal);
+
 PolyTensor *poly_tensor_empty(
     PolyCtx *ctx,
     PolyDType scalar_dtype,
@@ -167,6 +186,20 @@ PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divi
 PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
 
 PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
+
+PolyTensor *poly_tensor_abs(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_sign(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_floor(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_ceil(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_round(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_isnan(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_isinf(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_reciprocal(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_mish(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_hardswish(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_softplus(PolyCtx *ctx, PolyTensor *src, double beta);
+PolyTensor *poly_tensor_elu(PolyCtx *ctx, PolyTensor *src, double alpha);
+PolyTensor *poly_tensor_leaky_relu(PolyCtx *ctx, PolyTensor *src, double slope);
 
 PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
 

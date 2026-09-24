@@ -320,7 +320,7 @@ def _bound_model_class(runtime):
         __init__ = _bound_runtime_call(runtime, Model.__init__)
 
     for name in ('from_callable', 'from_tensors', 'from_bindings', 'load', 'from_bundle',
-                 'from_ir', 'from_hf', 'from_gguf'):
+                 'from_ir', 'from_hf', 'from_gguf', 'from_onnx'):
         setattr(RuntimeModel, name, staticmethod(_bound_runtime_call(runtime, getattr(Model, name))))
     RuntimeModel.__name__ = 'Model'
     RuntimeModel.__qualname__ = 'Model'

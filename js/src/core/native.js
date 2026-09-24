@@ -229,6 +229,9 @@ function createNativeCore(device) {
       return binding.poly_gguf_load_into(
         ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
     },
+    loadONNX(bytes, dimensions, external) {
+      return binding.poly_onnx_load_into(bytes, dimensions, external, deviceId, ctx)
+    },
     importLastError() {
       const code = binding.poly_import_last_error_code()
       if (code === 0) return null

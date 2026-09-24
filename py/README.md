@@ -285,6 +285,18 @@ To resume training, reapply the optimizer configuration after loading.
 See [export products](https://github.com/polygrad/polygrad#export-products)
 for graph, program and weight exports and version compatibility.
 
+### ONNX Import
+
+`Model.from_onnx(path_or_bytes, dimensions={'batch': 2})` imports a supported
+ONNX graph as an ordinary inference Model. Omit `dimensions` for fixed shapes.
+Use `model.call('forward', inputs)` with the graph's input names; outputs retain
+their ONNX names. The imported Model supports placement and bundle save/load.
+
+For external weights, pass `external_data={'weights.bin': weight_bytes}`;
+locations are exact keys, not files fetched by the loader. Initializers are
+copied into frozen state; this import does not create a training objective or
+Transformer generation methods. See the [supported ONNX subset](https://github.com/polygrad/polygrad#onnx-import).
+
 ### Pretrained models
 
 <!-- readme-test: network -->

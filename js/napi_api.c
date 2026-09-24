@@ -22,6 +22,7 @@
 #include "tokenizer.h"
 #include "loaders/hf_decode.h"
 #include "loaders/gguf_decode.h"
+#include "loaders/onnx_loader.h"
 #include "loaders/gguf_loader.h"
 #include "models/hf_loader.h"
 #include "loaders/import_error.h"
@@ -7264,6 +7265,71 @@ static napi_value napi_poly_hf_load_into(napi_env env, napi_callback_info info) 
   return make_external(env, inst);
 }
 
+static napi_value napi_poly_onnx_load_into(napi_env env, napi_callback_info info) {
+  napi_value argv[5], result = NULL;
+  size_t argc = 5, len;
+  void *data;
+  int32_t device;
+  uint32_t count;
+  char *dimensions = NULL;
+  char **names = NULL;
+  const uint8_t **buffers = NULL;
+  int64_t *lengths = NULL;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &count));
+  if (count > 4096) {
+    napi_throw_range_error(env, NULL, "too many ONNX external files");
+    return NULL;
+  }
+  size_t size;
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[1], NULL, 0, &size));
+  dimensions = malloc(size + 1);
+  names = calloc(count ? count : 1, sizeof(*names));
+  buffers = calloc(count ? count : 1, sizeof(*buffers));
+  lengths = calloc(count ? count : 1, sizeof(*lengths));
+  if (!dimensions || !names || !buffers || !lengths) goto error;
+  if (napi_get_value_string_utf8(env, argv[1], dimensions, size + 1, &size) != napi_ok) goto error;
+  for (uint32_t i = 0; i < count; i++) {
+    napi_value pair, name, bytes;
+    void *ptr;
+    size_t n;
+    if (napi_get_element(env, argv[2], i, &pair) != napi_ok ||
+        napi_get_element(env, pair, 0, &name) != napi_ok ||
+        napi_get_element(env, pair, 1, &bytes) != napi_ok ||
+        napi_get_value_string_utf8(env, name, NULL, 0, &n) != napi_ok)
+      goto error;
+    names[i] = malloc(n + 1);
+    if (!names[i]) goto error;
+    if (napi_get_value_string_utf8(env, name, names[i], n + 1, &n) != napi_ok ||
+        napi_get_buffer_info(env, bytes, &ptr, &n) != napi_ok)
+      goto error;
+    buffers[i] = ptr;
+    lengths[i] = (int64_t)n;
+  }
+  PolyOnnxOptions options = {dimensions, (const char *const *)names, buffers, lengths, (int)count};
+  PolyModel *model = poly_onnx_load_into(
+      get_external(env, argv[4]), data, (int64_t)len, &options, (PolyDevice)device
+  );
+  if (model)
+    result = make_external(env, model);
+  else
+    napi_get_null(env, &result);
+  goto done;
+error:
+  napi_throw_error(env, NULL, "invalid ONNX arguments or allocation failure");
+done:
+  if (names)
+    for (uint32_t i = 0; i < count; i++)
+      free(names[i]);
+  free(names);
+  free(buffers);
+  free(lengths);
+  free(dimensions);
+  return result;
+}
+
 static napi_value napi_poly_gguf_load_into(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -7812,6 +7878,7 @@ NAPI_MODULE_INIT() {
       /* Loaders */
       DECLARE_NAPI_METHOD("poly_hf_load_into", napi_poly_hf_load_into),
       DECLARE_NAPI_METHOD("poly_gguf_load_into", napi_poly_gguf_load_into),
+      DECLARE_NAPI_METHOD("poly_onnx_load_into", napi_poly_onnx_load_into),
       DECLARE_NAPI_METHOD("poly_tokenizer_from_gguf", napi_poly_tokenizer_from_gguf),
 
       /* Import error */
