@@ -14,11 +14,18 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def trajectory_summary(values):
+    return dict(shape=list(values.shape), dtype=str(values.dtype),
+                sha256=hashlib.sha256(values.tobytes()).hexdigest(),
+                argmax_tokens=np.argmax(values, axis=-1).reshape(-1).tolist())
 
 
 def worker(args):
@@ -113,13 +120,17 @@ def worker(args):
                 if repeat >= args.warmup:
                     (prefill if pos == 0 else decode).append(elapsed)
                 if repeat == args.warmup:
-                    trajectory.append(result.tolist())
+                    trajectory.append(np.array(result, dtype=np.float32, copy=True))
                 elif repeat > args.warmup:
                     index = 0 if pos == 0 else pos - args.chunk + 1
                     np.testing.assert_allclose(result, trajectory[index], rtol=tolerance, atol=tolerance)
+        trajectory = np.stack(trajectory)
+        # Temporary binary data preserves the full numerical comparison without
+        # multi-GB JSON reports or vocabulary-sized Python lists over stdout.
+        np.save(args.trajectory, trajectory)
         return dict(engine=args.worker, source=source, prefill_us=statistics.median(prefill),
                     decode_us=statistics.median(decode), prefill_samples=len(prefill),
-                    decode_samples=len(decode), trajectory=trajectory,
+                    decode_samples=len(decode), trajectory=trajectory_summary(trajectory),
                     affinity=sorted(os.sched_getaffinity(0)), load=os.getloadavg())
     finally:
         close()
@@ -137,6 +148,7 @@ def main():
     parser.add_argument('--checkpoint', type=Path, help='local unscaled Llama config.json + model.safetensors')
     parser.add_argument('--output', type=Path, default=ROOT / 'temp/kv-benchmark.json')
     parser.add_argument('--worker', choices=['polygrad', 'tinygrad'], help=argparse.SUPPRESS)
+    parser.add_argument('--trajectory', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.checkpoint:
         args.checkpoint = args.checkpoint.resolve()
@@ -145,31 +157,37 @@ def main():
     if args.cpu_core is not None:
         os.sched_setaffinity(0, {args.cpu_core})
     if args.worker:
+        if args.trajectory is None:
+            parser.error('--worker requires --trajectory')
         print(json.dumps(worker(args)))
         return
     rows = []
     env = dict(os.environ, DEV=args.device, POLY_DEV=args.device, BEAM='0', NOOPT='0', JIT='1',
                POLY_LIB=str(ROOT / 'build/libpolygrad.so'), OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
     env.pop('POLY_DEVICE', None)
-    for pair in range(args.pairs):
-        runs = {}
-        for engine in (['tinygrad', 'polygrad'] if pair % 2 == 0 else ['polygrad', 'tinygrad']):
-            env['PYTHONPATH'] = str(ROOT / ('py' if engine == 'polygrad' else 'references/tinygrad_014'))
-            command = [sys.executable, str(Path(__file__).resolve()), '--worker', engine,
-                       '--device', args.device, '--capacity', str(args.capacity), '--chunk', str(args.chunk),
-                       '--warmup', str(args.warmup), '--repeats', str(args.repeats)]
-            if args.checkpoint:
-                command += ['--checkpoint', str(args.checkpoint)]
-            print(f'pair {pair+1}/{args.pairs}: {engine}', flush=True)
-            result = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, check=True)
-            runs[engine] = json.loads(result.stdout)
-        tolerance = 3e-4 if args.checkpoint else 3e-5
-        np.testing.assert_allclose(runs['polygrad']['trajectory'], runs['tinygrad']['trajectory'],
-                                   rtol=tolerance, atol=tolerance)
-        np.testing.assert_array_equal(np.argmax(runs['polygrad']['trajectory'], axis=-1),
-                                      np.argmax(runs['tinygrad']['trajectory'], axis=-1))
-        rows.append(runs)
-        print({key:round(runs['polygrad'][key] / runs['tinygrad'][key], 3) for key in ('prefill_us','decode_us')}, flush=True)
+    with tempfile.TemporaryDirectory(prefix='polygrad-kv-') as scratch:
+        for pair in range(args.pairs):
+            runs = {}
+            for engine in (['tinygrad', 'polygrad'] if pair % 2 == 0 else ['polygrad', 'tinygrad']):
+                env['PYTHONPATH'] = str(ROOT / ('py' if engine == 'polygrad' else 'references/tinygrad_014'))
+                command = [sys.executable, str(Path(__file__).resolve()), '--worker', engine,
+                           '--device', args.device, '--capacity', str(args.capacity), '--chunk', str(args.chunk),
+                           '--warmup', str(args.warmup), '--repeats', str(args.repeats),
+                           '--trajectory', str(Path(scratch) / f'{engine}.npy')]
+                if args.checkpoint:
+                    command += ['--checkpoint', str(args.checkpoint)]
+                print(f'pair {pair+1}/{args.pairs}: {engine}', flush=True)
+                result = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, check=True)
+                runs[engine] = json.loads(result.stdout)
+            tolerance = 3e-4 if args.checkpoint else 3e-5
+            pg_values = np.load(Path(scratch) / 'polygrad.npy')
+            tg_values = np.load(Path(scratch) / 'tinygrad.npy')
+            np.testing.assert_allclose(pg_values, tg_values, rtol=tolerance, atol=tolerance)
+            np.testing.assert_array_equal(np.argmax(pg_values, axis=-1), np.argmax(tg_values, axis=-1))
+            runs['comparison'] = dict(max_abs_error=float(np.max(np.abs(pg_values - tg_values))),
+                                     rtol=tolerance, atol=tolerance, argmax_equal=True)
+            rows.append(runs)
+            print({key:round(runs['polygrad'][key] / runs['tinygrad'][key], 3) for key in ('prefill_us','decode_us')}, flush=True)
     report = dict(device=args.device, capacity=args.capacity, chunk=args.chunk, cache_dtype='float32',
                   reference='tinygrad_014/extra/models/llama.py', host_tokens_and_logits=True,
                   includes_sampling=False, pairs=rows,
