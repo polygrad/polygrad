@@ -4172,7 +4172,14 @@ static int poly_exec_linear_program(
   /* Match zip(call devices, resolved lanes), including globals-free kernels. */
   if (lanes > device_lanes) lanes = device_lanes;
 
-  PolyUOp *device_num = poly_call_device_num_var(ctx, poly_program_kernel_body(program));
+  /* tinygrad engine/realize.py:unwrap_multi searches only for MultiBuffers.
+   * A one-child MultiBuffer still binds lane zero; ordinary buffers preserve
+   * caller bindings and must not traverse the kernel graph on every replay. */
+  bool multi = false;
+  for (int i = 0; i < info->n_globals; i++)
+    multi |= poly_buffer_is_multi(resolved[info->globals[i]].container);
+  PolyUOp *device_num =
+      multi ? poly_call_device_num_var(ctx, poly_program_kernel_body(program)) : NULL;
   for (int lane = 0; lane < lanes; lane++) {
     PolyUOp *device_uop = devices->arg.kind == POLY_ARG_STRING_TUPLE
                               ? poly_device_uop_from_name(ctx, devices->arg.string_tuple.vals[lane])

@@ -382,6 +382,52 @@ TEST(schedule_runtime, execution_owner_lane_binding_capacity) {
   PASS();
 }
 
+TEST(schedule_runtime, device_num_binding_only_for_multi_buffers) {
+  bool ok = true;
+  /* A one-child MultiBuffer still binds lane zero; a scalar buffer must
+   * preserve the caller's variable, even when its name is _device_num. */
+  for (int children = 0; children <= 2; children++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buffers[] = {
+        poly_test_buffer_on_device(ctx, POLY_INT32, 1, POLY_DEVICE_CPU),
+        poly_test_buffer_on_device(ctx, POLY_INT32, 1, POLY_DEVICE_CPU)};
+    PolyUOp *out =
+        children ? poly_uop(ctx, POLY_OP_MSTACK, POLY_INT32, buffers, children, poly_arg_none())
+                 : buffers[0];
+    PolyUOp *ptr = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+    PolyUOp *var = poly_uop_variable(
+        ctx, "_device_num", poly_arg_int(0), poly_arg_int(7), POLY_INT32, 1, true
+    );
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, ptr, &zero, 1), var, poly_arg_none()
+    );
+    PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "device_num_binding");
+    PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+    PolyUOp *linear = poly_compile_linear(
+        ctx, poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none()), 0
+    );
+    ok &= linear != NULL;
+    for (int value = 3; linear && value <= 4; value++) {
+      PolyVarBinding binding = {.var = var, .value = value};
+      int rc = poly_run_linear(ctx, linear, &binding, 1, NULL, 0, true, true, false);
+      ok &= rc == 0;
+      for (int lane = 0; lane < (children ? children : 1); lane++) {
+        int32_t got = -1, expected = children ? lane : value;
+        ok &= poly_buffer_read(ctx, buffers[lane], &got, sizeof(got)) == 0;
+        if (got != expected)
+          fprintf(
+              stderr, "children=%d lane=%d got=%d expected=%d\n", children, lane, got, expected
+          );
+        ok &= got == expected;
+      }
+    }
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(schedule_runtime, execution_owner_call_access_classification) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_AUTO);
