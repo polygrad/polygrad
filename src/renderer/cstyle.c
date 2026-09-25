@@ -882,6 +882,50 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
   return *n_ranges - 1;
 }
 
+/* Pinned cstyle.py base_rewrite formats CUSTOM/CUSTOMI with positional source
+ * expressions. Reject malformed fields rather than emitting a zero value. */
+static char *render_custom(const PolyUOp *u, StrMap *names) {
+  if (u->arg.kind != POLY_ARG_STRING || !u->arg.str) return NULL;
+  StrBuf out;
+  sb_init(&out);
+  int automatic = 0, mode = 0;
+  const char *p = u->arg.str;
+  while (*p) {
+    if ((*p == '{' || *p == '}') && p[1] == *p) {
+      sb_printf(&out, "%c", *p);
+      p += 2;
+    } else if (*p == '{') {
+      p++;
+      int slot = 0;
+      if (*p == '}') {
+        if (mode == 2) goto invalid;
+        mode = 1;
+        slot = automatic++;
+      } else {
+        if (mode == 1 || *p < '0' || *p > '9') goto invalid;
+        mode = 2;
+        while (*p >= '0' && *p <= '9') {
+          if (slot > INT_MAX / 10 || (slot == INT_MAX / 10 && *p - '0' > INT_MAX % 10))
+            goto invalid;
+          slot = slot * 10 + *p++ - '0';
+        }
+      }
+      if (*p++ != '}' || slot >= u->n_src) goto invalid;
+      const char *source = smap_get(names, u->src[slot]);
+      if (!source) goto invalid;
+      sb_puts(&out, source);
+    } else if (*p == '}') {
+      goto invalid;
+    } else {
+      sb_printf(&out, "%c", *p++);
+    }
+  }
+  return out.buf;
+invalid:
+  free(out.buf);
+  return NULL;
+}
+
 /* C Renderer */
 
 typedef struct {
@@ -1365,6 +1409,29 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
         sb_printf(
             &body, "{ %s _bc = %s; memcpy(&%s, &_bc, sizeof(%s)); }\n", src_type, src_s, name, name
         );
+      }
+      continue;
+    }
+
+    if (u->op == POLY_OP_CUSTOM || u->op == POLY_OP_CUSTOMI) {
+      char *expr = render_custom(u, &names);
+      if (!expr) goto fail;
+      if (u->op == POLY_OP_CUSTOMI) {
+        smap_set(&names, u, expr);
+      } else {
+        for (int d = 0; d < depth; d++)
+          sb_puts(&body, "  ");
+        if (poly_dtype_eq(u->dtype, POLY_VOID)) {
+          sb_printf(&body, "%s\n", expr);
+        } else {
+          char name[32], dtype_s[128];
+          snprintf(name, sizeof(name), "alu%d", c_alu++);
+          render_ctype(u->dtype, render_uop_lanes(ctx, u), dtype_s, sizeof(dtype_s));
+          sb_printf(&decls, "  %s %s;\n", dtype_s, name);
+          sb_printf(&body, "%s = %s;\n", name, expr);
+          smap_set(&names, u, strdup(name));
+        }
+        free(expr);
       }
       continue;
     }

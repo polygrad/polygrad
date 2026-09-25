@@ -5937,6 +5937,48 @@ TEST(codegen, wgsl_narrow_cast_and_alu_results) {
   PASS();
 }
 
+TEST(codegen, c_custom_intrinsics_format_and_reject_invalid_fields) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop_const_int(ctx, 4), *b = poly_uop_const_int(ctx, 9);
+  const char *formats[] = {"({1}+{0}+{1})", "({}+{})", "/* {{literal}} */ ({0})"};
+  const char *expected[] = {"(9+4+9)", "(4+9)", "/* {literal} */ (4)"};
+  for (int mode = 0; mode < 2; mode++) {
+    for (int i = 0; i < 3; i++) {
+      PolyUOp *u = poly_uop2(
+          ctx, mode ? POLY_OP_CUSTOMI : POLY_OP_CUSTOM, POLY_INT32, a, b, poly_arg_str(formats[i])
+      );
+      PolyUOp *out = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+      PolyUOp *zero = poly_uop_const_int(ctx, 0);
+      PolyUOp *store = poly_uop_store(ctx, poly_uop_index(ctx, out, &zero, 1), u);
+      int count = 0;
+      PolyUOp **linear = poly_uop_toposort(ctx, store, &count);
+      char *source = poly_render_c(ctx, linear, count, "custom_format");
+      ASSERT_NOT_NULL(source);
+      ASSERT_NOT_NULL(strstr(source, expected[i]));
+      if (!mode) ASSERT_NOT_NULL(strstr(source, "alu0 = "));
+      free(source);
+    }
+  }
+  const char *invalid[] = {"{", "}", "{2}", "{99999999999999999999}", "{name}", "{}{1}"};
+  for (int i = 0; i < 6; i++) {
+    PolyUOp *u = poly_uop2(ctx, POLY_OP_CUSTOMI, POLY_INT32, a, b, poly_arg_str(invalid[i]));
+    PolyUOp *linear[] = {a, b, u};
+    char *source = poly_render_c(ctx, linear, 3, "invalid_custom");
+    ASSERT_PTR_EQ(source, NULL);
+  }
+  for (int mode = 0; mode < 2; mode++) {
+    PolyUOp *u = poly_uop0(
+        ctx, mode ? POLY_OP_CUSTOMI : POLY_OP_CUSTOM, POLY_VOID, poly_arg_str("/* custom_void */")
+    );
+    char *source = poly_render_c(ctx, &u, 1, "custom_void_test");
+    ASSERT_NOT_NULL(source);
+    ASSERT_TRUE((strstr(source, "/* custom_void */") != NULL) == !mode);
+    free(source);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, wgsl_float_literals_stay_in_range) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *shape = poly_uop_const(ctx, poly_arg_int(1), POLY_WEAKINT);
