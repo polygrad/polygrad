@@ -6,6 +6,45 @@ from polygrad.model import Model, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_output_lookup_does_not_enumerate_buffers(device, monkeypatch):
+    from polygrad import create
+    with create(device=device, logical='always') as rt:
+        x = rt.Tensor.empty(2, 3)
+        model = rt.Model(inputs={'x': x}, outputs={'matrix': x + 1, 'scalar': x.sum()})
+        restored = None
+        try:
+            names = [model.buf_name(i) for i in range(model.buf_count)]
+            for i, name in enumerate(names):
+                assert model.find_buf(name) == i
+            for missing in ('absent', '', 'matrix\0suffix', '\ud800', None, b'matrix'):
+                assert model.find_buf(missing) == -1
+            restored = rt.Model.load(model.save())
+            for current in (model, restored):
+                calls = []
+                original = current.buf_name
+                def observe(i, original=original, calls=calls):
+                    calls.append(i)
+                    return original(i)
+                monkeypatch.setattr(current, 'buf_name', observe)
+                values = np.arange(6, dtype=np.float32).reshape(2, 3)
+                result = current.forward(x=values)
+                np.testing.assert_array_equal(result['matrix'], values + 1)
+                np.testing.assert_array_equal(result['scalar'], values.sum())
+                assert result['scalar'].shape == ()
+                result['matrix'][:] = -1
+                np.testing.assert_array_equal(current.read_buffer('matrix'), (values + 1).flatten())
+                with pytest.raises(KeyError):
+                    current.read_buffer('absent')
+                assert calls == []
+        finally:
+            if restored is not None:
+                restored.dispose()
+            model.dispose()
+        assert model.find_buf('matrix') == -1
+        with pytest.raises(RuntimeError, match='disposed'):
+            model.read_buffer('matrix')
+
 def test_captured_partial_state_write_with_reduced_outputs():
     from polygrad import Model, create
 

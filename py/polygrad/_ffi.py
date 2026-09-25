@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 104
+POLYGRAD_ABI_VERSION = 105
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -1448,6 +1448,9 @@ def _declare_signatures(lib):
 
     lib.poly_model_buf_name.restype = ctypes.c_char_p
     lib.poly_model_buf_name.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_model_find_buf.restype = ctypes.c_int
+    lib.poly_model_find_buf.argtypes = [_ptr, ctypes.c_char_p]
 
     lib.poly_model_buf_role.restype = ctypes.c_int
     lib.poly_model_buf_role.argtypes = [_ptr, ctypes.c_int]

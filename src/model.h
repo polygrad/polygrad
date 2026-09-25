@@ -318,6 +318,8 @@ size_t poly_model_param_nbytes(const PolyModel *inst, int i);
 
 int poly_model_buf_count(const PolyModel *inst);
 const char *poly_model_buf_name(const PolyModel *inst, int i);
+/* Returns the buffer index, or -1 for a missing name or NULL argument. */
+int poly_model_find_buf(const PolyModel *inst, const char *name);
 int poly_model_buf_role(const PolyModel *inst, int i);
 bool poly_model_buf_trainable(const PolyModel *inst, int i);
 bool poly_model_param_trainable(const PolyModel *inst, int i);

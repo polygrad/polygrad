@@ -1684,6 +1684,12 @@ TEST(model, create_from_ir) {
   ASSERT_STR_EQ(poly_model_buf_name(inst, 1), "b");
   ASSERT_STR_EQ(poly_model_buf_name(inst, 2), "output");
   ASSERT_INT_EQ(poly_model_buf_role(inst, 2), POLY_ROLE_OUTPUT);
+  for (int i = 0; i < poly_model_buf_count(inst); i++)
+    ASSERT_INT_EQ(poly_model_find_buf(inst, poly_model_buf_name(inst, i)), i);
+  ASSERT_INT_EQ(poly_model_find_buf(inst, "missing"), -1);
+  ASSERT_INT_EQ(poly_model_find_buf(inst, ""), -1);
+  ASSERT_INT_EQ(poly_model_find_buf(inst, NULL), -1);
+  ASSERT_INT_EQ(poly_model_find_buf(NULL, "output"), -1);
 
   int64_t shape[8];
   int ndim = poly_model_buf_shape(inst, 2, shape, 8);

@@ -3421,6 +3421,10 @@ const char *poly_model_buf_name(const PolyModel *inst, int i) {
   return inst->bufs[i].name;
 }
 
+int poly_model_find_buf(const PolyModel *inst, const char *name) {
+  return inst && name ? find_buf_by_name(inst, name) : -1;
+}
+
 int poly_model_buf_role(const PolyModel *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   return inst->bufs[i].role;

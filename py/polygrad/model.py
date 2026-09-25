@@ -991,10 +991,14 @@ class Model:
 
     def find_buf(self, name):
         """Find buffer index by name, or -1."""
-        for i in range(self.buf_count):
-            if self.buf_name(i) == name:
-                return i
-        return -1
+        # C strings must not turn an embedded NUL into a valid prefix match.
+        if not isinstance(name, str) or '\0' in name:
+            return -1
+        try:
+            encoded = name.encode('utf-8')
+        except UnicodeEncodeError:
+            return -1
+        return _get_lib().poly_model_find_buf(self._ptr, encoded)
 
     def bindings(self):
         """Return value-only interface metadata, never raw UOp/storage pointers."""
