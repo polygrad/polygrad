@@ -2034,6 +2034,43 @@ TEST(rangeify, apply_data_stack_to_selector_where) {
   PASS();
 }
 
+TEST(rangeify, reshape_restores_ranges_with_dependent_bounds) {
+  /* Pinned apply_movement_op(RESHAPE) restores both the worker RANGE and a
+   * serial RANGE whose bound depends on it. No PLACEHOLDER reaches codegen. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *worker = poly_uop_range(ctx, 2, 3, POLY_AXIS_THREAD);
+  PolyUOp *two = poly_uop_const_int(ctx, 2), *nine = poly_uop_const_int(ctx, 9);
+  PolyUOp *start = poly_uop_alu2(ctx, POLY_OP_FLOORDIV, poly_uop_mul(ctx, worker, nine), two);
+  PolyUOp *stop = poly_uop_alu2(
+      ctx, POLY_OP_FLOORDIV,
+      poly_uop_mul(ctx, poly_uop_add(ctx, worker, poly_uop_const_int(ctx, 1)), nine), two
+  );
+  PolyUOp *loop = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_uop_sub(ctx, stop, start),
+      poly_arg_range(1, POLY_AXIS_LOOP)
+  );
+  PolyUOp *expected_loop = poly_graph_rewrite(ctx, loop, poly_symbolic());
+  PolyUOp *idx = poly_uop_add(ctx, start, loop);
+  PolyUOp *coord = poly_uop_mul(
+      ctx, poly_uop_alu2(ctx, POLY_OP_FLOORDIV, idx, poly_uop_const_int(ctx, 3)),
+      poly_uop_const_int(ctx, 4096)
+  );
+  PolyUOp *in[] = {poly_uop_const_int(ctx, 12), poly_uop_const_int(ctx, 1024)};
+  PolyUOp *out[] = {poly_uop_const_int(ctx, 12288)}, *result[2];
+  int count = 0, n = 0;
+  bool ok = poly_apply_reshape(ctx, in, 2, out, 1, &coord, 1, result, &count);
+  PolyUOp **nodes = ok ? poly_uop_toposort(ctx, poly_uop_sink(ctx, result, count), &n) : NULL;
+  bool original_loop = false;
+  for (int i = 0; i < n; i++) {
+    original_loop |= nodes[i] == expected_loop;
+    ok &= nodes[i]->op != POLY_OP_RANGE ||
+          poly_range_axis_type(nodes[i]->arg) != POLY_AXIS_PLACEHOLDER;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok && original_loop);
+  PASS();
+}
+
 TEST(rangeify, reshape_indices_use_placeholder_ranges_before_valid_simplification) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

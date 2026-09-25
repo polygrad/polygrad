@@ -4403,6 +4403,14 @@ static bool substitute_iter(
                    : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
     }
     if (new_srcs != src_buf) free(new_srcs);
+    /* Pinned graph_rewrite also matches the rebuilt parent. In particular,
+     * restoring a child RANGE can restore a placeholder parent's identity;
+     * matching only before source substitution leaks that PLACEHOLDER. */
+    if (result != u && poly_map_get(sub_map, poly_ptr_hash(result), result, poly_ptr_eq)) {
+      ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, result, 2}) &&
+           sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){result, NULL, 0});
+      continue;
+    }
     poly_map_set(memo, h, u, result, poly_ptr_eq);
     poly_map_remove(visiting, h, u, poly_ptr_eq);
   }
