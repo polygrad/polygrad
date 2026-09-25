@@ -760,6 +760,20 @@ onnx-coverage:
 # Diagnostic inventory: unsupported official cases remain failures, not a
 # release ratchet. Pin exclusions are reported separately from passing cases.
 ONNX_BACKEND_ARGS ?=
+CPU_GEMM_ARGS ?=
+.PHONY: bench-cpu-gemm
+build/bench-cpu-gemm/generator: bench/kernels/cpu_gemm.c build/libpolygrad.so
+	@mkdir -p build/bench-cpu-gemm
+	$(CC) $(CFLAGS_RELEASE) -o $@ $< -Lbuild -lpolygrad -Wl,-rpath,'$$ORIGIN/..' -lm -ldl
+
+build/bench-cpu-gemm/adapter.so: bench/kernels/cpu_gemm.c build/libpolygrad.so
+	@mkdir -p build/bench-cpu-gemm
+	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -o $@ $< -Lbuild -lpolygrad -Wl,-rpath,'$$ORIGIN/..' -lm -ldl
+
+bench-cpu-gemm: build/bench-cpu-gemm/generator build/bench-cpu-gemm/adapter.so
+	DEV=CPU CC=clang NUM_CPU_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+		$(HF_PYTHON) bench/bench_cpu_gemm.py $(CPU_GEMM_ARGS)
+
 ONNX_ENCODER_BENCH_ARGS ?=
 .PHONY: test-onnx-backend fetch-onnx-encoders bench-onnx-encoders
 test-onnx-backend: build/libpolygrad.so
