@@ -8,8 +8,10 @@
 
 const { runTensorTests } = require('../test_tensor')
 const { runModelRuntimeTests, runModelSmokeTests } = require('../test_model_runtime')
+const { checkOnnxEncoder } = require('../check_onnx_encoder')
 
 // Expose globally for index.html
 window.__runTensorTests = runTensorTests
 window.__runModelRuntimeTests = runModelRuntimeTests
 window.__runModelSmokeTests = runModelSmokeTests
+window.__checkOnnxEncoder = checkOnnxEncoder

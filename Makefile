@@ -757,6 +757,35 @@ generate-onnx-fixtures:
 onnx-coverage:
 	$(PARITY_PY) scripts/onnx_coverage.py
 
+# Diagnostic inventory: unsupported official cases remain failures, not a
+# release ratchet. Pin exclusions are reported separately from passing cases.
+ONNX_BACKEND_ARGS ?=
+ONNX_ENCODER_BENCH_ARGS ?=
+.PHONY: test-onnx-backend fetch-onnx-encoders bench-onnx-encoders
+test-onnx-backend: build/libpolygrad.so
+	DEV=CPU POLY_LIB=$(abspath build/libpolygrad.so) NUM_CPU_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+		$(HF_PYTHON) test/external/onnx_backend.py $(ONNX_BACKEND_ARGS)
+
+fetch-onnx-encoders:
+	$(HF_PYTHON) bench/bench_onnx_encoders.py --fetch $(ONNX_ENCODER_BENCH_ARGS)
+
+bench-onnx-encoders: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) $(HF_PYTHON) bench/bench_onnx_encoders.py $(ONNX_ENCODER_BENCH_ARGS)
+
+ONNX_ENCODER_DIR ?= temp/onnx-encoder
+.PHONY: fetch-onnx-encoder test-onnx-encoder-python test-onnx-encoder
+fetch-onnx-encoder:
+	$(HF_PYTHON) test/check_onnx_encoder.py --directory '$(ONNX_ENCODER_DIR)' --fetch
+
+test-onnx-encoder-python: verify-source-mirrors build/libpolygrad.so
+	DEV=CPU POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py \
+		$(HF_PYTHON) test/check_onnx_encoder.py --directory '$(ONNX_ENCODER_DIR)'
+
+test-onnx-encoder: test-onnx-encoder-python js/build/Release/polygrad_napi.node wasm-pkg
+	$(NODE) js/test/test_onnx_encoder.js native '$(ONNX_ENCODER_DIR)'
+	$(NODE) js/test/test_onnx_encoder.js wasm '$(ONNX_ENCODER_DIR)'
+	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-browser
+
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 

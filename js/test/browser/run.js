@@ -15,6 +15,17 @@ const jsDir = path.resolve(__dirname, '..', '..')
 
 const server = http.createServer((req, res) => {
   const url = (req.url || '/').split('?')[0]
+  const encoderFiles = ['/onnx-encoder/onnx/model.onnx', '/onnx-encoder/model.pgb', '/onnx-encoder/oracle.json']
+  if (process.env.POLY_ONNX_ENCODER_DIR && encoderFiles.includes(url)) {
+    const file = path.join(process.env.POLY_ONNX_ENCODER_DIR, url.slice('/onnx-encoder/'.length))
+    const stream = fs.createReadStream(file)
+    stream.on('error', () => {
+      if (!res.headersSent) res.writeHead(404)
+      res.end('encoder artifact missing')
+    })
+    stream.pipe(res)
+    return
+  }
   if (url === '/favicon.ico') {
     res.writeHead(204)
     res.end()
@@ -143,6 +154,7 @@ async function runForDevice(browser, port, device, spec) {
   const debugLevel = process.env.POLY_DEBUG || process.env.DEBUG || ''
   const testFilter = process.env.POLY_TEST_FILTER || ''
   const url = `http://127.0.0.1:${port}/?device=${device}` +
+    (process.env.POLY_ONNX_ENCODER_DIR ? '&encoder=1' : '') +
     (debugLevel ? `&debug=${encodeURIComponent(debugLevel)}` : '') +
     (testFilter ? `&filter=${encodeURIComponent(testFilter)}` : '')
   const page = await browser.newPage()

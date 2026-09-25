@@ -470,6 +470,22 @@ async function main() {
   }
   if (isWebGpu) installWebGpuAsyncTestAdapter(pg)
 
+  if (params.get('encoder') === '1') {
+    let results
+    try {
+      await window.__checkOnnxEncoder(pg, async name => {
+        const response = await fetch('/onnx-encoder/' + name)
+        if (!response.ok) throw new Error('encoder fetch failed: ' + response.status)
+        return new Uint8Array(await response.arrayBuffer())
+      })
+      results = { passed: 1, failed: 0 }
+    } catch (error) {
+      results = { passed: 0, failed: 1, error: error.stack || error.message }
+    } finally { await pg.dispose() }
+    window.__testResults = results
+    return
+  }
+
   // Run the full tensor test suite
   const createRuntime = () => {
     const runtime = polygrad.create({ core: 'wasm', device })
