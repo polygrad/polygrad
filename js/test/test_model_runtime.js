@@ -2,6 +2,57 @@
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
 
+async function checkPackedGemmModel(pg) {
+  const a = Float32Array.from({length:28}, (_, i) => (i % 9 - 4) / 11)
+  const b = Float32Array.from({length:168}, (_, i) => (i % 13 - 6) / 17)
+  const x = pg.Tensor.empty([2, 2, 7]), w = new pg.Tensor(b).reshape(7, 24)
+  await w.realize()
+  const model = await pg.Model.fromCallableAsync(({x}) => x.add(1).permute(1, 0, 2).reshape(4, 7).dot(w), {inputs:{x}, params:{w}})
+  let restored
+  try {
+    for (const scale of [1, -0.75]) {
+      const weight = Float32Array.from(b, v => v * scale), expected = new Float32Array(96)
+      for (let m = 0; m < 4; m++) for (let n = 0; n < 24; n++) {
+        let value = 0
+        const row = (m % 2) * 2 + Math.floor(m / 2)
+        for (let k = 0; k < 7; k++) value += Math.fround(a[row*7+k] + 1) * weight[k*24+n]
+        expected[m*24+n] = value
+      }
+      await model.writeBufferAsync('w', weight)
+      assertClose((await model.forwardAsync({x:a})).output, expected, 2e-5)
+    }
+    restored = pg.Model.load(await model.saveAsync())
+    assertClose((await restored.forwardAsync({x:a})).output, (await model.forwardAsync({x:a})).output, 2e-5)
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+    x.dispose(); w.dispose()
+  }
+}
+
+async function checkCpuAttentionModel(pg) {
+  const scores = Float32Array.from({length:56}, (_, i) => i % 7 === 6 ? -Infinity : (i % 13 - 6) / 11)
+  const values = Float32Array.from({length:112}, (_, i) => (i % 17 - 8) / 19)
+  const x = pg.Tensor.empty([2, 4, 7]), v = new pg.Tensor(values).reshape(2, 7, 8)
+  await v.realize()
+  const model = await pg.Model.fromCallableAsync(({x}) => x.softmax(-1).dot(v), {inputs:{x}, params:{v}})
+  let restored
+  try {
+    const expected = new Float32Array(64)
+    for (let h = 0; h < 2; h++) for (let m = 0; m < 4; m++) {
+      const weights = Array.from(scores.slice((h*4+m)*7, (h*4+m+1)*7), Math.exp)
+      const sum = weights.reduce((a,b) => a+b, 0)
+      for (let n = 0; n < 8; n++) for (let k = 0; k < 7; k++) expected[(h*4+m)*8+n] += weights[k] / sum * values[(h*7+k)*8+n]
+    }
+    for (let i = 0; i < 2; i++) assertClose((await model.forwardAsync({x:scores})).output, expected, 2e-5)
+    restored = pg.Model.load(await model.saveAsync())
+    assertClose((await restored.forwardAsync({x:scores})).output, expected, 2e-5)
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose(); x.dispose(); v.dispose()
+  }
+}
+
 async function checkOnnxImport(pg) {
   const bytes = str => Uint8Array.from(typeof atob === 'function' ? atob(str) : Buffer.from(str, 'base64').toString('binary'), c => c.charCodeAt(0))
   async function forward(model, inputs, name) {
@@ -1810,6 +1861,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   console.log('\n== Model ==')
 
+  await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
@@ -2588,6 +2641,8 @@ async function runModelSmokeTests(pg, createRuntime) {
 
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
+  await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))

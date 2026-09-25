@@ -191,6 +191,18 @@
       "close_when": "Re-evaluate authoring references when the Tinygrad or Transformers reference changes. This row never excuses compiler, Tensor or backend mismatches."
     },
     {
+      "id": "PG-DIV-012",
+      "status": "approved",
+      "stages": ["rangeify", "codegen", "renderer-source"],
+      "area": "opt-in physical CPU packed GEMM",
+      "tinygrad": "Pinned llm/kernels/amd.py selects UOp-authored custom kernels for supported AMD quantized Linear inputs; it has no equivalent FP32 AVX2 matmul kernel.",
+      "polygrad": "POLY_CPU_GEMM=1 selects fixed-shape FP32 broadcast matmuls and rank-three autograd contractions on native AVX2/FMA CPUs before decomposition, including resolved ordinary FUNCTION bodies. A 4x24 UOp kernel consumes scheduled panel packing; unsupported cases fall back. Existing CPU workers receive even output-tile-axis slices, using the pin's thread-count candidates and work floor; each output retains serial K accumulation. On the same opt-in path, a last-axis normalized exponential feeding matmul is materialized once when its fixed FP32 table is at most 32 MiB and reused across output columns. Authoring and portable logical graphs remain unchanged. Serial FMA accumulation and physical materialization can round differently from generic reductions.",
+      "rationale": "User-approved custom-kernel-first CPU experiment. Explicit opt-in keeps default pinned scheduling unchanged. No shared heuristic, new executor, persistent packed-state cache or default numerical-parity allowance is introduced.",
+      "approval": "User 2026-09-25: proceed with guarded physical custom-kernel integration, then investigate and repair attention recomputation while retaining opt-in selection and unchanged numerical checks.",
+      "evidence": ["references/tinygrad_latest/tinygrad/llm/kernels/amd.py", "src/kernels/cpu.c", "src/kernels/gemm.c", "test/test_codegen.c:cpu_packed_gemm_selection", "py/tests/test_cpu_gemm.py", "bench/bench_onnx_encoders.py", "temp/avx2-uop-20260925/ablation/results.json", "temp/attention-20260925/report.md"],
+      "close_when": "Re-evaluate selection and finite FP32 numerical tolerances before default enablement or expanding the supported kernel shapes/ISAs. This row grants no default Tensor, gradient, logical-graph or export mismatch allowance."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

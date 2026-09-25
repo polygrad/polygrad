@@ -41,27 +41,28 @@ def inputs(length, case):
     return dict(input_ids=ids, attention_mask=mask, token_type_ids=np.zeros_like(ids))
 
 
-def ort_session(path):
+def ort_session(path, threads=1):
     import onnxruntime as ort
     options = ort.SessionOptions()
-    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
     return ort.InferenceSession(str(path), options, providers=['CPUExecutionProvider'])
 
 
 def summarize(rows, lengths, arms):
     summary = []
     for length in lengths:
-        for engine, beam in arms:
-            group = [r for r in rows if r['sequence'] == length and r['engine'] == engine and r['beam'] == beam]
+        for engine, beam, gemm in arms:
+            group = [r for r in rows if r['sequence'] == length and r['engine'] == engine and r['beam'] == beam and r['cpu_gemm'] == gemm]
             if not group or any('status' in r for r in group):
-                summary.append(dict(sequence=length, engine=engine, beam=beam, status='incomplete'))
+                summary.append(dict(sequence=length, engine=engine, beam=beam, cpu_gemm=gemm, status='incomplete'))
                 continue
             ratios = []
             for row in group:
                 reference = next((r for r in rows if r['sequence'] == length and r['round'] == row['round'] and r['engine'] == 'ort' and 'median_ms' in r), None)
                 if reference:
                     ratios.append(row['median_ms']/reference['median_ms'])
-            summary.append(dict(sequence=length, engine=engine, beam=beam,
+            summary.append(dict(sequence=length, engine=engine, beam=beam, cpu_gemm=gemm,
                                 median_ms=statistics.median(r['median_ms'] for r in group),
                                 paired_ort_ratio=statistics.median(ratios) if len(ratios) == len(group) else None))
     return summary
@@ -75,7 +76,7 @@ def worker(args, path):
     if args.engine == 'ort':
         import onnxruntime  # Exclude module import, as for the other two engines.
         start = time.perf_counter()
-        model = ort_session(path)
+        model = ort_session(path, args.threads)
         def run(values):
             return model.run(['last_hidden_state'], values)[0]
     elif args.engine == 'polygrad':
@@ -123,7 +124,7 @@ def worker(args, path):
                median_ms=statistics.median(samples), samples_ms=samples, max_error=max(errors),
                peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                address_space_limit_bytes=resource.getrlimit(resource.RLIMIT_AS)[0],
-               affinity=sorted(os.sched_getaffinity(0)), load_before=load_before, load_after=os.getloadavg())
+               threads=args.threads, affinity=sorted(os.sched_getaffinity(0)), load_before=load_before, load_after=os.getloadavg())
     if args.engine == 'polygrad':
         model.dispose()
         runtime.dispose()
@@ -142,8 +143,13 @@ def main():
     parser.add_argument('--warmups', type=int, default=5)
     parser.add_argument('--samples', type=int, default=20)
     parser.add_argument('--beams', type=int, nargs='+', default=[0, 2])
+    parser.add_argument('--cpu-gemm', type=int, choices=[0, 1], nargs='+', default=[0],
+                        help='Polygrad physical AVX2 kernel selection; compare 0 1 in alternating pairs')
     parser.add_argument('--engines', nargs='+', choices=['polygrad', 'tinygrad', 'ort'], default=['polygrad', 'tinygrad', 'ort'])
-    parser.add_argument('--cpu', type=int, help='pin every worker to this allowed logical CPU')
+    affinity = parser.add_mutually_exclusive_group()
+    affinity.add_argument('--cpu', type=int, help='pin every worker to this allowed logical CPU')
+    affinity.add_argument('--cpus', type=int, nargs='+', help='allowed CPU set for all engines; select physical cores explicitly')
+    parser.add_argument('--threads', type=int, default=1, help='intra-op worker budget for all engines; inter-op remains one')
     parser.add_argument('--timeout', type=float, default=1800, help='per-arm timeout, including search')
     parser.add_argument('--memory-mib', type=int, default=4096, help='per-process address-space limit, inherited by compilers')
     parser.add_argument('--cache-level', type=int, choices=[0, 1, 2], default=2,
@@ -152,6 +158,10 @@ def main():
     parser.add_argument('--length', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--result', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    cpus = {args.cpu} if args.cpu is not None else set(args.cpus) if args.cpus else os.sched_getaffinity(0)
+    if not cpus <= os.sched_getaffinity(0) or not 1 <= args.threads <= len(cpus):
+        parser.error('threads must fit the requested allowed CPU set')
+    os.sched_setaffinity(0, cpus)
     if args.memory_mib < 1 or args.rounds < 1 or args.warmups < 3 or args.samples < 1 or any(n < 4 or n > 512 for n in args.lengths):
         parser.error('need positive rounds/samples/memory, warmups >=3, and sequence lengths in 4..512')
     limit = args.memory_mib * 1024 * 1024
@@ -172,8 +182,6 @@ def main():
         return 0
     if args.engine:
         return worker(args, path)
-    if args.cpu is not None:
-        os.sched_setaffinity(0, {args.cpu})
     import onnxruntime as ort
     import onnx
     args.output.mkdir(parents=True, exist_ok=True)
@@ -192,38 +200,40 @@ def main():
                     python=sys.version, numpy=np.__version__, onnx=onnx.__version__, ort=ort.__version__,
                     tinygrad_commit=subprocess.check_output(['git', '-C', str(ROOT / 'references/tinygrad_014'), 'rev-parse', 'HEAD'], text=True).strip(),
                     library=str(lib), library_sha256=digest(lib), arguments=vars(args),
-                    contract='FP32, batch 1, host int64 inputs and full last_hidden_state readback; one CPU worker; two changing padded inputs; atol=rtol=2e-5',
+                    compiler=os.environ.get('CC', 'clang'), cpu_arch=os.environ.get('POLY_CPU_ARCH', 'native'),
+                    contract=f'FP32, batch 1, host int64 inputs and full last_hidden_state readback; intra-op thread budget {args.threads} (not observed concurrency); two changing padded inputs; atol=rtol=2e-5',
                     cache_root=str(cache_root), cache_level=args.cache_level,
                     cache='private empty caches per engine; reused across shapes/rounds; first call and warmup include compilation/search/capture')
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2, default=str) + '\n')
-    arms = [(engine, beam) for engine in args.engines for beam in ([0] if engine == 'ort' else args.beams)]
+    arms = [(engine, beam, gemm) for engine in args.engines for beam in ([0] if engine == 'ort' else args.beams)
+            for gemm in (args.cpu_gemm if engine == 'polygrad' else [0])]
     rows = []
     for length in args.lengths:
         for round_id in range(args.rounds):
             order = arms if round_id % 2 == 0 else list(reversed(arms))
-            for engine, beam in order:
-                stem = args.output / f'{length}-{round_id+1}-{engine}-beam{beam}'
+            for engine, beam, gemm in order:
+                stem = args.output / f'{length}-{round_id+1}-{engine}-beam{beam}-gemm{gemm}'
                 result = stem.with_suffix('.json')
                 if result.exists():
                     result.unlink()
-                cache = cache_root / engine
+                cache = cache_root / f'{engine}-gemm{gemm}'
                 env = dict(os.environ, DEV='CPU', POLY_LIB=str(lib), BEAM=str(beam), CACHELEVEL=str(args.cache_level),
                            XDG_CACHE_HOME=str(cache), CACHEDB=str(cache / 'tinygrad/cache.db'),
-                           NUM_CPU_THREADS='1', OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+                           NUM_CPU_THREADS=str(args.threads), OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', POLY_CPU_GEMM=str(gemm))
                 for key in ('POLY_DEVICE', 'POLY_DEV', 'IGNORE_BEAM_CACHE'):
                     env.pop(key, None)
                 cmd = [sys.executable, str(Path(__file__).resolve()), '--model', args.model,
                        '--directory', str(args.directory.resolve()), '--output', str(args.output.resolve()),
                        '--engine', engine, '--length', str(length), '--result', str(result.resolve()),
-                       '--warmups', str(args.warmups), '--samples', str(args.samples), '--memory-mib', str(args.memory_mib)]
-                print(f'seq={length} pair={round_id+1} {engine} BEAM={beam}: starting', flush=True)
+                       '--warmups', str(args.warmups), '--samples', str(args.samples), '--memory-mib', str(args.memory_mib), '--threads', str(args.threads)]
+                print(f'seq={length} pair={round_id+1} {engine} BEAM={beam} GEMM={gemm}: starting', flush=True)
                 with stem.with_suffix('.log').open('w') as log:
                     try:
                         process = subprocess.run(cmd, cwd=ROOT, env=env, stdout=log, stderr=log, timeout=args.timeout)
                         row = json.loads(result.read_text()) if process.returncode == 0 and result.exists() else dict(status='failed', returncode=process.returncode)
                     except subprocess.TimeoutExpired:
                         row = dict(status='timeout')
-                row.update(engine=engine, beam=beam, sequence=length, round=round_id+1)
+                row.update(engine=engine, beam=beam, cpu_gemm=gemm, sequence=length, round=round_id+1)
                 rows.append(row)
                 (args.output / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')
                 print(f'  {row.get("median_ms", row.get("status"))}', flush=True)

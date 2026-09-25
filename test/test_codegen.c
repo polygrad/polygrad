@@ -18,10 +18,207 @@
 #include "../src/uop/symbolic.h"
 #include "../src/uop/weak.h"
 #include "../src/utils.h"
+#include "../src/kernels/kernels.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/device.h"
 
 #include <inttypes.h>
 #include <unistd.h>
 #include <sys/stat.h>
+
+TEST(codegen, gemm_recognizes_forward_and_backward_views) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){8, 24}, 2, POLY_DEVICE_CPU);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){24, 48}, 2, POLY_DEVICE_CPU);
+  PolyTensor *dy = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){8, 48}, 2, POLY_DEVICE_CPU);
+  PolyUOp *a = poly_tensor_uop_physical(x), *b = poly_tensor_uop_physical(w);
+  PolyUOp *g = poly_tensor_uop_physical(dy);
+  PolyUOp *products[] = {
+      poly_uop_dot(ctx, a, b), poly_uop_dot(ctx, g, poly_uop_permute(ctx, b, (int64_t[]){1, 0}, 2)),
+      poly_uop_dot(ctx, poly_uop_permute(ctx, a, (int64_t[]){1, 0}, 2), g)};
+  const int64_t expected[][3] = {{8, 48, 24}, {8, 24, 48}, {24, 48, 8}};
+  bool correct = true;
+  for (int p = 0; p < 3; p++) {
+    int count = 0, hits = 0;
+    PolyUOp **nodes = poly_uop_toposort(ctx, products[p], &count);
+    for (int i = 0; i < count; i++) {
+      PolyGemmDesc d;
+      if (!poly_kernel_match_gemm(ctx, nodes[i], &d)) continue;
+      hits++;
+      correct &= d.M == expected[p][0] && d.N == expected[p][1] && d.K == expected[p][2];
+    }
+    correct &= hits == 1;
+  }
+  poly_tensor_release(x);
+  poly_tensor_release(w);
+  poly_tensor_release(dy);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, cpu_packed_gemm_selection) {
+  int expected = 0;
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+  const char *arch = getenv("POLY_CPU_ARCH");
+  expected = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&
+             (!arch || !arch[0] || !strcmp(arch, "native"));
+#endif
+  const char *old = getenv("POLY_CPU_GEMM");
+  char *saved = old ? strdup(old) : NULL;
+  setenv("POLY_CPU_GEMM", "1", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4, 7}, 2, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){7, 24}, 2, POLY_DEVICE_CPU);
+  PolyUOp *dot = poly_uop_dot(ctx, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, dot, poly_arg_none());
+  PolyUOp *graph = poly_kernel_select(ctx, sink);
+  int n = 0, selected = 0;
+  PolyUOp **nodes = graph ? poly_uop_toposort(ctx, graph, &n) : NULL;
+  for (int i = 0; i < n; i++)
+    selected += nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
+                !strcmp(nodes[i]->arg.kernel_info->name, "avx2_gemm");
+  setenv("POLY_CPU_GEMM", "0", 1);
+  bool unchanged = poly_kernel_select(ctx, sink) == sink;
+  setenv("POLY_CPU_GEMM", "1", 1);
+  float av[28], bv[168], actual[96];
+  for (int i = 0; i < 28; i++)
+    av[i] = (i % 9 - 4) / 11.0f;
+  for (int i = 0; i < 168; i++)
+    bv[i] = (i % 13 - 6) / 17.0f;
+  bool correct =
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(a)), av, sizeof(av)
+      ) == 0 &&
+      poly_buffer_write(
+          ctx, (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(b)), bv, sizeof(bv)
+      ) == 0;
+  PolyTensor *out = poly_tensor_dot(ctx, a, b), *realized = NULL;
+  correct &= out && poly_realize_tensors(ctx, &out, 1, &realized) == 0;
+  correct &= realized &&
+             poly_buffer_read(
+                 ctx, (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop_physical(realized)),
+                 actual, sizeof(actual)
+             ) == 0;
+  if (correct)
+    for (int m = 0; m < 4; m++)
+      for (int n = 0; n < 24; n++) {
+        double ref = 0;
+        for (int k = 0; k < 7; k++)
+          ref += (double)av[m * 7 + k] * bv[k * 24 + n];
+        correct &= fabs(actual[m * 24 + n] - ref) < 2e-5;
+      }
+  if (out) poly_tensor_release(out);
+  /* A computed, permuted producer must keep its own materialization order.
+   * Flattening the view before the CALL changes upstream reduction tiling. */
+  PolyUOp *base = poly_uop_add(
+      ctx, poly_uop_reshape(ctx, poly_tensor_uop_physical(a), (int64_t[]){2, 2, 7}, 3),
+      poly_uop_const_float(ctx, 1)
+  );
+  PolyUOp *view = poly_uop_permute(ctx, base, (int64_t[]){1, 0, 2}, 3);
+  view = poly_uop_reshape(ctx, view, (int64_t[]){4, 7}, 2);
+  graph = poly_kernel_select(ctx, poly_uop_dot(ctx, view, poly_tensor_uop_physical(b)));
+  nodes = poly_uop_toposort(ctx, graph, &n);
+  bool preserves_layout = !expected;
+  for (int i = 0; i < n; i++) {
+    if (nodes[i]->op != POLY_OP_CALL || nodes[i]->n_src != 4) continue;
+    PolyUOp *input = nodes[i]->src[2];
+    while (input->op == POLY_OP_RESHAPE)
+      input = input->src[0];
+    preserves_layout = input->op == POLY_OP_CONTIGUOUS && input->src[0] == base;
+  }
+  /* Attention AV must consume one materialized probability table, not
+   * recompute its exponential for every output channel in the reduction. */
+  PolyUOp *prob = poly_uop_softmax(ctx, poly_tensor_uop_physical(a), -1);
+  PolyUOp *values = poly_uop_shrink_to(ctx, poly_tensor_uop_physical(b), (int64_t[]){7, 8}, 2);
+  PolyUOp *attention = poly_uop_dot(ctx, prob, values);
+  graph = poly_kernel_select(ctx, attention);
+  nodes = poly_uop_toposort(ctx, graph, &n);
+  bool materializes_prob = false;
+  for (int i = 0; i < n; i++)
+    materializes_prob |= nodes[i]->op == POLY_OP_CONTIGUOUS && nodes[i]->src[0] == prob;
+  PolyUOp *exponential = poly_uop_exp(ctx, poly_tensor_uop_physical(a));
+  PolyUOp *unnormalized = poly_uop_mul(
+      ctx, exponential, poly_uop_alu1(ctx, POLY_OP_RECIPROCAL, poly_tensor_uop_physical(a))
+  );
+  PolyUOp *other_dot = poly_uop_dot(ctx, unnormalized, values);
+  bool leaves_other_dot = poly_kernel_select(ctx, other_dot) == other_dot;
+  setenv("POLY_CPU_GEMM", "0", 1);
+  bool attention_disabled = poly_kernel_select(ctx, attention) == attention;
+  poly_tensor_release(a);
+  poly_tensor_release(b);
+  poly_ctx_destroy(ctx);
+  if (saved) {
+    setenv("POLY_CPU_GEMM", saved, 1);
+    free(saved);
+  } else
+    unsetenv("POLY_CPU_GEMM");
+  ASSERT_INT_EQ(selected, expected);
+  ASSERT_TRUE(unchanged && correct);
+  ASSERT_TRUE(preserves_layout);
+  ASSERT_INT_EQ(materializes_prob, expected);
+  ASSERT_TRUE(attention_disabled);
+  ASSERT_TRUE(leaves_other_dot);
+  PASS();
+}
+
+TEST(codegen, packed_gemm_function_and_thread_boundaries) {
+  const char *keys[] = {"POLY_CPU_GEMM", "NUM_CPU_THREADS", "THREADS"};
+  char *saved[3];
+  for (int i = 0; i < 3; i++)
+    saved[i] = getenv(keys[i]) ? strdup(getenv(keys[i])) : NULL;
+  setenv(keys[0], "1", 1);
+  setenv(keys[1], "4", 1);
+  setenv(keys[2], "1", 1);
+  int n_impls = 0;
+  poly_cpu_kernel_impls(&n_impls);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){12, 1024}, 2, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1024, 72}, 2, POLY_DEVICE_CPU);
+  PolyUOp *pa = poly_uop_param(ctx, 0, poly_tensor_uop_physical(a));
+  PolyUOp *pb = poly_uop_param(ctx, 1, poly_tensor_uop_physical(b));
+  PolyParamArg arg = *pa->arg.param;
+  arg.device = NULL;
+  pa = poly_uop1(ctx, POLY_OP_PARAM, pa->dtype, pa->src[0], poly_arg_param(&arg));
+  arg = *pb->arg.param;
+  arg.device = NULL;
+  pb = poly_uop1(ctx, POLY_OP_PARAM, pb->dtype, pb->src[0], poly_arg_param(&arg));
+  PolyUOp *dot = poly_uop_dot(ctx, pa, pb);
+  PolyUOp *body = poly_uop1(ctx, POLY_OP_TUPLE, POLY_VOID, dot, poly_arg_none());
+  PolyUOp *src[] = {body, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b)};
+  PolyCallInfo info = {.name = "matmul"};
+  PolyUOp *fn = poly_uop(ctx, POLY_OP_FUNCTION, POLY_VOID, src, 3, poly_arg_call_info(&info));
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_GETTUPLE, POLY_FLOAT32, fn, poly_arg_int(0));
+  PolyUOp *resolved = poly_apply_earliest_rewrites(ctx, out);
+  int count = 0, selected = 0, workers = 0;
+  PolyUOp **nodes = resolved ? poly_uop_toposort(ctx, resolved, &count) : NULL;
+  for (int i = 0; i < count; i++) {
+    selected += nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
+                !strcmp(nodes[i]->arg.kernel_info->name, "avx2_gemm");
+    if (nodes[i]->op == POLY_OP_RANGE && poly_range_axis_type(nodes[i]->arg) == POLY_AXIS_THREAD)
+      workers = nodes[i]->src[0]->arg.i;
+  }
+  /* A precompiled body is authored kernel code, not an invitation to rewrite
+   * its internal contractions. Both the selector and FUNCTION resolver skip it. */
+  info.precompile = true;
+  PolyUOp *opaque = poly_uop(ctx, POLY_OP_FUNCTION, POLY_VOID, src, 3, poly_arg_call_info(&info));
+  bool untouched = poly_kernel_select(ctx, opaque) == opaque &&
+                   poly_apply_earliest_rewrites(ctx, opaque) == opaque;
+  poly_tensor_release(a);
+  poly_tensor_release(b);
+  poly_ctx_destroy(ctx);
+  for (int i = 0; i < 3; i++) {
+    if (saved[i]) {
+      setenv(keys[i], saved[i], 1);
+      free(saved[i]);
+    } else
+      unsetenv(keys[i]);
+  }
+  ASSERT_INT_EQ(selected, n_impls ? 1 : 0);
+  ASSERT_INT_EQ(workers, n_impls ? 3 : 0);
+  ASSERT_TRUE(untouched);
+  PASS();
+}
 
 TEST(codegen, release014_float_value_slices_are_not_storage_views) {
   /* v0.14.0 pm_float_decomp excludes both LOAD and STACK parents for

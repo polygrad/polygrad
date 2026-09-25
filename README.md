@@ -387,6 +387,13 @@ optional `timestamp-query` feature. Without it, candidates are not timed and
 the original kernel is kept. Change JS settings while idle and restore them
 after use; existing compiled JIT captures are unchanged.
 
+`POLY_CPU_GEMM=1` opts into an experimental packed FP32 AVX2/FMA kernel on
+native x86 CPU. Set it before compilation; unsupported shapes use generic
+kernels. This mode also materializes bounded softmax tables before CPU matmul
+to avoid repeated exponentials. It preserves bundles but can change rounding.
+Benchmark with and without `BEAM=2`: custom-kernel boundaries can make the
+default schedule slower. It is disabled by default.
+
 Python `Context(IGNORE_BEAM_CACHE=1)` or JS `runtime.ignoreBeamCache = 1`
 bypasses saved search results. `BEAM_TIMEOUT_SEC` bounds candidate compilation
 (default 10 seconds; 0 disables the budget). Native compiler subprocesses are

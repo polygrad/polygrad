@@ -154,7 +154,7 @@ int bench_custom_run(
     goto done;
   rc = poly_buffer_read(c, poly_tensor_uop_physical(realized), out, M * N * sizeof(float));
 done:
-  if (realized) poly_tensor_release(realized);
+  /* realize returns borrowed aliases of the supplied Tensor handles. */
   for (int i = 0; i < 4; i++) {
     if (outputs[i]) poly_tensor_release(outputs[i]);
     if (inputs[i]) poly_tensor_release(inputs[i]);

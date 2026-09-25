@@ -10,6 +10,7 @@
 #include "uop/movement.h"
 #include "uop/spec.h"
 #include "tensor.h"
+#include "kernels/kernels.h"
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
@@ -1307,15 +1308,18 @@ static PolyUOp *rangeify_resolve_function(PolyCtx *ctx, PolyUOp *call) {
  * removal through the same bottom-up graph_rewrite.  The generic C driver
  * already has the corresponding fixed-point/replacement traversal: after a
  * FUNCTION becomes its substituted TUPLE body, it descends into that body.
- * Keep only FUNCTION resolution in this matcher; the existing earliest pass
- * below then applies the remaining ordered rules to the exposed graph. */
+ * Select opt-in kernels on the resolved body before the existing earliest
+ * pass applies the remaining ordered rules to the exposed graph. */
 static PolyUOp *resolve_function_match(PolyCtx *ctx, PolyUOp *call, const PolyBindings *bindings) {
   (void)bindings;
   if (!ctx || !call || call->op != POLY_OP_FUNCTION) return NULL;
   if (call->arg.kind == POLY_ARG_CALL_INFO && call->arg.call_info &&
       call->arg.call_info->precompile)
     return NULL;
-  return rangeify_resolve_function(ctx, call);
+  PolyUOp *body = rangeify_resolve_function(ctx, call);
+  /* Arguments now give PARAMs concrete devices/views. Select before the
+   * earliest pass decomposes the exposed contractions. Default-off is a no-op. */
+  return body ? poly_kernel_select(ctx, body) : NULL;
 }
 
 static PolyDType bitcast_uint_dtype(int itemsize) {
@@ -2671,6 +2675,8 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
 
   /* Current Tinygrad schedule/rangeify.py:get_kernel_graph. */
   tensor_sink = poly_apply_multi_pm(ctx, tensor_sink);
+  if (!tensor_sink) return NULL;
+  tensor_sink = poly_kernel_select(ctx, tensor_sink);
   if (!tensor_sink) return NULL;
   if (timing) {
     fprintf(stderr, "[polygrad:get_kernel_graph] stage earliest_rewrites begin\n");
