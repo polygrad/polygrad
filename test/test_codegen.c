@@ -5937,6 +5937,31 @@ TEST(codegen, wgsl_narrow_cast_and_alu_results) {
   PASS();
 }
 
+TEST(codegen, wgsl_float_literals_stay_in_range) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *shape = poly_uop_const(ctx, poly_arg_int(1), POLY_WEAKINT);
+  PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL};
+  PolyUOp *out = poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, shape, poly_arg_param(&arg));
+  PolyUOp *index = poly_uop_const(ctx, poly_arg_int(0), POLY_INT32);
+  PolyUOp *address = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, index, poly_arg_none());
+  const float values[] = {FLT_MAX, -FLT_MAX, FLT_MIN, .1f, -0.0f};
+  for (int i = 0; i < 5; i++) {
+    PolyUOp *value = poly_uop_const(ctx, poly_arg_float(values[i]), POLY_FLOAT32);
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
+    int n = 0;
+    PolyUOp **uops = poly_uop_toposort(ctx, store, &n);
+    char *src = poly_render_wgsl(ctx, uops, n, "literal_range");
+    ASSERT_NOT_NULL(src);
+    char *literal = strstr(src, "data0[0] = ");
+    ASSERT_NOT_NULL(literal);
+    double parsed = strtod(literal + strlen("data0[0] = "), NULL);
+    ASSERT_TRUE(parsed == (double)values[i]);
+    ASSERT_TRUE(!!signbit(parsed) == !!signbit(values[i]));
+    free(src);
+  }
+  poly_ctx_destroy(ctx);
+}
+
 TEST(codegen, renderers_inline_current_casted_literals) {
   /* Current tinygrad renderer/cstyle.py:26-47,238-241 renders
    * CAST(strong, CONST(weak/bool)) as the destination-typed literal itself.

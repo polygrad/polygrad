@@ -54,6 +54,15 @@ def fixtures():
                         h.make_node('Relu', ['hidden'], ['relu']),
                         h.make_node('Gemm', ['relu', 'out'], ['y'], transB=1, alpha=.7)],
                {'x': f((2, 4))}, {'y': (2, 2)}, {'w': f((4, 6)), 'b': f((6,)), 'out': f((2, 6))}, dims={'batch': 2})
+    yield case('scalar_constants', [
+        h.make_node('Constant', [], ['raw'], value=nh.from_array(np.array(2., np.float32))),
+        h.make_node('Constant', [], ['typed'], value=h.make_tensor('', T.FLOAT, [], [2.])),
+        h.make_node('Constant', [], ['attr'], value_float=2.),
+        *[h.make_node('Pow', ['x', name], [name+'_pow']) for name in ['raw', 'typed', 'attr']],
+        h.make_node('Mul', ['raw_pow', 'w'], ['weighted'])],
+        {'x': np.array([-3., -.5, 0., 2.], np.float32)},
+        {name: (4,) for name in ['raw_pow', 'typed_pow', 'attr_pow', 'weighted']},
+        {'w': np.array(1.5, np.float32)})
     yield case('conv', [h.make_node('Conv', ['x', 'w', 'b'], ['c'], pads=[1, 0, 0, 1]),
                          h.make_node('Relu', ['c'], ['r']),
                          h.make_node('GlobalAveragePool', ['r'], ['p']),
@@ -72,6 +81,38 @@ def fixtures():
                {'x': f((1, 3, 4))}, {'y': (1, 3, 4)},
                {'q': f((4, 4)), 'k': f((4, 4)), 'v': f((4, 4)), 'scale': np.array(.5, np.float32),
                 'norm': np.ones(4, np.float32), 'bias': f((4,))})
+    previous_rng, rng = rng, np.random.default_rng(25)
+    for mode in range(4):
+        yield case('attention_mode_'+str(mode),
+                   [h.make_node('Attention', ['q','k','v','mask','pk','pv'], ['y','key','value','scores'],
+                                qk_matmul_output_mode=mode, softcap=.7, scale=.4)],
+                   {'q':f((1,2,2,4)), 'k':f((1,2,2,4)), 'v':f((1,2,2,3))},
+                   {'y':(1,2,2,3),'key':(1,2,3,4),'value':(1,2,3,3),'scores':(1,2,2,3)},
+                   {'mask':f((2,3)), 'pk':f((1,2,1,4)), 'pv':f((1,2,1,3))}, opset=23)
+    yield case('attention_3d_causal',
+               [h.make_node('Attention',['q','k','v'],['y'],q_num_heads=2,kv_num_heads=2,is_causal=1)],
+               {'q':f((1,3,8)),'k':f((1,3,8)),'v':f((1,3,6))}, {'y':(1,3,6)}, {}, opset=23)
+    yield case('attention_mqa_mask', [h.make_node('Attention',['q','k','v','mask'],['y'])],
+               {'q':f((1,2,2,4)),'k':f((1,1,3,4)),'v':f((1,1,3,4))}, {'y':(1,2,2,4)},
+               {'mask':np.array([[True,False,True],[False,True,True]])}, opset=23)
+    for interleaved in (0,1):
+        for packed in (False,True):
+            dims = (2,3,8) if packed else (2,2,3,4)
+            rotary = 2 if packed else 4
+            yield case('rotary_'+str(interleaved)+'_'+str(int(packed)),
+                       [h.make_node('RotaryEmbedding',['x','cos','sin','positions'],['y'],
+                                    interleaved=interleaved,rotary_embedding_dim=rotary,num_heads=2)],
+                       {'x':f(dims)}, {'y':dims},
+                       {'cos':np.cos(f((8,rotary//2))), 'sin':np.sin(f((8,rotary//2))),
+                        'positions':np.array([[0,2,4],[1,3,5]],np.int64)}, opset=23)
+    for axis in (-1,1):
+        yield case('rms_'+str(axis), [h.make_node('RMSNormalization',['x','scale'],['y'],axis=axis)],
+                   {'x':f((2,3,4))}, {'y':(2,3,4)}, {'scale':f((4,))}, opset=23)
+    yield case('rotary_preselected_cache',
+               [h.make_node('RotaryEmbedding',['x','cos','sin'],['y'])],
+               {'x':f((1,2,3,4))}, {'y':(1,2,3,4)},
+               {'cos':np.cos(f((1,3,2))),'sin':np.sin(f((1,3,2)))}, opset=23)
+    rng = previous_rng
     yield case('external', [h.make_node('MatMul', ['x', 'w'], ['y'])],
                {'x': f((2, 3))}, {'y': (2, 4)}, {'w': f((3, 4))}, external=True)
     # Non-raw typed INT64 storage exercises shape operands without NumPy/ONNX

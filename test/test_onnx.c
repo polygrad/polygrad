@@ -6,7 +6,7 @@
 static cJSON *onnx_fixture(void) {
   FILE *file = fopen("test/fixtures/onnx.json", "rb");
   if (!file) return NULL;
-  char data[65536];
+  char data[100 * 1024];
   size_t n = fread(data, 1, sizeof(data), file);
   bool ok = !ferror(file) && feof(file);
   fclose(file);
@@ -114,6 +114,24 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     }
     if (!strncmp(cJSON_GetObjectItem(row, "name")->valuestring, "if_", 3))
       ASSERT_EQ(selections, 1); /* Tinygrad If selects equal-shaped branch values with WHERE. */
+    const char *fixture_name = cJSON_GetObjectItem(row, "name")->valuestring;
+    if (!strcmp(fixture_name, "scalar_constants")) {
+      int powers = 0;
+      for (int i = 0; i < count; i++)
+        if (nodes[i]->op == POLY_OP_POW) {
+          ASSERT_EQ(nodes[i]->src[1]->op, POLY_OP_CONST);
+          ASSERT_FLOAT_EQ(nodes[i]->src[1]->arg.f, 2.0, 0);
+          powers++;
+        }
+      ASSERT_TRUE(powers > 0);
+      ASSERT_EQ(poly_model_param_count(m), 1); /* Only the mutable scalar weight. */
+    }
+    if (!strcmp(fixture_name, "attention_mode_0"))
+      ASSERT_EQ(reductions, 4); /* QK, softmax max/sum, and probability @ V. */
+    if (!strncmp(fixture_name, "rms_", 4)) ASSERT_EQ(reductions, 1);
+    if (!strncmp(fixture_name, "rotary_", 7))
+      /* Tinygrad advanced indexing adds three reductions for cache lookup. */
+      ASSERT_EQ(reductions, !strcmp(fixture_name, "rotary_preselected_cache") ? 0 : 3);
     poly_model_free(m);
   }
   poly_ctx_destroy(ctx);

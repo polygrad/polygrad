@@ -7,6 +7,7 @@
 #include "../models/factory.h"
 #include "../models/layers.h"
 #include "../nn/nn.h"
+#include "../uop/upat.h"
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -296,6 +297,40 @@ static bool external_bytes(Import *d, Bytes proto, Bytes *raw) {
   return fail(d, POLY_IMPORT_ERR_PARSE, "external data '%s' was not supplied", location);
 }
 
+/* OnnxPBParser folds scalar tensor literals before operators see them. Keep
+ * the declared dtype (not a weak scalar) and decode integer bits without a
+ * double round trip. Named initializers remain writable Model state. */
+static PolyTensor *onnx_scalar(Import *d, PolyDType dtype, const void *data) {
+  uint64_t bits = 0;
+  size_t size = poly_dtype_itemsize(dtype);
+  memcpy(&bits, data, size);
+  PolyDType from = size == 1   ? POLY_UINT8
+                   : size == 2 ? POLY_UINT16
+                   : size == 4 ? POLY_UINT32
+                               : POLY_UINT64;
+  PolyDType decoded = dtype;
+  if (poly_dtype_eq(dtype, POLY_BFLOAT16)) {
+    /* bfloat16 has no struct format in the shared bitcast constant helper. */
+    bits <<= 16;
+    from = POLY_UINT32;
+    decoded = POLY_FLOAT32;
+  }
+  int64_t signed_bits;
+  memcpy(&signed_bits, &bits, sizeof(bits));
+  PolyArg value;
+  if (poly_dtype_is_bool(dtype))
+    value = poly_arg_bool(bits != 0);
+  else if (!poly_exec_bitcast_const(from, decoded, poly_arg_int(signed_bits), &value))
+    return NULL;
+  uint32_t limbs[] = {(uint32_t)bits, (uint32_t)(bits >> 32)};
+  if (poly_dtype_eq(dtype, POLY_UINT64) && bits > INT64_MAX) value = poly_arg_bigint(1, limbs, 2);
+  PolyUOp *u = poly_uop_const(d->ctx, value, dtype);
+  return u ? poly_tensor_create_with_roots(
+                 d->ctx, u, u, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(d->ctx)
+             )
+           : NULL;
+}
+
 static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
   char name[ONNX_NAME];
   Field typ, raw, location;
@@ -374,8 +409,12 @@ static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
     }
   if (r.bad || storage_fields != 1 || used != v->nbytes)
     return fail(d, POLY_IMPORT_ERR_PARSE, "incomplete initializer '%s'", name);
-  v->initializer = true;
   v->constant = true;
+  if (output_name && v->rank == 0) {
+    v->tensor = onnx_scalar(d, v->dtype, v->host);
+    return v->tensor != NULL || fail(d, POLY_IMPORT_ERR_INTERNAL, "scalar literal failed");
+  }
+  v->initializer = true;
   if (poly_dtype_is_float(v->dtype))
     v->tensor = poly_model_param(d->model, v->binding, v->dtype, v->shape, v->rank);
   else {
@@ -647,6 +686,7 @@ static PolyTensor *transpose(Import *d, PolyTensor *x) {
   return poly_tensor_permute(d->ctx, x, p, n);
 }
 static PolyTensor *matmul(Import *d, PolyTensor *a, PolyTensor *b) {
+  if (!a || !b) return NULL;
   int na = rank(d, a), nb = rank(d, b);
   const int64_t *sa = shape(d, a), *sb = shape(d, b);
   if (!na || !nb || sa[na - 1] != sb[nb > 1 ? nb - 2 : 0] || !same_dtype(a, b)) {
@@ -1032,11 +1072,243 @@ static PolyTensor *onnx_resize(Import *d, Node *n, bool legacy) {
 
 static bool onnx_subgraph(Import *d, Bytes proto, Value **outputs, int *nout);
 
+/* onnx.py:attention_onnx. Present state is returned before head expansion. */
+static PolyTensor *onnx_attention(Import *d, Node *n) {
+  if (d->opset < 23 || !arity_outputs(d, n, 3, 6, 4) ||
+      !attrs(
+          d, n,
+          "|is_causal||q_num_heads||kv_num_heads||scale||softcap||softmax_precision||qk_matmul_"
+          "output_mode|"
+      ))
+    return NULL;
+  PolyCtx *ctx = d->ctx;
+  PolyTensor *t[3] = {n->inputs[0]->tensor, n->inputs[1]->tensor, n->inputs[2]->tensor};
+  int nr = rank(d, t[0]);
+  if ((nr != 3 && nr != 4) || !poly_dtype_is_float(t[0]->uop_physical->dtype)) return NULL;
+  if (rank(d, t[1]) != nr || rank(d, t[2]) != nr) return NULL;
+  int64_t heads[3] = {
+      attr_int(d, n, "q_num_heads", nr == 4 ? shape(d, t[0])[1] : 0),
+      attr_int(d, n, "kv_num_heads", nr == 4 ? shape(d, t[1])[1] : 0), 0};
+  heads[2] = heads[1];
+  for (int i = 0; i < 3; i++) {
+    if (rank(d, t[i]) != nr || heads[i] <= 0 || !same_dtype(t[0], t[i])) return NULL;
+    const int64_t *s = shape(d, t[i]);
+    if (nr == 3) {
+      if (s[2] % heads[i]) return NULL;
+      int64_t dims[] = {s[0], s[1], heads[i], s[2] / heads[i]};
+      t[i] = poly_tensor_permute(
+          ctx, poly_tensor_reshape(ctx, t[i], dims, 4), (int64_t[]){0, 2, 1, 3}, 4
+      );
+    } else if (s[1] != heads[i])
+      return NULL;
+  }
+  const int64_t *q = shape(d, t[0]), *k = shape(d, t[1]), *v = shape(d, t[2]);
+  if (q[0] != k[0] || q[0] != v[0] || q[3] != k[3] || k[2] != v[2] || heads[0] % heads[1])
+    return NULL;
+  if (heads[0] != heads[1] && heads[1] != 1) {
+    fail(
+        d, POLY_IMPORT_ERR_UNSUPPORTED_OP,
+        "multi-KV-head GQA differs between pinned Tinygrad and ONNX"
+    );
+    return NULL;
+  }
+  for (int i = 1; i < 3; i++) {
+    PolyTensor *past = n->nin > i + 3 && n->inputs[i + 3] ? n->inputs[i + 3]->tensor : NULL;
+    if (past) {
+      if (rank(d, past) != 4 || !same_dtype(past, t[i])) return NULL;
+      for (int a = 0; a < 4; a++)
+        if (a != 2 && shape(d, past)[a] != shape(d, t[i])[a]) return NULL;
+      t[i] = poly_tensor_cat(ctx, (PolyTensor *[]){past, t[i]}, 2, 2);
+    }
+    n->extra[i] = t[i];
+  }
+  if (shape(d, t[1])[2] != shape(d, t[2])[2]) return NULL;
+  if (heads[0] != heads[1]) {
+    for (int i = 1; i < 3; i++) {
+      const int64_t *s = shape(d, t[i]);
+      int64_t dims[] = {s[0], heads[0], s[2], s[3]};
+      t[i] = poly_tensor_expand(ctx, t[i], dims, 4);
+    }
+  }
+  int64_t mode = attr_int(d, n, "qk_matmul_output_mode", 0),
+          causal = attr_int(d, n, "is_causal", 0);
+  int64_t precision = attr_int(d, n, "softmax_precision", 0);
+  double cap = attr_float(d, n, "softcap", 0),
+         factor = attr_float(d, n, "scale", 1.0 / sqrt((double)q[3]));
+  if (mode < 0 || mode > 3 || (causal != 0 && causal != 1) || cap < 0 ||
+      (precision != 0 && precision != 1 && precision != 10 && precision != 16))
+    return NULL;
+  if (causal && ((n->nin > 4 && n->inputs[4]) || (n->nin > 5 && n->inputs[5]))) {
+    fail(
+        d, POLY_IMPORT_ERR_UNSUPPORTED_OP,
+        "causal Attention with past state differs between pinned Tinygrad and ONNX"
+    );
+    return NULL;
+  }
+  PolyTensor *scores = scale(d, matmul(d, t[0], transpose(d, t[1])), factor);
+  n->extra[3] = scores;
+  if (causal) {
+    int64_t dims[] = {q[2], shape(d, t[1])[2]};
+    PolyTensor *ones = poly_tensor_expand(
+        ctx,
+        poly_tensor_reshape(
+            ctx, poly_tensor_cast(ctx, onnx_int(d, 1), POLY_BOOL), (int64_t[]){1, 1}, 2
+        ),
+        dims, 2
+    );
+    scores = poly_tensor_alu3(
+        ctx, POLY_OP_WHERE, poly_tensor_tril(ctx, ones, 0), scores, onnx_float(d, -INFINITY)
+    );
+  }
+  PolyTensor *mask = n->nin > 3 && n->inputs[3] ? n->inputs[3]->tensor : NULL;
+  if (mask) {
+    if (poly_dtype_eq(mask->uop_physical->dtype, POLY_BOOL)) {
+      mask = poly_tensor_alu3(ctx, POLY_OP_WHERE, mask, onnx_float(d, 0), onnx_float(d, -INFINITY));
+      /* Resolve the weak literal mask as ADD's promotion would, before checking
+       * the ONNX broadcast contract shared with explicitly typed masks. */
+      mask = poly_tensor_cast(ctx, mask, scores->uop_physical->dtype);
+    }
+    if (!broadcast_into(d, scores, mask)) return NULL;
+    scores = poly_tensor_alu2(ctx, POLY_OP_ADD, scores, mask);
+  }
+  if (mode == 1) n->extra[3] = scores;
+  if (cap > 0)
+    scores = scale(
+        d, poly_tensor_tanh(ctx, poly_tensor_alu2(ctx, POLY_OP_FDIV, scores, onnx_float(d, cap))),
+        cap
+    );
+  if (mode == 2) n->extra[3] = scores;
+  if (precision)
+    scores = poly_tensor_cast(
+        ctx, scores,
+        precision == 1    ? POLY_FLOAT32
+        : precision == 10 ? POLY_FLOAT16
+                          : POLY_BFLOAT16
+    );
+  PolyTensor *prob =
+      poly_tensor_cast(ctx, poly_tensor_softmax(ctx, scores, -1), t[0]->uop_physical->dtype);
+  if (mode == 3) n->extra[3] = prob;
+  PolyTensor *out = matmul(d, prob, t[2]);
+  if (nr == 3) {
+    int64_t dims[] = {q[0], q[2], heads[0] * shape(d, t[2])[3]};
+    out = poly_tensor_reshape(
+        ctx, poly_tensor_permute(ctx, out, (int64_t[]){0, 2, 1, 3}, 4), dims, 3
+    );
+  }
+  return out;
+}
+
+/* onnx.py:RotaryEmbedding; reshape interleaved pairs rather than changing the
+ * shared RoPE convention used by checkpoint-specific Transformer builders. */
+static PolyTensor *onnx_rotary(Import *d, Node *n) {
+  if (d->opset < 23 || !arity(d, n, 3, 4) ||
+      !attrs(d, n, "|num_heads||interleaved||rotary_embedding_dim|"))
+    return NULL;
+  PolyCtx *ctx = d->ctx;
+  PolyTensor *x = n->inputs[0]->tensor, *cs[2] = {n->inputs[1]->tensor, n->inputs[2]->tensor};
+  int nr = rank(d, x);
+  if ((nr != 3 && nr != 4) || !poly_dtype_is_float(x->uop_physical->dtype)) return NULL;
+  int64_t original[4];
+  memcpy(original, shape(d, x), (size_t)nr * sizeof(int64_t));
+  int64_t heads = attr_int(d, n, "num_heads", nr == 4 ? original[1] : 0);
+  if (heads <= 0 || (nr == 3 && original[2] % heads) || (nr == 4 && heads != original[1]))
+    return NULL;
+  if (nr == 4)
+    x = poly_tensor_permute(ctx, x, (int64_t[]){0, 2, 1, 3}, 4);
+  else
+    x = poly_tensor_reshape(
+        ctx, x, (int64_t[]){original[0], original[1], heads, original[2] / heads}, 4
+    );
+  const int64_t *s = shape(d, x);
+  int64_t rd = attr_int(d, n, "rotary_embedding_dim", 0),
+          interleaved = attr_int(d, n, "interleaved", 0);
+  if (!rd) rd = s[3];
+  if (rd <= 0 || rd > s[3] || rd % 2 || (interleaved != 0 && interleaved != 1)) return NULL;
+  PolyTensor *pos = n->nin > 3 && n->inputs[3] ? n->inputs[3]->tensor : NULL;
+  if (pos && (rank(d, pos) != 2 || shape(d, pos)[0] != s[0] || shape(d, pos)[1] != s[1] ||
+              !poly_dtype_eq(pos->uop_physical->dtype, POLY_INT64)))
+    return NULL;
+  for (int i = 0; i < 2; i++) {
+    if (!same_dtype(x, cs[i])) return NULL;
+    if (pos) {
+      if (rank(d, cs[i]) != 2 || shape(d, cs[i])[1] != rd / 2) return NULL;
+      cs[i] = onnx_index_axes(d, cs[i], &pos, 0, 1, NULL);
+    } else {
+      /* The pin slices the first cache axis by head_size. Only admit shapes
+       * where that slice is an identity, rather than truncate the batch. */
+      if (rank(d, cs[i]) != 3 || shape(d, cs[i])[0] != s[0] || s[0] > s[3] ||
+          shape(d, cs[i])[1] != s[1] || shape(d, cs[i])[2] != rd / 2)
+        return NULL;
+    }
+    cs[i] = poly_tensor_reshape(ctx, cs[i], (int64_t[]){s[0], s[1], 1, rd / 2}, 4);
+  }
+  int64_t pairs[4][2] = {{0, s[0]}, {0, s[1]}, {0, s[2]}, {0, rd}};
+  PolyTensor *rot = rd == s[3] ? x : poly_tensor_shrink(ctx, x, pairs, 4), *halves[2];
+  for (int i = 0; i < 2; i++) {
+    if (interleaved) {
+      PolyTensor *paired =
+          poly_tensor_reshape(ctx, rot, (int64_t[]){s[0], s[1], s[2], rd / 2, 2}, 5);
+      int64_t p[5][2] = {{0, s[0]}, {0, s[1]}, {0, s[2]}, {0, rd / 2}, {i, i + 1}};
+      halves[i] = poly_tensor_reshape(
+          ctx, poly_tensor_shrink(ctx, paired, p, 5), (int64_t[]){s[0], s[1], s[2], rd / 2}, 4
+      );
+    } else {
+      pairs[3][0] = i * rd / 2;
+      pairs[3][1] = (i + 1) * rd / 2;
+      halves[i] = poly_tensor_shrink(ctx, rot, pairs, 4);
+    }
+  }
+  PolyTensor *real = onnx_sub(
+      d, poly_tensor_alu2(ctx, POLY_OP_MUL, halves[0], cs[0]),
+      poly_tensor_alu2(ctx, POLY_OP_MUL, halves[1], cs[1])
+  );
+  PolyTensor *imag = poly_tensor_alu2(
+      ctx, POLY_OP_ADD, poly_tensor_alu2(ctx, POLY_OP_MUL, halves[0], cs[1]),
+      poly_tensor_alu2(ctx, POLY_OP_MUL, halves[1], cs[0])
+  );
+  PolyTensor *out = interleaved
+                        ? poly_tensor_reshape(
+                              ctx, poly_tensor_stack(ctx, (PolyTensor *[]){real, imag}, 2, -1),
+                              (int64_t[]){s[0], s[1], s[2], rd}, 4
+                          )
+                        : poly_tensor_cat(ctx, (PolyTensor *[]){real, imag}, 2, -1);
+  if (rd < s[3]) {
+    pairs[3][0] = rd;
+    pairs[3][1] = s[3];
+    out = poly_tensor_cat(ctx, (PolyTensor *[]){out, poly_tensor_shrink(ctx, x, pairs, 4)}, 2, -1);
+  }
+  return nr == 3 ? poly_tensor_reshape(ctx, out, original, 3)
+                 : poly_tensor_permute(ctx, out, (int64_t[]){0, 2, 1, 3}, 4);
+}
+
 static PolyTensor *onnx_operation(Import *d, Node *n) {
   PolyCtx *ctx = d->ctx;
   PolyTensor *x = n->nin && n->inputs[0] ? n->inputs[0]->tensor : NULL;
   PolyTensor *y = n->nin > 1 && n->inputs[1] ? n->inputs[1]->tensor : NULL;
   const char *op = d->op;
+  if (!strcmp(op, "Attention")) return onnx_attention(d, n);
+  if (!strcmp(op, "RotaryEmbedding")) return onnx_rotary(d, n);
+  if (!strcmp(op, "RMSNormalization")) {
+    if (d->opset < 23 || !arity(d, n, 2, 2) || !attrs(d, n, "|axis||epsilon||stash_type|") ||
+        attr_int(d, n, "stash_type", 1) != 1 ||
+        !poly_dtype_eq(x->uop_physical->dtype, POLY_FLOAT32) || !broadcast_into(d, x, y))
+      return NULL;
+    int nr = rank(d, x);
+    int64_t axis = attr_int(d, n, "axis", -1), axes[ONNX_RANK];
+    double eps = attr_float(d, n, "epsilon", 1e-5);
+    if (!onnx_axis(d, &axis, nr) || eps < 0) return NULL;
+    for (int i = (int)axis; i < nr; i++)
+      axes[i - axis] = i;
+    /* onnx.py:RMSNormalization stashes the mean square in float32. */
+    PolyTensor *sq = poly_tensor_alu2(ctx, POLY_OP_MUL, x, x);
+    PolyTensor *mean = poly_tensor_mean(ctx, sq, axes, nr - (int)axis, true);
+    PolyTensor *norm = poly_tensor_reciprocal(
+        ctx, poly_tensor_alu1(
+                 ctx, POLY_OP_SQRT, poly_tensor_alu2(ctx, POLY_OP_ADD, mean, onnx_float(d, eps))
+             )
+    );
+    return poly_tensor_alu2(ctx, POLY_OP_MUL, poly_tensor_alu2(ctx, POLY_OP_MUL, x, norm), y);
+  }
   if (!strcmp(op, "If")) {
     if (!arity_outputs(d, n, 1, 1, ONNX_IO) || !attrs(d, n, "|then_branch||else_branch|") ||
         !poly_dtype_eq(x->uop_physical->dtype, POLY_BOOL) || n->inputs[0]->nbytes != 1)
@@ -2644,8 +2916,12 @@ static bool onnx_literal(
   v->host = malloc(len ? len : 1);
   if (!v->host) return false;
   memcpy(v->host, data, len);
-  v->constant = v->initializer = true;
-  v->tensor = poly_model_aux_from_host(d->model, v->binding, dtype, v->shape, ndim, v->host, len);
+  v->constant = true;
+  v->initializer = ndim != 0;
+  v->tensor =
+      ndim == 0
+          ? onnx_scalar(d, dtype, v->host)
+          : poly_model_aux_from_host(d->model, v->binding, dtype, v->shape, ndim, v->host, len);
   return v->tensor != NULL;
 }
 
@@ -3011,8 +3287,8 @@ PolyModel *poly_onnx_load_into(
         fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "unsupported domain '%s'", domain);
         goto done;
       }
-      if (d->opset || opset.integer < 13 || opset.integer > 21) {
-        fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "one standard opset in 13..21 is required");
+      if (d->opset || opset.integer < 13 || opset.integer > 23) {
+        fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "one standard opset in 13..23 is required");
         goto done;
       }
       d->opset = (int)opset.integer;

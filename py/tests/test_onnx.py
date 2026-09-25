@@ -32,6 +32,10 @@ def test_onnx_model_and_bundle(case):
                         opposite = -inputs['x']
                         expected = opposite + 2 if opposite.sum() > 0 else opposite * 3
                         np.testing.assert_array_equal(current.call('forward', {'x': opposite})['y'], expected)
+                    if case['name'] == 'scalar_constants':
+                        assert {r['name'] for r in current.bindings() if r['role'] == 0} == {'w'}
+                        current.write_buffer('w', np.array(3., np.float32))
+                        np.testing.assert_array_equal(current.call('forward', inputs)['weighted'], inputs['x']**2 * 3)
             finally:
                 restored.dispose()
         finally:
@@ -176,13 +180,71 @@ def _info(name, dims, dtype=1):
     return _field(1, name.encode()) + _field(2, _field(1, _int_field(1, dtype) + _field(2, shape)))
 
 
-def _small_graph(op, inputs, outputs):
+def _small_graph(op, inputs, outputs, opset=17, attributes=None):
     node = b''.join(_field(1, name.encode()) for name, _, _ in inputs)
     node += _field(2, outputs[0][0].encode()) + _field(4, op.encode())
+    node += b''.join(_field(5, _field(1, key.encode()) + _int_field(3, value) + _int_field(20, 2))
+                     for key, value in (attributes or {}).items())
     graph = _field(1, node)
     graph += b''.join(_field(11, _info(*row)) for row in inputs)
     graph += b''.join(_field(12, _info(*row)) for row in outputs)
-    return _int_field(1, 8) + _field(7, graph) + _field(8, _int_field(2, 17))
+    return _int_field(1, 8) + _field(7, graph) + _field(8, _int_field(2, opset))
+
+
+@pytest.mark.parametrize('dtype,code,value', [
+    ('float32', 1, -0.), ('float32', 1, np.inf), ('float32', 1, np.nan),
+    ('float64', 11, 1.0000000000000002), ('float16', 10, 2**-24),
+    ('int8', 3, -128), ('uint8', 2, 255), ('int16', 5, -32768),
+    ('uint16', 4, 65535), ('int32', 6, -2**31), ('uint32', 12, 2**32-1),
+    ('int64', 7, -2**63+1), ('uint64', 13, 2**64-1), ('bool', 9, True),
+    ('uint16', 16, 0x4010),  # bfloat16 2.25, read back through Cast(float32).
+])
+def test_onnx_scalar_literal_dtype_and_bundle(dtype, code, value):
+    expected = np.array(value, dtype=dtype)
+    tensor = _int_field(2, code) + _field(9, expected.tobytes())
+    attr = _field(1, b'value') + _field(5, tensor) + _int_field(20, 4)
+    node = _field(2, b'y') + _field(4, b'Constant') + _field(5, attr)
+    graph = _field(1, node)
+    output = 'y'
+    if code == 16:
+        cast = _field(1, b'y') + _field(2, b'z') + _field(4, b'Cast')
+        cast += _field(5, _field(1, b'to') + _int_field(3, 1) + _int_field(20, 2))
+        graph += _field(1, cast)
+        output, code, expected = 'z', 1, np.array(2.25, np.float32)
+    raw = _replace_graph(b'', graph + _field(12, _info(output, [], code)))
+    with pg.Runtime(device='CPU') as rt:
+        model = rt.Model.from_onnx(raw)
+        restored = rt.Model.load(model.save())
+        try:
+            for current in (model, restored):
+                actual = current.call('forward')[output]
+                assert actual.shape == expected.shape and actual.dtype == expected.dtype
+                if np.isnan(expected) and np.issubdtype(expected.dtype, np.floating):
+                    assert np.isnan(actual)
+                else:
+                    assert actual.tobytes() == expected.tobytes()
+        finally:
+            restored.dispose()
+            model.dispose()
+
+
+def test_onnx_attention_rejects_reference_disagreement_and_invalid_signatures():
+    with pg.Runtime(device='INTERP') as rt:
+        for shapes, version, error in [
+            ([[1,4,2,4],[1,2,3,4],[1,2,3,4]], 23, 'multi-KV-head GQA'),
+            ([[1,2,2,4],[1,2,3,4],[1,2,3,4]], 21, 'shape/attribute'),
+            ([[1,2,2,4],[],[1,2,3,4]], 23, 'shape/attribute'),
+            ([[1,2,2,4],[1,2,3,5],[1,2,3,4]], 23, 'shape/attribute'),
+        ]:
+            raw = _small_graph('Attention', [(key, dims, 1) for key,dims in zip(['q','k','v'],shapes)],
+                               [('y',[1,2,2,4],1)], opset=version)
+            with pytest.raises(ValueError, match=error):
+                rt.Model.from_onnx(raw)
+        inputs = [(key, [1,2,2,4], 1) for key in ['q','k','v']]
+        inputs += [('mask',[2,5],1),('pk',[1,2,3,4],1),('pv',[1,2,3,4],1)]
+        raw = _small_graph('Attention', inputs, [('y',[1,2,2,4],1)], opset=23, attributes={'is_causal':1})
+        with pytest.raises(ValueError, match='causal Attention with past'):
+            rt.Model.from_onnx(raw)
 
 
 def test_onnx_rejects_implicit_dtype_promotion_and_reverse_norm_broadcast():

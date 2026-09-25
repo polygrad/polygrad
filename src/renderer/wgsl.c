@@ -353,8 +353,9 @@ static int wgsl_next_vector_lane(
 /* WGSL float constant */
 
 static char *render_float_const_wgsl(double v, char *buf, int cap) {
-  /* Use enough digits to round-trip float32 constants through text. */
-  snprintf(buf, cap, "%.9g", (double)(float)v);
+  /* Match the pin's str(c.val): round-trip the promoted double, not just f32.
+   * Nine digits round FLT_MAX above its range as a WGSL abstract-float. */
+  snprintf(buf, cap, "%.17g", (double)(float)v);
   /* ensure decimal point (WGSL requires it for f32 literals) */
   if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
     int len = (int)strlen(buf);
