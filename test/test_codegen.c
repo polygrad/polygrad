@@ -57,6 +57,89 @@ TEST(codegen, gemm_recognizes_forward_and_backward_views) {
   PASS();
 }
 
+TEST(codegen, portable_packed_gemm_selection) {
+  const char *old = getenv("POLY_KERNELS");
+  char *saved = old ? strdup(old) : NULL;
+  setenv("POLY_KERNELS", "1", 1);
+  const PolyDevice devices[] = {POLY_DEVICE_WASM, POLY_DEVICE_WEBGPU};
+  const char *names[] = {"wasm_gemm", "webgpu_gemm"};
+  bool correct = true;
+  for (int target = 0; target < 2; target++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){16, 128}, 2, devices[target]);
+    PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){128, 128}, 2, devices[target]);
+    PolyUOp *dot = poly_uop_dot(ctx, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
+    PolyUOp *selected = poly_kernel_select(ctx, dot);
+    int n = 0, hits = 0;
+    PolyUOp **nodes = selected ? poly_uop_toposort(ctx, selected, &n) : NULL;
+    for (int i = 0; i < n; i++) {
+      hits += nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
+              !strcmp(nodes[i]->arg.kernel_info->name, names[target]);
+      /* Browser targets cannot consume a C intrinsic string. */
+      correct &= nodes[i]->op != POLY_OP_CUSTOM && nodes[i]->op != POLY_OP_CUSTOMI;
+    }
+    correct &= hits == (target == 0 ? 1 : 0);
+    if (target == 1) correct &= selected == dot;
+    correct &= poly_ctx_set_kernel_policy(ctx, 0) == -1;
+    correct &= poly_ctx_set_kernel_policy(ctx, 1) == 0;
+    poly_tensor_release(a);
+    poly_tensor_release(b);
+    poly_ctx_destroy(ctx);
+  }
+  if (saved) {
+    setenv("POLY_KERNELS", saved, 1);
+    free(saved);
+  } else
+    unsetenv("POLY_KERNELS");
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, wasm_gemm_small_work_fallback) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_kernel_policy(ctx, 1);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){32, 64}, 2, POLY_DEVICE_WASM);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){64, 64}, 2, POLY_DEVICE_WASM);
+  PolyUOp *dot = poly_uop_dot(ctx, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
+  bool unchanged = poly_kernel_select(ctx, dot) == dot;
+  poly_tensor_release(a);
+  poly_tensor_release(b);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unchanged);
+  PASS();
+}
+
+TEST(codegen, webgpu_gemm_workgroup_tiling) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_kernel_policy(ctx, 1);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){64, 64}, 2, POLY_DEVICE_WEBGPU);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){64, 128}, 2, POLY_DEVICE_WEBGPU);
+  PolyUOp *dot = poly_uop_dot(ctx, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
+  PolyUOp *selected = poly_kernel_select(ctx, dot), *kernel = NULL;
+  int count = 0;
+  PolyUOp **nodes = poly_uop_toposort(ctx, selected, &count);
+  for (int i = 0; i < count; i++)
+    if (nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
+        !strcmp(nodes[i]->arg.kernel_info->name, "webgpu_gemm"))
+      kernel = nodes[i];
+  int nl = 0;
+  PolyUOp **lin = kernel ? poly_linearize_webgpu(ctx, kernel, &nl) : NULL;
+  char *wgsl = lin ? poly_render_wgsl(ctx, lin, nl, "webgpu_gemm") : NULL;
+  int barriers = 0;
+  if (wgsl)
+    for (char *p = wgsl; (p = strstr(p, "workgroupBarrier()")); p++)
+      barriers++;
+  bool valid = wgsl && strstr(wgsl, "var<workgroup>") && strstr(wgsl, "@workgroup_size(32,") &&
+               barriers == 2;
+  free(wgsl);
+  free(lin);
+  poly_tensor_release(a);
+  poly_tensor_release(b);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 TEST(codegen, cpu_packed_gemm_selection) {
   int expected = 0;
 #if defined(__x86_64__) && !defined(__EMSCRIPTEN__)

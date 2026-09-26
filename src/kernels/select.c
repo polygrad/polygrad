@@ -1,10 +1,10 @@
 #include "kernels/kernels.h"
 #include "utils.h"
+#include "ctx.h"
 #include <stdio.h>
 
 typedef struct {
-  const PolyKernelImpl *impls;
-  int count;
+  bool portable;
   bool failed, debug;
 } KernelSelection;
 
@@ -13,8 +13,11 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
   KernelSelection *s = poly_graph_rewrite_userctx();
   PolyGemmDesc d;
   if (s->failed || !poly_kernel_match_gemm(ctx, u, &d)) return NULL;
-  for (int i = 0; i < s->count; i++) {
-    const PolyKernelImpl *impl = &s->impls[i];
+  int count = 0;
+  const PolyKernelImpl *impls = s->portable ? poly_portable_kernel_impls(d.device, &count) : NULL;
+  if (!count) impls = poly_cpu_kernel_impls(&count);
+  for (int i = 0; i < count; i++) {
+    const PolyKernelImpl *impl = &impls[i];
     const char *reason = impl->supports(ctx, &d);
     if (s->debug)
       fprintf(
@@ -30,12 +33,11 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
 }
 
 PolyUOp *poly_kernel_select(PolyCtx *ctx, PolyUOp *sink) {
-  /* Keep the existing opt-in for the mechanical migration. Context policy and
-   * centralized renderer target resolution are a separate lifecycle change. */
-  if (!poly_getenv_int("POLY_CPU_GEMM", 0)) return sink;
-  KernelSelection s = {.debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0};
-  s.impls = poly_cpu_kernel_impls(&s.count);
-  if (!s.count) return sink;
+  ctx->kernel_policy_locked = true;
+  bool portable = ctx->kernel_policy == 1;
+  if (!portable && !(ctx->kernel_policy == -1 && poly_getenv_int("POLY_CPU_GEMM", 0))) return sink;
+  KernelSelection s = {
+      .debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0, .portable = portable};
   static _Thread_local PolyPatternMatcher *pm;
   if (!pm) {
     PolyRule rules[] = {{poly_upat_op(POLY_OP_REDUCE, NULL, 0, "x"), select_match}};

@@ -89,6 +89,8 @@ struct PolyCtx {
   int64_t next_unique_id;
   PolyDevice preferred_device;
   PolyLogicalPolicy logical_policy;
+  int kernel_policy; /* -1 inherits the legacy CPU-only opt-in, 0 off, 1 auto */
+  bool kernel_policy_locked;
   PolyFrontendBufferReleaseFn frontend_buffer_release;
 };
 

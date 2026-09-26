@@ -89,7 +89,9 @@ static PolyUOp *kernel(
     for (int l = 0; l < lanes; l++)
       previous[l] = ld(c, poly_uop_after(c, acc[i], k), ci(c, l));
     PolyUOp *src[] = {av[i / vectors], bv[i % vectors], poly_uop_stack(c, previous, lanes)};
-    PolyUOp *fma = poly_uop(c, POLY_OP_CUSTOM, POLY_FLOAT32, src, 3, poly_arg_str(tile->fma));
+    PolyUOp *fma = tile->fma
+                       ? poly_uop(c, POLY_OP_CUSTOM, POLY_FLOAT32, src, 3, poly_arg_str(tile->fma))
+                       : poly_uop_add(c, poly_uop_mul(c, src[0], src[1]), src[2]);
     updates[i] = poly_uop_store_val(c, acc[i], fma);
   }
   PolyUOp *done = poly_uop_end(c, poly_uop_group(c, updates, regs), &k, 1);
@@ -103,6 +105,24 @@ static PolyUOp *kernel(
   PolyUOp *end = poly_uop_end(c, poly_uop_group(c, stores, rows * cols), ranges, n_ranges);
   PolyKernelInfo info = {.name = tile->name, .has_opts_to_apply = true};
   return poly_uop1(c, POLY_OP_SINK, POLY_VOID, end, poly_arg_kernel_info(&info));
+}
+
+const char *poly_kernel_gemm_supported(PolyCtx *ctx, const PolyGemmDesc *d, int rows, int cols) {
+  if (!poly_dtype_eq(d->root->dtype, POLY_FLOAT32) || !poly_dtype_eq(d->a->dtype, POLY_FLOAT32) ||
+      !poly_dtype_eq(d->b->dtype, POLY_FLOAT32))
+    return "requires float32";
+  if (d->K > 4096 || d->N > 4096 || d->M > 512) return "shape outside validated bounds";
+  if (d->N % cols || d->M % rows) return "requires complete microtiles";
+  for (int i = 0; i < d->bd - 2; i++)
+    if (d->bs[i] != 1) return "batched right operand";
+  int nd = poly_uop_ndim(ctx, d->a_base);
+  if (nd < 0 || nd > POLY_MAX_DIMS) return "unsupported producer rank";
+  for (int i = 0; i < nd; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, d->a_base, i);
+    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT || dim->arg.i <= 0)
+      return "symbolic producer shape";
+  }
+  return NULL;
 }
 
 PolyUOp *poly_kernel_gemm_lower(

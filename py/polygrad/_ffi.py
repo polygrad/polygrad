@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 105
+POLYGRAD_ABI_VERSION = 106
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -253,6 +253,8 @@ def _declare_signatures(lib):
 
     lib.poly_ctx_set_logical_policy.restype = ctypes.c_int
     lib.poly_ctx_set_logical_policy.argtypes = [_ptr, ctypes.c_int]
+    lib.poly_ctx_set_kernel_policy.restype = ctypes.c_int
+    lib.poly_ctx_set_kernel_policy.argtypes = [_ptr, ctypes.c_int]
 
     lib.poly_ctx_get_logical_policy.restype = ctypes.c_int
     lib.poly_ctx_get_logical_policy.argtypes = [_ptr]

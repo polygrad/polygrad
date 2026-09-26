@@ -387,7 +387,13 @@ optional `timestamp-query` feature. Without it, candidates are not timed and
 the original kernel is kept. Change JS settings while idle and restore them
 after use; existing compiled JIT captures are unchanged.
 
-`POLY_CPU_GEMM=1` opts into an experimental packed FP32 AVX2/FMA kernel on
+`Runtime(kernels=True)` in Python or `create({ kernels: true })` in JavaScript
+enables experimental physical kernels for that runtime: AVX2/FMA on CPU,
+SIMD128 on Wasm and tiled FP32 GEMM on WebGPU. Unsupported shapes use the default
+path. Policy is fixed at first compilation; portable bundles keep the original operations.
+These kernels are opt-in experiments, not guaranteed speedups.
+
+`POLY_CPU_GEMM=1` retains the CPU-only experimental packed FP32 AVX2/FMA kernel on
 native x86 CPU. Set it before compilation; unsupported shapes use generic
 kernels. This mode also materializes bounded softmax tables before CPU matmul
 to avoid repeated exponentials. It preserves bundles but can change rounding.

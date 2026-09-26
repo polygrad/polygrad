@@ -4,6 +4,18 @@ import pytest
 import polygrad as pg
 
 
+def test_runtime_kernel_policy(monkeypatch):
+    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    from polygrad import _ffi
+    with pg.Runtime(device='CPU', kernels=False) as rt:
+        assert _ffi.get_lib().poly_ctx_set_kernel_policy(rt._ctx, 2) == -1
+        np.testing.assert_array_equal(rt.Tensor([1., 2.]).realize().numpy(), [1., 2.])
+        assert _ffi.get_lib().poly_ctx_set_kernel_policy(rt._ctx, 1) == -1
+        assert _ffi.get_lib().poly_ctx_set_kernel_policy(rt._ctx, 0) == 0
+    with pytest.raises(TypeError, match='kernels must be a bool'):
+        pg.Runtime(kernels='auto')
+
+
 @pytest.mark.parametrize('shape', [(4, 7, 24), (8, 32, 48), (3, 7, 24), (4, 7, 25)])
 def test_cpu_gemm_tensor_and_gradients(shape, monkeypatch):
     monkeypatch.setenv('POLY_CPU_GEMM', '1')

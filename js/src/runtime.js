@@ -19,6 +19,9 @@ function normalizeOptions(opts) {
   if (options.device == null) {
     options.device = 'auto'
   }
+  if (options.kernels != null && typeof options.kernels !== 'boolean') {
+    throw new TypeError('kernels must be a boolean')
+  }
 
   return options
 }
@@ -381,6 +384,10 @@ function createRuntime(opts, resolveCore) {
   }
   const options = normalizeOptions(opts)
   const binding = resolveCore(options.core, options)
+  if (options.kernels != null && binding.ffi.poly_ctx_set_kernel_policy(binding.ctx, Number(options.kernels)) !== 0) {
+    binding.destroy()
+    throw new Error('failed to set kernel policy')
+  }
   const logical = normalizeLogicalPolicy(options.logical)
   if (logical !== null && binding.ffi.poly_ctx_set_logical_policy(binding.ctx, logical) !== 0) {
     binding.destroy()
@@ -395,6 +402,10 @@ async function createRuntimeAsync(opts, resolveCore) {
   }
   const options = normalizeOptions(opts)
   const binding = await resolveCore(options.core, options)
+  if (options.kernels != null && binding.ffi.poly_ctx_set_kernel_policy(binding.ctx, Number(options.kernels)) !== 0) {
+    binding.destroy()
+    throw new Error('failed to set kernel policy')
+  }
   const logical = normalizeLogicalPolicy(options.logical)
   if (logical !== null && binding.ffi.poly_ctx_set_logical_policy(binding.ctx, logical) !== 0) {
     binding.destroy()

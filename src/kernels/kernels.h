@@ -28,6 +28,7 @@ typedef struct {
 } PolyKernelImpl;
 
 bool poly_kernel_match_gemm(PolyCtx *, PolyUOp *, PolyGemmDesc *);
+const char *poly_kernel_gemm_supported(PolyCtx *, const PolyGemmDesc *, int rows, int cols);
 PolyUOp *poly_kernel_gemm_lower(
     PolyCtx *,
     const PolyGemmDesc *,
@@ -37,6 +38,9 @@ PolyUOp *poly_kernel_gemm_lower(
 );
 PolyUOp *poly_kernel_probabilities_lower(PolyCtx *, const PolyGemmDesc *);
 const PolyKernelImpl *poly_cpu_kernel_impls(int *count);
+const PolyKernelImpl *poly_portable_kernel_impls(const char *device, int *count);
+const char *poly_kernel_webgpu_supported(PolyCtx *, const PolyGemmDesc *);
+PolyUOp *poly_kernel_webgpu_lower(PolyCtx *, const PolyGemmDesc *);
 PolyUOp *poly_kernel_select(PolyCtx *, PolyUOp *);
 
 #endif

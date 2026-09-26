@@ -330,7 +330,7 @@ def _bound_model_class(runtime):
 class Runtime:
     """Explicit PolyCtx owner for device/context-scoped Python code."""
 
-    def __init__(self, *, device='auto', logical=None):
+    def __init__(self, *, device='auto', logical=None, kernels=None):
       lib = _ffi.get_lib()
       self._device = Device.canonicalize(None if str(device).lower() == 'auto' else device)
       self._ctx = lib.poly_ctx_new()
@@ -339,6 +339,11 @@ class Runtime:
       self._disposed = False
       try:
           policy = _normalize_logical_policy(logical)
+          if kernels is not None:
+              if not isinstance(kernels, bool):
+                  raise TypeError('kernels must be a bool')
+              if lib.poly_ctx_set_kernel_policy(self._ctx, int(kernels)) != 0:
+                  raise RuntimeError('failed to set kernel policy')
           if policy is not None and lib.poly_ctx_set_logical_policy(self._ctx, policy) != 0:
               raise ValueError(f'invalid logical policy {logical!r}')
           dev_id = lib.poly_device_by_name(self._device.encode('utf-8'))

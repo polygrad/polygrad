@@ -2,21 +2,22 @@
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
 
-async function checkPackedGemmModel(pg) {
-  const a = Float32Array.from({length:28}, (_, i) => (i % 9 - 4) / 11)
-  const b = Float32Array.from({length:168}, (_, i) => (i % 13 - 6) / 17)
-  const x = pg.Tensor.empty([2, 2, 7]), w = new pg.Tensor(b).reshape(7, 24)
+async function checkPackedGemmModel(pg, gpuTile = false) {
+  const rows = gpuTile ? 32 : 2, kdim = gpuTile ? 32 : 7, ncols = gpuTile ? 128 : 48
+  const a = Float32Array.from({length:2*rows*kdim}, (_, i) => (i % 9 - 4) / 11)
+  const b = Float32Array.from({length:kdim*ncols}, (_, i) => (i % 13 - 6) / 17)
+  const x = pg.Tensor.empty([2, rows, kdim]), w = new pg.Tensor(b).reshape(kdim, ncols)
   await w.realize()
-  const model = await pg.Model.fromCallableAsync(({x}) => x.add(1).permute(1, 0, 2).reshape(4, 7).dot(w), {inputs:{x}, params:{w}})
+  const model = await pg.Model.fromCallableAsync(({x}) => x.add(1).permute(1, 0, 2).reshape(2*rows, kdim).dot(w), {inputs:{x}, params:{w}})
   let restored
   try {
     for (const scale of [1, -0.75]) {
-      const weight = Float32Array.from(b, v => v * scale), expected = new Float32Array(96)
-      for (let m = 0; m < 4; m++) for (let n = 0; n < 24; n++) {
+      const weight = Float32Array.from(b, v => v * scale), expected = new Float32Array(2*rows*ncols)
+      for (let m = 0; m < 2*rows; m++) for (let n = 0; n < ncols; n++) {
         let value = 0
-        const row = (m % 2) * 2 + Math.floor(m / 2)
-        for (let k = 0; k < 7; k++) value += Math.fround(a[row*7+k] + 1) * weight[k*24+n]
-        expected[m*24+n] = value
+        const row = (m % 2) * rows + Math.floor(m / 2)
+        for (let k = 0; k < kdim; k++) value += Math.fround(a[row*kdim+k] + 1) * weight[k*ncols+n]
+        expected[m*ncols+n] = value
       }
       await model.writeBufferAsync('w', weight)
       assertClose((await model.forwardAsync({x:a})).output, expected, 2e-5)
@@ -28,6 +29,38 @@ async function checkPackedGemmModel(pg) {
     await model.dispose()
     x.dispose(); w.dispose()
   }
+}
+
+async function checkPortableGemmModel(createRuntime) {
+  const rt = await createRuntime({kernels:true})
+  try {
+    await checkPackedGemmModel(rt)
+    await checkPackedGemmModel(rt, true)
+    assert(rt._core.ffi.poly_ctx_set_kernel_policy(rt._core.ctx, 0) === -1,
+      'kernel policy changed after compilation')
+    // More than one workgroup, transposed weights, then an incomplete tile
+    // that must keep the generic path. Gradients use the same generic authoring graph.
+    for (const [m,k,n] of [[32,32,64], [64,96,128], [32,48,64], [64,17,64], [8,31,48], [3,7,17]]) {
+      const a=Float32Array.from({length:m*k},(_,i)=>(i%13-6)/32)
+      const b=Float32Array.from({length:n*k},(_,i)=>(i%17-8)/32)
+      const x=new rt.Tensor(a).reshape(m,k), w=new rt.Tensor(b).reshape(n,k).transpose()
+      const y=x.dot(w), loss=y.sum(), expected=new Float32Array(m*n)
+      for(let i=0;i<m;i++) for(let j=0;j<n;j++) for(let r=0;r<k;r++)
+        expected[i*n+j]+=a[i*k+r]*b[j*k+r]
+      try {
+        assertClose(await y.toArrayAsync(),expected,2e-5)
+        await loss.backward()
+        const dx=x.grad, dw=w.grad
+        try {
+          const gx=new Float32Array(m*k), gw=new Float32Array(k*n)
+          for(let i=0;i<m;i++) for(let r=0;r<k;r++) for(let j=0;j<n;j++) gx[i*k+r]+=b[j*k+r]
+          for(let r=0;r<k;r++) for(let j=0;j<n;j++) for(let i=0;i<m;i++) gw[r*n+j]+=a[i*k+r]
+          assertClose(await dx.toArrayAsync(),gx,2e-5)
+          assertClose(await dw.toArrayAsync(),gw,2e-5)
+        } finally {dx.dispose();dw.dispose()}
+      } finally {loss.dispose();y.dispose();x.dispose();w.dispose()}
+    }
+  } finally { await rt.dispose() }
 }
 
 async function checkCpuAttentionModel(pg) {
@@ -1862,6 +1895,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   console.log('\n== Model ==')
 
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
@@ -2642,6 +2676,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))

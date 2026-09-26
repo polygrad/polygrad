@@ -62,6 +62,8 @@ PolyCtx *poly_ctx_new(void) {
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
+  ctx->kernel_policy = poly_getenv_int("POLY_KERNELS", -1);
+  ctx->kernel_policy_locked = false;
   ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
   ctx->uop_storage = poly_map_new(256);
@@ -659,6 +661,15 @@ void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device) {
 
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
   return ctx ? ctx->preferred_device : POLY_DEVICE_AUTO;
+}
+
+int poly_ctx_set_kernel_policy(PolyCtx *ctx, int policy) {
+  if (!ctx || policy < 0 || policy > 1) return -1;
+  /* Retained Model/JIT schedules must not silently outlive their selection
+   * policy. Each context has its own caches; choose policy before lowering. */
+  if (ctx->kernel_policy_locked && ctx->kernel_policy != policy) return -1;
+  ctx->kernel_policy = policy;
+  return 0;
 }
 
 int poly_ctx_set_logical_policy(PolyCtx *ctx, PolyLogicalPolicy policy) {

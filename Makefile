@@ -82,6 +82,8 @@ PARITY_SCRIPT = test/test_tinygrad_parity.py
 PARITY_PY ?= $(if $(wildcard references/.venv-tinygrad-py311/bin/python),references/.venv-tinygrad-py311/bin/python,conda run -n tiny python)
 
 # Emscripten uses the complete core/codec set minus native backend owners.
+SRC += src/kernels/portable.c src/kernels/webgpu.c
+FILC_SRC += src/kernels/portable.c src/kernels/webgpu.c
 WASM_SRC = $(filter-out src/runtime_cpu.c src/renderer/cuda.c src/runtime_cuda.c src/renderer/hip.c src/runtime_hip.c src/renderer/isa/x86.c,$(SRC)) $(CODEC_SRC)
 WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
 
@@ -650,6 +652,11 @@ bench-kv: build/libpolygrad.so
 .PHONY: test-bench-wasm
 test-bench-wasm:
 	$(NODE) --test bench/test_wasm_checks.mjs
+
+.PHONY: bench-kernel-targets
+KERNEL_TARGET_ARGS ?=
+bench-kernel-targets: build-js
+	$(NODE) bench/bench_kernel_targets.mjs $(KERNEL_TARGET_ARGS)
 
 bench-jax-js-wasm: wasm-pkg
 	$(NODE) bench/bench_jax_js_wasm.mjs --iters $(BENCH_JAX_JS_ITERS) --warmup $(BENCH_JAX_JS_WARMUP) $(BENCH_JAX_JS_EXTRA)

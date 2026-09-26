@@ -523,7 +523,7 @@ async function main() {
   try {
     const syncResult = await runSyncContractTests(polygrad, pg, { core: 'wasm' })
     const tensorResult = await runTensorTests(pg, () => polygrad.create({ core: 'wasm', device: pg.device }))
-    const instanceResult = await runModelRuntimeTests(pg, () => polygrad.create({ core: 'wasm', device: pg.device }))
+    const instanceResult = await runModelRuntimeTests(pg, (opts = {}) => polygrad.create({ core: 'wasm', device: pg.device, ...opts }))
     const jitResult = await runJitTests(pg)
     const optimResult = await runOptimTests(pg)
     const modelResult = await runModelTests(pg)

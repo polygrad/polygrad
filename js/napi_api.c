@@ -4352,6 +4352,17 @@ static napi_value napi_poly_ctx_set_logical_policy(napi_env env, napi_callback_i
   return out;
 }
 
+static napi_value napi_poly_ctx_set_kernel_policy(napi_env env, napi_callback_info info) {
+  napi_value argv[2], out;
+  size_t argc = 2;
+  int32_t policy = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &policy));
+  int rc = poly_ctx_set_kernel_policy(get_external(env, argv[0]), policy);
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
 static napi_value napi_poly_ctx_get_logical_policy(napi_env env, napi_callback_info info) {
   napi_value argv[1], out;
   size_t argc = 1;
@@ -7644,6 +7655,7 @@ NAPI_MODULE_INIT() {
       ),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
       DECLARE_NAPI_METHOD("poly_ctx_set_logical_policy", napi_poly_ctx_set_logical_policy),
+      DECLARE_NAPI_METHOD("poly_ctx_set_kernel_policy", napi_poly_ctx_set_kernel_policy),
       DECLARE_NAPI_METHOD("poly_ctx_get_logical_policy", napi_poly_ctx_get_logical_policy),
       DECLARE_NAPI_METHOD("poly_get_noopt", napi_poly_get_noopt),
       DECLARE_NAPI_METHOD("poly_get_beam", napi_poly_get_beam),

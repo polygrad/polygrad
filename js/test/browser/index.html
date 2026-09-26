@@ -487,8 +487,8 @@ async function main() {
   }
 
   // Run the full tensor test suite
-  const createRuntime = () => {
-    const runtime = polygrad.create({ core: 'wasm', device })
+  const createRuntime = (opts = {}) => {
+    const runtime = polygrad.create({ core: 'wasm', device, ...opts })
     if (isWebGpu) installWebGpuAsyncTestAdapter(runtime)
     return runtime
   }

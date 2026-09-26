@@ -5,7 +5,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 105
+#define POLYGRAD_ABI_VERSION 106
 
 #include <stdint.h>
 #include <stddef.h>
@@ -865,6 +865,9 @@ int poly_schedule_cache_clear(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 int poly_ctx_set_logical_policy(PolyCtx *ctx, PolyLogicalPolicy policy);
+/* Optional physical kernels: 0 off, 1 auto. Set before the first lowering;
+ * changing policy afterward returns -1. Does not change portable graphs. */
+int poly_ctx_set_kernel_policy(PolyCtx *ctx, int policy);
 PolyLogicalPolicy poly_ctx_get_logical_policy(const PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
 

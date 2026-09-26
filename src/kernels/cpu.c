@@ -24,18 +24,7 @@ static const char *probabilities_supported(PolyCtx *ctx, const PolyGemmDesc *d) 
 static const char *gemm_supported(PolyCtx *ctx, const PolyGemmDesc *d) {
   const char *reason = cpu_fp32(d);
   if (reason) return reason;
-  if (d->K > 4096 || d->N > 4096 || d->M > 512) return "shape outside validated bounds";
-  if (d->N % 24 || d->M % 4) return "requires complete 4x24 tiles";
-  for (int i = 0; i < d->bd - 2; i++)
-    if (d->bs[i] != 1) return "batched right operand";
-  int nd = poly_uop_ndim(ctx, d->a_base);
-  if (nd < 0 || nd > POLY_MAX_DIMS) return "unsupported producer rank";
-  for (int i = 0; i < nd; i++) {
-    PolyUOp *dim = poly_uop_shape_dim(ctx, d->a_base, i);
-    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT || dim->arg.i <= 0)
-      return "symbolic producer shape";
-  }
-  return NULL;
+  return poly_kernel_gemm_supported(ctx, d, 4, 24);
 }
 
 static PolyUOp *gemm_lower(PolyCtx *ctx, const PolyGemmDesc *d) {
