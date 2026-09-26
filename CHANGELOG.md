@@ -2,7 +2,15 @@
 
 ## Unreleased (KV branch)
 
-- Require C ABI104 and write PGIR22; continue reading PGIR19. PGPM10 is unchanged.
+- Require C ABI106 and write PGIR22; continue reading PGIR19. PGPM10 is unchanged.
+- Retain eligible Wasm four-lane register accumulators as vectors, including
+  default kernels, without changing lane arithmetic or reduction order.
+- Add runtime-scoped opt-in packed GEMM for CPU and Wasm SIMD128. Small Wasm
+  contractions retain generic lowering; default kernel selection remains off.
+- Add opt-in WebGPU GEMM with cooperative workgroup tiling and no weight-packing
+  dispatch; unsupported shapes retain generic lowering.
+- Resolve Python Model buffer names in one C call instead of enumerating names
+  across the binding boundary on every output readback.
 - Add entrypoint-local integer controls, transient Model state and pre-write
   admission, including bounds derived from read/write views on build/import.
   Remove the unreleased author-precondition API and serialized predicate field.

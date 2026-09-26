@@ -2,8 +2,10 @@
 
 ## Unreleased (KV branch)
 
-- Require C ABI104/PGIR22 (reads PGIR19). Add Model integer controls and transient
+- Require C ABI106/PGIR22 (reads PGIR19). Add Model integer controls and transient
   state, with admission before mutation.
+- Add `Runtime(kernels=True)` for optional target-specific physical kernels.
+- Look up Model output buffers directly in C without repeated Python name scans.
 - Add `models.Transformer(Model)` for cached C-backed generation. Reset clears KV
   without rewinding sampling; bundles preserve RNG state and start with empty KV.
 
