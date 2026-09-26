@@ -1698,10 +1698,140 @@ static bool wasm_stack_native_vec(PolyUOp *u, PolyDType *dtype_out, int *lanes_o
   return true;
 }
 
+static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_out);
+
+typedef struct {
+  LocalMap buffers, snapshots;
+  int *snapshot_locals;
+} WasmRegVectors;
+
+/* Only promote complete four-lane stores. Partial writes, gated loads and
+ * reinterpreted accesses keep scalar storage. This is renderer-local SLP,
+ * not a change to the scheduled graph or its reduction order. */
+static PolyUOp **wasm_pack_reg_stores(PolyCtx *ctx, PolyUOp **uops, int *count, WasmRegVectors *v) {
+  int n = *count;
+  lm_init(&v->buffers, n * 2);
+  lm_init(&v->snapshots, n * 2);
+  PolyUOp **out = malloc((size_t)n * sizeof(*out));
+  v->snapshot_locals = calloc((size_t)n, sizeof(int));
+  if (!out || !v->snapshot_locals) {
+    free(out);
+    return NULL;
+  }
+  for (int i = 0; i < n; i++) {
+    PolyUOp *r = uops[i];
+    if (r->op != POLY_OP_BUFFER || !poly_program_memory_is(r, POLY_ADDR_REG) ||
+        !poly_dtype_eq(poly_program_buffer_dtype(r), POLY_FLOAT32) ||
+        wasm_reg_storage_size(uops, n, r) != 4)
+      continue;
+    bool valid = true;
+    for (int j = 0; j < n && valid; j++) {
+      PolyUOp *u = uops[j], *base = NULL;
+      int lane = -1;
+      if ((u->op != POLY_OP_LOAD && u->op != POLY_OP_STORE) ||
+          !wasm_reg_addr_index(u->src[0], &base, &lane) || base != r)
+        continue;
+      if (u->op == POLY_OP_LOAD) {
+        valid = u->n_src == 1 && poly_dtype_eq(u->dtype, POLY_FLOAT32);
+        /* The scalar emitter, like pinned CStyle, aliases a single-use REG
+         * load. Do not promote it if its consumer observes a later write. */
+        int uses = 0, last = j;
+        for (int k = j + 1; k < n; k++)
+          for (int s = 0; s < uops[k]->n_src; s++)
+            if (uops[k]->src[s] == u) {
+              uses++;
+              last = k;
+            }
+        if (uses == 1)
+          for (int k = j + 1; k < last; k++) {
+            PolyUOp *written = NULL;
+            if (uops[k]->op == POLY_OP_STORE &&
+                wasm_reg_addr_index(uops[k]->src[0], &written, NULL) && written == r)
+              valid = false;
+          }
+        continue;
+      }
+      unsigned mask = 0;
+      for (int k = 0; k < 4 && valid; k++) {
+        PolyUOp *s = j + k < n ? uops[j + k] : NULL;
+        valid = s && s->op == POLY_OP_STORE && s->n_src == 2 &&
+                wasm_reg_addr_index(s->src[0], &base, &lane) && base == r && lane >= 0 &&
+                lane < 4 && !(mask & (1u << lane)) &&
+                poly_dtype_eq(s->src[1]->dtype, POLY_FLOAT32) &&
+                poly_uop_max_numel(ctx, s->src[1]) == 1;
+        if (valid) mask |= 1u << lane;
+      }
+      j += 3;
+    }
+    /* SHRINK and typed aliases have separate memory contracts. */
+    for (int j = 0; j < n && valid; j++)
+      if ((uops[j]->op == POLY_OP_SHRINK || uops[j]->op == POLY_OP_CAST ||
+           uops[j]->op == POLY_OP_BITCAST) &&
+          uops[j]->n_src && wasm_acc_base(uops[j]->src[0]) == r)
+        valid = false;
+    if (valid) lm_set(&v->buffers, r, 1);
+  }
+  int len = 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i], *base = NULL;
+    int lane = -1;
+    if (u->op == POLY_OP_STORE && wasm_reg_addr_index(u->src[0], &base, &lane) &&
+        lm_get(&v->buffers, base) == 1) {
+      PolyUOp *values[4], *address = NULL;
+      for (int k = 0; k < 4; k++) {
+        wasm_reg_addr_index(uops[i + k]->src[0], NULL, &lane);
+        values[lane] = uops[i + k]->src[1];
+        if (lane == 0) address = uops[i + k]->src[0];
+      }
+      out[len++] = poly_uop_stack(ctx, values, 4);
+      out[len] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, out[len - 1], poly_arg_none());
+      len++;
+      i += 3;
+    } else
+      out[len++] = u;
+  }
+  *count = len;
+  LocalMap latest;
+  lm_init(&latest, len * 2);
+  int boundary = -1;
+  for (int i = 0; i < len; i++) {
+    PolyUOp *u = out[i], *base = NULL;
+    if (u->op == POLY_OP_STORE || u->op == POLY_OP_RANGE || u->op == POLY_OP_END ||
+        u->op == POLY_OP_IF || u->op == POLY_OP_ENDIF)
+      boundary = i;
+    if (u->op != POLY_OP_LOAD || !wasm_reg_addr_index(u->src[0], &base, NULL) ||
+        lm_get(&v->buffers, base) != 1)
+      continue;
+    int owner = lm_get(&latest, base);
+    if (owner <= boundary) lm_set(&latest, base, owner = i);
+    lm_set(&v->snapshots, u, owner);
+  }
+  lm_destroy(&latest);
+  return out;
+}
+
+static bool wasm_reg_vector_lanes(WasmRegVectors *v, PolyUOp **lanes, int n) {
+  if (!v || n != 4 || lanes[0]->op != POLY_OP_LOAD) return false;
+  int owner = lm_get(&v->snapshots, lanes[0]);
+  if (owner < 0) return false;
+  for (int l = 0; l < 4; l++) {
+    int index;
+    if (lanes[l]->op != POLY_OP_LOAD || lm_get(&v->snapshots, lanes[l]) != owner ||
+        !wasm_reg_addr_index(lanes[l]->src[0], NULL, &index) || index != l)
+      return false;
+  }
+  return true;
+}
+
 /* Tinygrad 2026-08-22/a9069c177a9d renderer/cstyle.py:52-54 emits a shaped
  * STACK of lane-isomorphic scalar expressions as one native vector value.
  * Wasm has no source compiler, so recognize that same structure here. */
-static bool wasm_structural_vec_expr(PolyCtx *ctx, PolyUOp **lanes, int n_lanes) {
+static bool wasm_structural_vec_expr(
+    PolyCtx *ctx,
+    PolyUOp **lanes,
+    int n_lanes,
+    WasmRegVectors *v
+) {
   if (!ctx || !lanes || n_lanes <= 1 || n_lanes > 4) return false;
 
   PolyUOp *first = lanes[0];
@@ -1710,6 +1840,7 @@ static bool wasm_structural_vec_expr(PolyCtx *ctx, PolyUOp **lanes, int n_lanes)
   for (int lane = 1; lane < n_lanes; lane++)
     if (lanes[lane] != first) same = false;
   if (same) return poly_uop_max_numel(ctx, first) == 1;
+  if (wasm_reg_vector_lanes(v, lanes, n_lanes)) return true;
 
   if (first->op == POLY_OP_INDEX && first->n_src >= 2) {
     PolyUOp *base = first->src[0];
@@ -1734,7 +1865,7 @@ static bool wasm_structural_vec_expr(PolyCtx *ctx, PolyUOp **lanes, int n_lanes)
     PolyUOp *src_lanes[4];
     for (int lane = 0; lane < n_lanes; lane++)
       src_lanes[lane] = lanes[lane]->src[src];
-    if (!wasm_structural_vec_expr(ctx, src_lanes, n_lanes)) return false;
+    if (!wasm_structural_vec_expr(ctx, src_lanes, n_lanes, v)) return false;
   }
   return true;
 }
@@ -1755,7 +1886,7 @@ static void wasm_mark_structural_vec_expr(
     for (int i = 0; i < n; i++)
       if (uops[i] == lanes[lane]) covered[i] = true;
 
-  if (lanes[0]->op == POLY_OP_INDEX) return;
+  if (lanes[0]->op == POLY_OP_INDEX || lanes[0]->op == POLY_OP_LOAD) return;
   for (int src = 0; src < lanes[0]->n_src; src++) {
     PolyUOp *src_lanes[4];
     for (int lane = 0; lane < n_lanes; lane++)
@@ -1769,14 +1900,16 @@ static void wasm_plan_structural_vecs(
     PolyUOp **uops,
     int n,
     bool *fused_stack,
-    bool *skip
+    bool *skip,
+    WasmRegVectors *v
 ) {
   bool *covered = calloc((size_t)n, sizeof(*covered));
   if (!covered) return;
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (!wasm_stack_native_vec(u, NULL, NULL) || !wasm_structural_vec_expr(ctx, u->src, u->n_src))
+    if (!wasm_stack_native_vec(u, NULL, NULL) ||
+        !wasm_structural_vec_expr(ctx, u->src, u->n_src, v))
       continue;
     fused_stack[i] = true;
     covered[i] = true;
@@ -1889,7 +2022,7 @@ static WasmScalarPack *wasm_plan_scalar_packs(
       PolyUOp *operands[4];
       for (int k = 0; k < 4; k++)
         operands[k] = lanes[k]->src[s];
-      if (!wasm_structural_vec_expr(ctx, operands, 4)) ready = false;
+      if (!wasm_structural_vec_expr(ctx, operands, 4, NULL)) ready = false;
       PolyUOp *value = first->src[s];
       if (value->op == POLY_OP_INDEX && value->n_src >= 2 &&
           wasm_uop_value_is_v128(ctx, value->src[0]))
@@ -1913,9 +2046,15 @@ static bool wasm_emit_structural_vec_expr(
     WasmBuf *body,
     LocalMap *locals,
     PolyUOp **lanes,
-    int n_lanes
+    int n_lanes,
+    WasmRegVectors *v
 ) {
   PolyUOp *first = lanes[0];
+  if (wasm_reg_vector_lanes(v, lanes, n_lanes)) {
+    wb_byte(body, WASM_OP_LOCAL_GET);
+    wb_uleb128(body, v->snapshot_locals[lm_get(&v->snapshots, first)]);
+    return true;
+  }
   bool same = true;
   for (int lane = 1; lane < n_lanes; lane++)
     if (lanes[lane] != first) same = false;
@@ -1956,7 +2095,7 @@ static bool wasm_emit_structural_vec_expr(
     PolyUOp *src_lanes[4];
     for (int lane = 0; lane < n_lanes; lane++)
       src_lanes[lane] = lanes[lane]->src[src];
-    if (!wasm_emit_structural_vec_expr(ctx, body, locals, src_lanes, n_lanes)) return false;
+    if (!wasm_emit_structural_vec_expr(ctx, body, locals, src_lanes, n_lanes, v)) return false;
   }
 
   PolyDType dtype = wasm_simd_value_dtype(first);
@@ -2228,9 +2367,12 @@ static void build_code_scalar(
     MathImports *math,
     int n_imported_funcs
 ) {
+  WasmRegVectors reg_vectors = {0};
+  PolyUOp **packed_uops = wasm_pack_reg_stores(ctx, uops, &n, &reg_vectors);
+  if (packed_uops) uops = packed_uops;
   bool *fused_stack = calloc((size_t)n, sizeof(*fused_stack));
   bool *skip = calloc((size_t)n, sizeof(*skip));
-  if (fused_stack && skip) wasm_plan_structural_vecs(ctx, uops, n, fused_stack, skip);
+  if (fused_stack && skip) wasm_plan_structural_vecs(ctx, uops, n, fused_stack, skip, &reg_vectors);
   WasmScalarPack *packs = wasm_plan_scalar_packs(ctx, uops, n, skip);
 
   /* Same direct-edge count as pinned CStyleLanguage._render, including
@@ -2250,6 +2392,8 @@ static void build_code_scalar(
 
   /* First pass: count locals */
   for (int i = 0; i < n; i++) {
+    if (uops[i]->op == POLY_OP_LOAD && lm_get(&reg_vectors.snapshots, uops[i]) == i)
+      n_locals_v128++;
     if (skip && skip[i]) continue;
     if (packs && packs[i].owner == i + 1) n_locals_v128++;
     PolyUOp *u = uops[i];
@@ -2266,7 +2410,7 @@ static void build_code_scalar(
             shrink_dtype, true, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
             &n_locals_v128
         );
-      } else if (!wasm_load_aliases_reg(u, &child_count)) {
+      } else if (lm_get(&reg_vectors.snapshots, u) >= 0 || !wasm_load_aliases_reg(u, &child_count)) {
         count_local(
             u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
             &n_locals_f64, &n_locals_v128
@@ -2288,9 +2432,11 @@ static void build_code_scalar(
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
+      bool vector = lm_get(&reg_vectors.buffers, u) == 1;
+      if (vector) reg_size = 1;
       for (int r = 0; r < reg_size; r++)
         count_local(
-            base, false, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64, &n_locals_v128
+            base, vector, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64, &n_locals_v128
         );
     }
     if (u->op == POLY_OP_STACK)
@@ -2369,6 +2515,17 @@ static void build_code_scalar(
 
   /* --- Second pass: emit instructions --- */
   for (int i = 0; i < n; i++) {
+    /* Snapshot at the original LOAD, never at its later vector consumer.
+     * Otherwise an intervening register STORE would change SSA semantics. */
+    if (uops[i]->op == POLY_OP_LOAD && lm_get(&reg_vectors.snapshots, uops[i]) == i) {
+      PolyUOp *base = NULL;
+      wasm_reg_addr_index(uops[i]->src[0], &base, NULL);
+      int local = reg_vectors.snapshot_locals[i] = next_v128++;
+      wb_byte(&body, WASM_OP_LOCAL_GET);
+      wb_uleb128(&body, rlm_get(&reg_locals, base, 0));
+      wb_byte(&body, WASM_OP_LOCAL_SET);
+      wb_uleb128(&body, local);
+    }
     if (skip && skip[i]) continue;
     PolyUOp *u = uops[i];
 
@@ -2416,13 +2573,20 @@ static void build_code_scalar(
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
+      bool vector = lm_get(&reg_vectors.buffers, u) == 1;
       int *reg_slots = malloc((size_t)reg_size * sizeof(int));
       if (!reg_slots) reg_size = 0;
       for (int r = 0; r < reg_size; r++) {
+        if (vector && r) {
+          reg_slots[r] = reg_slots[0];
+          continue;
+        }
         int local_idx =
-            alloc_local(base, false, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
+            alloc_local(base, vector, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
         reg_slots[r] = local_idx;
-        if (dt_is_f64(base)) {
+        if (vector) {
+          emit_v128_zero(&body);
+        } else if (dt_is_f64(base)) {
           wb_byte(&body, WASM_OP_F64_CONST);
           wb_f64(&body, 0.0);
         } else if (poly_dtype_is_float(base)) {
@@ -2468,7 +2632,8 @@ static void build_code_scalar(
       bool emitted_fused = false;
       if (fused_stack && fused_stack[i]) {
         int start = body.len;
-        emitted_fused = wasm_emit_structural_vec_expr(ctx, &body, &locals, u->src, u->n_src);
+        emitted_fused =
+            wasm_emit_structural_vec_expr(ctx, &body, &locals, u->src, u->n_src, &reg_vectors);
         if (!emitted_fused) body.len = start;
       }
       if (!emitted_fused && wasm_uop_value_is_v128(ctx, u) && u->n_src > 0) {
@@ -2643,7 +2808,8 @@ static void build_code_scalar(
       int lanes = 1;
       bool shrink_vec = wasm_load_shrink_native_vec(u, &load_dtype, &lanes);
       bool v128 = shrink_vec || wasm_uop_value_is_v128(ctx, u);
-      if (wasm_load_aliases_reg(u, &child_count)) {
+      int snapshot = lm_get(&reg_vectors.snapshots, u);
+      if (snapshot < 0 && wasm_load_aliases_reg(u, &child_count)) {
         lm_set(&locals, u, rlm_get(&reg_locals, reg_base, reg_lane));
         continue;
       }
@@ -2681,7 +2847,11 @@ static void build_code_scalar(
         }
       } else if (is_reg) {
         wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, rlm_get(&reg_locals, reg_base, reg_lane));
+        wb_uleb128(
+            &body, snapshot >= 0 ? reg_vectors.snapshot_locals[snapshot]
+                                 : rlm_get(&reg_locals, reg_base, reg_lane)
+        );
+        if (snapshot >= 0) emit_v128_extract_lane(&body, POLY_FLOAT32, reg_lane);
       } else {
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, lm_get(&locals, u->src[0]));
@@ -2853,7 +3023,7 @@ static void build_code_scalar(
             PolyUOp *operands[4];
             for (int k = 0; k < 4; k++)
               operands[k] = uops[pack->roots[k]]->src[s];
-            wasm_emit_structural_vec_expr(ctx, &body, &locals, operands, 4);
+            wasm_emit_structural_vec_expr(ctx, &body, &locals, operands, 4, &reg_vectors);
           }
           emit_alu_simd_f32x4(&body, wasm_scalar_pack_op(u));
           wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -2978,6 +3148,10 @@ static void build_code_scalar(
   free(skip);
   free(fused_stack);
   free(packs);
+  free(packed_uops);
+  free(reg_vectors.snapshot_locals);
+  lm_destroy(&reg_vectors.buffers);
+  lm_destroy(&reg_vectors.snapshots);
 }
 
 /* Build code section (SIMD) */
