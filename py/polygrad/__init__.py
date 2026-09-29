@@ -362,7 +362,7 @@ class Runtime:
           })
           class RuntimeTransformer(models.Transformer):
               __init__ = _bound_runtime_call(self, models.Transformer.__init__)
-          for name in ('load', 'from_bundle'):
+          for name in ('load', 'from_bundle', 'from_gguf'):
               setattr(RuntimeTransformer, name, staticmethod(
                   _bound_runtime_call(self, getattr(models.Transformer, name))))
           self.models.Transformer = RuntimeTransformer

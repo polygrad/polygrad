@@ -1,10 +1,24 @@
 # Changelog
 
-## Unreleased (KV branch)
+## 0.6.0 (unreleased)
 
-- Require C ABI106/PGIR22 (reads PGIR19). Add Model integer controls and transient
+- Fix float64 sine range reduction in shared codegen, preserving the full
+  significand and covering finite double exponents without native-sine bypasses.
+  Make Wasm scalar float-to-integer casts nontrapping, matching SIMD casts.
+- Make CUDA graph-cache ownership weak while live JIT graphs retain their scratch
+  buffers. Avoid temporary owning UOps during JavaScript JIT input inspection.
+- Add `models.Transformer.fromGGUF` for validated cached generation; generic
+  `Model.fromGGUF` remains unchanged.
+- Require C ABI107/PGIR22 (reads PGIR19). Add Model integer controls and transient
   state, with admission before mutation.
 - Add the `kernels: true` runtime option for CPU, Wasm SIMD128 and tiled WebGPU GEMM.
+- Remove context-registry native/Wasm adapters; see the root changelog's C
+  migration table. `POLY_KERNELS` is sampled once per runtime.
+- Add `Model.fromONNX()` for fixed or explicitly specialized inference graphs.
+- Remove ordinary WebGPU per-dispatch waits. Decompose Wasm transcendentals and
+  retain eligible four-lane accumulators as vectors without reordering reductions.
+- Fuse sampling with decode and specialize full prefill chunks. Qwen3 GGUF import
+  accepts `cacheCapacity` and `prefillChunkSize` for cached Transformer use.
 - Add `models.Transformer` for cached C-backed generation, including WebGPU.
   `reset()`/`resetAsync()` clear KV without rewinding sampling. Bundles preserve
   RNG state and start with empty KV. Constructor options accept `modelType`.

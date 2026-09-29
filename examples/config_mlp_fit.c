@@ -7,6 +7,7 @@
  */
 
 #include "models/mlp.h"
+#include <math.h>
 #include <stdio.h>
 
 int main(void) {
@@ -24,7 +25,10 @@ int main(void) {
   PolyModel *inst = poly_mlp_into(NULL, &cfg, POLY_DEVICE_AUTO);
   if (!inst) return 1;
 
-  poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f);
+  if (poly_model_set_optimizer(inst, POLY_OPTIM_SGD, 0.03f, 0.0f, 0.0f, 0.0f, 0.0f) != 0) {
+    poly_model_free(inst);
+    return 1;
+  }
   float x[] = {1.0f, 2.0f};
   float y[] = {4.0f};
   PolyIOBinding io[] = {
@@ -32,11 +36,14 @@ int main(void) {
 
   float first = 0.0f, last = 0.0f;
   for (int step = 0; step < 12; step++) {
-    poly_model_train_step(inst, NULL, io, 2, &last);
+    if (poly_model_train_step(inst, NULL, io, 2, &last) != 0) {
+      poly_model_free(inst);
+      return 1;
+    }
     if (step == 0) first = last;
   }
   printf("mlp loss %.6f -> %.6f\n", first, last);
 
   poly_model_free(inst);
-  return 0;
+  return !(isfinite(last) && last < first);
 }

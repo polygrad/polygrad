@@ -119,16 +119,22 @@ class UOp {
     return this.ffi.poly_uop_device_names(this.ctx, this.raw)
   }
 
-  get base() {
+  get _baseRaw() {
     const ops = this.ffi.__polygradOps || {}
-    const op = this.op
-    if (op === ops.RESHAPE || op === ops.EXPAND || op === ops.PERMUTE ||
+    let raw = this.raw
+    while (raw) {
+      const op = Number(this.ffi.poly_uop_op(raw))
+      if (!(op === ops.RESHAPE || op === ops.EXPAND || op === ops.PERMUTE ||
         op === ops.PAD || op === ops.SHRINK || op === ops.FLIP ||
-        op === ops.MULTI || op === ops.DETACH) {
-      const sources = this.src
-      if (sources.length) return sources[0].base
+        op === ops.MULTI || op === ops.DETACH) || !this.ffi.poly_uop_n_src(raw)) break
+      raw = this.ffi.poly_uop_src(raw, 0)
     }
-    return this
+    return raw
+  }
+
+  get base() {
+    const raw = this._baseRaw
+    return raw === this.raw ? this : new UOp(this.ctx, this.ffi, raw)
   }
 
   hasBufferIdentity() {
@@ -155,7 +161,13 @@ class UOp {
   get isRealized() {
     // tinygrad/uop/ops.py:881-891: movement views are realized when their
     // recursive base buffer is allocated.
-    return this.base.realized !== null
+    // Inspection must not create owning wrappers which hold device storage
+    // until the JS finalizer runs, especially on every JIT replay.
+    const base = this._baseRaw
+    const ops = this.ffi.__polygradOps || {}
+    if (!base || Number(this.ffi.poly_uop_op(base)) !== ops.BUFFER) return false
+    const buffer = this.ffi.poly_uop_buffer(this.ctx, base)
+    return !!(buffer && this.ffi.poly_buffer_is_allocated(this.ctx, buffer))
   }
 
   get is_realized() { return this.isRealized }

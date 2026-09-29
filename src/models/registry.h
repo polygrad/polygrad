@@ -9,6 +9,7 @@
 typedef struct {
   PolyCtx *ctx; /* NULL requests a standalone owning Model. */
   int max_batch, max_seq_len;
+  int cache_capacity, prefill_chunk_size;
   PolyDevice device;
 } PolyGenericImportOpts;
 

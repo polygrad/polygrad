@@ -4,7 +4,6 @@
 #include <stdio.h>
 
 typedef struct {
-  bool portable;
   bool failed, debug;
 } KernelSelection;
 
@@ -14,7 +13,7 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
   PolyGemmDesc d;
   if (s->failed || !poly_kernel_match_gemm(ctx, u, &d)) return NULL;
   int count = 0;
-  const PolyKernelImpl *impls = s->portable ? poly_portable_kernel_impls(d.device, &count) : NULL;
+  const PolyKernelImpl *impls = poly_portable_kernel_impls(d.device, &count);
   if (!count) impls = poly_cpu_kernel_impls(&count);
   for (int i = 0; i < count; i++) {
     const PolyKernelImpl *impl = &impls[i];
@@ -34,10 +33,8 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
 
 PolyUOp *poly_kernel_select(PolyCtx *ctx, PolyUOp *sink) {
   ctx->kernel_policy_locked = true;
-  bool portable = ctx->kernel_policy == 1;
-  if (!portable && !(ctx->kernel_policy == -1 && poly_getenv_int("POLY_CPU_GEMM", 0))) return sink;
-  KernelSelection s = {
-      .debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0, .portable = portable};
+  if (!ctx->kernel_policy) return sink;
+  KernelSelection s = {.debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0};
   static _Thread_local PolyPatternMatcher *pm;
   if (!pm) {
     PolyRule rules[] = {{poly_upat_op(POLY_OP_REDUCE, NULL, 0, "x"), select_match}};

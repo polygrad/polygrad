@@ -602,16 +602,6 @@ static napi_value napi_poly_ctx_destroy(napi_env env, napi_callback_info info) {
   return undef;
 }
 
-static napi_value napi_poly_ctx_named_count(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  napi_value out;
-  NAPI_CALL(env, napi_create_int32(env, poly_ctx_named_count(ctx), &out));
-  return out;
-}
-
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
 static napi_value napi_poly_uop_const_float(napi_env env, napi_callback_info info) {
@@ -1029,42 +1019,6 @@ static napi_value napi_poly_uop_numel(napi_env env, napi_callback_info info) {
   napi_value out;
   NAPI_CALL(env, napi_create_int64(env, numel, &out));
   return out;
-}
-
-static napi_value napi_poly_register_buffer_by_id(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  int32_t role = 0, dtype_id = 0;
-  napi_get_value_int32(env, argv[1], &role);
-  napi_get_value_int32(env, argv[2], &dtype_id);
-  int64_t shape[8];
-  int ndim = read_int64_array(env, argv[3], shape, 8);
-  char *name = read_utf8_arg(env, argv[4], NULL);
-  if (!name) return NULL;
-  PolyUOp *ret = poly_register_buffer_by_id(ctx, role, dtype_id, shape, ndim, name);
-  free(name);
-  return make_external(env, ret);
-}
-
-static napi_value napi_poly_register_existing_buffer(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  int32_t role = 0;
-  napi_get_value_int32(env, argv[1], &role);
-  PolyUOp *buffer = get_external(env, argv[2]);
-  int64_t shape[8];
-  int ndim = read_int64_array(env, argv[3], shape, 8);
-  char *name = read_utf8_arg(env, argv[4], NULL);
-  bool trainable = false;
-  napi_get_value_bool(env, argv[5], &trainable);
-  if (!name) return NULL;
-  PolyUOp *ret = poly_register_existing_buffer(ctx, role, buffer, shape, ndim, name, trainable);
-  free(name);
-  return make_external(env, ret);
 }
 
 /* ── Buffers ───────────────────────────────────────────────────────────── */
@@ -4399,8 +4353,6 @@ static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
   set_named_size(env, out, "bufferOwnedCurrentBytes", s.buffer_owned_current_bytes);
   set_named_size(env, out, "bufferOwnedSourceBytes", s.buffer_owned_source_bytes);
   set_named_size(env, out, "tensorRecords", s.tensor_records);
-  set_named_size(env, out, "registryEntries", s.registry_entries);
-  set_named_size(env, out, "entrypointEntries", s.entrypoint_entries);
   set_named_size(env, out, "compiledArtifactBytes", s.compiled_artifact_bytes);
   set_named_size(env, out, "runtimeArtifactEntries", s.runtime_artifact_entries);
   set_named_size(env, out, "launchCount", s.launch_count);
@@ -5532,48 +5484,6 @@ fail:
   free_string_array_items(entry_objectives, n_entry_objectives);
   free(entry_flags);
   return NULL;
-}
-
-static napi_value napi_poly_model_from_sinks(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-
-  uint32_t n_names = 0, n_sinks = 0;
-  napi_get_array_length(env, argv[1], &n_names);
-  napi_get_array_length(env, argv[2], &n_sinks);
-  uint32_t n = n_names < n_sinks ? n_names : n_sinks;
-  const char **names = calloc(n ? n : 1, sizeof(char *));
-  PolyUOp **sinks = calloc(n ? n : 1, sizeof(PolyUOp *));
-  if (!names || !sinks) {
-    free(names);
-    free(sinks);
-    napi_throw_error(env, NULL, "calloc failed");
-    return NULL;
-  }
-
-  for (uint32_t i = 0; i < n; i++) {
-    napi_value name_val, sink_val;
-    napi_get_element(env, argv[1], i, &name_val);
-    napi_get_element(env, argv[2], i, &sink_val);
-    names[i] = read_utf8_arg(env, name_val, NULL);
-    sinks[i] = get_external(env, sink_val);
-    if (!names[i]) {
-      for (uint32_t j = 0; j < i; j++)
-        free((void *)names[j]);
-      free(names);
-      free(sinks);
-      return NULL;
-    }
-  }
-
-  PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, (int)n);
-  for (uint32_t i = 0; i < n; i++)
-    free((void *)names[i]);
-  free(names);
-  free(sinks);
-  return make_external(env, inst);
 }
 
 static napi_value napi_poly_model_free(napi_env env, napi_callback_info info) {
@@ -7342,19 +7252,21 @@ done:
 }
 
 static napi_value napi_poly_gguf_load_into(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
+  napi_value argv[7];
+  size_t argc = 7;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   void *data;
   size_t len;
   NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
-  int32_t max_batch, max_seq_len, device;
+  int32_t max_batch, max_seq_len, capacity, chunk, device;
   NAPI_CALL(env, napi_get_value_int32(env, argv[1], &max_batch));
   NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_seq_len));
-  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &capacity));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &chunk));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[5], &device));
   PolyModel *inst = poly_gguf_load_into(
-      get_external(env, argv[4]), (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len,
-      (PolyDevice)device
+      get_external(env, argv[6]), (const uint8_t *)data, (int64_t)len, max_batch, max_seq_len,
+      capacity, chunk, (PolyDevice)device
   );
   if (!inst) {
     napi_value n;
@@ -7407,7 +7319,6 @@ NAPI_MODULE_INIT() {
       /* Context */
       DECLARE_NAPI_METHOD("poly_ctx_new", napi_poly_ctx_new),
       DECLARE_NAPI_METHOD("poly_ctx_destroy", napi_poly_ctx_destroy),
-      DECLARE_NAPI_METHOD("poly_ctx_named_count", napi_poly_ctx_named_count),
 
       /* Constants */
       DECLARE_NAPI_METHOD("poly_uop_const_float", napi_poly_uop_const_float),
@@ -7452,8 +7363,6 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_n_src", napi_poly_uop_n_src),
       DECLARE_NAPI_METHOD("poly_uop_src", napi_poly_uop_src),
       DECLARE_NAPI_METHOD("poly_uop_call_grad_fxn_key", napi_poly_uop_call_grad_fxn_key),
-      DECLARE_NAPI_METHOD("poly_register_buffer_by_id", napi_poly_register_buffer_by_id),
-      DECLARE_NAPI_METHOD("poly_register_existing_buffer", napi_poly_register_existing_buffer),
 
       /* Buffers */
       DECLARE_NAPI_METHOD("poly_uop_buffer_by_id", napi_poly_uop_buffer_by_id),
@@ -7780,7 +7689,6 @@ NAPI_MODULE_INIT() {
       /* PolyModel / model runtime */
       DECLARE_NAPI_METHOD("poly_model_from_ir_into", napi_poly_model_from_ir_into),
       DECLARE_NAPI_METHOD("poly_model_from_program", napi_poly_model_from_program),
-      DECLARE_NAPI_METHOD("poly_model_from_sinks", napi_poly_model_from_sinks),
       DECLARE_NAPI_METHOD("poly_model_from_binding_arrays", napi_poly_model_from_binding_arrays),
       DECLARE_NAPI_METHOD("poly_model_free", napi_poly_model_free),
       DECLARE_NAPI_METHOD("poly_model_last_error", napi_poly_model_last_error),

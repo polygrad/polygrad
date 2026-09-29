@@ -184,17 +184,18 @@ troubleshooting sections for installation and runtime errors.
 
 ### Supported Models
 
-| Model type | JSON construction | HF import | GGUF import | Python generation helper |
+| Model type | JSON construction | HF import | GGUF import | Generation |
 | --- | --- | --- | --- | --- |
 | MLP, TabM, NAM, Sequential, Graph | Yes | No | No | No |
-| GPT2, DistilGPT2 | Yes | Yes | Yes | Yes |
-| Llama | Yes | Yes | No | No |
-| Qwen3 | No | No | Yes | No |
+| GPT2, DistilGPT2 | Yes | Yes | Yes | Legacy Python helper (uncached) |
+| Llama | Yes | Yes | No | C-backed Transformer in Python/JS |
+| Qwen3 | No | No | Yes | C-backed Transformer in Python/JS |
 | CLIP, ViT, DINOv2, DINOv3 | Yes | Yes | No | No |
 
 Checkpoint-required types must have all weights loaded before execution or
-export. `models.list()` reports construction/import capabilities; generation
-is a separate Python helper, not implied by checkpoint support.
+export. `models.list()` reports construction/import capabilities. Cached generation
+requires `cache_capacity` / `cacheCapacity`; specialize an imported Model with
+`Transformer.from_model()` / `Transformer.fromModel()`.
 
 ### Configuration-driven Models
 
@@ -326,10 +327,8 @@ inference-only; unsupported operators and shapes produce an import error.
 ### Export Products
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.
-Polygrad 0.5.2 requires C ABI101 and graph formats PGIR19/PGPM10; incompatible
-artifacts are rejected.
-
-The KV development branch uses ABI104 and PGIR22 (also reads PGIR19).
+Polygrad 0.6.0 (unreleased) requires C ABI107 and writes PGIR22/PGPM10.
+PGIR19 bundles remain readable; incompatible artifacts are rejected.
 Cached models save their program and weights, not conversation history.
 
 For separate artifacts:
@@ -393,12 +392,11 @@ SIMD128 on Wasm and tiled FP32 GEMM on WebGPU. Unsupported shapes use the defaul
 path. Policy is fixed at first compilation; portable bundles keep the original operations.
 These kernels are opt-in experiments, not guaranteed speedups.
 
-`POLY_CPU_GEMM=1` retains the CPU-only experimental packed FP32 AVX2/FMA kernel on
-native x86 CPU. Set it before compilation; unsupported shapes use generic
-kernels. This mode also materializes bounded softmax tables before CPU matmul
-to avoid repeated exponentials. It preserves bundles but can change rounding.
-Benchmark with and without `BEAM=2`: custom-kernel boundaries can make the
-default schedule slower. It is disabled by default.
+`POLY_KERNELS=1` sets the default for newly created runtimes; an explicit
+`kernels` option overrides it. Changing the environment does not change an
+existing runtime. The CPU path also materializes bounded softmax tables to
+avoid repeated exponentials. Custom kernels can change rounding; benchmark
+your workload before enabling them.
 
 Python `Context(IGNORE_BEAM_CACHE=1)` or JS `runtime.ignoreBeamCache = 1`
 bypasses saved search results. `BEAM_TIMEOUT_SEC` bounds candidate compilation
@@ -741,16 +739,20 @@ Release acceptance runs maintained targets serially: sanitizers, backend and
 frontend suites, browser/Qwen, HF fixtures, isolated package installs, interchange,
 parity, reviewed analysis, fuzzing and performance checks. CUDA and browser
 WebGPU are required. HIP, HCQ2/GETADDR, genuine multi-GPU and PYLITERAL are
-[excluded](test/fixtures/release_050_scope.json), not certified. Optional
+[excluded](test/fixtures/release_scope.json), not certified. Optional
 MSan/TSan/Fil-C and additional browser executables have separate targets.
 
 Required setup:
 
+- Fetch pinned fixtures with `make fetch-llama-pretrained fetch-onnx-encoder
+  HF_PYTHON=/path/to/hf/python`, or set `LLAMA_CHECKPOINT` and `ONNX_ENCODER_DIR`
+  to existing copies. Preflight verifies their hashes; it does not download them.
 - `PYTHON` and `PARITY_PY`: CPython 3.11 with the selected test dependencies;
   source-audit AST hashes require that interpreter. Release `PYTHON` defaults
   to `PARITY_PY`.
 - `PYTHON_MIN`: Python 3.9 for the isolated minimum-version package check.
-- `HF_PYTHON`: the Torch/Transformers/Hugging Face reference environment.
+- `HF_PYTHON`: the Torch/Transformers/Hugging Face and ONNX Runtime reference environment.
+- An AVX2/FMA CPU for the required native custom-kernel lane.
 - `CC`: defaults to Clang for release runs, with CPU-renderer `__fp16` support.
   Formatting uses `CLANG_FORMAT=clang-format-14`; analysis uses
   `ANALYZER_CC=clang-14` at the exact reviewed version.

@@ -1,5 +1,7 @@
 'use strict'
 
+const { UOp } = require('./uop/ops')
+
 const capturing = []
 
 // Tinygrad Tensor._buffer rejects reads whose values would be baked into capture.
@@ -69,10 +71,10 @@ async function resolveUserReturnAsync(value) {
 function checkDuplicateBuffers(inputs) {
   const seen = new Set()
   for (const t of inputs) {
-    const input = t.uop
-    const u = input && input.base
-    const b = u && u.buffer
-    const key = b ? b.key : '0'
+    const {ffi, ctx} = t._rt._core
+    const input = new UOp(ctx, ffi, t._currentUopRaw(), false)
+    const b = ffi.poly_uop_buffer(ctx, input._baseRaw)
+    const key = b ? String(ffi.poly_uop_key(b)) : '0'
     if (key === '0') throw new Error('jit inputs must be real buffers')
     if (seen.has(key)) throw new Error('duplicate inputs to jit')
     seen.add(key)
@@ -228,7 +230,8 @@ function createBoundJit(runtime) {
       // requires requested-device placement even if the logical HOST base is
       // already allocated.
       for (const t of inputs) {
-        if (!t.uopPhysical || !t.uop.isRealized) t.realize()
+        if (!ffi.poly_tensor_uop_physical(t._tensor) ||
+            !new UOp(ctx, ffi, t._currentUopRaw(), false).isRealized) t.realize()
       }
       checkDuplicateBuffers(inputs)
 
@@ -308,7 +311,8 @@ function createBoundJit(runtime) {
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
       if (this.cnt > 0 && inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
       for (const t of inputs) {
-        if (!t.uopPhysical || !t.uop.isRealized) await t._realizeAsyncUnleased()
+        if (!ffi.poly_tensor_uop_physical(t._tensor) ||
+            !new UOp(ctx, ffi, t._currentUopRaw(), false).isRealized) await t._realizeAsyncUnleased()
       }
       checkDuplicateBuffers(inputs)
 

@@ -73,23 +73,11 @@ struct PolyCtx {
   uint64_t next_tensor_order;
   PolyJit *active_jit_capture;
   struct PolyTensorCapture *tensor_capture;
-  /* Named buffer registry */
-  PolyRegEntry **entries;
-  int n_entries;
-  int entries_cap;
-  PolyMap *name_map;
-  /* Named entrypoints */
-  struct {
-    const char *name;
-    PolyUOp *sink;
-  } * ep;
-  int n_ep;
-  int ep_cap;
   int32_t next_buf_tag;
   int64_t next_unique_id;
   PolyDevice preferred_device;
   PolyLogicalPolicy logical_policy;
-  int kernel_policy; /* -1 inherits the legacy CPU-only opt-in, 0 off, 1 auto */
+  int kernel_policy; /* 0 off, 1 auto; environment sampled at context creation */
   bool kernel_policy_locked;
   PolyFrontendBufferReleaseFn frontend_buffer_release;
 };

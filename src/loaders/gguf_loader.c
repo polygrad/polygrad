@@ -19,9 +19,19 @@ static PolyModel *gguf_load(
     int64_t len,
     int max_batch,
     int max_seq_len,
+    int cache_capacity,
+    int prefill_chunk_size,
     PolyDevice device
 ) {
   poly_import_error_clear();
+  if (cache_capacity < 0 || prefill_chunk_size < 0 || (!cache_capacity && prefill_chunk_size) ||
+      (cache_capacity && (max_batch > 1 || prefill_chunk_size > cache_capacity))) {
+    poly_import_error_set(
+        POLY_IMPORT_ERR_INVALID_ARGUMENT,
+        "invalid cache_capacity/prefill_chunk_size or cache batch (must be 1)"
+    );
+    return NULL;
+  }
 
   PolyGgufDecoded *gguf = NULL;
   if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf) return NULL;
@@ -43,6 +53,8 @@ static PolyModel *gguf_load(
       .ctx = ctx,
       .max_batch = max_batch,
       .max_seq_len = max_seq_len,
+      .cache_capacity = cache_capacity,
+      .prefill_chunk_size = cache_capacity ? (prefill_chunk_size ? prefill_chunk_size : 1) : 0,
       .device = device,
   };
   PolyModel *inst = desc->from_gguf_decoded(gguf, &opts);
@@ -56,9 +68,13 @@ PolyModel *poly_gguf_load(
     int64_t len,
     int max_batch,
     int max_seq_len,
+    int cache_capacity,
+    int prefill_chunk_size,
     PolyDevice device
 ) {
-  return gguf_load(NULL, data, len, max_batch, max_seq_len, device);
+  return gguf_load(
+      NULL, data, len, max_batch, max_seq_len, cache_capacity, prefill_chunk_size, device
+  );
 }
 
 PolyModel *poly_gguf_load_into(
@@ -67,7 +83,13 @@ PolyModel *poly_gguf_load_into(
     int64_t len,
     int max_batch,
     int max_seq_len,
+    int cache_capacity,
+    int prefill_chunk_size,
     PolyDevice device
 ) {
-  return ctx ? gguf_load(ctx, data, len, max_batch, max_seq_len, device) : NULL;
+  return ctx ? gguf_load(
+                   ctx, data, len, max_batch, max_seq_len, cache_capacity, prefill_chunk_size,
+                   device
+               )
+             : NULL;
 }

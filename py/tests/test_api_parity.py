@@ -284,8 +284,9 @@ def test_symbolic_proof_harness_layout_matches_c(tmp_path):
     root = Path(__file__).resolve().parents[2]
     harness = runpy.run_path(str(root / 'test/external/fuzz_symbolic_z3.py'))
     expected, statements = {}, []
-    for name in ('PolyDType', 'PolyArg', 'PolyParamArg', 'PolyUOp', 'PolyBigInt'):
-        layout = harness[name]
+    layouts = {name: harness[name] for name in ('PolyDType', 'PolyArg', 'PolyParamArg', 'PolyUOp', 'PolyBigInt')}
+    layouts['PolyCtxStats'] = _ffi.PolyCtxStats
+    for name, layout in layouts.items():
         expected[name] = ctypes.sizeof(layout)
         statements.append(f'printf("{name} %zu\\n", sizeof({name}));')
         for field, _ in layout._fields_:

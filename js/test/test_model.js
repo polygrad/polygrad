@@ -82,32 +82,25 @@ async function runModelTests(pg) {
   })
 
   await test('fromTensors uses model-local bindings', async () => {
-    const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
-    assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
     const w = new Tensor([[2]], { dtype: 'float32' })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
-    const before = count(pg._core.ctx)
     const inst = await pg.Model.fromTensors({
       inputs: { local_x: x },
       outputs: { local_y: y },
       params: { local_w: w }
     })
-    assert(count(pg._core.ctx) === before, 'fromTensors mutated ctx named registry')
     assert(inst.paramName(0) === 'local_w', 'param name mismatch')
     const out = await inst.forward({ local_x: new Float32Array([3]) })
     assertClose(out.local_y, [6])
   })
 
   await test('fromBindings primitive uses model-local bindings', async () => {
-    const count = pg._core && pg._core.ffi && pg._core.ffi.poly_ctx_named_count
-    assert(typeof count === 'function', 'poly_ctx_named_count unavailable')
     const w = new Tensor([[7]], { dtype: 'float32' })
     await w.realize()
     const x = pg.Tensor.empty([1, 1])
     const y = x.dot(w)
-    const before = count(pg._core.ctx)
     const inst = pg.Model.fromBindings([
       { name: 'bind_x', role: 'input', tensor: x },
       { name: 'bind_w', role: 'state', tensor: w },
@@ -115,7 +108,6 @@ async function runModelTests(pg) {
     ], [
       { name: 'forward', inputs: ['bind_x'], outputs: ['bind_y'] }
     ])
-    assert(count(pg._core.ctx) === before, 'fromBindings mutated ctx named registry')
     assert(inst.paramName(0) === 'bind_w', 'param name mismatch')
     const out = await inst.forward({ bind_x: new Float32Array([3]) })
     assertClose(out.bind_y, [21])

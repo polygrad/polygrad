@@ -22,6 +22,10 @@ def check_api_owners():
     core = (ROOT / 'src/core.h').read_text()
     tensor = (ROOT / 'src/tensor.h').read_text()
     layers = (ROOT / 'src/models/layers.h').read_text()
+    removed = r'poly_(?:param|input|output|target|aux|alias|register_(?:buffer(?:_by_id)?|existing_buffer|entrypoint)|ctx_(?:get(?:_entry)?|named_\w+|entrypoint_\w+|(?:is|set)_trainable)|model_from_(?:ctx|sinks))'
+    for name in ('core.h', 'model.h', 'frontend.h'):
+        declarations = re.sub(r'/\*.*?\*/', '', (ROOT / 'src' / name).read_text(), flags=re.S)
+        assert not re.search(r'\b' + removed + r'\s*\(', declarations), f'removed registry API in {name}'
     assert not re.search(r'\bpoly_(linear|layernorm|rmsnorm|embedding)\(', layers), 'removed ctx-global layer helpers'
     assert '#include "core.h"' in umbrella, 'polygrad.h must expose the shared core header'
     assert not re.search(r'\bpoly_\w+\s*\(', umbrella), 'declarations belong to domain headers'

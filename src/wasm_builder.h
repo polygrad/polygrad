@@ -237,6 +237,8 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 /* WASM SIMD prefix + opcodes */
 
 #define WASM_SIMD_PREFIX 0xFD
+/* 0xfc subopcodes 0..7 are i32/i64.trunc_sat_f32/f64_s/u. */
+#define WASM_MISC_PREFIX 0xFC
 
 /* SIMD opcodes (LEB128-encoded after prefix) */
 #define WASM_SIMD_V128_LOAD 0x00

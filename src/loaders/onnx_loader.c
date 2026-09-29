@@ -3001,17 +3001,17 @@ static bool onnx_node(Import *d, Bytes proto) {
     if (a)
       return a->type == 4 && field(d, a->proto, 5, 2, &t, true) &&
              onnx_initializer(d, t.bytes, n.outputs[0]);
-    if ((a = attr(&n, "value_int"))) {
+    if (attr(&n, "value_int")) {
       int64_t v = attr_int(d, &n, "value_int", 0);
       return poly_import_last_error_code() == POLY_IMPORT_OK &&
              onnx_literal(d, n.outputs[0], POLY_INT64, NULL, 0, &v, 8);
     }
-    if ((a = attr(&n, "value_float"))) {
+    if (attr(&n, "value_float")) {
       float v = (float)attr_float(d, &n, "value_float", 0);
       return poly_import_last_error_code() == POLY_IMPORT_OK &&
              onnx_literal(d, n.outputs[0], POLY_FLOAT32, NULL, 0, &v, 4);
     }
-    if ((a = attr(&n, "value_ints"))) {
+    if (attr(&n, "value_ints")) {
       int64_t values[512];
       int count;
       if (!attr_ints(d, &n, "value_ints", values, 512, &count)) return false;

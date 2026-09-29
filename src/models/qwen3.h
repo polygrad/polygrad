@@ -24,6 +24,8 @@ typedef struct {
   float norm_eps;
   float rope_theta;
   int qk_norm; /* head_dim if per-head Q/K norm, 0 otherwise */
+  int cache_capacity; /* 0 disables cached entrypoints; requires batch_size=1 */
+  int prefill_chunk_size;
 } Qwen3Config;
 
 Qwen3Config poly_qwen3_config_default(void);

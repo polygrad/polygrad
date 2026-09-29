@@ -263,18 +263,6 @@ PolyTensor *poly_tensor_conv2d_dtype_by_id(
     int dtype_id
 );
 
-/* Non-variadic named-buffer registration for FFI/frontends. These mirror
- * poly_param/poly_input/poly_output/poly_target/poly_aux, but accept an exact
- * string and dtype id so Python/JS/WASM do not need to call variadic C APIs. */
-PolyUOp *poly_register_buffer_by_id(
-    PolyCtx *ctx,
-    int role,
-    int dtype_id,
-    const int64_t *shape,
-    int ndim,
-    const char *name
-) POLY_DEPRECATED("use poly_model_from_binding_arrays");
-
 #ifdef __cplusplus
 }
 #endif

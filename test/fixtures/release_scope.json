@@ -1,6 +1,25 @@
 {
   "schema_version": 1,
-  "version": "0.5.2",
+  "version": "0.6.0",
+  "required_fixtures": [
+    {
+      "variable": "LLAMA_CHECKPOINT",
+      "default": "temp/llama-stories15m",
+      "fetch_target": "fetch-llama-pretrained",
+      "files": {
+        "config.json": "20e21467e9774b66d793f802cfc777e5c3b0eb3e2989183f6771c4a06fd10402",
+        "model.safetensors": "b05d853da20dfc009d6d2905f1fc6281c7b5f1b83baa21e41e9383c9ea7098df"
+      }
+    },
+    {
+      "variable": "ONNX_ENCODER_DIR",
+      "default": "temp/onnx-encoder",
+      "fetch_target": "fetch-onnx-encoder",
+      "files": {
+        "onnx/model.onnx": "c26b1b3e2f210b1e49e7a1a5067f6451c7c9039ac5a91848c5d455372fd5d618"
+      }
+    }
+  ],
   "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
   "excluded_capabilities": [
     "HIP backend validation",

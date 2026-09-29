@@ -1,8 +1,30 @@
 # Changelog
 
-## Unreleased (KV branch)
+## 0.6.0 (unreleased)
 
-- Require C ABI106 and write PGIR22; continue reading PGIR19. PGPM10 is unchanged.
+- Preserve per-lane variable shift counts in optimized X86 kernels.
+- Fix float64 sine range reduction in shared codegen, preserving the full
+  significand and covering finite double exponents without native-sine bypasses.
+  Make Wasm scalar float-to-integer casts nontrapping, matching SIMD casts.
+- Make CUDA graph-cache ownership weak while live JIT graphs retain their scratch
+  buffers. Avoid temporary owning UOps during JavaScript JIT input inspection.
+- Require pretrained cached Llama, cross-frontend ONNX encoder, selected custom
+  kernels on CPU/Wasm/WebGPU and C examples in acceptance. Preflight checks pinned
+  checkpoint files before the matrix. Add explicit Transformer GGUF loaders.
+- Require C ABI107 and write PGIR22; continue reading PGIR19. PGPM10 is unchanged.
+- Remove the deprecated context-global registry and its binding adapters. Model
+  state is explicit and local; context statistics no longer include registry or
+  entrypoint counts. BEAM, NOOPT, cache settings and buffer roles are unchanged.
+- Add ONNX inference import in C, exposed as Model loading in Python and JS.
+  Fixed or explicitly specialized graphs export as ordinary portable bundles.
+- Remove WebGPU per-dispatch synchronization on ordinary launches; retain waits
+  for readback and timing. Decompose Wasm transcendentals in generated kernels
+  and pack independent SIMD lanes without changing reduction order.
+- Fuse generation sampling with decode and use fixed-width full-chunk prefill
+  alongside variable-width remainders. Qwen3 GGUF imports accept cache capacity
+  and prefill chunk size through both frontends.
+- Derive Python sdist sources from the Makefile. Use only `POLY_KERNELS` for the
+  environment kernel switch, sampled at context creation.
 - Retain eligible Wasm four-lane register accumulators as vectors, including
   default kernels, without changing lane arithmetic or reduction order.
 - Add runtime-scoped opt-in packed GEMM for CPU and Wasm SIMD128. Small Wasm
@@ -18,6 +40,23 @@
   Python/JavaScript subclasses, variable-width prefill, prefix reuse and sampling.
   Conversation reset clears KV but preserves RNG progress; bundles omit KV history
   and retain RNG state. Generic Model has no generation methods.
+
+### C registry migration
+
+| Removed API | Replacement |
+| --- | --- |
+| `poly_param`, `poly_input`, `poly_target` | `poly_model_param`, `poly_model_input`, `poly_model_target` on a building Model |
+| `poly_output`, `poly_aux` | `poly_model_output`, `poly_model_aux` with an existing Tensor value |
+| `poly_register_buffer`, `poly_register_existing_buffer`, `poly_register_buffer_by_id` | Explicit `PolyBindingSpec` records passed to `poly_model_from_bindings` or its flattened adapter |
+| `poly_alias` | Bind the same Tensor under multiple names using `poly_model_state` |
+| `poly_register_entrypoint` | `poly_model_entrypoint` with named inputs, outputs and optional objective |
+| `poly_ctx_get*`, `poly_ctx_named_*`, `poly_ctx_entrypoint_*` | Model-owned buffer and entrypoint accessors |
+| `poly_ctx_set_trainable`, `poly_ctx_is_trainable` | `poly_model_set_param_trainable`, `poly_model_param_trainable` |
+| `poly_model_from_ctx`, `poly_model_from_sinks` | `poly_model_build` for staged construction, or `poly_model_from_bindings` / `poly_model_from_binding_arrays` for existing tensors |
+
+Models retain their graph roots; callers still own the supplied context unless
+ownership is explicitly transferred. Outputs are values, not registered buffers
+that callers must populate with STOREs. Both C onboarding examples use this path.
 
 ## 0.5.2 (2026-09-19)
 

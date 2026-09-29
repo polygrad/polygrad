@@ -147,9 +147,9 @@ TEST(codegen, cpu_packed_gemm_selection) {
   expected = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&
              (!arch || !arch[0] || !strcmp(arch, "native"));
 #endif
-  const char *old = getenv("POLY_CPU_GEMM");
+  const char *old = getenv("POLY_KERNELS");
   char *saved = old ? strdup(old) : NULL;
-  setenv("POLY_CPU_GEMM", "1", 1);
+  setenv("POLY_KERNELS", "1", 1);
   PolyCtx *ctx = poly_ctx_new();
   PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4, 7}, 2, POLY_DEVICE_CPU);
   PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){7, 24}, 2, POLY_DEVICE_CPU);
@@ -161,9 +161,17 @@ TEST(codegen, cpu_packed_gemm_selection) {
   for (int i = 0; i < n; i++)
     selected += nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
                 !strcmp(nodes[i]->arg.kernel_info->name, "avx2_gemm");
-  setenv("POLY_CPU_GEMM", "0", 1);
-  bool unchanged = poly_kernel_select(ctx, sink) == sink;
-  setenv("POLY_CPU_GEMM", "1", 1);
+  setenv("POLY_KERNELS", "0", 1);
+  /* Selection allocates fresh CALL buffers; compare the selected provider,
+   * not graph identity, when checking that the environment is sampled once. */
+  PolyUOp *reselected = poly_kernel_select(ctx, sink);
+  int selected_again = 0;
+  nodes = reselected ? poly_uop_toposort(ctx, reselected, &n) : NULL;
+  for (int i = 0; i < n; i++)
+    selected_again += nodes[i]->arg.kind == POLY_ARG_KERNEL_INFO &&
+                      !strcmp(nodes[i]->arg.kernel_info->name, "avx2_gemm");
+  bool unchanged = reselected && selected_again == selected;
+  setenv("POLY_KERNELS", "1", 1);
   float av[28], bv[168], actual[96];
   for (int i = 0; i < 28; i++)
     av[i] = (i % 9 - 4) / 11.0f;
@@ -216,6 +224,7 @@ TEST(codegen, cpu_packed_gemm_selection) {
   PolyUOp *values = poly_uop_shrink_to(ctx, poly_tensor_uop_physical(b), (int64_t[]){7, 8}, 2);
   PolyUOp *attention = poly_uop_dot(ctx, prob, values);
   graph = poly_kernel_select(ctx, attention);
+  PolyUOp *attention_graph = graph;
   nodes = poly_uop_toposort(ctx, graph, &n);
   bool materializes_prob = false;
   for (int i = 0; i < n; i++)
@@ -226,27 +235,27 @@ TEST(codegen, cpu_packed_gemm_selection) {
   );
   PolyUOp *other_dot = poly_uop_dot(ctx, unnormalized, values);
   bool leaves_other_dot = poly_kernel_select(ctx, other_dot) == other_dot;
-  setenv("POLY_CPU_GEMM", "0", 1);
-  bool attention_disabled = poly_kernel_select(ctx, attention) == attention;
+  setenv("POLY_KERNELS", "0", 1);
+  bool attention_unchanged = poly_kernel_select(ctx, attention) == attention_graph;
   poly_tensor_release(a);
   poly_tensor_release(b);
   poly_ctx_destroy(ctx);
   if (saved) {
-    setenv("POLY_CPU_GEMM", saved, 1);
+    setenv("POLY_KERNELS", saved, 1);
     free(saved);
   } else
-    unsetenv("POLY_CPU_GEMM");
+    unsetenv("POLY_KERNELS");
   ASSERT_INT_EQ(selected, expected);
   ASSERT_TRUE(unchanged && correct);
   ASSERT_TRUE(preserves_layout);
   ASSERT_INT_EQ(materializes_prob, expected);
-  ASSERT_TRUE(attention_disabled);
+  ASSERT_TRUE(attention_unchanged);
   ASSERT_TRUE(leaves_other_dot);
   PASS();
 }
 
 TEST(codegen, packed_gemm_function_and_thread_boundaries) {
-  const char *keys[] = {"POLY_CPU_GEMM", "NUM_CPU_THREADS", "THREADS"};
+  const char *keys[] = {"POLY_KERNELS", "NUM_CPU_THREADS", "THREADS"};
   char *saved[3];
   for (int i = 0; i < 3; i++)
     saved[i] = getenv(keys[i]) ? strdup(getenv(keys[i])) : NULL;
@@ -5618,6 +5627,15 @@ TEST(codegen, c_renderer_matches_pinned_clang_transcendental_caps) {
   ASSERT_FALSE(caps.has_exp2);
   ASSERT_FALSE(caps.has_log2);
   ASSERT_FALSE(caps.has_sin);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_FLOAT32, POLY_FLOAT64};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *input = poly_uop0(ctx, POLY_OP_PARAM, types[i], poly_arg_int(0));
+    PolyUOp *sine = poly_uop1(ctx, POLY_OP_SIN, types[i], input, poly_arg_none());
+    PolyUOp *lowered = poly_pm_rewrite(poly_get_transcendental_patterns(caps), ctx, sine);
+    ASSERT_NOT_NULL(lowered);
+  }
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -5927,11 +5945,9 @@ TEST(codegen, decomp_owner_half_sin) {
   PASS();
 }
 
-TEST(codegen, transcendental_pow2if_dtype_follows_integer_input) {
-  /* Pinned tinygrad uop/decompositions.py:29-32 chooses pow2if's float result
-   * from q.dtype: int32 -> float32 and int64 -> float64. Its f64
-   * payne_hanek_reduction keeps f64 intermediates, while the int32 residual
-   * exponent still intentionally creates a float32 pow2 value. */
+TEST(codegen, transcendental_f64_reduction_preserves_precision) {
+  /* PG-DIV-013 replaces the pin's 32-bit significand truncation. The lowered
+   * graph must contain no native SIN and no narrowing to float32. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = program_param(ctx, POLY_FLOAT64, 1, 0);
   PolyUOp *in = program_param(ctx, POLY_FLOAT64, 1, 1);
@@ -5955,20 +5971,20 @@ TEST(codegen, transcendental_pow2if_dtype_follows_integer_input) {
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   ASSERT_NOT_NULL(rewritten);
 
-  int n_topo = 0, i32_to_f32 = 0, u64_to_f64 = 0;
+  int n_topo = 0, f64_to_u64 = 0;
   PolyUOp **topo = poly_uop_toposort(ctx, rewritten, &n_topo);
   ASSERT_NOT_NULL(topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
+    ASSERT_FALSE(u->op == POLY_OP_SIN);
+    ASSERT_FALSE(poly_dtype_eq(u->dtype, POLY_FLOAT32));
     if (u->op != POLY_OP_BITCAST || u->n_src != 1) continue;
     PolyDType from = u->src[0]->dtype;
     PolyDType to = u->dtype;
     ASSERT_INT_EQ(from.bitsize, to.bitsize);
-    if (poly_dtype_eq(from, POLY_INT32) && poly_dtype_eq(to, POLY_FLOAT32)) i32_to_f32++;
-    if (poly_dtype_eq(from, POLY_UINT64) && poly_dtype_eq(to, POLY_FLOAT64)) u64_to_f64++;
+    if (poly_dtype_eq(from, POLY_FLOAT64) && poly_dtype_eq(to, POLY_UINT64)) f64_to_u64++;
   }
-  ASSERT_TRUE(i32_to_f32 > 0);
-  ASSERT_TRUE(u64_to_f64 > 0);
+  ASSERT_TRUE(f64_to_u64 > 0);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -6042,8 +6058,10 @@ TEST(codegen, shaped_transcendentals_devectorize_before_decomposition) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyDType dtypes[] = {POLY_BFLOAT16, POLY_FLOAT64};
-  int expected_nodes[] = {357, 428};
-  uint64_t expected_hashes[] = {UINT64_C(0xdc76be45b23dd9e3), UINT64_C(0xc23a158242127c6f)};
+  /* f64 uses the reviewed full-mantissa reduction (PG-DIV-013); bf16 still
+   * has the pinned topology. Numerical sweeps cover the changed f64 path. */
+  int expected_nodes[] = {357, 1078};
+  uint64_t expected_hashes[] = {UINT64_C(0xdc76be45b23dd9e3), UINT64_C(0xa6ea6b6ee9690640)};
   for (int d = 0; d < 2; d++) {
     PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
     PolyParamArg arg = {.slot = d, .addrspace = POLY_ADDR_GLOBAL};

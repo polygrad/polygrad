@@ -51,6 +51,16 @@ class Transformer(Model):
         return model
 
     @classmethod
+    def from_gguf(cls, data, **kwargs):
+        """Load a cached GGUF Model and adopt its generation contract."""
+        model = Model.from_gguf(data, **kwargs)
+        try:
+            return cls.from_model(model)
+        except BaseException:
+            model.dispose()
+            raise
+
+    @classmethod
     def load(cls, source, *, runtime=None):
         model = Model.load(source, runtime=runtime)
         try:

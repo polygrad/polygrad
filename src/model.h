@@ -282,22 +282,6 @@ PolyModel *poly_model_from_ir_into(
     PolyDevice device
 );
 
-/* Create from a PolyCtx with named buffer registry + entrypoints.
- * Requires at least one entrypoint registered. The ctx is NOT owned
- * by the model (caller manages ctx lifetime, must outlive the model).
- * Returns NULL on error (zero entrypoints, allocation failure).
- *
- * Compatibility API for old ctx-global model construction. New code should
- * use staged PolyModel construction or poly_model_from_bindings(). */
-PolyModel *poly_model_from_ctx(PolyCtx *ctx)
-    POLY_DEPRECATED("use staged PolyModel construction or poly_model_from_bindings");
-
-/* Create from selected named sinks instead of every entrypoint registered on
- * the ctx. Frontend export uses this to package one traced lazy graph even if
- * the shared ctx contains old probes or other models. Names are copied by the
- * model; ctx remains caller-owned. */
-PolyModel *poly_model_from_sinks(PolyCtx *ctx, const char **names, PolyUOp **sinks, int n_sinks);
-
 void poly_model_free(PolyModel *inst);
 
 /* Param Enumeration */

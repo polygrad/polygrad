@@ -311,6 +311,43 @@ TEST(model, capture_restores_author_and_retains_explicit_effects) {
   PASS();
 }
 
+TEST(model, bindings_enforce_authored_state_roles) {
+  for (int role = POLY_ROLE_PARAM; role <= POLY_ROLE_AUX; role++) {
+    /* Outputs are declared values, not author-writable state bindings. */
+    if (role == POLY_ROLE_OUTPUT) continue;
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+    PolyTensor *state = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+    PolyTensor *one = poly_tensor_full_float_by_id(
+        ctx, (int64_t[]){1}, 1, 1, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU, false, false
+    );
+    PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
+    ASSERT_NOT_NULL(poly_tensor_assign(ctx, state, one));
+    PolyTensor *wrapped = NULL;
+    int mutable = 1;
+    ASSERT_EQ(poly_tensor_capture_wrap(capture, &state, &mutable, 1, &one, 1, &wrapped), 0);
+    poly_tensor_capture_end(capture);
+    PolyBindingSpec bindings[] = {
+        {"state", role, state, 0}, {"result", POLY_ROLE_OUTPUT, wrapped, 0}};
+    const char *inputs[] = {"state"}, *outputs[] = {"result", "state"};
+    PolyEntrypointSpec entry = {
+        .name = "write",
+        .inputs = inputs,
+        .n_inputs = role == POLY_ROLE_INPUT || role == POLY_ROLE_TARGET,
+        .outputs = outputs,
+        .n_outputs = role == POLY_ROLE_OUTPUT ? 2 : 1};
+    PolyModel *model = poly_model_from_bindings(ctx, bindings, 2, &entry, 1, NULL, NULL);
+    bool admitted = model != NULL;
+    poly_model_free(model);
+    poly_tensor_release(wrapped);
+    poly_tensor_release(one);
+    poly_tensor_release(state);
+    poly_ctx_destroy(ctx);
+    ASSERT_EQ(admitted, role == POLY_ROLE_AUX || role == POLY_ROLE_OUTPUT);
+  }
+  PASS();
+}
+
 TEST(model, capture_rejects_execution_and_undeclared_writes) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
@@ -2584,6 +2621,10 @@ TEST(model, staged_runtime_trainability_is_model_metadata) {
   ASSERT_TRUE(poly_model_param_trainable(inst, 0));
   ASSERT_INT_EQ(poly_model_set_param_trainable(inst, 0, false), 0);
   ASSERT_TRUE(!poly_model_param_trainable(inst, 0));
+  ASSERT_EQ(poly_model_set_param_trainable(inst, 0, true), 0);
+  ASSERT_TRUE(poly_model_param_trainable(inst, 0));
+  ASSERT_EQ(poly_model_set_param_trainable(inst, 0, false), 0);
+  ASSERT_FALSE(poly_model_param_trainable(inst, 0));
 
   poly_model_free(inst);
   poly_ctx_destroy(ctx);
@@ -4414,7 +4455,6 @@ TEST(model, from_binding_arrays_forward_e2e) {
       entry_flags, 1, NULL, &err
   );
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_ctx_named_count(ctx), 0);
   ASSERT_INT_EQ(poly_model_param_count(inst), 1);
   ASSERT_STR_EQ(poly_model_param_name(inst, 0), "w");
 
@@ -4635,41 +4675,47 @@ TEST(model, from_binding_arrays_train_after_set_device_auto_updates_param) {
   PASS();
 }
 
-TEST(model, from_sinks_wraps_selected_lazy_tensor_graph) {
+TEST(model, from_bindings_isolates_selected_graph) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {4};
-
-  PolyUOp *w = poly_uop_buffer_f32(ctx, 4);
   float w_data[] = {2.0f, 3.0f, 4.0f, 5.0f};
-  poly_buffer_set(ctx, w, w_data, sizeof(w_data), POLY_DEVICE_CPU);
-  ASSERT_NOT_NULL(poly_register_existing_buffer(ctx, POLY_ROLE_PARAM, w, shape, 1, "w", true));
-
-  PolyUOp *x = poly_register_buffer_by_id(
-      ctx, POLY_ROLE_INPUT, poly_dtype_id_by_name("float32"), shape, 1, "x"
-  );
-  PolyUOp *out = poly_register_buffer_by_id(
-      ctx, POLY_ROLE_OUTPUT, poly_dtype_id_by_name("float32"), shape, 1, "output"
-  );
-  ASSERT_NOT_NULL(x);
-  ASSERT_NOT_NULL(out);
-
-  /* A stale registered entrypoint should not leak into this package when the
-   * frontend asks for a selected sink set. This is what lets multiple lazy
-   * models share a ctx but export one ABI at a time. */
-  PolyUOp *stale = poly_register_buffer_by_id(
-      ctx, POLY_ROLE_OUTPUT, poly_dtype_id_by_name("float32"), shape, 1, "stale"
-  );
-  poly_register_entrypoint(
-      ctx, "stale",
-      poly_uop_sink1(ctx, poly_uop_store_val(ctx, stale, poly_uop_alu2(ctx, POLY_OP_ADD, x, w)))
-  );
-
-  PolyUOp *prod = poly_uop_alu2(ctx, POLY_OP_MUL, x, w);
-  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, prod));
-  const char *names[] = {"forward"};
-  PolyUOp *sinks[] = {sink};
-  PolyModel *inst = poly_model_from_sinks(ctx, names, sinks, 1);
+  PolyTensor *w = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, poly_tensor_uop_physical(w), w_data, sizeof(w_data)), 0);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyTensor *unrelated = poly_tensor_alu2(ctx, POLY_OP_ADD, x, w);
+  PolyBindingSpec bindings[] = {
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = out}};
+  PolyBindingSpec other_bindings[] = {
+      {.name = "w", .role = POLY_ROLE_PARAM, .tensor = w},
+      {.name = "x", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "stale", .role = POLY_ROLE_OUTPUT, .tensor = unrelated}};
+  PolyEntrypointSpec entry = {
+      .name = "forward",
+      .inputs = (const char *[]){"x"},
+      .n_inputs = 1,
+      .outputs = (const char *[]){"output"},
+      .n_outputs = 1};
+  PolyEntrypointSpec other_entry = {
+      .name = "stale",
+      .inputs = (const char *[]){"x"},
+      .n_inputs = 1,
+      .outputs = (const char *[]){"stale"},
+      .n_outputs = 1};
+  /* Two live Models in one context must not discover each other's ABI. */
+  PolyModel *other = poly_model_from_bindings(ctx, other_bindings, 3, &other_entry, 1, NULL, NULL);
+  ASSERT_NOT_NULL(other);
+  PolyModel *inst = poly_model_from_bindings(ctx, bindings, 3, &entry, 1, NULL, NULL);
   ASSERT_NOT_NULL(inst);
+  ASSERT_EQ(poly_model_get_sink(inst, "stale"), NULL);
+  poly_model_free(other);
+  poly_tensor_release(unrelated);
+  poly_tensor_release(out);
+  poly_tensor_release(x);
+  poly_tensor_release(w);
+  poly_ctx_collect(ctx);
   ASSERT_INT_EQ(poly_model_param_count(inst), 1);
   ASSERT_STR_EQ(poly_model_param_name(inst, 0), "w");
   ASSERT_INT_EQ(poly_model_buf_count(inst), 3);

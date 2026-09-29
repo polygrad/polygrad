@@ -419,6 +419,12 @@ PolyModel *model_gpt2_from_gguf_decoded(
     const PolyGgufDecoded *gguf,
     const PolyGenericImportOpts *opts
 ) {
+  if (opts && opts->cache_capacity) {
+    poly_import_error_set(
+        POLY_IMPORT_ERR_UNSUPPORTED_MODEL, "GPT2 does not support cached generation"
+    );
+    return NULL;
+  }
   PolyCtx *ctx = opts ? opts->ctx : NULL;
   int max_batch = opts ? opts->max_batch : 0;
   int max_seq_len = opts ? opts->max_seq_len : 0;

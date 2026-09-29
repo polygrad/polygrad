@@ -615,8 +615,6 @@ TEST(hf, gpt2_build_tiny) {
   ASSERT_TRUE(found_x);
   ASSERT_TRUE(found_output);
 
-  ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
-
   poly_model_free(inst);
   PASS();
 }
@@ -666,7 +664,6 @@ TEST(hf, qwen3_build_tiny_staged) {
 
   PolyModel *inst = poly_qwen3_into(NULL, &cfg, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
 
   ASSERT_INT_EQ(poly_model_param_count(inst), 11);
   ASSERT_INT_EQ(poly_model_entrypoint_input_count(inst, "forward"), 1);

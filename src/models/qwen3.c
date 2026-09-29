@@ -81,6 +81,8 @@ static PolyModel *qwen3_build(PolyCtx *ctx, const Qwen3Config *cfg) {
       .length = cfg->max_seq_len,
       .head_dim = cfg->head_dim > 0 ? cfg->head_dim : cfg->dim / cfg->n_heads,
       .qk_norm = cfg->qk_norm,
+      .cache_capacity = cfg->cache_capacity,
+      .prefill_chunk = cfg->prefill_chunk_size,
       .eps = cfg->norm_eps > 0 ? (double)cfg->norm_eps : 1e-6,
       .theta = cfg->rope_theta,
       .factor = 1,
@@ -177,6 +179,8 @@ PolyModel *model_qwen3_from_gguf_decoded(
 
   if (max_batch > 0) cfg.batch_size = max_batch;
   if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
+  cfg.cache_capacity = opts ? opts->cache_capacity : 0;
+  cfg.prefill_chunk_size = opts ? opts->prefill_chunk_size : 0;
 
   if (poly_debug_at_least(1))
     fprintf(

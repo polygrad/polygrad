@@ -2,8 +2,8 @@
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
 
-async function checkPackedGemmModel(pg, gpuTile = false) {
-  const rows = gpuTile ? 32 : 2, kdim = gpuTile ? 32 : 7, ncols = gpuTile ? 128 : 48
+async function checkPackedGemmModel(pg, gpuTile = false, provider = null) {
+  const rows = gpuTile ? 32 : 2, kdim = gpuTile ? 32 : 7, ncols = gpuTile ? 192 : 48
   const a = Float32Array.from({length:2*rows*kdim}, (_, i) => (i % 9 - 4) / 11)
   const b = Float32Array.from({length:kdim*ncols}, (_, i) => (i % 13 - 6) / 17)
   const x = pg.Tensor.empty([2, rows, kdim]), w = new pg.Tensor(b).reshape(kdim, ncols)
@@ -24,6 +24,12 @@ async function checkPackedGemmModel(pg, gpuTile = false) {
     }
     restored = pg.Model.load(await model.saveAsync())
     assertClose((await restored.forwardAsync({x:a})).output, (await model.forwardAsync({x:a})).output, 2e-5)
+    if (provider) {
+      // Bound exports contain the programs that actually ran, unlike portable
+      // bundles, which intentionally preserve the generic authoring graph.
+      const program = new TextDecoder().decode(await model.exportProgramAsync())
+      assert(program.includes(provider), `expected ${provider} in executed program; generic fallback used`)
+    }
   } finally {
     if (restored) await restored.dispose()
     await model.dispose()
@@ -35,7 +41,10 @@ async function checkPortableGemmModel(createRuntime) {
   const rt = await createRuntime({kernels:true})
   try {
     await checkPackedGemmModel(rt)
-    await checkPackedGemmModel(rt, true)
+    const strict = typeof process !== 'undefined' && process.env.POLY_REQUIRE_KERNELS === '1'
+    const provider = rt.device === 'interp' ? null : rt.device === 'webgpu' ? 'webgpu_gemm' : rt.core === 'wasm' ? 'wasm_gemm' :
+      strict ? 'avx2_gemm' : null
+    await checkPackedGemmModel(rt, true, provider)
     assert(rt._core.ffi.poly_ctx_set_kernel_policy(rt._core.ctx, 0) === -1,
       'kernel policy changed after compilation')
     // More than one workgroup, transposed weights, then an incomplete tile
@@ -521,6 +530,11 @@ async function checkQwenRotaryState(pg) {
       assertClose(await model.readBufferAsync(name), fixture[name].flat(), 2e-7)
     }
     const bundle = await model.saveAsync()
+    let loadError = ''
+    try { pg.models.Transformer.load(bundle).dispose() }
+    catch (error) { loadError = error.message }
+    assert(/Transformer/.test(loadError), 'uncached bundle accepted as Transformer')
+    assert(pg._activeAsync === 0, 'failed bundle adoption left asynchronous cleanup behind')
     restored = pg.Model.load(bundle)
     const saved = await restored.saveAsync()
     assert(bundle.length === saved.length && bundle.every((v, i) => v === saved[i]), 'Qwen canonical round trip')
@@ -535,6 +549,35 @@ async function checkQwenRotaryState(pg) {
   } finally {
     if (restored) await restored.dispose()
     await model.dispose()
+  }
+  const cached = pg.models.Transformer.fromGGUF(bytes,
+    { maxSeqLen: 4, cacheCapacity: 4, prefillChunkSize: 2 })
+  assert(cached instanceof pg.models.Transformer, 'GGUF loader did not specialize')
+  let loaded
+  try {
+    const tokens = new Int32Array(fixture.tokens.flat())
+    for (let i = 0; i < tokens.length; i++)
+      assertClose(await cached.appendTokensAsync(tokens.slice(i, i + 1)), fixture.logits[0][i], 3e-5)
+    let message = ''
+    try { await cached.appendTokensAsync(tokens.slice(0, 1)) } catch (error) { message = error.message }
+    assert(/capacity/.test(message), message)
+    loaded = pg.models.Transformer.load(await cached.saveAsync())
+    assert(loaded.decodePosition === 0, 'import starts with an empty cache')
+    assertClose(await loaded.prefillTokensAsync(tokens), fixture.logits[0][3], 3e-5)
+  } finally {
+    if (loaded) await loaded.dispose()
+    await cached.dispose()
+  }
+  let adoptionError = ''
+  try { pg.models.Transformer.fromGGUF(bytes).dispose() }
+  catch (error) { adoptionError = error.message }
+  assert(/Transformer/.test(adoptionError), 'uncached GGUF accepted as Transformer')
+  assert(pg._activeAsync === 0, 'failed adoption left asynchronous cleanup behind')
+  for (const opts of [{cacheCapacity: -1}, {cacheCapacity: 4, prefillChunkSize: 5},
+                      {prefillChunkSize: 2}, {cacheCapacity: 4, maxBatch: 2}]) {
+    let message = ''
+    try { pg.Model.fromGGUF(bytes, opts).dispose() } catch (error) { message = error.message }
+    assert(/cache|prefill/.test(message), message)
   }
 }
 

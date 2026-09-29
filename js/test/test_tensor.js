@@ -110,6 +110,79 @@ async function runTensorTests(pg, createRuntime) {
 
   console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
+  await testIf(pg.device === 'cuda', 'CUDA compiled QR releases graph scratch', isolatedRuntime(async rt => {
+    for (let iteration = 0; iteration < 3; iteration++) {
+      const outputs = new Set()
+      const x = rt.Tensor.ones([64, 8])
+      const stage = rt.compile(a => {
+        const out = a.qr('r')
+        outputs.add(out)
+        return out
+      }, [x])
+      try {
+        const out = stage.run([x])
+        outputs.add(out)
+        assert((await out.toArray()).every(Number.isFinite), 'QR output must be finite')
+      } finally {
+        stage.dispose()
+        for (const out of outputs) out.dispose()
+        x.dispose()
+      }
+      rt.clearScheduleCache()
+      rt.collect()
+      assert(rt.stats().coreStats.bufferOwnedCurrentBytes === 0,
+        `dead graph retained scratch: ${JSON.stringify(rt.stats().coreStats)}`)
+    }
+  }))
+
+  await testIf(supportsF64, 'float64 sine full range reduction', async () => {
+    const values = [0, -0, 29.999999, 30, 30.000001, 31.2, 1000.1, -1780566.693,
+      1e15, -1e25, 1e30, -1e100, Number.MAX_VALUE, Infinity, -Infinity, NaN]
+    for (let e = 0; e < 1024; e += 31) values.push(2 ** e, -1.23456789 * 2 ** e)
+    for (let q = 1; q <= 32; q++) values.push(q * Math.PI / 2)
+    const x = new Tensor(values, {dtype: 'float64'})
+    const y = x.sin()
+    try {
+      const actual = await y.toArray()
+      assertClose(actual, values.map(Math.sin), 2e-15)
+      for (let i = 0; i < values.length; i++) {
+        const expected = Math.sin(values[i])
+        if (Number.isFinite(expected) && expected !== 0) {
+          assert(Math.abs((actual[i] - expected) / expected) < 2e-14,
+            `float64 sine relative error at ${values[i]}: ${actual[i]} vs ${expected}`)
+        }
+      }
+    }
+    finally { y.dispose(); x.dispose() }
+    // Cosine remains the pinned sin(pi/2-x) composition. At these phases its
+    // subtraction rounding is below 2e-10, unlike the old reduction's 1e-4.
+    const phases = [31.2, -1000.1, -1780566.693, 1946594.878]
+    const a = new Tensor(phases, {dtype: 'float64'}), b = a.cos()
+    try { assertClose(await b.toArray(), phases.map(Math.cos), 2e-10) }
+    finally { b.dispose(); a.dispose() }
+  })
+
+  await testIf(pg.core === 'wasm', 'Wasm saturating scalar float casts', async () => {
+    for (const dtype of ['float32', 'float64']) {
+      for (const [target, value, expected] of [
+        ['int32', 1e30, 2147483647], ['int32', -1e30, -2147483648],
+        ['uint32', -1e30, 0], ['uint32', 1e30, 4294967295],
+        ['int32', NaN, 0], ['int32', Infinity, 2147483647],
+        ['int64', 1e30, 9223372036854775807n], ['int64', -1e30, -9223372036854775808n],
+        ['uint64', -1e30, 0n], ['uint64', 1e30, 18446744073709551615n],
+        ['uint8', -1.25, 255], ['int32', -1.75, -1],
+      ]) {
+        const x = new Tensor([value], {dtype}), y = x.cast(target)
+        try { assert((await y.toTypedArray())[0] === expected, `${dtype}->${target}: ${value}`) }
+        finally { y.dispose(); x.dispose() }
+      }
+    }
+    const values = [8e9, 1e20, 1e30, -1e30].map(Math.fround)
+    const x = new Tensor(values, {dtype: 'float32'}), y = x.sin()
+    try { assertClose(await y.toArray(), values.map(Math.sin), 2e-6) }
+    finally { y.dispose(); x.dispose() }
+  })
+
   await test('device identity rejects unknown targets without AUTO fallback', async () => {
     const source = new Tensor([1, 2, 3])
     const scalar = new Tensor(1)
@@ -6001,9 +6074,9 @@ async function runTensorTests(pg, createRuntime) {
     const end = a.add(b)
     const composed = end.sub(a)
     const viaC = pg._core.ffi.poly_uop_sub(a.ctx, end.raw, a.raw)
-    assert(composed.raw === viaC, 'raw subtraction differs from C composition')
+    assert(composed.key === String(pg._core.ffi.poly_uop_key(viaC)), 'raw subtraction differs from C composition')
     const rawSub = pg._core.ffi.poly_uop_binop(a.ctx, pg._core.ops.SUB, end.raw, a.raw)
-    assert(composed.raw !== rawSub, 'composed subtraction emitted a primitive SUB')
+    assert(composed.key !== String(pg._core.ffi.poly_uop_key(rawSub)), 'composed subtraction emitted a primitive SUB')
   })
 
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)

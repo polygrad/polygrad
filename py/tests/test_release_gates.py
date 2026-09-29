@@ -18,13 +18,15 @@ ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.parametrize('failure', ['', 'missing-wheel', 'tampered'])
 def test_publish_python_uses_verified_staged_archives(tmp_path, failure):
     import hashlib
+    import re
 
+    version = re.search(r'^version = "([^"]+)"', (ROOT / 'py/pyproject.toml').read_text(), re.M)[1]
     release = tmp_path / 'release'
     wheels = release / 'wheels'
     wheels.mkdir(parents=True)
-    sdist = release / 'polygrad-0.5.2.tar.gz'
+    sdist = release / f'polygrad-{version}.tar.gz'
     sdist.write_bytes(b'sdist')
-    wheel = wheels / 'polygrad-0.5.2-cp39-cp39-manylinux_2_28_x86_64.whl'
+    wheel = wheels / f'polygrad-{version}-cp39-cp39-manylinux_2_28_x86_64.whl'
     wheel.write_bytes(b'wheel')
     (release / 'SHA256SUMS').write_text(f'{hashlib.sha256(sdist.read_bytes()).hexdigest()}  {sdist}\n')
     (wheels / 'SHA256SUMS').write_text(f'{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n')

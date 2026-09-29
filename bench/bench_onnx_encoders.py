@@ -219,7 +219,7 @@ def main():
                 cache = cache_root / f'{engine}-gemm{gemm}'
                 env = dict(os.environ, DEV='CPU', POLY_LIB=str(lib), BEAM=str(beam), CACHELEVEL=str(args.cache_level),
                            XDG_CACHE_HOME=str(cache), CACHEDB=str(cache / 'tinygrad/cache.db'),
-                           NUM_CPU_THREADS=str(args.threads), OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', POLY_CPU_GEMM=str(gemm))
+                           NUM_CPU_THREADS=str(args.threads), OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', POLY_KERNELS=str(gemm))
                 for key in ('POLY_DEVICE', 'POLY_DEV', 'IGNORE_BEAM_CACHE'):
                     env.pop(key, None)
                 cmd = [sys.executable, str(Path(__file__).resolve()), '--model', args.model,

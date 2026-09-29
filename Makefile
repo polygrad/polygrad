@@ -40,7 +40,7 @@ LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c
 SRC += src/uop/key.c
 FILC_SRC += src/uop/key.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/distilgpt2.c src/models/qwen3.c src/models/llama.c src/models/transformer.c src/models/hf_loader.c $(LOADER_SRC)
-TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_placement.c test/test_realize.c test/test_threading.c
+TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_placement.c test/test_realize.c test/test_threading.c
 TEST_SRC += test/test_llama.c
 TEST_SRC += test/test_onnx.c
 
@@ -92,7 +92,7 @@ WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','j
 # the synchronous compiler fast path. Do not rely on helper inlining for safety.
 # Initial Model bindings may already own WebGPU AUX bytes; packing then reads
 # them through alloc_owned_host, so both frames must survive suspension.
-WASM_ASYNCIFY_ONLY = ['onnx_subgraph','onnx_resize','onnx_floats','onnx_const_data','onnx_ints','onnx_operation','onnx_literal','poly_onnx_load','poly_onnx_load_into','onnx_graph','onnx_node','onnx_initializer','model_clip_from_config','model_vit_from_config','model_dinov2_from_config','model_dinov3_from_config','model_vision_finish','model_vision_import','dinov3_rotary','model_from_spec','poly_model_from_program','model_copy_binding','model_initialize_closed_computed_state','model_from_named_sinks','poly_model_import_weights','poly_model_copy_prefixed_weights','poly_buffer_alloc_owned_host','poly_model_call_tensors','prepare_model_io','model_run_copies','llama_create','model_transformer_build','qwen3_build','poly_qwen3_into','model_qwen3_from_gguf_decoded','poly_model_rope_frequencies','poly_model_aux_from_host','apply','sequence','construct','compose_build','poly_model_from_config','model_sequential_from_config','model_graph_from_config','model_llama_from_config','model_mlp_from_config','model_tabm_from_config','model_nam_from_config','model_gpt2_from_config','model_gpt2_configure','model_distilgpt2_from_config','mlp_build','gpt2_build','model_init_param','poly_model_write_buf_named','poly_model_from_binding_arrays','poly_model_from_bindings','poly_model_build','prepare_build_named_value_snapshots','snapshot_build_named_value','copy_initial_buffer_data','poly_realize_sink','poly_model_call','poly_model_reset_transient','poly_transformer_append','poly_transformer_prefill','poly_transformer_start','poly_transformer_reset','poly_transformer_next','transformer_tokens','poly_model_call_with_controls','poly_model_call_tensors_with_controls','poly_model_train_step','poly_model_set_device_map_arrays','poly_model_set_device','poly_model_set_device_name','model_set_device_uop','model_place_uniform_device','model_publish_placement','run_model_sink','run_model_sink_bound','poly_model_param_data_raw','poly_model_buf_data','poly_model_buf_data_raw','poly_model_export_weights_ex','poly_model_save_bundle_ex','poly_model_read_buf','poly_model_read_buf_named','poly_model_write_buf','model_host_data','poly_model_readback_param','poly_model_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_realize_tensors_impl','poly_realize_linear','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out','poly_compile_linear','poly_prepare_program_for_backend','poly_rewrite_webgpu','poly_full_rewrite_to_sink_ex','poly_beam_search','beam_time_candidate','poly_time_call','poly_timing_buffers_init','poly_time_program','poly_optimize_local_size','optimize_local_size_candidates','local_size_time_candidate','poly_time_call_prepare']
+WASM_ASYNCIFY_ONLY = ['onnx_subgraph','onnx_resize','onnx_floats','onnx_const_data','onnx_ints','onnx_operation','onnx_literal','poly_onnx_load','poly_onnx_load_into','onnx_graph','onnx_node','onnx_initializer','model_clip_from_config','model_vit_from_config','model_dinov2_from_config','model_dinov3_from_config','model_vision_finish','model_vision_import','dinov3_rotary','model_from_spec','poly_model_from_program','model_copy_binding','model_initialize_closed_computed_state','poly_model_import_weights','poly_model_copy_prefixed_weights','poly_buffer_alloc_owned_host','poly_model_call_tensors','prepare_model_io','model_run_copies','llama_create','model_transformer_build','qwen3_build','poly_qwen3_into','model_qwen3_from_gguf_decoded','poly_model_rope_frequencies','poly_model_aux_from_host','apply','sequence','construct','compose_build','poly_model_from_config','model_sequential_from_config','model_graph_from_config','model_llama_from_config','model_mlp_from_config','model_tabm_from_config','model_nam_from_config','model_gpt2_from_config','model_gpt2_configure','model_distilgpt2_from_config','mlp_build','gpt2_build','model_init_param','poly_model_write_buf_named','poly_model_from_binding_arrays','poly_model_from_bindings','poly_model_build','prepare_build_named_value_snapshots','snapshot_build_named_value','copy_initial_buffer_data','poly_realize_sink','poly_model_call','poly_model_reset_transient','poly_transformer_append','poly_transformer_prefill','poly_transformer_start','poly_transformer_reset','poly_transformer_next','transformer_tokens','poly_model_call_with_controls','poly_model_call_tensors_with_controls','poly_model_train_step','poly_model_set_device_map_arrays','poly_model_set_device','poly_model_set_device_name','model_set_device_uop','model_place_uniform_device','model_publish_placement','run_model_sink','run_model_sink_bound','poly_model_param_data_raw','poly_model_buf_data','poly_model_buf_data_raw','poly_model_export_weights_ex','poly_model_save_bundle_ex','poly_model_read_buf','poly_model_read_buf_named','poly_model_write_buf','model_host_data','poly_model_readback_param','poly_model_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_realize_tensors_impl','poly_realize_linear','poly_jit_end_capture','poly_jit_run','poly_jit_run_captured_linear','poly_run_linear','poly_webgpu_execute','poly_buffer_copy','poly_buffer_ensure_device_current','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out','poly_compile_linear','poly_prepare_program_for_backend','poly_rewrite_webgpu','poly_full_rewrite_to_sink_ex','poly_beam_search','beam_time_candidate','poly_time_call','poly_timing_buffers_init','poly_time_program','poly_optimize_local_size','optimize_local_size_candidates','local_size_time_candidate','poly_time_call_prepare']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -451,7 +451,7 @@ test-release-op-census: build/libpolygrad.so
 	@mkdir -p $(OP_PARITY_DIR)
 	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py:references/tinygrad_latest \
 		$(PARITY_PY) test/op_vocabulary_census.py \
-		--release-scope test/fixtures/release_050_scope.json --output $(OP_PARITY_DIR)/report.json
+		--release-scope test/fixtures/release_scope.json --output $(OP_PARITY_DIR)/report.json
 
 test-compat-tinygrad-tier1: build/libpolygrad.so
 	@mkdir -p $(COMPAT_TIER1_DIR) temp/cc_tmp
@@ -654,6 +654,23 @@ test-bench-wasm:
 	$(NODE) --test bench/test_wasm_checks.mjs
 
 .PHONY: bench-kernel-targets
+.PHONY: test-kernels test-examples
+# Require a real selected provider on each supported target, not just a
+# numerically correct generic fallback. Keep ordinary parity gates kernels-off.
+test-kernels: build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
+	POLY_REQUIRE_KERNELS=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_cpu_gemm.py
+	POLY_REQUIRE_KERNELS=1 POLY_DEV=cpu POLY_TEST_FILTER='Model portable GEMM selection' $(NODE) js/test/test_native.js
+	POLY_REQUIRE_KERNELS=1 POLY_TEST_FILTER='Model portable GEMM selection' $(NODE) js/test/test_wasm.js
+	POLY_ONNX_ENCODER_DIR= POLY_TEST_FILTER='Model portable GEMM selection' POLY_BROWSER_DEVICES=auto,webgpu POLY_BROWSER_SKIP_UNAVAILABLE=0 $(MAKE) test-browser
+
+EXAMPLE_BINS = $(patsubst examples/%.c,build/examples/%,$(wildcard examples/*.c))
+build/examples/%: examples/%.c build/libpolygrad.so
+	@mkdir -p build/examples
+	$(CC) $(CFLAGS_COMMON) -Werror $< -Lbuild -lpolygrad -lm -ldl -Wl,-rpath,'$$ORIGIN/..' -o $@
+
+test-examples: $(EXAMPLE_BINS)
+	@set -e; for example in $(EXAMPLE_BINS); do echo "RUN $$example"; "$$example"; done
+
 KERNEL_TARGET_ARGS ?=
 bench-kernel-targets: build-js
 	$(NODE) bench/bench_kernel_targets.mjs $(KERNEL_TARGET_ARGS)
@@ -737,6 +754,10 @@ build/fuzz_sym_div: test/fuzz_sym_div.c $(SRC) $(CODEC_SRC)
 
 NODE ?= $(shell which node 2>/dev/null || echo node)
 test-wasm: test-js-browser
+
+.PHONY: package-c-sources
+package-c-sources:
+	@printf '%s\n' $(sort $(SRC) $(CODEC_SRC))
 
 sync-source-mirrors:
 	$(PYTHON) py/scripts/sync-csrc.py
@@ -956,7 +977,7 @@ RELEASE_MAKE := $(MAKE)
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
 RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
-                   QWEN3_GGUF BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST
+                   QWEN3_GGUF LLAMA_CHECKPOINT ONNX_ENCODER_DIR BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
 	@$(PARITY_PY) scripts/test_release.py --make '$(RELEASE_MAKE)' --output '$(RELEASE_DIR)' \
@@ -967,6 +988,8 @@ test-release-preflight:
 	@$(PARITY_PY) scripts/test_release.py --preflight \
 		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)' \
 		--make-var 'PYTHON_MIN=$(PYTHON_MIN)' \
+		--make-var 'HF_PYTHON=$(HF_PYTHON)' --make-var 'LLAMA_CHECKPOINT=$(LLAMA_CHECKPOINT)' \
+		--make-var 'ONNX_ENCODER_DIR=$(ONNX_ENCODER_DIR)' \
 		--make-var 'CLANG_FORMAT=$(CLANG_FORMAT)' --make-var 'ANALYZER_CC=$(ANALYZER_CC)'
 
 test-release-list:

@@ -22,6 +22,7 @@
 #include "../src/nn/nn.h"
 #include "../src/nn/optim.h"
 #include "../src/tensor.h"
+#include "../src/utils.h"
 #include <string.h>
 
 /* Renderer-only tests remain runnable without hardware; runtime tests skip. */
@@ -2057,7 +2058,36 @@ TEST_BACKEND(cuda, jit_graph_batches_programs_and_replays_inputs) {
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got[i], replay_data[i] + 1.0f, 1e-5f);
 
+  /* A second JIT owner must survive disposal of the first, without making
+   * the weak runtime cache an owner of its concrete scratch buffers. */
+  PolyJit *second = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(second);
+  ASSERT_INT_EQ(poly_jit_begin_capture(second, &capture, 1), 0);
+  ASSERT_INT_EQ(poly_jit_record_linear(second, linear, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_jit_end_capture(second, ctx->tensors, ctx->n_tensors), 0);
+  ASSERT_TRUE(poly_jit_captured_linear(second)->src[0]->src[0] == graph_fn);
+  poly_tensor_release(first);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_jit_run(jit, &replay, 1), 0);
+  void *cached_graph =
+      poly_map_get(ctx->graph_cache, poly_ptr_hash(graph_fn), graph_fn, poly_ptr_eq);
+  ASSERT_NOT_NULL(cached_graph);
   poly_jit_free(jit);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(
+      poly_map_get(ctx->graph_cache, poly_ptr_hash(graph_fn), graph_fn, poly_ptr_eq) == cached_graph
+  );
+  ASSERT_INT_EQ(poly_jit_run(second, &replay, 1), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buffer, got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], replay_data[i] + 1.0f, 1e-5f);
+  poly_jit_free(second);
+  PolyTensor *owned[] = {capture_host, ones_host, capture, ones, out, replay_host, replay};
+  for (unsigned i = 0; i < sizeof(owned) / sizeof(owned[0]); i++)
+    poly_tensor_release(owned[i]);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_map_len(ctx->graph_cache), 0);
+  ASSERT_INT_EQ(poly_ctx_mem_used_for_device(ctx, POLY_DEVICE_CUDA), 0);
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_scope_matches_package_versions():
-    scope = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text())
+    scope = json.loads((ROOT / 'test/fixtures/release_scope.json').read_text())
     python = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / 'py/pyproject.toml').read_text(), re.M).group(1)
     javascript = json.loads((ROOT / 'js/package.json').read_text())['version']
     assert scope['version'] == python == javascript
@@ -22,7 +22,7 @@ def test_release_scope_matches_package_versions():
 @pytest.fixture
 def gate():
     module = runpy.run_path(str(ROOT / 'test/op_vocabulary_census.py'))
-    scope = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text())
+    scope = json.loads((ROOT / 'test/fixtures/release_scope.json').read_text())
     findings = [dict(side=r['side'], op=r['op'], id=r['id'], status='open_debt', allowed=False, present=True)
                 for r in scope['excluded_vocabulary']]
     report = dict(reference_commit=scope['reference_commit'], findings=findings)
@@ -54,7 +54,7 @@ def test_scoped_vocabulary_rejects_new_or_changed_gaps(gate, mutation):
     elif mutation == 'missing':
         report['findings'].pop()
     elif mutation == 'version':
-        version = '0.6.0'
+        version = scope['version'] + '.invalid'
     else:
         report['reference_commit'] = 'other'
     assert module['release_scope_errors'](report, scope, version)

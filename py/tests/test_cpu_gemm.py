@@ -1,11 +1,12 @@
 """Opt-in physical GEMM: mutation, autograd and portable Model contracts."""
 import numpy as np
+import os
 import pytest
 import polygrad as pg
 
 
 def test_runtime_kernel_policy(monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     from polygrad import _ffi
     with pg.Runtime(device='CPU', kernels=False) as rt:
         assert _ffi.get_lib().poly_ctx_set_kernel_policy(rt._ctx, 2) == -1
@@ -18,7 +19,7 @@ def test_runtime_kernel_policy(monkeypatch):
 
 @pytest.mark.parametrize('shape', [(4, 7, 24), (8, 32, 48), (3, 7, 24), (4, 7, 25)])
 def test_cpu_gemm_tensor_and_gradients(shape, monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     m, k, n = shape
     a = (np.arange(m*k).reshape(m, k) % 17 - 8).astype(np.float32) / 31
     b = (np.arange(k*n).reshape(k, n) % 13 - 6).astype(np.float32) / 23
@@ -42,7 +43,7 @@ def test_cpu_gemm_tensor_and_gradients(shape, monkeypatch):
 
 
 def test_cpu_gemm_model_repacking_and_portability(monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     a = np.arange(56, dtype=np.float32).reshape(2, 4, 7) / 71
     b = (np.arange(168, dtype=np.float32).reshape(7, 24) % 13 - 6) / 23
     with pg.Runtime(device='CPU', logical='always') as rt:
@@ -57,7 +58,7 @@ def test_cpu_gemm_model_repacking_and_portability(monkeypatch):
             model.write_buffer('w', b)
             assert model.save() == original
             for device, enabled in [('INTERP', '1'), ('CPU', '0')]:
-                monkeypatch.setenv('POLY_CPU_GEMM', enabled)
+                monkeypatch.setenv('POLY_KERNELS', enabled)
                 with pg.Runtime(device=device) as other:
                     restored = other.Model.load(original)
                     try:
@@ -70,7 +71,7 @@ def test_cpu_gemm_model_repacking_and_portability(monkeypatch):
 
 
 def test_cpu_gemm_backward_transposed_views(monkeypatch, capfd):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     monkeypatch.setenv('POLY_DEBUG_KERNELS', '1')
     rng = np.random.default_rng(8)
     # Explicit x@w, dy@w.T, and x.T@dy have tile-compatible shapes. Check the
@@ -82,6 +83,8 @@ def test_cpu_gemm_backward_transposed_views(monkeypatch, capfd):
         np.testing.assert_allclose((rt.Tensor(dy) @ w.transpose()).numpy(), dy @ b.T, atol=2e-5, rtol=2e-5)
         np.testing.assert_allclose((x.transpose() @ rt.Tensor(dy)).numpy(), a.T @ dy, atol=2e-5, rtol=2e-5)
         enabled = 'gemm_avx2_4x24: selected' in capfd.readouterr().err
+        if os.environ.get('POLY_REQUIRE_KERNELS') == '1':
+            assert enabled, 'AVX2/FMA provider was not selected on the required CPU target'
         ((x @ w) * rt.Tensor(dy)).sum().backward()
         np.testing.assert_allclose(x.grad.numpy(), dy @ b.T, atol=2e-5, rtol=2e-5)
         np.testing.assert_allclose(w.grad.numpy(), a.T @ dy, atol=2e-5, rtol=2e-5)
@@ -93,7 +96,7 @@ def test_cpu_gemm_backward_transposed_views(monkeypatch, capfd):
 
 @pytest.mark.parametrize('view', ['permute', 'shrink', 'expand'])
 def test_cpu_gemm_computed_input_layout(view, monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     values = (np.arange(2*3*4*7).reshape(2, 3, 4, 7) % 19 - 9).astype(np.float32) / 37
     with pg.Runtime(device='CPU') as rt:
         x = rt.Tensor(values).sum(axis=1)
@@ -113,7 +116,7 @@ def test_cpu_gemm_computed_input_layout(view, monkeypatch):
 
 @pytest.mark.parametrize('shape', [(1, 4, 7, 8), (2, 8, 16, 32)])
 def test_cpu_attention_probabilities(shape, monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     heads, rows, keys, cols = shape
     rng = np.random.default_rng(7)
     scores = rng.normal(size=(heads, rows, keys)).astype(np.float32)
@@ -143,7 +146,7 @@ def test_cpu_attention_probabilities(shape, monkeypatch):
 
 @pytest.mark.parametrize('shape', [(12, 1024, 72), (4, 4096, 120), (16, 1024, 96), (4, 7, 24)])
 def test_cpu_gemm_worker_partitions(shape, monkeypatch):
-    monkeypatch.setenv('POLY_CPU_GEMM', '1')
+    monkeypatch.setenv('POLY_KERNELS', '1')
     monkeypatch.setenv('THREADS', '1')
     m, k, n = shape
     rng = np.random.default_rng(19)

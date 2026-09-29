@@ -125,6 +125,7 @@ void poly_time_call_finish(PolyCtx *ctx, PolyRunner *runner, PolyDevice device);
 /* tinygrad@2026-08-22/a9069c177a9d to_program_cache and runtime_cache. */
 size_t poly_runtime_cache_len(PolyCtx *ctx);
 void poly_runtime_cache_clear(PolyCtx *ctx);
+int poly_graph_cache_evict_unmarked(PolyCtx *ctx, PolyMap *live);
 size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx);
 size_t poly_to_program_cache_len(PolyCtx *ctx);
 void poly_to_program_cache_clear(PolyCtx *ctx);

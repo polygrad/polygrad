@@ -73,7 +73,6 @@ TEST(nam, staged_builder_does_not_use_ctx_registry) {
       NULL, "nam", simple_nam_spec, (int)strlen(simple_nam_spec), POLY_DEVICE_AUTO, NULL
   );
   ASSERT_NOT_NULL(inst);
-  ASSERT_INT_EQ(poly_ctx_named_count(poly_model_ctx(inst)), 0);
   poly_model_free(inst);
   PASS();
 }

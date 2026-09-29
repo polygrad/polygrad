@@ -937,6 +937,26 @@ static PolyUOp *runtime_test_graph(PolyCtx *ctx, PolyUOp *linear) {
   return poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
 }
 
+TEST(schedule_runtime, graph_call_owns_private_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *scratch = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  float data[] = {1, 2, 3, 4}, got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, scratch, data, sizeof(data)), 0);
+  PolyUOp *program = poly_uop0(ctx, POLY_OP_PROGRAM, POLY_VOID, poly_arg_none());
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, program, scratch, poly_arg_none());
+  PolyUOp *inner = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  PolyUOp *linear = runtime_test_graph(ctx, inner);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, scratch, got, sizeof(got)), 0);
+  ASSERT_TRUE(memcmp(data, got, sizeof(data)) == 0);
+  poly_uop_release(ctx, linear);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(ctx->mem_used, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* lower_and_compile's final substitution does not enter opaque CALL bodies.
  * A graph runtime must receive a previously compiled inner LINEAR. */
 TEST(schedule_runtime, execution_owner_preserves_opaque_call_bodies) {

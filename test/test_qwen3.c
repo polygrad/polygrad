@@ -10,12 +10,18 @@
 #include "../src/codegen/codegen.h"
 #include "../src/loaders/gguf_decode.h"
 #include "../src/loaders/gguf_loader.h"
+#include "../src/loaders/import_error.h"
 #include "../src/model.h"
 #include "../src/engine/schedule.h"
 #include "../src/tokenizer.h"
 #include <string.h>
 
 /* GGUF file loading */
+TEST(qwen3, invalid_cache_options) {
+  ASSERT_EQ(poly_gguf_load(NULL, 0, 1, 0, 4, 5, POLY_DEVICE_CPU), NULL);
+  ASSERT_INT_EQ(poly_import_last_error_code(), POLY_IMPORT_ERR_INVALID_ARGUMENT);
+  PASS();
+}
 
 #define QWEN3_GGUF_EXPECTED_LEN 639447744LL
 #define QWEN3_GGUF_EXPECTED_CRC32 0xa014a8efu
@@ -166,7 +172,8 @@ TEST(qwen3, model_build_and_load) {
   SKIP_IF_NO_GGUF();
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, 0, 0, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   ASSERT_TRUE(poly_model_ctx(inst) == ctx);
 
@@ -195,7 +202,8 @@ TEST(qwen3, forward_cpu) {
   SKIP_IF_NO_GGUF();
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, 0, 0, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
 
   /* Fill input with prompt "The capital of France is" */
@@ -235,7 +243,8 @@ TEST(qwen3, forward_cuda) {
 
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  PolyModel *inst = poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, POLY_DEVICE_AUTO);
+  PolyModel *inst =
+      poly_gguf_load_into(ctx, g_gguf_data, g_gguf_len, 1, 25, 0, 0, POLY_DEVICE_AUTO);
   ASSERT_NOT_NULL(inst);
   poly_model_set_device(inst, POLY_DEVICE_CUDA);
 

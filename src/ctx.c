@@ -62,7 +62,7 @@ PolyCtx *poly_ctx_new(void) {
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
-  ctx->kernel_policy = poly_getenv_int("POLY_KERNELS", -1);
+  ctx->kernel_policy = poly_getenv_int("POLY_KERNELS", 0) == 1;
   ctx->kernel_policy_locked = false;
   ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
@@ -112,11 +112,10 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->active_jit_capture = NULL;
   ctx->tensor_capture = NULL;
-  ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->uop_storage || !ctx->schedule_cache ||
       !ctx->to_program_cache || !ctx->runtime_cache || !ctx->local_size_cache ||
       !ctx->graph_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
-      !ctx->retained_uops || !ctx->collection_roots || !ctx->rng_states || !ctx->name_map) {
+      !ctx->retained_uops || !ctx->collection_roots || !ctx->rng_states) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -132,16 +131,9 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->retained_uops) poly_map_destroy(ctx->retained_uops);
     if (ctx->collection_roots) poly_map_destroy(ctx->collection_roots);
     if (ctx->rng_states) poly_map_destroy(ctx->rng_states);
-    if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
   }
-  ctx->entries = NULL;
-  ctx->n_entries = 0;
-  ctx->entries_cap = 0;
-  ctx->ep = NULL;
-  ctx->n_ep = 0;
-  ctx->ep_cap = 0;
   ctx->next_buf_tag = 1;
   ctx->next_unique_id = 0;
   /* Snapshot a supported default without rejecting context creation: an
@@ -173,12 +165,9 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->rng_states);
   poly_map_destroy(ctx->mem_used_by_device);
   free(ctx->tensors);
-  poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);
   poly_uop_storage_destroy_all(ctx);
   poly_map_destroy(ctx->uop_storage);
-  free(ctx->entries);
-  free(ctx->ep);
   poly_arena_destroy(ctx->scratch);
   poly_arena_destroy(ctx->arena);
   free(ctx);
@@ -308,9 +297,13 @@ static bool residency_mark_root(ResidencyMarker *marker, PolyUOp *root) {
       marker->stack = stack;
       marker->cap_stack = capacity;
     }
-    /* Current Tinygrad get_call_outs_ins/_collect_bufs derives JIT residency
-     * from CALL arguments. src[0] is executable code, not a buffer owner. */
-    int first_src = uop->op == POLY_OP_CALL ? 1 : 0;
+    /* PROGRAM bodies contain abstract parameters, but graph functions contain
+     * concrete scratch buffers omitted from the outer CALL's input list. The
+     * live caller, not the weak graph-runtime cache, owns that storage. */
+    int first_src = uop->op == POLY_OP_CALL && uop->n_src &&
+                            uop->src[0]->op != POLY_OP_CUSTOM_FUNCTION
+                        ? 1
+                        : 0;
     for (int i = first_src; i < uop->n_src; i++)
       marker->stack[marker->n_stack++] = uop->src[i];
   }
@@ -484,10 +477,6 @@ static int mark_live_ir(PolyCtx *ctx, PolyUOp *transient_root, PolyMap *live) {
     marker.failed =
         !ir_mark_root(&marker, tensor->uop_logical) || !ir_mark_root(&marker, tensor->uop_physical);
   }
-  for (int i = 0; !marker.failed && i < ctx->n_entries; i++)
-    if (ctx->entries[i]) marker.failed = !ir_mark_root(&marker, ctx->entries[i]->buffer);
-  for (int i = 0; !marker.failed && i < ctx->n_ep; i++)
-    marker.failed = !ir_mark_root(&marker, ctx->ep[i].sink);
   if (!marker.failed && transient_root) marker.failed = !ir_mark_root(&marker, transient_root);
   if (!marker.failed) poly_map_foreach(ctx->retained_uops, mark_retained_ir, &marker);
   BufferIrMarker buffers = {.ir = &marker, .visited = poly_map_new(64)};
@@ -524,15 +513,10 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
     if (tensor && tensor->owner_refs > 0)
       failed = !residency_mark_owner(&roots, tensor->uop_physical);
   }
-  for (int i = 0; !failed && i < ctx->n_entries; i++)
-    if (ctx->entries[i]) failed = !residency_mark_root(&roots, ctx->entries[i]->buffer);
-  for (int i = 0; !failed && i < ctx->n_ep; i++)
-    failed = !residency_mark_root(&roots, ctx->ep[i].sink);
   /* A call-local allocation guard is not a persistent owner. Let persistent
    * roots establish coverage before adding that temporary protection. */
   if (!failed && transient_root) failed = !residency_mark_root(&roots, transient_root);
   free(roots.stack);
-  poly_map_destroy(roots.visited);
 
   ResidencyRows rows = {0};
   if (!failed) poly_map_foreach(ctx->buffers, collect_residency_row, &rows);
@@ -577,6 +561,10 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
     free(alias_stack);
     poly_map_destroy(row_by_buffer);
   }
+  /* Destroy native graph objects before releasing any storage they reference.
+   * This also runs on residency-only collection, not just the later IR sweep. */
+  if (!failed && poly_graph_cache_evict_unmarked(ctx, roots.visited) != 0) failed = true;
+  poly_map_destroy(roots.visited);
   if (!failed) {
     for (int i = 0; i < rows.count; i++)
       if (!poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
@@ -731,8 +719,6 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->buffer_owned_source_bytes = buf_stats.source;
   out->buffer_owned_bytes = buf_stats.current + buf_stats.source;
   out->tensor_records = (size_t)ctx->n_tensors;
-  out->registry_entries = (size_t)ctx->n_entries;
-  out->entrypoint_entries = (size_t)ctx->n_ep;
   out->compiled_artifact_bytes = poly_runtime_cache_artifact_bytes(ctx);
   out->launch_count = ctx->launch_count;
   out->runtime_cache_hits = ctx->runtime_cache_hits;
@@ -837,15 +823,15 @@ void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes)
 #ifdef __EMSCRIPTEN__
 /* wasm_common.js reads this public struct manually. Keep the ABI facts
  * compile-checked instead of relying on an unverified offset table. */
-_Static_assert(offsetof(PolyCtxStats, global_ops) == 104, "wasm PolyCtxStats.global_ops offset");
-_Static_assert(offsetof(PolyCtxStats, global_mem) == 112, "wasm PolyCtxStats.global_mem offset");
-_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 120, "wasm PolyCtxStats.time_sum_s offset");
+_Static_assert(offsetof(PolyCtxStats, global_ops) == 96, "wasm PolyCtxStats.global_ops offset");
+_Static_assert(offsetof(PolyCtxStats, global_mem) == 104, "wasm PolyCtxStats.global_mem offset");
+_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 112, "wasm PolyCtxStats.time_sum_s offset");
 _Static_assert(
-    offsetof(PolyCtxStats, kernel_count) == 128,
+    offsetof(PolyCtxStats, kernel_count) == 120,
     "wasm PolyCtxStats.kernel_count offset"
 );
-_Static_assert(offsetof(PolyCtxStats, mem_used) == 136, "wasm PolyCtxStats.mem_used offset");
-_Static_assert(sizeof(PolyCtxStats) == 144, "wasm PolyCtxStats size");
+_Static_assert(offsetof(PolyCtxStats, mem_used) == 128, "wasm PolyCtxStats.mem_used offset");
+_Static_assert(sizeof(PolyCtxStats) == 136, "wasm PolyCtxStats size");
 #endif
 
 PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {

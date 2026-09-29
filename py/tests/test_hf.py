@@ -50,6 +50,47 @@ def test_qwen3_rotary_state_and_roundtrip(device):
             model.dispose()
 
 
+def test_qwen3_cached_gguf_roundtrip():
+    import polygrad as pg
+    from polygrad.models import Transformer
+    fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/qwen3.json').read_text())
+    data = base64.b64decode(fixture['gguf'])
+    tokens = np.array(fixture['tokens'], dtype=np.int32)
+    expected = np.array(fixture['logits'], dtype=np.float32).reshape(1, 4, -1)
+    with pg.create(device='CPU') as rt:
+        model = Transformer.from_gguf(data, max_seq_len=4, cache_capacity=4,
+                               prefill_chunk_size=2, runtime=rt)
+        restored = None
+        try:
+            assert isinstance(model, Transformer)
+            for i in range(4):
+                np.testing.assert_allclose(model.append_tokens(tokens[:, i:i+1]), expected[:, i],
+                                           atol=3e-5, rtol=3e-5)
+            with pytest.raises(RuntimeError, match='capacity'):
+                model.append_tokens(tokens[:, :1])
+            restored = Transformer.load(model.save(), runtime=rt)
+            assert restored.decode_position == 0
+            np.testing.assert_allclose(restored.prefill_tokens(tokens), expected[:, -1],
+                                       atol=3e-5, rtol=3e-5)
+            restored.reset()
+            assert list(restored.generate(tokens[:, :3], max_tokens=1)) == [int(expected[0, 2].argmax())]
+        finally:
+            if restored is not None: restored.dispose()
+            model.dispose()
+        for options in ({'cache_capacity': -1}, {'cache_capacity': 4, 'prefill_chunk_size': 5},
+                        {'prefill_chunk_size': 2}, {'cache_capacity': 4, 'max_batch': 2}):
+            with pytest.raises((ValueError, RuntimeError), match='cache|prefill'):
+                Model.from_gguf(data, runtime=rt, **options)
+        with pytest.raises(ValueError, match='prefill|decode|Transformer'):
+            Transformer.from_gguf(data, runtime=rt)
+        bound = rt.models.Transformer.from_gguf(data, cache_capacity=4)
+        try:
+            assert bound._ctx == rt._ctx
+            assert isinstance(bound, Transformer)
+        finally:
+            bound.dispose()
+
+
 @pytest.mark.parametrize('kind', ['gpt2', 'qwen3'])
 def test_checkpoint_import_is_quiet_by_default(kind, capfd, monkeypatch):
     import polygrad as pg
@@ -110,7 +151,14 @@ def test_checkpoint_abi_uses_generic_loaders_only():
     from polygrad import _ffi
 
     lib = _ffi.get_lib()
-    for name in ('poly_linear', 'poly_layernorm', 'poly_rmsnorm', 'poly_embedding'):
+    for name in ('poly_linear', 'poly_layernorm', 'poly_rmsnorm', 'poly_embedding',
+                 'poly_param', 'poly_input', 'poly_output', 'poly_target', 'poly_aux',
+                 'poly_alias', 'poly_register_buffer', 'poly_register_buffer_by_id',
+                 'poly_register_existing_buffer', 'poly_ctx_get', 'poly_ctx_get_entry',
+                 'poly_ctx_named_count', 'poly_ctx_named_entry', 'poly_register_entrypoint',
+                 'poly_ctx_entrypoint_count', 'poly_ctx_entrypoint_name', 'poly_ctx_entrypoint_sink',
+                 'poly_ctx_set_trainable', 'poly_ctx_is_trainable',
+                 'poly_model_from_ctx', 'poly_model_from_sinks'):
         assert not hasattr(lib, name), f'obsolete ctx-global constructor: {name}'
     for name in ('poly_hf_load', 'poly_hf_load_into', 'poly_gguf_load', 'poly_gguf_load_into'):
         assert getattr(lib, name)

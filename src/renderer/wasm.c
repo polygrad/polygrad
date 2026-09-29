@@ -728,18 +728,12 @@ static void emit_cast_stack_value(WasmBuf *body, PolyDType src_dt, PolyDType dst
     return;
   }
 
-  /* A narrow unsigned result wraps after truncation; converting a negative
-   * float directly to u32 traps before the 8/16-bit mask can run. Use signed
-   * i32 staging for narrow destinations, then emit_narrow_integer. */
+  /* Saturation matches the SIMD emitter and keeps eagerly evaluated WHERE
+   * alternatives from trapping (notably discarded sine range reductions).
+   * Narrow unsigned results still use signed staging before their width mask. */
   bool dst_u = poly_dtype_is_unsigned(dst_dt) && dst_dt.bitsize >= 32;
-  if (src_64 && dst_64)
-    wb_byte(body, dst_u ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
-  else if (src_64 && !dst_64)
-    wb_byte(body, dst_u ? WASM_OP_I32_TRUNC_F64_U : WASM_OP_I32_TRUNC_F64_S);
-  else if (!src_64 && dst_64)
-    wb_byte(body, dst_u ? WASM_OP_I64_TRUNC_F32_U : WASM_OP_I64_TRUNC_F32_S);
-  else
-    wb_byte(body, dst_u ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
+  wb_byte(body, WASM_MISC_PREFIX);
+  wb_uleb128(body, (dst_64 ? 4 : 0) + (src_64 ? 2 : 0) + (dst_u ? 1 : 0));
 }
 
 static PolyDType wasm_compare_dtype(PolyDType a, PolyDType b) {

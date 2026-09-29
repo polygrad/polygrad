@@ -7,7 +7,7 @@ function createBoundTransformerClass(runtime) {
       const { buildModel } = require('./index')
       const model = buildModel(runtime, modelType, spec, false, false)
       try { return Transformer.fromModel(model) }
-      catch (error) { model.dispose(); throw error }
+      catch (error) { model._discardUnpublished(); throw error }
     }
 
     // Trusted producers only: admission does not prove causal, append-only caches.
@@ -34,7 +34,13 @@ function createBoundTransformerClass(runtime) {
     static load(source) {
       const model = runtime.Model.load(source)
       try { return Transformer.fromModel(model) }
-      catch (error) { model.dispose(); throw error }
+      catch (error) { model._discardUnpublished(); throw error }
+    }
+
+    static fromGGUF(source, options = {}) {
+      const model = runtime.Model.fromGGUF(source, options)
+      try { return Transformer.fromModel(model) }
+      catch (error) { model._discardUnpublished(); throw error }
     }
 
     _transformerError(fallback) {

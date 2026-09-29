@@ -976,7 +976,7 @@ function createBoundTensorClass(runtime) {
       /* Public device is a placement label. The WASM core maps public CPU onto
        * the WASM execution backend internally, but user-facing Tensor.device
        * should stay CPU for parity with Python/tinygrad-style APIs. */
-      const device = this.uop.device
+      const device = ffi.poly_uop_device_names(this._ctx, this._currentUopRaw())
       return device === 'WASM' && this._device === 'cpu' ? 'CPU' : device
     }
     get ndim() { return this._rt._core.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }

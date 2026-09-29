@@ -352,6 +352,10 @@ the causal, append-only cache semantics required by prefix reuse and rewind.
 Calling `pg.models.Qwen3(...)` reports that it is import-only and points to
 `pg.Model.fromGGUF(...)`; it does not construct an uninitialized model.
 
+For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
+{cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
+contract; `pg.Model.fromGGUF` accepts the same cache options but stays generic.
+
 New Qwen3 GGUF imports take only `x` (`Int32Array`) and return `output`:
 `(await model.forwardAsync({ x: tokenIds })).output`. Rotary tables are
 Model-owned state, included in saved bundles. Older bundles retain their

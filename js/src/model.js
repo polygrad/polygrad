@@ -262,7 +262,7 @@ function createBoundModelClass(runtime) {
         if (pending && typeof pending.then === 'function') pending.catch(() => {})
       })
 
-  function releaseModelOwner(owner, token = null) {
+  function releaseModelOwner(owner, token = null, enqueue = true) {
     if (!owner || !owner.active) return undefined
     owner.active = false
     liveModelOwners.delete(owner)
@@ -275,7 +275,7 @@ function createBoundModelClass(runtime) {
     }
     if (!owner.state.alive || !owner.core || !owner.handle) return undefined
     const free = () => owner.release(owner.resource)
-    if (owner.asyncHost && owner.core.enqueueAsync) return owner.core.enqueueAsync(free)
+    if (enqueue && owner.asyncHost && owner.core.enqueueAsync) return owner.core.enqueueAsync(free)
     free()
     return undefined
   }
@@ -752,7 +752,12 @@ function createBoundModelClass(runtime) {
       if (_runtime._activeAsync > 0) throw new Error('Model GGUF load requires an idle Runtime')
       const api = _runtime._core.model
       const bytes = normalizeBytes(ggufBytes, 'gguf')
-      const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
+      const capacity = opts.cacheCapacity ?? 0, chunk = opts.prefillChunkSize ?? 0
+      for (const value of [capacity, chunk]) {
+        if (!Number.isInteger(value) || value < 0 || value > 2147483647)
+          throw new TypeError('GGUF cache options must fit a nonnegative int32')
+      }
+      const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen, capacity, chunk)
       if (!handle) {
         const err = api.importLastError && api.importLastError()
         throw new Error('polygrad: fromGGUF failed' + (err ? ': ' + err.message : ''))
@@ -779,6 +784,16 @@ function createBoundModelClass(runtime) {
         throw new Error(err ? err.message : 'ONNX import failed')
       }
       return Model._fromHandle(handle)
+    }
+
+    _discardUnpublished() {
+      // Only synchronous factory rollback: the preceding load already admitted
+      // entry to C, and no JS turn or Model execution intervened. WebGPU imports
+      // are still host-staged. Do not queue a release that leaves the caller's
+      // runtime busy after the factory throws without returning an owner.
+      if (this._activeAsync || this._rt._activeAsync)
+        throw new Error('unpublished Model rollback requires an idle Runtime')
+      return releaseModelOwner(this._owner, this, false)
     }
 
     dispose() {

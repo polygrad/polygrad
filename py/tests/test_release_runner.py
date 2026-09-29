@@ -40,6 +40,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
     assert 'test-symbolic-z3-supported' in targets
     assert 'test-release-py-performance' in targets
+    assert {'test-kernels', 'test-examples', 'test-llama-pretrained', 'test-onnx-encoder'} <= set(targets)
     assert targets.index('test-release-py-performance') < targets.index('test')
     perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
     assert perf['variables']['PY_PERF_OUTPUT'] == '{output}/python-performance/report.json'
@@ -89,14 +90,25 @@ def test_release_stops_before_matrix_when_preflight_fails(runner, tmp_path):
     assert [g['status'] for g in report['gates']] == ['failed', 'not_run']
 
 
-def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path):
+def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path, monkeypatch):
     # The real 3.9 execution belongs to test-py-min-install. A configured
     # probe double keeps orchestration tests independent of a local 3.9 path.
     floor_python = tmp_path / 'python39'
     floor_python.write_text('#!/bin/sh\necho "CPython 3.9"\nexit 0\n')
     floor_python.chmod(0o700)
+    # Fixture contents and audit-tool identity have separate tests. This case
+    # executes the actual kernel compiler and Python version probes only.
+    monkeypatch.setitem(runner['preflight'].__globals__, 'fixture_errors', lambda _: [])
+    review = json.loads((ROOT / 'test/fixtures/analyzer_reviews.json').read_text())
+    tools = {}
+    for name, version in [('CLANG_FORMAT', 'clang-format version 14.0.6'),
+                          ('ANALYZER_CC', review['context']['clang'].rstrip('\n'))]:
+        tool = tmp_path / name
+        tool.write_text(f'#!{sys.executable}\nprint({version!r})\n')
+        tool.chmod(0o700)
+        tools[name] = str(tool)
     variables = dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable,
-                     PYTHON_MIN=str(floor_python))
+                     PYTHON_MIN=str(floor_python), HF_PYTHON=str(floor_python), **tools)
     assert runner['preflight'](variables) == 0
     # GCC accepts the C11 core, but not the CPU renderer's __fp16 storage type.
     assert runner['preflight'](dict(variables, CC='gcc')) == 1
@@ -133,6 +145,30 @@ def test_release_preflight_rejects_unreviewed_tools(runner, tmp_path, tool, vers
 
 def test_release_subprocesses_use_utf8(runner, tmp_path):
     assert runner['release_environment'](tmp_path)['PYTHONUTF8'] == '1'
+    assert runner['release_environment'](tmp_path)['POLY_KERNELS'] == '0'
+
+
+def test_release_fixture_preflight_checks_missing_and_changed_bytes(runner, tmp_path):
+    import hashlib
+    data = b'pinned checkpoint'
+    fixture = dict(variable='CHECKPOINT', default='default', fetch_target='fetch-model',
+                   files={'weights': hashlib.sha256(data).hexdigest()})
+    directory = tmp_path / 'chosen'
+    directory.mkdir()
+    variables = {'CHECKPOINT': str(directory)}
+    check = lambda: runner['fixture_errors'](variables, tmp_path, [fixture])
+    assert 'fetch-model' in check()[0]
+    (directory / 'weights').write_bytes(data)
+    assert check() == []
+    (directory / 'weights').write_bytes(b'changed')
+    assert 'hash mismatch' in check()[0]
+
+
+def test_release_fixture_inventory_covers_pretrained_gates(runner):
+    fixtures = {f['variable']: f for f in runner['SCOPE']['required_fixtures']}
+    assert set(fixtures) == {'LLAMA_CHECKPOINT', 'ONNX_ENCODER_DIR'}
+    assert set(fixtures['LLAMA_CHECKPOINT']['files']) == {'config.json', 'model.safetensors'}
+    assert set(fixtures['ONNX_ENCODER_DIR']['files']) == {'onnx/model.onnx'}
 
 
 def test_release_make_defaults_do_not_export_builtin_cc_or_ambient_python():

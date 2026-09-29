@@ -80,6 +80,7 @@ typedef enum {
   X86_REG_CLASS_XMM,
   X86_REG_CLASS_FIXED_RAX,
   X86_REG_CLASS_FIXED_RDX,
+  X86_REG_CLASS_FIXED_RCX,
 } X86RegClass;
 
 #define X86_TAG_REAL 0x40000000
@@ -112,6 +113,7 @@ static X86RegClass x86_real_class_for_constraint(X86RegClass cls) {
   switch (cls) {
   case X86_REG_CLASS_FIXED_RAX:
   case X86_REG_CLASS_FIXED_RDX:
+  case X86_REG_CLASS_FIXED_RCX:
     return X86_REG_CLASS_WGPR;
   default:
     return cls;
@@ -834,6 +836,8 @@ static int32_t x86_virtual_fixed_wgpr(int real_reg, int *next_vreg) {
     cls = X86_REG_CLASS_FIXED_RAX;
   else if (real_reg == X86_REG_RDX)
     cls = X86_REG_CLASS_FIXED_RDX;
+  else if (real_reg == X86_REG_RCX)
+    cls = X86_REG_CLASS_FIXED_RCX;
   else
     return 0;
   return x86_tag_virtual(cls, (*next_vreg)++);
@@ -2238,17 +2242,16 @@ static PolyUOp *rule_x86_isel_scalar_int_bin_graph(
   PolyX86Op op = x86_int_bin_op(u->op, u->dtype, imm, false);
   if (!op) return NULL;
   if (!imm && (u->op == POLY_OP_SHL || u->op == POLY_OP_SHR)) {
-    /* tinygrad x86.py:277-280,470-472: variable shifts use CL.  Keep the
-     * shifted value out of RCX and materialize the count in RCX. */
+    /* Pinned x86.shift/alloc_vregs: CL is a constraint, not a value identity.
+     * Distinct counts need separate live ranges when lanes are unrolled. */
     PolyUOp *value_srcs[1] = {u->src[0]};
     PolyUOp *count_srcs[1] = {rhs};
     PolyUOp *value = x86_ins(
         ctx, POLY_X86_MOV, u->dtype, value_srcs, 1,
         x86_graph_vreg_for_op(u->dtype, POLY_X86_MOV, false)
     );
-    PolyUOp *count = x86_ins(
-        ctx, POLY_X86_MOV, rhs->dtype, count_srcs, 1, x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RCX)
-    );
+    PolyUOp *count =
+        x86_ins(ctx, POLY_X86_MOV, rhs->dtype, count_srcs, 1, x86_graph_fixed_wgpr(X86_REG_RCX));
     PolyUOp *srcs[2] = {value, count};
     return x86_ins(ctx, op, u->dtype, srcs, 2, x86_graph_vreg_for_op(u->dtype, op, false));
   }
@@ -3387,6 +3390,7 @@ static const int32_t *x86_real_pool(X86RegClass cls, int *n_out) {
   };
   static const int32_t fixed_rax[] = {X86_REG_RAX};
   static const int32_t fixed_rdx[] = {X86_REG_RDX};
+  static const int32_t fixed_rcx[] = {X86_REG_RCX};
   static const int32_t xmm[] = {
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
   };
@@ -3397,6 +3401,10 @@ static const int32_t *x86_real_pool(X86RegClass cls, int *n_out) {
   if (cls == X86_REG_CLASS_FIXED_RDX) {
     *n_out = 1;
     return fixed_rdx;
+  }
+  if (cls == X86_REG_CLASS_FIXED_RCX) {
+    *n_out = 1;
+    return fixed_rcx;
   }
   if (cls == X86_REG_CLASS_XMM) {
     *n_out = (int)(sizeof(xmm) / sizeof(xmm[0]));
@@ -3748,6 +3756,8 @@ static int32_t x86_fixed_constraint_real(int32_t vreg) {
     return x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RAX);
   case X86_REG_CLASS_FIXED_RDX:
     return x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RDX);
+  case X86_REG_CLASS_FIXED_RCX:
+    return x86_tag_real(X86_REG_CLASS_WGPR, X86_REG_RCX);
   default:
     return 0;
   }

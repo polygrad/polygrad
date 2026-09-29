@@ -5095,6 +5095,34 @@ class TestRepr:
 class TestFloat64:
     """Tests for float64 dtype support."""
 
+    def test_cpu_sine_full_range_reduction(self):
+        values = np.array([0., -0., 29.999999, 30., 30.000001, 31.2, 1000.1,
+                           -1780566.693, 1e15, -1e25, 1e30, -1e100,
+                           np.finfo(np.float64).max, np.inf, -np.inf, np.nan])
+        x = Tensor(values, device='CPU')
+        with np.errstate(invalid='ignore'):
+            np.testing.assert_allclose(x.sin().numpy(), np.sin(values), atol=2e-15, rtol=0)
+        phases = values[5:8]
+        np.testing.assert_allclose(Tensor(phases, device='CPU').cos().numpy(),
+                                   np.cos(phases), atol=2e-10, rtol=0)
+
+    def test_cpu_sine_exponents_and_quadrant_boundaries(self):
+        rng = np.random.default_rng(1328)
+        # Cover every normal exponent, all table-word transitions, subnormals,
+        # and both neighbors of representable multiples of pi/2.
+        exponents = np.arange(-1022, 1024)
+        powers = np.ldexp(np.ones(exponents.size), exponents)
+        random = np.ldexp(rng.uniform(1., 2., exponents.size), exponents)
+        quadrants = np.arange(1, 257) * (np.pi / 2)
+        centers = np.concatenate((powers, random, quadrants, [30., np.nextafter(0., 1.)]))
+        values = np.concatenate((centers, np.nextafter(centers, 0.),
+                                 np.nextafter(centers, np.inf)))
+        values = np.concatenate((values, -values))
+        got = Tensor(values, device='CPU').sin().numpy()
+        expected = np.sin(values)
+        np.testing.assert_allclose(got, expected, atol=0, rtol=2e-14)
+        np.testing.assert_array_equal(np.signbit(got), np.signbit(expected))
+
     def test_numpy_dtype_is_preserved_like_tinygrad(self):
         f64 = Tensor(np.array([1.0, 2.0], dtype=np.float64))
         assert f64.dtype is dtypes.float64

@@ -221,8 +221,6 @@ function createWasmCoreFromModule(Module, device) {
     'bufferOwnedCurrentBytes',
     'bufferOwnedSourceBytes',
     'tensorRecords',
-    'registryEntries',
-    'entrypointEntries',
     'compiledArtifactBytes',
     'runtimeArtifactEntries',
     'launchCount',
@@ -237,7 +235,7 @@ function createWasmCoreFromModule(Module, device) {
   ]
 
   function readCtxStats(ctx) {
-    const ptr = malloc(144)
+    const ptr = malloc(136)
     try {
       const rc = Module._poly_ctx_stats(ctx, ptr)
       if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
@@ -252,11 +250,11 @@ function createWasmCoreFromModule(Module, device) {
         const hi = view.getUint32(ptr + offset + 4, true)
         return hi * 0x100000000 + lo
       }
-      out.globalOps = readU64(104)
-      out.globalMem = readU64(112)
-      out.timeSumS = view.getFloat64(ptr + 120, true)
-      out.kernelCount = readU64(128)
-      out.memUsed = readU64(136)
+      out.globalOps = readU64(96)
+      out.globalMem = readU64(104)
+      out.timeSumS = view.getFloat64(ptr + 112, true)
+      out.kernelCount = readU64(120)
+      out.memUsed = readU64(128)
       return out
     } finally {
       Module._free(ptr)
@@ -807,7 +805,6 @@ function createWasmCoreFromModule(Module, device) {
     poly_set_default_float: Module._poly_set_default_float,
     poly_set_default_int: Module._poly_set_default_int,
     poly_set_noopt: Module._poly_set_noopt,
-    poly_ctx_named_count: Module._poly_ctx_named_count,
     poly_uop_const_float: Module._poly_uop_const_float,
     poly_uop_const_double: Module._poly_uop_const_double,
     poly_uop_const_int: (ctx, val) => Module._poly_uop_const_int(ctx, BigInt(val)),
@@ -932,30 +929,6 @@ function createWasmCoreFromModule(Module, device) {
     },
     poly_uop_flatten: Module._poly_uop_flatten,
     poly_uop_numel: (ctx, uop) => Number(Module._poly_uop_numel(ctx, uop)),
-    poly_register_buffer_by_id: (ctx, role, dtypeId, shape, name) => {
-      const shapePtr = writeInt64Array(shape || [])
-      const namePtr = allocString(name)
-      try {
-        return Module._poly_register_buffer_by_id(
-          ctx, role, dtypeId, shapePtr, (shape || []).length, namePtr
-        )
-      } finally {
-        Module._free(namePtr)
-        if (shapePtr) Module._free(shapePtr)
-      }
-    },
-    poly_register_existing_buffer: (ctx, role, buffer, shape, name, trainable) => {
-      const shapePtr = writeInt64Array(shape || [])
-      const namePtr = allocString(name)
-      try {
-        return Module._poly_register_existing_buffer(
-          ctx, role, buffer, shapePtr, (shape || []).length, namePtr, Boolean(trainable)
-        )
-      } finally {
-        Module._free(namePtr)
-        if (shapePtr) Module._free(shapePtr)
-      }
-    },
     poly_uop_buffer_by_id: (ctx, dtypeId, size) => Module._poly_uop_buffer_by_id(ctx, dtypeId, BigInt(size)),
     poly_uop_buffer_on_device_by_id: (ctx, dtypeId, size, device) =>
       Module._poly_uop_buffer_on_device_by_id(ctx, dtypeId, BigInt(size), device),
@@ -2058,7 +2031,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 106
+  const EXPECTED_ABI = 107
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2484,27 +2457,6 @@ function createWasmCoreFromModule(Module, device) {
       return configureModelDevice(inst)
     },
 
-    fromSinks(ctxPtr, names, sinks) {
-      const n = Math.min(names.length, sinks.length)
-      const namesPtr = malloc(Math.max(1, n) * 4)
-      const sinksPtr = malloc(Math.max(1, n) * 4)
-      const namePtrs = []
-      try {
-        for (let i = 0; i < n; i++) {
-          const p = allocString(names[i])
-          namePtrs.push(p)
-          heap32()[(namesPtr >>> 2) + i] = p
-          heap32()[(sinksPtr >>> 2) + i] = sinks[i] || 0
-        }
-        const inst = Module._poly_model_from_sinks(ctxPtr, namesPtr, sinksPtr, n)
-        return configureModelDevice(inst)
-      } finally {
-        for (const p of namePtrs) Module._free(p)
-        Module._free(namesPtr)
-        Module._free(sinksPtr)
-      }
-    },
-
     async fromBindingsAsync(ctxPtr, bindings, entries) {
       if (deviceName === 'webgpu') await ensureWebGPU()
       return this.fromBindings(ctxPtr, bindings, entries, deviceName === 'webgpu')
@@ -2667,10 +2619,10 @@ function createWasmCoreFromModule(Module, device) {
       return configureModelDevice(inst)
     },
 
-    loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
+    loadGGUF(ggufBytes, maxBatch, maxSeqLen, capacity, chunk) {
       const ptr = allocBytes(ggufBytes)
       const inst = Module._poly_gguf_load_into(
-        ctx, ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0,
+        ctx, ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0, capacity, chunk,
         deviceName === 'webgpu' ? DEVICE_IDS.interp : deviceId)
       Module._free(ptr)
       return configureModelDevice(inst)

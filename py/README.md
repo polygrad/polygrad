@@ -328,6 +328,11 @@ capabilities; see [supported models](https://github.com/polygrad/polygrad#suppor
 Calling `models.Qwen3(...)` reports that it is import-only and points to
 `Model.from_gguf(...)`; it does not construct an uninitialized model.
 
+For cached Qwen3 generation, use `models.Transformer.from_gguf(data,
+cache_capacity=4096, prefill_chunk_size=64)`, or the runtime-bound
+`rt.models.Transformer.from_gguf(...)`. The loader validates the generation
+contract; `Model.from_gguf` accepts the same cache options but stays generic.
+
 New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
 `model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,
 included in saved bundles. Older bundles retain their original signatures;

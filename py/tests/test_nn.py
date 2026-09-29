@@ -993,7 +993,6 @@ class TestModelExport:
         w = Tensor([[2.0]]).realize()
         x = Tensor.empty((1, 1))
         y = x.dot(w)
-        before = _ffi._lib.poly_ctx_named_count(x._ctx)
 
         inst = Model.from_tensors(
             inputs={"local_x": x},
@@ -1001,7 +1000,6 @@ class TestModelExport:
             params={"local_w": w},
         )
 
-        assert _ffi._lib.poly_ctx_named_count(x._ctx) == before
         assert inst.param_name(0) == "local_w"
         out = inst.forward(local_x=np.array([[3.0]], dtype=np.float32))
         assert np.allclose(out["local_y"], [6.0], atol=1e-5)
@@ -1012,7 +1010,6 @@ class TestModelExport:
         w = Tensor([[7.0]]).realize()
         x = Tensor.empty((1, 1))
         y = x.dot(w)
-        before = _ffi._lib.poly_ctx_named_count(x._ctx)
 
         inst = Model.from_bindings(
             bindings=[
@@ -1025,7 +1022,6 @@ class TestModelExport:
             ],
         )
 
-        assert _ffi._lib.poly_ctx_named_count(x._ctx) == before
         assert inst.param_name(0) == "bind_w"
         out = inst.forward(bind_x=np.array([[3.0]], dtype=np.float32))
         assert np.allclose(out["bind_y"], [21.0], atol=1e-5)

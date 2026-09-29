@@ -548,16 +548,3 @@ PolyTensor *poly_tensor_randn_by_id(
   if (!poly_dtype_by_id(dtype_id, &dtype)) return NULL;
   return poly_tensor_randn(ctx, dims, ndim, dtype, device);
 }
-
-PolyUOp *poly_register_buffer_by_id(
-    PolyCtx *ctx,
-    int role,
-    int dtype_id,
-    const int64_t *shape,
-    int ndim,
-    const char *name
-) {
-  PolyDType dt;
-  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
-  return poly_register_buffer(ctx, role, dt, shape, ndim, name);
-}

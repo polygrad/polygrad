@@ -27,6 +27,61 @@
 
 int poly_test_x86_program_call_entry(void *entry, void **args, int n_args);
 
+TEST_BACKEND(x86, variable_shifts_preserve_each_lane_count) {
+  /* Pinned x86.shift/isel allocate distinct virtual values constrained to RCX.
+   * Unrolled lanes must not share one live value merely because all use CL. */
+  PolyDType dtypes[] = {POLY_UINT32, POLY_INT32, POLY_UINT64, POLY_INT64};
+  bool ok = true;
+  for (int d = 0; d < 4; d++) {
+    int bits = d < 2 ? 32 : 64, bytes = bits / 8;
+    uint64_t mask = bits == 32 ? UINT32_MAX : UINT64_MAX;
+    uint64_t sign = UINT64_C(1) << (bits - 1);
+    uint64_t values[] = {1, 7, 12345, 123456789, sign, mask, sign + 3, 31};
+    uint64_t counts[] = {1, 7, 17, 0, 1, (uint64_t)bits - 1, 3, 2};
+    uint64_t input[8] = {0}, shifts[8] = {0};
+    for (int i = 0; i < 8; i++) {
+      if (bits == 32) {
+        uint32_t v = (uint32_t)values[i], c = (uint32_t)counts[i];
+        memcpy((char *)input + i * bytes, &v, bytes);
+        memcpy((char *)shifts + i * bytes, &c, bytes);
+      } else {
+        input[i] = values[i];
+        shifts[i] = counts[i];
+      }
+    }
+    for (int right = 0; right < 2; right++) {
+      PolyCtx *ctx = poly_ctx_new();
+      poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
+      PolyTensor *x = poly_tensor_from_host(ctx, input, 8 * bytes, dtypes[d], (int64_t[]){8}, 1);
+      PolyTensor *y = poly_tensor_from_host(ctx, shifts, 8 * bytes, dtypes[d], (int64_t[]){8}, 1);
+      x = poly_tensor_to_device(ctx, x, POLY_DEVICE_X86);
+      y = poly_tensor_to_device(ctx, y, POLY_DEVICE_X86);
+      PolyTensor *out = poly_tensor_alu2(ctx, right ? POLY_OP_SHR : POLY_OP_SHL, x, y);
+      PolyTensor *realized = NULL;
+      uint64_t actual[8] = {0};
+      bool ran = out && poly_realize_tensors(ctx, &out, 1, &realized) == 0 && realized;
+      const PolyUOp *buffer = ran ? poly_uop_get_buffer_identity(poly_tensor_uop(realized)) : NULL;
+      ran = buffer && poly_buffer_read(ctx, (PolyUOp *)buffer, actual, 8 * bytes) == 0;
+      ok &= ran;
+      for (int i = 0; ran && i < 8; i++) {
+        uint64_t expected = right ? values[i] >> counts[i] : (values[i] << counts[i]) & mask;
+        if (right && (d & 1) && (values[i] & sign) && counts[i])
+          expected |= mask ^ (mask >> counts[i]);
+        uint64_t got = actual[i];
+        if (bits == 32) {
+          uint32_t lane;
+          memcpy(&lane, (char *)actual + i * bytes, bytes);
+          got = lane;
+        }
+        ok &= got == expected;
+      }
+      poly_ctx_destroy(ctx);
+    }
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST_BACKEND(x86, program_call_without_compiler_type_prefix) {
   long page = sysconf(_SC_PAGESIZE);
   ASSERT_TRUE(page > 0);

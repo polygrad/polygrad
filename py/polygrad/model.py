@@ -27,6 +27,13 @@ def _model_capture_active(ctx):
     return _ptr_value(ctx) in _capture_contexts
 
 
+def _gguf_cache_int(value):
+    value = operator.index(value)
+    if not 0 <= value <= 2**31 - 1:
+        raise ValueError('GGUF cache options must fit a nonnegative int32')
+    return value
+
+
 def _import_context(runtime):
     from . import Runtime, _default_ctx
     if runtime is not None:
@@ -815,7 +822,8 @@ class Model:
         )
 
     @staticmethod
-    def from_gguf(data, *, max_batch=1, max_seq_len=0, device=None, runtime=None):
+    def from_gguf(data, *, max_batch=1, max_seq_len=0, cache_capacity=0,
+                  prefill_chunk_size=0, device=None, runtime=None):
         """Load a GGUF byte buffer or file path as an Model."""
         if isinstance(data, (str, pathlib.Path)):
             data = pathlib.Path(data).read_bytes()
@@ -823,7 +831,9 @@ class Model:
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         ctx = _import_context(runtime)
         ptr = _get_lib().poly_gguf_load_into(
-            ctx, buf, len(data), int(max_batch), int(max_seq_len), _device_id(device) if device is not None else 0
+            ctx, buf, len(data), int(max_batch), int(max_seq_len),
+            _gguf_cache_int(cache_capacity), _gguf_cache_int(prefill_chunk_size),
+            _device_id(device) if device is not None else 0
         )
         if not ptr:
             detail = _get_lib().poly_import_last_error_message()

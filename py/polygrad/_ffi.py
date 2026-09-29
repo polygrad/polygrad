@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 106
+POLYGRAD_ABI_VERSION = 107
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -92,8 +92,6 @@ class PolyCtxStats(ctypes.Structure):
         ('buffer_owned_current_bytes', ctypes.c_size_t),
         ('buffer_owned_source_bytes', ctypes.c_size_t),
         ('tensor_records', ctypes.c_size_t),
-        ('registry_entries', ctypes.c_size_t),
-        ('entrypoint_entries', ctypes.c_size_t),
         ('compiled_artifact_bytes', ctypes.c_size_t),
         ('runtime_artifact_entries', ctypes.c_size_t),
         ('launch_count', ctypes.c_size_t),
@@ -287,9 +285,6 @@ def _declare_signatures(lib):
     lib.poly_device_is_host_addressable.restype = ctypes.c_bool
     lib.poly_device_is_host_addressable.argtypes = [ctypes.c_int]
 
-    lib.poly_ctx_named_count.restype = ctypes.c_int
-    lib.poly_ctx_named_count.argtypes = [_ptr]
-
     lib.poly_ctx_stats.restype = ctypes.c_int
     lib.poly_ctx_stats.argtypes = [_ptr, ctypes.POINTER(PolyCtxStats)]
 
@@ -409,16 +404,6 @@ def _declare_signatures(lib):
 
     lib.poly_uop_numel.restype = ctypes.c_int64
     lib.poly_uop_numel.argtypes = [_ptr, _ptr]
-
-    lib.poly_register_buffer_by_id.restype = _ptr
-    lib.poly_register_buffer_by_id.argtypes = [
-        _ptr, ctypes.c_int, ctypes.c_int, _i64p, ctypes.c_int, ctypes.c_char_p
-    ]
-
-    lib.poly_register_existing_buffer.restype = _ptr
-    lib.poly_register_existing_buffer.argtypes = [
-        _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int, ctypes.c_char_p, ctypes.c_bool
-    ]
 
     lib.poly_uop_buffer_by_id.restype = _ptr
     lib.poly_uop_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
@@ -1382,11 +1367,6 @@ def _declare_signatures(lib):
     lib.poly_model_from_program.restype = _ptr
     lib.poly_model_from_program.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
-    lib.poly_model_from_sinks.restype = _ptr
-    lib.poly_model_from_sinks.argtypes = [
-        _ptr, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(_ptr), ctypes.c_int
-    ]
-
     lib.poly_model_from_bindings.restype = _ptr
     lib.poly_model_from_bindings.argtypes = [
         _ptr,
@@ -1596,7 +1576,8 @@ def _declare_signatures(lib):
 
     lib.poly_gguf_load_into.restype = _ptr
     lib.poly_gguf_load_into.argtypes = [
-        _ptr, _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int
+        _ptr, _u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int
     ]
     lib.poly_onnx_load_into.restype = _ptr
     lib.poly_onnx_load_into.argtypes = [

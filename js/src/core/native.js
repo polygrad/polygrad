@@ -62,7 +62,7 @@ function createNativeCore(device) {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 106
+  const EXPECTED_ABI = 107
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -180,10 +180,6 @@ function createNativeCore(device) {
     fromBundle(bytes) {
       return binding.poly_model_from_bundle_into(bytes, ctx)
     },
-    fromSinks(ctxPtr, names, sinks) {
-      const inst = binding.poly_model_from_sinks(ctxPtr, names, sinks)
-      return setModelDevice(inst)
-    },
     fromBindings(ctxPtr, bindings, entries) {
       const bindingNames = bindings.map(b => b.name)
       const bindingRoles = bindings.map(b => b.role)
@@ -225,9 +221,9 @@ function createNativeCore(device) {
       return binding.poly_hf_load_into(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
     },
-    loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
+    loadGGUF(ggufBytes, maxBatch, maxSeqLen, capacity, chunk) {
       return binding.poly_gguf_load_into(
-        ggufBytes, maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
+        ggufBytes, maxBatch || 1, maxSeqLen || 0, capacity, chunk, deviceId, ctx)
     },
     loadONNX(bytes, dimensions, external) {
       return binding.poly_onnx_load_into(bytes, dimensions, external, deviceId, ctx)

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.reference_migration import file_hash, manifest_hash, source_manifest
 
-SCOPE = json.loads((ROOT / 'test/fixtures/release_050_scope.json').read_text(encoding='utf-8'))
+SCOPE = json.loads((ROOT / 'test/fixtures/release_scope.json').read_text(encoding='utf-8'))
 EXCLUSIONS = SCOPE['excluded_capabilities']
 
 
@@ -42,9 +42,9 @@ def release_gates():
     # because its temporary .plist files affect HLB's checkout source lock.
     targets = '''
         test-release-preflight format-check verify-source-mirrors test-headers test-release-py-performance test-analyze-reviewed
-        test test-x86 test-interp test-cuda test-qwen3
+        test test-x86 test-interp test-cuda test-qwen3 test-examples
         test-harness-skip-accounting test-release-gates
-        test-py test-py-x86 test-hf-e2e
+        test-py test-py-x86 test-hf-e2e test-llama-pretrained test-onnx-encoder test-kernels
         test-js-native-cpu test-js-native-x86 test-js-native-interp
         test-js-native-cuda test-js-native-gc
         test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm
@@ -61,7 +61,9 @@ def release_gates():
     '''.split()
     gates = [dict(target=target, variables={}) for target in targets]
     for gate in gates:
-        if gate['target'] == 'test-release-py-performance':
+        if gate['target'] == 'test-llama-pretrained':
+            gate['variables']['LLAMA_TEST_DEVICES'] = 'cpu cuda'
+        elif gate['target'] == 'test-release-py-performance':
             gate['variables']['PY_PERF_OUTPUT'] = '{output}/python-performance/report.json'
         elif gate['target'] == 'test-release-c-performance':
             gate['variables']['C_PERF_OUTPUT'] = '{output}/c-performance/report.json'
@@ -83,6 +85,19 @@ def release_gates():
             gate['variables'].update(UPSTREAM_COMPAT_DIR='{output}/upstream-policy',
                                      UPSTREAM_POLICY_TESTS='test/backend/test_setitem.py test/backend/test_tensor.py test/null/test_indexing.py')
     return gates
+
+
+def fixture_errors(variables, root=ROOT, fixtures=None):
+    errors = []
+    for fixture in SCOPE['required_fixtures'] if fixtures is None else fixtures:
+        directory = root / variables.get(fixture['variable'], fixture['default'])
+        for name, expected in fixture['files'].items():
+            path = directory / name
+            if not path.is_file():
+                errors.append(f'{path}: missing; run make {fixture["fetch_target"]}')
+            elif file_hash(path) != expected:
+                errors.append(f'{path}: checkpoint hash mismatch')
+    return errors
 
 
 def preflight(variables):
@@ -112,9 +127,14 @@ def preflight(variables):
                    ['-c', 'import build'], None))
     checks.append(('PARITY_PY z3', shlex.split(variables.get('PARITY_PY', sys.executable)) +
                    ['-c', 'import z3'], None))
+    checks.append(('HF_PYTHON', shlex.split(variables.get('HF_PYTHON', sys.executable)) +
+                   ['-c', 'import torch, transformers, onnx, onnxruntime'], None))
     for name, default in (('CLANG_FORMAT', 'clang-format-14'), ('ANALYZER_CC', 'clang-14')):
         checks.append((name, shlex.split(variables.get(name, default)) + ['--version'], None))
-    failed = False
+    fixture_failures = fixture_errors(variables)
+    for error in fixture_failures:
+        print(error)
+    failed = bool(fixture_failures)
     for name, command, source in checks:
         print(f'{name}: {shlex.join(command)}', flush=True)
         try:
@@ -147,9 +167,11 @@ def release_environment(root):
     # passed as explicit Make assignments, not inherited MAKEFLAGS.
     for key in ('MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES', 'PYTHONHOME', 'PYTHONPATH',
                 'POLY_TEST_FILTER', 'POLY_LIB', 'POLY_CORE', 'COMPAT_CASES',
-                'POLY_REQUIRE_HF', 'NODE_OPTIONS', 'NODE_PATH'):
+                'POLY_REQUIRE_HF', 'POLY_REQUIRE_KERNELS', 'POLY_ONNX_ENCODER_DIR',
+                'NODE_OPTIONS', 'NODE_PATH'):
         env.pop(key, None)
     env.update(DEV='CPU', POLY_DEV='cpu', PYTEST_ADDOPTS='',
+               POLY_KERNELS='0',
                PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', PYTHONUTF8='1', POLY_BROWSER_DEVICES='auto,interp,webgpu',
                POLY_BROWSER_SKIP_UNAVAILABLE='0')
     for key, directory in (('POLY_TMPDIR', 'cc_tmp'), ('TMPDIR', 'cc_tmp'),
