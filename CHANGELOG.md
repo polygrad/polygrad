@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0
 
+- Fix Wasm/WebGPU kernel argument addressing above 2 GiB, including large Qwen3 loads.
 - Preserve per-lane variable shift counts in optimized X86 kernels.
 - Fix float64 sine range reduction in shared codegen, preserving the full
   significand and covering finite double exponents without native-sine bypasses.

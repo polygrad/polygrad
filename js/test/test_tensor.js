@@ -162,7 +162,9 @@ async function runTensorTests(pg, createRuntime) {
     finally { b.dispose(); a.dispose() }
   })
 
-  await testIf(pg.core === 'wasm', 'Wasm saturating scalar float casts', async () => {
+  // Saturation is the Wasm JIT's conversion contract, not the INTERP/WebGPU
+  // backends that can also execute inside the Wasm-hosted core.
+  await testIf(pg.device === 'wasm', 'Wasm JIT saturating scalar float casts', async () => {
     for (const dtype of ['float32', 'float64']) {
       for (const [target, value, expected] of [
         ['int32', 1e30, 2147483647], ['int32', -1e30, -2147483648],

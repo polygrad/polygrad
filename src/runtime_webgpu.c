@@ -406,11 +406,12 @@ EM_JS(
         for (const buf of tempCopies) buf.destroy();
       };
       try {
-      const outHandle = n_params > 0 ? HEAPU32[args >> 2] : 0;
+      // wasm32 addresses above 2 GiB must stay unsigned when indexing heap views.
+      const outHandle = n_params > 0 ? HEAPU32[args >>> 2] : 0;
 
       const paramHandles = [];
       for (let i = 0; i < n_params; i++) {
-        const handle = HEAPU32[(args >> 2) + i];
+        const handle = HEAPU32[(args >>> 2) + i];
         paramHandles.push(handle);
         let buf = st.buffers.get(handle);
         if (!buf) return -1;
@@ -432,8 +433,8 @@ EM_JS(
       }
 
       for (let i = n_params; i < n_args; i++) {
-        const valuePtr = HEAPU32[(args >> 2) + i];
-        const value = HEAP32[valuePtr >> 2];
+        const valuePtr = HEAPU32[(args >>> 2) + i];
+        const value = HEAP32[valuePtr >>> 2];
         const ubuf = st.device.createBuffer(
             {size : 4, usage : GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST}
         );
@@ -533,7 +534,7 @@ EM_JS(
             if (elapsed_us) {
               await queryReadback.mapAsync(GPUMapMode.READ);
               const times = new BigUint64Array(queryReadback.getMappedRange());
-              HEAPF64[elapsed_us >> 3] = Number(times[1] - times[0]) / 1000;
+              HEAPF64[elapsed_us >>> 3] = Number(times[1] - times[0]) / 1000;
               queryReadback.unmap();
             }
             return 0;

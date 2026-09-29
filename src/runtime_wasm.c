@@ -101,6 +101,7 @@ if (!Module._polyKernelCache) Module._polyKernelCache = [];
 var kernel = inst.exports.kernel;
 var n_params = kernel.length;
 var launcher;
+// wasm32 addresses above 2 GiB must stay unsigned when indexing heap views.
 switch (n_params) {
 case 0:
   launcher = function(args) {
@@ -109,55 +110,55 @@ case 0:
   break;
 case 1:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p]);
   };
   break;
 case 2:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1]);
   };
   break;
 case 3:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2]);
   };
   break;
 case 4:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3]);
   };
   break;
 case 5:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]);
   };
   break;
 case 6:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5]);
   };
   break;
 case 7:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6]);
   };
   break;
 case 8:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2;
+    var h = HEAP32, p = args >>> 2;
     kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6], h[p + 7]);
   };
   break;
 default:
   launcher = function(args) {
-    var h = HEAP32, p = args >> 2, params = [];
+    var h = HEAP32, p = args >>> 2, params = [];
     for (var i = 0; i < n_params; i++)
       params.push(h[p + i]);
     kernel.apply(null, params);

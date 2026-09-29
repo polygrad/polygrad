@@ -916,6 +916,7 @@ test-browser: test-js-browser
 .PHONY: test-browser-runner
 test-browser-runner:
 	$(NODE) js/test/test_browser_runner.js
+	$(NODE) js/test/test_wasm_addresses.js
 
 test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-09-29",
-  "basis": "Complete CUDA-enabled/HIP-disabled Clang 14 scan of 92 translation units after the X86 shift fix and ONNX cleanup: 97 diagnostics. Rechecked affected existing warning invariants and reviewed 26 ONNX parser/operation paths plus graph-cache eviction ownership. Removed three genuine ONNX Constant dead assignments instead of approving them. Detailed ONNX traces show validation failures being treated as successful helper returns; graph-cache eviction has a checked allocation and callback count bound. All 70 prior warning identities remain, with 11 reviewed location moves. No checker suppression, scope reduction or source-hash-only approval. Evidence: temp/analyzer-review-20260929/review.md, onnx-traces.log, scan/report.json and verified/report.json. Earlier unchanged-site rationales are retained per diagnostic.",
+  "basis": "Complete CUDA-enabled/HIP-disabled Clang 14 scan of 92 translation units after the X86 shift fix and ONNX cleanup: 97 diagnostics. Rechecked affected existing warning invariants and reviewed 26 ONNX parser/operation paths plus graph-cache eviction ownership. Removed three genuine ONNX Constant dead assignments instead of approving them. Detailed ONNX traces show validation failures being treated as successful helper returns; graph-cache eviction has a checked allocation and callback count bound. All 70 prior warning identities remain, with 11 reviewed location moves. No checker suppression, scope reduction or source-hash-only approval. Evidence: temp/analyzer-review-20260929/review.md, onnx-traces.log, scan/report.json and verified/report.json. Earlier unchanged-site rationales are retained per diagnostic. September29 release-failure follow-up: temp/release-fixes-20260929/analyzer-scan/report.json rescans all 92 units with the same 97 diagnostics and locations. ctx.c changes only formatting; runtime_wasm.c/runtime_webgpu.c change unsigned JavaScript heap indexing, outside native analyzer preprocessing, covered by executable bridge regressions and the real Qwen WebGPU gate. No diagnostic dispositions changed.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -133,7 +133,7 @@
       "src/codegen/simplify.c": "bc72c039ed06b1c8c1f5be1646904395fa8f79f60a7db8b90e282347eeebd60a",
       "src/codegen/simplify.h": "3c5611fdf96a2ab7f8b9980038cc0158ae2c83dd8ded5633778ba70bd1892995",
       "src/core.h": "5e009f59e1d4dcf737301c0134c910c870e4fb4ae543cc99ebdd43eb30cad691",
-      "src/ctx.c": "8f149770ed986cae69aad8134dee37f89ea5e814bf67b6e1413826f619e088a9",
+      "src/ctx.c": "75e3f22bdf9bedb4e4cb033f4151d7c897e022dfda453d16b193ee5f9b30891a",
       "src/ctx.h": "99215f58a085a6653dcb33408eea6c0c7616d3c9ed1acb180a3718f9d17423aa",
       "src/device.c": "2b1b63f1b437d10a2d2e2185e1737aad2c50426a05818fd00105b22ba68ead24",
       "src/device.h": "5e079afb10ae2df9fde9ed33ca09f2890ea49d8f394ecc49f45d7a2c4c45e25c",
@@ -231,9 +231,9 @@
       "src/runtime/support/memory.h": "e38f9c0dfe8102ecf8e8e91e65b6cce7e9a713f2034b122e27b53816c6de3d9f",
       "src/runtime_cpu.c": "b74bffafd3feede3651e3820187e2d46226ad4c4c2696e44a6ce9fa4ddb4f0db",
       "src/runtime_cuda.c": "498292f3420d90757d15c23d291747a1939e334cd245bf3e4870156d8e92585f",
-      "src/runtime_wasm.c": "3d180dc4f095df0271a526bf66dfa2f1d385229c80d75e7773b06fa4fbea7e6e",
+      "src/runtime_wasm.c": "d6f749336994ada090d85e1aef4b7ada63af3ec0c4f8c62092a1f8b06ef7354d",
       "src/runtime_wasm.h": "318f72d83264bf1050d8c5038b3fcfb4d67172093e1b34b7d636dd9153dfb465",
-      "src/runtime_webgpu.c": "e37825b2da2c9286822159b924e4de710df3ce658e012081c58e112c1bf51a25",
+      "src/runtime_webgpu.c": "20fc4076955f69e4a3237b1b16afdd3e68d914f35e45c3b04fcdcb65d8900853",
       "src/runtime_webgpu.h": "d0eb570b077da7ec34e7698ae2245a2d1407d005b2804a17a04db4f1596c483a",
       "src/safetensors.c": "420718a2546712632a0f6dee12c9ea4b9883e0c51c2c8817efdc914728f40530",
       "src/safetensors.h": "ab94601e89561e631af974bc77dcf4f90c2ce2b76eb4283148fa3a29932c856a",

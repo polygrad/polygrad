@@ -28,7 +28,7 @@ BLOCKS = list(blocks())
 
 
 def run_example(lang, code, work):
-    env = dict(os.environ, POLY_LIB=str(_ffi._lib._name), PYTHONPATH=str(ROOT / 'py'),
+    env = dict(os.environ, POLY_LIB=str(Path(_ffi._lib._name).resolve()), PYTHONPATH=str(ROOT / 'py'),
                POLY_DEV='CPU', DEV='CPU', POLY_DEBUG='0')
     if lang == 'python':
         command = [sys.executable, '-c', code]

@@ -240,9 +240,10 @@ def outcome(phases):
 
 
 class Results:
-    def __init__(self, events, reference, adapted=None):
+    def __init__(self, events, reference, adapted=None, seed=None):
         self.events, self.reference = events, reference
         self.adapted = adapted
+        self.seed = seed
         self.tests, self.collection, self.collected = {}, [], []
 
     def emit(self, event, **data):
@@ -258,6 +259,22 @@ class Results:
     def pytest_collection_finish(self, session):
         self.collected = [item.nodeid for item in session.items]
         self.emit("collected", nodeids=self.collected)
+
+    def pytest_runtest_setup(self, item):
+        if self.seed is None:
+            return
+        # The NN suite uses Tensor.randn and Torch initialization, not just
+        # NumPy. Reset per test so skipped/failed predecessors cannot change
+        # the input stream, and both providers see the same reviewed seed.
+        import random
+        import numpy as np
+        import torch
+        from tinygrad import Tensor
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        Tensor.manual_seed(self.seed)
+        self.emit('seed', nodeid=item.nodeid, value=self.seed)
 
     def pytest_runtest_logstart(self, nodeid, location):
         self.emit("start", nodeid=nodeid)
@@ -341,7 +358,7 @@ def child(request):
                                     'renderer_type':type(tinygrad.Device["CPU"].renderer).__name__}
             test, pytest_root = str(dest) + ''.join('::' + n for n in node), adapted
         with Path(request["events"]).open("w") as events:
-            plugin = Results(events, reference, adapted)
+            plugin = Results(events, reference, adapted, seed=0 if request.get('adapter') == 'cpu-nn' else None)
             code = pytest.main([
                 "-c", os.devnull, "--rootdir", str(pytest_root), "--noconftest",
                 "--import-mode=importlib", "-q", "-ra", "--tb=short", "-p", "no:cacheprovider",
@@ -642,6 +659,8 @@ def main(argv=None):
                 "runner_sha256": digest(__file__), "versions": [r.get("versions") for r in runs],
                 "devices": [r.get("device") for r in runs], 'adapter':args.adapter,
                 'failure_signature':'source-path-and-message-v2'}
+    if args.adapter == 'cpu-nn':
+        contract['random_seed'] = {'scope': 'test', 'value': 0, 'providers': ['random', 'numpy', 'torch', 'tensor']}
     if args.logical_policy is not None or args.poly_device is not None:
         contract['polygrad_environment'] = worker_environment(args.adapter, engine='polygrad',
             logical_policy=args.logical_policy, poly_device=args.poly_device)

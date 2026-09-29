@@ -15,7 +15,7 @@ async function check(device) {
     },
     async waitForFunction(fn, arg, options) {
       assert.equal(arg, null, 'timeout is not the predicate argument')
-      assert.equal(options.timeout, device === 'webgpu' ? 120000 : 60000)
+      assert.equal(options.timeout, 300000)
       return { async jsonValue() { return results } }
     },
     async evaluate() { return { ok: true, features: [] } },

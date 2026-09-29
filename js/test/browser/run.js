@@ -172,7 +172,9 @@ async function runForDevice(browser, port, device, spec) {
   // Test microtasks can defer load; wait for completion through __testResults.
   await page.goto(url, { waitUntil: 'commit' })
 
-  const timeout = device === 'webgpu' ? 120000 : 60000
+  // Full Wasm/INTERP suites include synchronous compilation and training and
+  // can exceed a minute before the page yields to Playwright's result poll.
+  const timeout = 300000
   const results = await page.waitForFunction(
     () => window.__testResults,
     null,

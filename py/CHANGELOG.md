@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0
 
 - Fix float64 sine range reduction in shared codegen, preserving the full
   significand and covering finite double exponents without native-sine bypasses.

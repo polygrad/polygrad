@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0
 
+- Fix Wasm/WebGPU kernel argument addressing above 2 GiB, including large Qwen3 loads.
 - Fix float64 sine range reduction in shared codegen, preserving the full
   significand and covering finite double exponents without native-sine bypasses.
   Make Wasm scalar float-to-integer casts nontrapping, matching SIMD casts.

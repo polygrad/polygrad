@@ -300,10 +300,8 @@ static bool residency_mark_root(ResidencyMarker *marker, PolyUOp *root) {
     /* PROGRAM bodies contain abstract parameters, but graph functions contain
      * concrete scratch buffers omitted from the outer CALL's input list. The
      * live caller, not the weak graph-runtime cache, owns that storage. */
-    int first_src = uop->op == POLY_OP_CALL && uop->n_src &&
-                            uop->src[0]->op != POLY_OP_CUSTOM_FUNCTION
-                        ? 1
-                        : 0;
+    int first_src =
+        uop->op == POLY_OP_CALL && uop->n_src && uop->src[0]->op != POLY_OP_CUSTOM_FUNCTION ? 1 : 0;
     for (int i = first_src; i < uop->n_src; i++)
       marker->stack[marker->n_stack++] = uop->src[i];
   }

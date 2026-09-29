@@ -4,10 +4,31 @@ import copy
 import json
 import subprocess
 import sys
+import io
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import tinygrad_upstream as upstream
+
+
+@pytest.mark.parametrize('seed', [None, 0])
+def test_nn_seed_resets_all_rngs_before_each_test(monkeypatch, tmp_path, seed):
+    import random
+    import numpy as np
+    calls = []
+    def recorder(name):
+        return lambda value: calls.append((name, value))
+    monkeypatch.setattr(random, 'seed', recorder('random'))
+    monkeypatch.setattr(np.random, 'seed', recorder('numpy'))
+    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(manual_seed=recorder('torch')))
+    monkeypatch.setitem(sys.modules, 'tinygrad', SimpleNamespace(
+        Tensor=SimpleNamespace(manual_seed=recorder('tensor'))))
+    plugin = upstream.Results(io.StringIO(), tmp_path, seed=seed)
+    for name in ('test_a', 'test_b'):
+        plugin.pytest_runtest_setup(SimpleNamespace(nodeid=name))
+    expected = [(name, 0) for name in ('random', 'numpy', 'torch', 'tensor')] * 2
+    assert calls == ([] if seed is None else expected)
 
 
 def test_aliases_preserve_module_identity_and_block_reference_fallback(tmp_path):
