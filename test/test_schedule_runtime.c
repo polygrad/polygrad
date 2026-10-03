@@ -13,6 +13,7 @@
 #include "../src/frontend.h"
 #include "../src/codegen/codegen.h"
 #include "../src/schedule/memory.h"
+#include "../src/runtime/support/memory.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/schedule.h"
 #include "../src/uop/spec.h"
@@ -2132,6 +2133,53 @@ TEST(schedule_runtime, memory_plan_rewrite_uses_one_arena_for_disjoint_temporari
   ASSERT_PTR_EQ(planned->src[2]->src[1], output);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, memory_allocator_rejects_wrapped_bucket_size) {
+  PolyTLSFAllocator *allocator = poly_tlsf_allocator_new(SIZE_MAX - 255, 256, 32);
+  ASSERT_NOT_NULL(allocator);
+  bool rejected = poly_tlsf_allocator_alloc(allocator, SIZE_MAX) == SIZE_MAX;
+  size_t small = poly_tlsf_allocator_alloc(allocator, 256);
+  bool reusable = small == 0 && poly_tlsf_allocator_free(allocator, small) == 0;
+  poly_tlsf_allocator_destroy(allocator);
+  ASSERT_TRUE(rejected && reusable);
+  PASS();
+}
+
+TEST(schedule_runtime, memory_plan_virtual_capacity_uses_peak_not_sum_limit) {
+  /* No device allocation: disjoint lifetimes fit one arena even when the
+   * planner's sum(bytes)*2 upper bound exceeds the host address width. */
+  for (int count = 5; count <= 9; count += 4) {
+    PolyCtx *ctx = poly_ctx_new();
+    int64_t bytes = (int64_t)(SIZE_MAX / 8 + 1);
+    PolyUOp *body = poly_uop_sink_ex(ctx, NULL, 0, "virtual_capacity", 1);
+    PolyUOp *calls[9];
+    for (int i = 0; i < count; i++) {
+      PolyUOp *buffer = poly_test_buffer_on_device(ctx, POLY_FLOAT32, bytes / 4, POLY_DEVICE_CPU);
+      PolyUOp *sources[] = {body, buffer};
+      calls[i] = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, sources, 2, poly_arg_none());
+    }
+    PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, count, poly_arg_none());
+    PolyUOp *planned = poly_memory_plan_rewrite(ctx, linear, NULL, 0);
+    bool valid = planned != NULL;
+    const PolyUOp *arena = NULL;
+    for (int i = 0; valid && i < count; i++) {
+      PolyUOp *view = planned->src[i]->src[1];
+      const PolyUOp *current = view;
+      while (current->n_src && (current->op == POLY_OP_BITCAST || current->op == POLY_OP_SHRINK ||
+                                current->op == POLY_OP_RESHAPE))
+        current = current->src[0];
+      /* A full-arena SHRINK can fold away; ownership and extent are invariant. */
+      valid = current->op == POLY_OP_BUFFER && (!arena || arena == current) &&
+              poly_uop_max_numel(ctx, current) == bytes &&
+              poly_uop_max_numel(ctx, view) == bytes / 4 &&
+              poly_dtype_eq(view->dtype, POLY_FLOAT32);
+      arena = current;
+    }
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(valid);
+  }
   PASS();
 }
 

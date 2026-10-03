@@ -272,7 +272,11 @@ size_t poly_tlsf_allocator_alloc(PolyTLSFAllocator *allocator, size_t requested)
   size_t size = requested;
   int bits = bit_length_size(size);
   size_t bucket_size = power_of_two(bits - allocator->level2_bits);
-  size = size % bucket_size ? size + bucket_size - size % bucket_size : size;
+  size_t padding = size % bucket_size ? bucket_size - size % bucket_size : 0;
+  /* Python's bucket rounding cannot wrap. A wrapped C request could select a
+   * smaller free block and publish an allocation beyond the virtual arena. */
+  if (padding > SIZE_MAX - size) return SIZE_MAX;
+  size += padding;
   int start_level1 = level1(allocator, size);
   int size_bits = bit_length_size(size);
   for (int l1 = start_level1; l1 < allocator->level1_count; l1++) {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix Wasm scheduling failures when aggregate temporary sizes exceed 4 GiB but their lifetimes permit a smaller reused arena.
+
 ## 0.6.0
 
 - Fix Wasm/WebGPU kernel argument addressing above 2 GiB, including large Qwen3 loads.

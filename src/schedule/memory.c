@@ -10,6 +10,7 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -161,6 +162,7 @@ PolyUOp *poly_memory_plan_rewrite(
       (held_count > 0 && !held_buffers))
     return NULL;
   if (poly_getenv_flag("NO_MEMORY_PLANNER")) return linear;
+  const size_t capacity_limit = SIZE_MAX - SIZE_MAX % 256;
 
   MemoryBuffer *buffers = NULL;
   int buffer_count = 0, buffer_capacity = 0;
@@ -192,7 +194,7 @@ PolyUOp *poly_memory_plan_rewrite(
           }
           int64_t numel = poly_uop_max_numel(ctx, buffer);
           size_t itemsize = poly_dtype_itemsize(buffer->dtype);
-          if (numel < 0 || itemsize == 0 || (uint64_t)numel > SIZE_MAX / itemsize) {
+          if (numel < 0 || itemsize == 0 || (uint64_t)numel > capacity_limit / itemsize) {
             free(found);
             goto fail;
           }
@@ -223,14 +225,18 @@ PolyUOp *poly_memory_plan_rewrite(
   MemoryLane *lanes = NULL;
   int lane_count = 0, lane_capacity = 0;
   for (int i = 0; i < buffer_count; i++) {
-    if (buffers[i].allocation_size > SIZE_MAX - total_memory) goto fail_lanes;
-    total_memory += buffers[i].allocation_size;
+    total_memory = buffers[i].allocation_size > capacity_limit - total_memory
+                       ? capacity_limit
+                       : total_memory + buffers[i].allocation_size;
     buffers[i].lane =
         memory_lane_index(&lanes, &lane_count, &lane_capacity, buffers[i].device, buffers[i].copy);
     if (buffers[i].lane < 0) goto fail_lanes;
   }
-  if (total_memory > SIZE_MAX / 2) goto fail_lanes;
-  total_memory *= 2;
+  /* Tinygrad uses unbounded integers for sum(bytes)*2. This is only TLSF's
+   * virtual search space, not an allocation: on wasm32 the sum can exceed
+   * 4 GiB while disjoint lifetimes reuse a much smaller arena. Bound the search
+   * space to addressable, aligned offsets; actual peak exhaustion still fails. */
+  total_memory = total_memory > capacity_limit / 2 ? capacity_limit : total_memory * 2;
   for (int i = 0; i < lane_count; i++) {
     lanes[i].allocator = poly_tlsf_allocator_new(total_memory, 256, 32);
     if (!lanes[i].allocator) goto fail_lanes;
@@ -266,6 +272,11 @@ PolyUOp *poly_memory_plan_rewrite(
     size_t size = round_up(lanes[i].peak, 256);
     lanes[i].arena = new_arena(ctx, lanes[i].device, size);
     if (!lanes[i].arena) goto fail_lanes;
+    if (poly_debug_at_least(2))
+      fprintf(
+          stderr, "[polygrad:memory_plan] lane=%d capacity=%zu peak=%zu bytes\n", i, total_memory,
+          size
+      );
   }
   PolyUOp **from = malloc((size_t)buffer_count * sizeof(*from));
   PolyUOp **to = malloc((size_t)buffer_count * sizeof(*to));

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Bound memory-planner search capacity to addressable offsets on Wasm32 and reject allocator size-rounding overflow.
+
 ## 0.6.0
 
 - Fix Wasm/WebGPU kernel argument addressing above 2 GiB, including large Qwen3 loads.
