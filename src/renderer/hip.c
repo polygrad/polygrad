@@ -717,7 +717,8 @@ char *poly_render_hip(
      * scalar kernel arguments from the same numbered ParamArg sequence. */
     if (u->op == POLY_OP_PARAM) {
       int64_t slot = poly_program_buffer_slot(u);
-      if (slot < 0) {
+      char name[1024];
+      if (slot < 0 || !poly_render_param_name(ctx, u, name, sizeof(name))) {
         for (int j = 0; j < n_params; j++) {
           free(param_types[j]);
           free(param_names[j]);
@@ -727,8 +728,6 @@ char *poly_render_hip(
         hsmap_destroy(&names);
         return NULL;
       }
-      char name[32];
-      snprintf(name, sizeof(name), "data%lld", (long long)slot);
       hsmap_set(&names, u, strdup(name));
 
       PolyDType base = u->dtype;

@@ -12,6 +12,7 @@ PolyPatternMatcher *poly_cuda_renderer_extra_matcher(void);
 PolyPatternMatcher *poly_hip_renderer_extra_matcher(void);
 PolyPatternMatcher *poly_pm_manual_bf16_cast(void);
 bool poly_wmma_name(const PolyUOp *uop, char *out, size_t out_size);
+bool poly_render_param_name(PolyCtx *ctx, PolyUOp *uop, char *out, size_t out_size);
 char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name);
 
 #endif

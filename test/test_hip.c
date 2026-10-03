@@ -177,7 +177,7 @@ TEST_BACKEND(hip, renderer_inlines_current_casted_literals) {
   ASSERT_NOT_NULL(uops);
   char *source = poly_render_hip(ctx, uops, n, "casted_const", 1, "gfx1100");
   ASSERT_NOT_NULL(source);
-  ASSERT_NOT_NULL(strstr(source, "data0+20"));
+  ASSERT_NOT_NULL(strstr(source, "data0_32+20"));
   ASSERT_NOT_NULL(strstr(source, " = 7;"));
   ASSERT_TRUE(strstr(source, "cast0") == NULL);
   free(source);

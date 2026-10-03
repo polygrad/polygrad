@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Bound memory-planner search capacity to addressable offsets on Wasm32 and reject allocator size-rounding overflow.
+- Use shared shape-qualified parameter names in C, CUDA, HIP and WGSL to prevent scalar/buffer name collisions without changing argument order.
 
 ## 0.6.0
 

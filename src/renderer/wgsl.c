@@ -24,6 +24,7 @@
 
 #include "codegen/codegen.h"
 #include "runtime_webgpu.h"
+#include "renderer/cstyle.h"
 #include "uop/ops.h"
 #include "bigint.h"
 #include "engine/schedule.h" /* POLY_DEVICE_WEBGPU */
@@ -596,8 +597,8 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     if (u->op == POLY_OP_PARAM) {
       int64_t slot = poly_program_buffer_slot(u);
       if (slot < 0) goto fail;
-      char name[32];
-      snprintf(name, sizeof(name), "data%lld", (long long)slot);
+      char name[1024];
+      if (!poly_render_param_name(ctx, u, name, sizeof(name))) goto fail;
       wsm_set(&names, u, strdup(name));
 
       if (!wgsl_binding_append(

@@ -3510,6 +3510,59 @@ TEST(codegen, render_sparse_param_slots_use_compact_call_abi) {
   PASS();
 }
 
+TEST(codegen, render_thread_variable_and_sparse_buffer_slot_do_not_collide) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = program_param(ctx, POLY_INT32, 4, 0);
+  PolyUOp *input = program_param(ctx, POLY_INT32, 1, 5);
+  PolyParamArg arg = {
+      .slot = 5,
+      .addrspace = POLY_ADDR_ALU,
+      .name = "core_id",
+      .min_val = poly_arg_int(0),
+      .max_val = poly_arg_int(3),
+      .has_minmax = true};
+  PolyUOp *worker = poly_uop0(ctx, POLY_OP_PARAM, POLY_INT32, poly_arg_param(&arg));
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  PolyUOp *read = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, input, zero, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, read, poly_arg_none());
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, value, worker, poly_arg_none());
+  PolyUOp *write = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, worker, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, write, sum, poly_arg_none());
+  PolyUOp *linear[] = {out, input, worker, zero, read, value, sum, write, store};
+  char *source = poly_render_c(ctx, linear, 9, "sparse_thread_param");
+  char *wgsl = poly_render_wgsl(ctx, linear, 9, "sparse_thread_param");
+  bool names_ok = true;
+  char *rendered[] = {
+      source,
+      wgsl,
+#ifdef POLY_HAS_CUDA
+      poly_render_cuda(ctx, linear, 9, "sparse_thread_param", 1),
+#endif
+#ifdef POLY_HAS_HIP
+      poly_render_hip(ctx, linear, 9, "sparse_thread_param", 1, "gfx1100"),
+#endif
+  };
+  for (size_t i = 0; i < sizeof(rendered) / sizeof(*rendered); i++)
+    names_ok &= rendered[i] && strstr(rendered[i], "data5_1") &&
+                (strstr(rendered[i], "data5_ ") || strstr(rendered[i], "data5_:") ||
+                 strstr(rendered[i], "data5_)") || strstr(rendered[i], "data5_,"));
+  PolyProgram *program = source ? poly_compile_c(source, "sparse_thread_param") : NULL;
+  bool ok = program != NULL;
+  if (program) {
+    int32_t actual[4] = {0}, input_value = 42;
+    void *args[] = {actual, &input_value};
+    poly_program_call_threaded(program, args, 2, 4);
+    for (int i = 0; i < 4; i++)
+      ok &= actual[i] == input_value + i;
+    poly_program_destroy(program);
+  }
+  for (size_t i = 0; i < sizeof(rendered) / sizeof(*rendered); i++)
+    free(rendered[i]);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok && names_ok);
+  PASS();
+}
+
 TEST(codegen, render_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
   const char *old_expand_ssa = getenv("EXPAND_SSA");
@@ -4238,11 +4291,11 @@ TEST(codegen, render_wgsl_vecadd) {
 
   /* buffer bindings: offset by +1 (binding 0 = INFINITY) */
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data0: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data0_10: array<f32>"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data1: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data1_10: array<f32>"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2_10: array<f32>"));
 
   /* compute shader entry point: workgroup_id + local_invocation_id */
   ASSERT_NOT_NULL(strstr(src, "@compute @workgroup_size(1)"));
@@ -4254,9 +4307,9 @@ TEST(codegen, render_wgsl_vecadd) {
   ASSERT_NOT_NULL(strstr(src, "for (var Lidx0: i32 = 0; Lidx0 < 10; Lidx0++)"));
 
   /* array indexing (not pointer arithmetic) */
-  ASSERT_NOT_NULL(strstr(src, "data0[Lidx0]"));
-  ASSERT_NOT_NULL(strstr(src, "data1[Lidx0]"));
-  ASSERT_NOT_NULL(strstr(src, "data2[Lidx0]"));
+  ASSERT_NOT_NULL(strstr(src, "data0_10[Lidx0]"));
+  ASSERT_NOT_NULL(strstr(src, "data1_10[Lidx0]"));
+  ASSERT_NOT_NULL(strstr(src, "data2_10[Lidx0]"));
 
   /* variable declarations with WGSL types */
   ASSERT_NOT_NULL(strstr(src, "var val0: f32"));
@@ -4284,10 +4337,10 @@ TEST(codegen, render_wgsl_vecmul) {
   /* The tinygrad-style recursive tuplize tiebreak may order vector lanes as
    * offsets first and base lane last. The semantic contract is four scalar
    * stores to the four lanes, not a specific temporary-number pairing. */
-  ASSERT_NOT_NULL(strstr(src, "data2[alu0] ="));
-  ASSERT_NOT_NULL(strstr(src, "data2[alu1] ="));
-  ASSERT_NOT_NULL(strstr(src, "data2[alu2] ="));
-  ASSERT_NOT_NULL(strstr(src, "data2[alu3] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2_8[alu0] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2_8[alu1] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2_8[alu2] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2_8[alu3] ="));
   ASSERT_NOT_NULL(strstr(src, "*")); /* multiply operator */
   ASSERT_TRUE(strstr(src, "for (var ridx0") == NULL);
   ASSERT_TRUE(strstr(src, "vec4<f32>") == NULL);
@@ -4452,7 +4505,7 @@ TEST(codegen, webgpu_decomposes_bf16_before_wgsl_render) {
   char *src = poly_render_wgsl(ctx, lin, n_lin, "bf16_to_f32");
   ASSERT_NOT_NULL(src);
   ASSERT_NOT_NULL(strstr(src, "array<atomic<u32>>"));
-  ASSERT_TRUE(strstr(src, "data1: array<f32>") == NULL);
+  ASSERT_TRUE(strstr(src, "data1_4: array<f32>") == NULL);
 
   free(src);
   free(lin);
@@ -6139,7 +6192,7 @@ TEST(codegen, partial_reshape_index_matches_tinygrad_mop) {
   ASSERT_NOT_NULL(linear);
   char *source = poly_render_c(ctx, linear, n_linear, "partial_reshape_index");
   ASSERT_NOT_NULL(source);
-  ASSERT_NOT_NULL(strstr(source, "data1+2"));
+  ASSERT_NOT_NULL(strstr(source, "data1_3+2"));
   PolyProgram *program = poly_compile_c(source, "partial_reshape_index");
   ASSERT_NOT_NULL(program);
 
@@ -6292,9 +6345,9 @@ TEST(codegen, wgsl_float_literals_stay_in_range) {
     PolyUOp **uops = poly_uop_toposort(ctx, store, &n);
     char *src = poly_render_wgsl(ctx, uops, n, "literal_range");
     ASSERT_NOT_NULL(src);
-    char *literal = strstr(src, "data0[0] = ");
+    char *literal = strstr(src, "data0_1[0] = ");
     ASSERT_NOT_NULL(literal);
-    double parsed = strtod(literal + strlen("data0[0] = "), NULL);
+    double parsed = strtod(literal + strlen("data0_1[0] = "), NULL);
     ASSERT_TRUE(parsed == (double)values[i]);
     ASSERT_TRUE(!!signbit(parsed) == !!signbit(values[i]));
     free(src);
@@ -6324,21 +6377,21 @@ TEST(codegen, renderers_inline_current_casted_literals) {
 
   char *c = poly_render_c(ctx, uops, n, "casted_const");
   ASSERT_NOT_NULL(c);
-  ASSERT_NOT_NULL(strstr(c, "data0+20"));
+  ASSERT_NOT_NULL(strstr(c, "data0_32+20"));
   ASSERT_NOT_NULL(strstr(c, " = 7;"));
   ASSERT_TRUE(strstr(c, "cast0") == NULL);
   free(c);
 
   char *wgsl = poly_render_wgsl(ctx, uops, n, "casted_const");
   ASSERT_NOT_NULL(wgsl);
-  ASSERT_NOT_NULL(strstr(wgsl, "data0[20] = 7;"));
+  ASSERT_NOT_NULL(strstr(wgsl, "data0_32[20] = 7;"));
   ASSERT_TRUE(strstr(wgsl, "var cast") == NULL);
   free(wgsl);
 
 #ifdef POLY_HAS_CUDA
   char *cuda = poly_render_cuda(ctx, uops, n, "casted_const", 1);
   ASSERT_NOT_NULL(cuda);
-  ASSERT_NOT_NULL(strstr(cuda, "data0+20"));
+  ASSERT_NOT_NULL(strstr(cuda, "data0_32+20"));
   ASSERT_NOT_NULL(strstr(cuda, " = 7;"));
   ASSERT_TRUE(strstr(cuda, "cast0") == NULL);
   free(cuda);
@@ -6411,7 +6464,7 @@ TEST(codegen, partial_reshape_index_maps_nonzero_input_prefix) {
   ASSERT_NOT_NULL(linear);
   char *source = poly_render_c(ctx, linear, n_linear, "partial_reshape_index_prefix");
   ASSERT_NOT_NULL(source);
-  ASSERT_NOT_NULL(strstr(source, "data1+20"));
+  ASSERT_NOT_NULL(strstr(source, "data1_24+20"));
   PolyProgram *program = poly_compile_c(source, "partial_reshape_index_prefix");
   ASSERT_NOT_NULL(program);
 
@@ -6676,8 +6729,8 @@ TEST(codegen, render_wgsl_unary) {
   char *src = poly_render_wgsl(ctx, lin, n, "vecneg");
 
   /* only 2 bindings */
-  ASSERT_NOT_NULL(strstr(src, "data0: array<f32>"));
-  ASSERT_NOT_NULL(strstr(src, "data1: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "data0_6: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "data1_6: array<f32>"));
   ASSERT_NOT_NULL(strstr(src, "fn vecneg("));
   /* NEG renders as (-val) */
   ASSERT_NOT_NULL(strstr(src, "(-val0)"));
@@ -6801,12 +6854,12 @@ TEST(codegen, render_wgsl_uint8_storage_is_packed_like_tinygrad) {
   PolyUOp **lin = poly_test_full_rewrite_and_linearize(ctx, sink, &n);
   char *src = poly_render_wgsl(ctx, lin, n, "copy_u8");
 
-  ASSERT_NOT_NULL(strstr(src, "data0: array<atomic<u32>>"));
-  ASSERT_NOT_NULL(strstr(src, "data1: array<atomic<u32>>"));
-  ASSERT_NOT_NULL(strstr(src, "atomicLoad(&data0[(Lidx0/4)]"));
-  ASSERT_NOT_NULL(strstr(src, "atomicAnd(&data1[(Lidx0/4)]"));
-  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data1[(Lidx0/4)]"));
-  ASSERT_TRUE(strstr(src, "data1[Lidx0] =") == NULL);
+  ASSERT_NOT_NULL(strstr(src, "data0_5: array<atomic<u32>>"));
+  ASSERT_NOT_NULL(strstr(src, "data1_5: array<atomic<u32>>"));
+  ASSERT_NOT_NULL(strstr(src, "atomicLoad(&data0_5[(Lidx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAnd(&data1_5[(Lidx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data1_5[(Lidx0/4)]"));
+  ASSERT_TRUE(strstr(src, "data1_5[Lidx0] =") == NULL);
 
   free(src);
   free(lin);
@@ -6839,10 +6892,10 @@ TEST(codegen, render_wgsl_bool_storage_is_packed_like_tinygrad) {
   PolyUOp **lin = poly_test_full_rewrite_and_linearize(ctx, sink, &n);
   char *src = poly_render_wgsl(ctx, lin, n, "eq_bool");
 
-  ASSERT_NOT_NULL(strstr(src, "data0: array<atomic<u32>>"));
+  ASSERT_NOT_NULL(strstr(src, "data0_3: array<atomic<u32>>"));
   ASSERT_TRUE(strstr(src, "array<bool>") == NULL);
   ASSERT_NOT_NULL(strstr(src, "var alu0: bool"));
-  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data0[(Lidx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data0_3[(Lidx0/4)]"));
   ASSERT_NOT_NULL(strstr(src, "select(0u, 1u, alu0)"));
 
   free(src);
@@ -6895,7 +6948,9 @@ static bool check_wgsl_storage_address_space(PolyAddrSpace space) {
           memmove(&uops[7], &uops[8], 3 * sizeof(*uops));
         }
         char *source = poly_render_wgsl(ctx, uops, wrapped ? 11 : 10, "storage_access");
-        const char *name = space == POLY_ADDR_GLOBAL  ? "data0"
+        char global_name[64];
+        snprintf(global_name, sizeof(global_name), "data0_%lld", (long long)size);
+        const char *name = space == POLY_ADDR_GLOBAL  ? global_name
                            : space == POLY_ADDR_LOCAL ? "smem0"
                                                       : "r0";
         bool packed = d < 5 && space != POLY_ADDR_REG;
@@ -7002,7 +7057,7 @@ TEST(codegen, render_wgsl_reduce) {
   /* accumulator store (not array write) */
   ASSERT_NOT_NULL(strstr(src, "r0[0] = "));
   /* output buffer store */
-  ASSERT_NOT_NULL(strstr(src, "data1[0]"));
+  ASSERT_NOT_NULL(strstr(src, "data1_1[0]"));
 
   free(src);
   free(lin);
@@ -7040,16 +7095,18 @@ TEST(codegen, render_wgsl_alu_param) {
   /* binding(0) = INFINITY uniform (always) */
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(0)\nvar<uniform> INFINITY"));
 
-  /* binding(1) = data0 storage buffer */
-  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)\nvar<storage,read_write> data0: array<f32>"));
+  /* binding(1) = data0_16 storage buffer */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)\nvar<storage,read_write> data0_16: array<f32>")
+  );
 
-  /* binding(2) = data1 storage buffer */
-  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)\nvar<storage,read_write> data1: array<f32>"));
+  /* binding(2) = data1_16 storage buffer */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)\nvar<storage,read_write> data1_16: array<f32>")
+  );
 
   /* binding(3) = scalar ALU PARAM */
-  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)\nvar<uniform> data2: i32"));
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)\nvar<uniform> data2_: i32"));
 
-  ASSERT_NOT_NULL(strstr(src, "f32(data2)"));
+  ASSERT_NOT_NULL(strstr(src, "f32(data2_)"));
 
   free(src);
   free(lin);
@@ -7089,14 +7146,14 @@ TEST(codegen, render_wgsl_param_bindings_follow_encounter_order) {
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)\nvar<storage,read_write>"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)\nvar<storage,read_write>"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)\nvar<storage,read_write>"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data7: array<f32>;"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2: array<f32>;"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data9: array<f32>;"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data7_8: array<f32>;"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2_8: array<f32>;"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data9_8: array<f32>;"));
   ASSERT_TRUE(
-      strstr(src, "@group(0) @binding(8)\nvar<storage,read_write> data7: array<f32>") == NULL
+      strstr(src, "@group(0) @binding(8)\nvar<storage,read_write> data7_8: array<f32>") == NULL
   );
   ASSERT_TRUE(
-      strstr(src, "@group(0) @binding(10)\nvar<storage,read_write> data9: array<f32>") == NULL
+      strstr(src, "@group(0) @binding(10)\nvar<storage,read_write> data9_8: array<f32>") == NULL
   );
 
   free(src);

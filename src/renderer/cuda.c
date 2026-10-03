@@ -724,8 +724,8 @@ char *poly_render_cuda(
     if (u->op == POLY_OP_PARAM) {
       int64_t slot = poly_program_buffer_slot(u);
       if (slot < 0) goto cleanup;
-      char name[32];
-      snprintf(name, sizeof(name), "data%lld", (long long)slot);
+      char name[1024];
+      if (!poly_render_param_name(ctx, u, name, sizeof(name))) goto cleanup;
       csmap_set(&names, u, strdup(name));
 
       char type[64];

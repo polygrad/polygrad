@@ -928,9 +928,33 @@ invalid:
 
 /* C Renderer */
 
+bool poly_render_param_name(PolyCtx *ctx, PolyUOp *uop, char *out, size_t out_size) {
+  int64_t slot = poly_program_buffer_slot(uop);
+  int rank = poly_uop_ndim(ctx, uop);
+  if (slot < 0 || !out_size) return false;
+  /* Pinned CStyleLanguage qualifies slots by shape. Sparse buffer slots may
+   * overlap the late-numbered scalar slots; this must not alter the call ABI. */
+  /* Raw renderer callers may omit shape sources. Keep their buffer namespace
+   * distinct from scalar parameters too. Compiled programs carry shapes. */
+  bool scalar = uop->arg.kind == POLY_ARG_PARAM && uop->arg.param &&
+                uop->arg.param->addrspace == POLY_ADDR_ALU;
+  int n = snprintf(out, out_size, "data%lld_%s", (long long)slot, rank < 0 && !scalar ? "buf" : "");
+  if (n < 0 || (size_t)n >= out_size) return false;
+  size_t used = (size_t)n;
+  for (int i = 0; i < rank; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, uop, i);
+    int64_t extent;
+    if (!dim || poly_uop_const_i64(dim, &extent) != 0 || extent < 0) return false;
+    n = snprintf(out + used, out_size - used, "%s%lld", i ? "_" : "", (long long)extent);
+    if (n < 0 || (size_t)n >= out_size - used) return false;
+    used += (size_t)n;
+  }
+  return true;
+}
+
 typedef struct {
   char type[256];
-  char name[256];
+  char name[1024];
   int order; /* compact C runtime args[] position */
   int sort_key; /* numbered PARAM slot */
   bool is_alu;
@@ -1024,14 +1048,14 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_PARAM) {
       int64_t slot = poly_program_buffer_slot(u);
       if (slot < 0) goto fail;
-      char name[32];
-      snprintf(name, sizeof(name), "data%lld", (long long)slot);
+      bool is_alu = poly_uop_is_alu_param(u);
+      char name[1024];
+      if (!poly_render_param_name(ctx, u, name, sizeof(name))) goto fail;
       smap_set(&names, u, strdup(name));
 
       PolyDType base = u->dtype;
       char base_type[128];
       render_ctype_nonptr(base, 1, base_type, sizeof(base_type));
-      bool is_alu = poly_uop_is_alu_param(u);
       snprintf(
           params[n_params].type, sizeof(params[n_params].type),
           is_alu ? "const %s" : "%s* restrict", base_type
