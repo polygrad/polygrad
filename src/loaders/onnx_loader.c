@@ -16,6 +16,7 @@
 #include <string.h>
 
 #define ONNX_VALUES 4096
+#define ONNX_NODES 4096
 #define ONNX_IO 128
 #define ONNX_RANK 16
 #define ONNX_NAME 256
@@ -237,10 +238,11 @@ static Value *add_value(Import *d, const char *name) {
   return v;
 }
 
-static bool shape_bytes(Import *d, Value *v) {
+static bool shape_bytes(Import *d, Value *v, bool allow_empty) {
   size_t n = poly_dtype_itemsize(v->dtype);
   for (int i = 0; i < v->rank; i++) {
-    if (v->shape[i] <= 0 || (uint64_t)v->shape[i] > ONNX_BYTES / n)
+    if (v->shape[i] < 0 || (!allow_empty && v->shape[i] == 0) ||
+        (uint64_t)v->shape[i] > ONNX_BYTES / (n ? n : 1))
       return fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "'%s': nonpositive/oversized shape", v->name);
     n *= (size_t)v->shape[i];
   }
@@ -340,7 +342,7 @@ static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
     return false;
   Value *v = add_value(d, name);
   if (!v || !field(d, proto, 2, 0, &typ, true) || !dtype(d, typ.integer, &v->dtype) ||
-      !integers(d, proto, 1, v->shape, ONNX_RANK, &v->rank) || !shape_bytes(d, v) ||
+      !integers(d, proto, 1, v->shape, ONNX_RANK, &v->rank) || !shape_bytes(d, v, false) ||
       !field(d, proto, 9, 2, &raw, false) || !field(d, proto, 14, 0, &location, false))
     return false;
   if (location.integer > 1) return fail(d, POLY_IMPORT_ERR_PARSE, "invalid data_location");
@@ -434,12 +436,16 @@ static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
   return v->tensor != NULL || fail(d, POLY_IMPORT_ERR_INTERNAL, "initializer declaration failed");
 }
 
-static bool value_info(Import *d, Bytes b, Value *v) {
+static bool value_info(Import *d, Bytes b, Value *v, bool output) {
   Field type, tensor, dt, shape;
   if (!name_field(d, b, 1, v->name, true) || !field(d, b, 2, 2, &type, true) ||
       !field(d, type.bytes, 1, 2, &tensor, true) || !field(d, tensor.bytes, 1, 0, &dt, true) ||
       !dtype(d, dt.integer, &v->dtype) || !field(d, tensor.bytes, 2, 2, &shape, true))
     return false;
+  /* Output symbols are annotations, not new runtime inputs. Specialization
+   * has already derived their extents from the graph; explicit declarations
+   * and user overrides still have to match at the caller. */
+  Value *inferred = output ? lookup(d, v->name) : NULL;
   Reader r = {.bytes = shape.bytes};
   Field f;
   while (next(&r, &f))
@@ -460,13 +466,19 @@ static bool value_info(Import *d, Bytes b, Value *v) {
         char key[ONNX_NAME];
         if (!text(d, symbolic.bytes, key, false)) return false;
         cJSON *x = cJSON_GetObjectItemCaseSensitive(d->dimensions, key);
-        if (!cJSON_IsNumber(x))
+        if (!x && inferred && v->rank < inferred->rank) {
+          n = inferred->shape[v->rank];
+          if (!d->dimensions) d->dimensions = cJSON_CreateObject();
+          if (!d->dimensions || !cJSON_AddNumberToObject(d->dimensions, key, (double)n))
+            return fail(d, POLY_IMPORT_ERR_INTERNAL, "output dimension allocation failed");
+        } else if (!cJSON_IsNumber(x))
           return fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "supply dimension '%s' explicitly", key);
-        n = (int64_t)x->valuedouble;
+        else
+          n = (int64_t)x->valuedouble;
       }
       v->shape[v->rank++] = n;
     }
-  return !r.bad && shape_bytes(d, v);
+  return !r.bad && shape_bytes(d, v, false);
 }
 
 static int rank(Import *d, PolyTensor *t) {
@@ -485,6 +497,8 @@ static bool onnx_const_data(Import *d, Value *v) {
   if (!v || !v->constant)
     return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "shape operand depends on runtime data");
   if (v->host) return true;
+  /* Empty intermediate shape slices carry no data and need no residency. */
+  if (!v->nbytes) return (v->host = malloc(1)) != NULL;
   if (v->nbytes > 65536)
     return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "host shape operand exceeds 64KiB");
   PolyTensor *t = poly_tensor_contiguous(d->ctx, v->tensor), *out = NULL;
@@ -1286,6 +1300,45 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
   PolyTensor *x = n->nin && n->inputs[0] ? n->inputs[0]->tensor : NULL;
   PolyTensor *y = n->nin > 1 && n->inputs[1] ? n->inputs[1]->tensor : NULL;
   const char *op = d->op;
+  if (!strcmp(op, "Range")) {
+    /* onnx.py:Range resolves all three operands on the host, then uses arange.
+     * Runtime-dependent lengths remain rejected by onnx_const_data. */
+    if (!arity(d, n, 3, 3) || !attrs(d, n, "")) return NULL;
+    PolyDType dt = x->uop_physical->dtype;
+    bool integer = poly_dtype_eq(dt, POLY_INT16) || poly_dtype_eq(dt, POLY_INT32) ||
+                   poly_dtype_eq(dt, POLY_INT64);
+    if (!integer && !poly_dtype_eq(dt, POLY_FLOAT32) && !poly_dtype_eq(dt, POLY_FLOAT64))
+      return NULL;
+    int64_t iv[3] = {0};
+    double fv[3] = {0};
+    long double values[3];
+    for (int i = 0; i < 3; i++) {
+      Value *v = n->inputs[i];
+      if (!v || v->rank || !poly_dtype_eq(v->dtype, dt) || !onnx_const_data(d, v)) return NULL;
+      if (integer) {
+        if (poly_dtype_eq(dt, POLY_INT16)) {
+          int16_t value;
+          memcpy(&value, v->host, sizeof(value));
+          iv[i] = value;
+        } else if (poly_dtype_eq(dt, POLY_INT32)) {
+          int32_t value;
+          memcpy(&value, v->host, sizeof(value));
+          iv[i] = value;
+        } else
+          memcpy(&iv[i], v->host, sizeof(iv[i]));
+        values[i] = iv[i];
+      } else {
+        int count;
+        if (!onnx_floats(d, v, &fv[i], 1, &count) || count != 1 || !isfinite(fv[i])) return NULL;
+        values[i] = fv[i];
+      }
+    }
+    if (!values[2]) return NULL;
+    long double length = ceill((values[1] - values[0]) / values[2]);
+    if (length > ONNX_BYTES / poly_dtype_itemsize(dt)) return NULL;
+    return integer ? poly_tensor_arange_int(ctx, iv[0], iv[1], iv[2], dt, x->device)
+                   : poly_tensor_arange_float(ctx, fv[0], fv[1], fv[2], dt, x->device);
+  }
   if (!strcmp(op, "Attention")) return onnx_attention(d, n);
   if (!strcmp(op, "RotaryEmbedding")) return onnx_rotary(d, n);
   if (!strcmp(op, "RMSNormalization")) {
@@ -1935,7 +1988,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
       lo = lo < lower ? lower : lo > upper ? upper : lo;
       hi = hi < lower ? lower : hi > upper ? upper : hi;
       int64_t start = strides[i] > 0 ? lo : hi + 1, span = strides[i] > 0 ? hi - lo : lo - hi;
-      if (span <= 0) return NULL;
+      if (span < 0) span = 0;
       starts[a] = poly_uop_const_int(ctx, start);
       sizes[a] = poly_uop_const_int(ctx, span);
       steps[a] = strides[i];
@@ -2910,7 +2963,7 @@ static bool onnx_literal(
   v->dtype = dtype;
   v->rank = ndim;
   if (ndim) memcpy(v->shape, dims, ndim * sizeof(int64_t));
-  if (!shape_bytes(d, v) || len != v->nbytes || len > ONNX_BYTES - d->initializer_bytes)
+  if (!shape_bytes(d, v, false) || len != v->nbytes || len > ONNX_BYTES - d->initializer_bytes)
     return false;
   d->initializer_bytes += len;
   v->host = malloc(len ? len : 1);
@@ -3057,7 +3110,7 @@ static bool onnx_node(Import *d, Bytes proto) {
     v->rank = rank(d, out);
     if (v->rank < 0 || v->rank > ONNX_RANK) return false;
     if (v->rank) memcpy(v->shape, shape(d, out), v->rank * sizeof(int64_t));
-    if (!shape_bytes(d, v)) return false;
+    if (!shape_bytes(d, v, true)) return false;
   }
   return true;
 }
@@ -3083,13 +3136,14 @@ static bool onnx_subgraph(Import *d, Bytes proto, Value **outputs, int *nout) {
   if (r.bad) goto done;
   r = (Reader){.bytes = proto};
   while (next(&r, &f))
-    if (f.tag == 1 && (f.wire != 2 || ++d->node_index > 2048 || !onnx_node(d, f.bytes))) goto done;
+    if (f.tag == 1 && (f.wire != 2 || ++d->node_index > ONNX_NODES || !onnx_node(d, f.bytes)))
+      goto done;
   if (r.bad) goto done;
   r = (Reader){.bytes = proto};
   while (next(&r, &f))
     if (f.tag == 12) {
       Value info = {0};
-      if (f.wire != 2 || !value_info(d, f.bytes, &info) || *nout == ONNX_IO) goto done;
+      if (f.wire != 2 || !value_info(d, f.bytes, &info, true) || *nout == ONNX_IO) goto done;
       Value *v = lookup(d, info.name);
       if (!v || !poly_dtype_eq(v->dtype, info.dtype) || v->rank != info.rank ||
           (info.rank && memcmp(v->shape, info.shape, info.rank * sizeof(int64_t)))) {
@@ -3125,7 +3179,7 @@ static bool onnx_graph(Import *d, Bytes proto) {
   while (next(&r, &f))
     if (f.tag == 11) {
       Value info = {0};
-      if (f.wire != 2 || !value_info(d, f.bytes, &info)) return false;
+      if (f.wire != 2 || !value_info(d, f.bytes, &info, false)) return false;
       Value *v = lookup(d, info.name);
       if (v) {
         if (!v->initializer || !poly_dtype_eq(v->dtype, info.dtype) || v->rank != info.rank ||
@@ -3145,14 +3199,14 @@ static bool onnx_graph(Import *d, Bytes proto) {
   r = (Reader){.bytes = proto};
   while (next(&r, &f))
     if (f.tag == 1) {
-      if (f.wire != 2 || ++d->node_index > 2048 || !onnx_node(d, f.bytes)) return false;
+      if (f.wire != 2 || ++d->node_index > ONNX_NODES || !onnx_node(d, f.bytes)) return false;
     }
   if (r.bad) return false;
   r = (Reader){.bytes = proto};
   while (next(&r, &f))
     if (f.tag == 12) {
       Value info = {0};
-      if (f.wire != 2 || !value_info(d, f.bytes, &info)) return false;
+      if (f.wire != 2 || !value_info(d, f.bytes, &info, true)) return false;
       Value *v = lookup(d, info.name);
       if (!v || nout == ONNX_IO)
         return fail(d, POLY_IMPORT_ERR_PARSE, "unknown output '%s'", info.name);

@@ -6,11 +6,26 @@
 static cJSON *onnx_fixture(void) {
   FILE *file = fopen("test/fixtures/onnx.json", "rb");
   if (!file) return NULL;
-  char data[100 * 1024];
-  size_t n = fread(data, 1, sizeof(data), file);
-  bool ok = !ferror(file) && feof(file);
+  if (fseek(file, 0, SEEK_END)) {
+    fclose(file);
+    return NULL;
+  }
+  long length = ftell(file);
+  if (length <= 0 || fseek(file, 0, SEEK_SET)) {
+    fclose(file);
+    return NULL;
+  }
+  char *data = malloc((size_t)length);
+  if (!data) {
+    fclose(file);
+    return NULL;
+  }
+  size_t n = fread(data, 1, (size_t)length, file);
+  bool ok = !ferror(file) && n == (size_t)length;
   fclose(file);
-  return ok ? cJSON_ParseWithLength(data, n) : NULL;
+  cJSON *result = ok ? cJSON_ParseWithLength(data, n) : NULL;
+  free(data);
+  return result;
 }
 
 static uint8_t *fixture_bytes(const char *str, size_t *size) {

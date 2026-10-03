@@ -57,6 +57,23 @@ def test_onnx_scatter_preserves_caller_tensor():
             model.dispose()
 
 
+def test_onnx_inferred_outputs_still_validate_explicit_dimensions():
+    case = next(c for c in CASES if c['name'] == 'inferred_output_dimension')
+    raw = base64.b64decode(case['onnx'])
+    with pg.Runtime(device='CPU') as rt:
+        model = rt.Model.from_onnx(raw, dimensions={'output_rows': 3, 'output_columns': 2})
+        model.dispose()
+        for dims in ({'output_rows': 2}, {'output_columns': 3}):
+            with pytest.raises(ValueError, match='disagrees with declared shape'):
+                rt.Model.from_onnx(raw, dimensions=dims)
+        # A repeated symbol is one dimension, not a separate wildcard per axis.
+        dim = _field(1, _field(2, b'same_extent'))
+        output = _field(1, b'y') + _field(2, _field(1, b'\x08\x01' + _field(2, dim + dim)))
+        graph = b''.join(_field(tag, output if tag == 12 else value) for tag, value in _fields(_graph(raw)))
+        with pytest.raises(ValueError, match='disagrees with declared shape'):
+            rt.Model.from_onnx(_replace_graph(raw, graph))
+
+
 def _varint(n):
     out = bytearray()
     while n > 127:
@@ -98,6 +115,22 @@ def _graph(data):
 
 def _replace_graph(data, graph):
     return b'\x08\x08' + _field(7, graph) + _field(8, b'\x0a\x00\x10\x11')
+
+
+def test_onnx_large_graph_stays_bounded():
+    raw = base64.b64decode(CASES[0]['onnx'])
+    def graph(count):
+        nodes = []
+        for i in range(count):
+            node = _field(1, b'x' if i == 0 else f'identity{i-1}'.encode())
+            node += _field(2, f'identity{i}'.encode()) + _field(4, b'Identity')
+            nodes.append(_field(1, node))
+        return _replace_graph(raw, _graph(raw) + b''.join(nodes))
+    with pg.Runtime(device='INTERP') as rt:
+        model = rt.Model.from_onnx(graph(2050), dimensions={'batch': 2})
+        model.dispose()
+        with pytest.raises(ValueError, match='limit|unsupported graph'):
+            rt.Model.from_onnx(graph(4100), dimensions={'batch': 2})
 
 
 def test_onnx_import_rejections_leave_runtime_usable():
@@ -189,6 +222,24 @@ def _small_graph(op, inputs, outputs, opset=17, attributes=None):
     graph += b''.join(_field(11, _info(*row)) for row in inputs)
     graph += b''.join(_field(12, _info(*row)) for row in outputs)
     return _int_field(1, 8) + _field(7, graph) + _field(8, _int_field(2, opset))
+
+
+def test_onnx_range_rejects_runtime_lengths_and_invalid_constants():
+    with pg.Runtime(device='INTERP') as rt:
+        runtime = _small_graph('Range', [(k, [], 1) for k in ('start', 'end', 'step')], [('y', [3], 1)])
+        with pytest.raises(ValueError, match='runtime data'):
+            rt.Model.from_onnx(runtime)
+        for end, step in [(3., 0.), (3., np.nan), (np.inf, 1.), (1e30, 1.)]:
+            graph = b''
+            for name, value in [('start', 0.), ('end', end), ('step', step)]:
+                tensor = _int_field(2, 1) + _field(9, np.array(value, np.float32).tobytes())
+                attr = _field(1, b'value') + _field(5, tensor) + _int_field(20, 4)
+                graph += _field(1, _field(2, name.encode()) + _field(4, b'Constant') + _field(5, attr))
+            node = b''.join(_field(1, k.encode()) for k in ('start', 'end', 'step'))
+            node += _field(2, b'y') + _field(4, b'Range')
+            raw = _replace_graph(b'', graph + _field(1, node) + _field(12, _info('y', [3], 1)))
+            with pytest.raises(ValueError, match='Range'):
+                rt.Model.from_onnx(raw)
 
 
 @pytest.mark.parametrize('dtype,code,value', [

@@ -62,6 +62,32 @@ def fixtures():
                {'x': np.arange(9, dtype=np.float32).reshape(3, 3)}, {'y': (9,)},
                {'axis': np.array(0, np.int64), 'exponent': np.array(2, np.int64),
                 'axes': np.array([0], np.int64)})
+    yield case('inferred_output_dimension', [h.make_node('Transpose', ['x'], ['y'], perm=[1, 0])],
+               {'x': np.arange(6, dtype=np.float32).reshape(2, 3)},
+               {'y': ('output_rows', 'output_columns')}, {})
+    # Torch MultiheadAttention exports a Slice past the end of Shape before
+    # concatenating the remaining dimensions. Empty intermediates are valid.
+    yield case('empty_shape_slice', [h.make_node('Shape', ['x'], ['dims']),
+               h.make_node('Slice', ['dims', 'start', 'end'], ['empty']),
+               h.make_node('Concat', ['dims', 'empty'], ['target'], axis=0),
+               h.make_node('Reshape', ['x', 'target'], ['y'])],
+               {'x': np.arange(6, dtype=np.float32).reshape(2, 3)}, {'y': (2, 3)},
+               {'start': np.array([2], np.int64), 'end': np.array([np.iinfo(np.int64).max], np.int64)})
+    for step in (1, -1):
+        yield case('empty_slice_concat_'+str(step), [
+            h.make_node('Slice', ['x','start','end','axis','step'], ['empty']),
+            h.make_node('Concat', ['empty','x'], ['y'], axis=1)],
+            {'x': np.arange(6,dtype=np.float32).reshape(2,3)}, {'y':(2,3)},
+            {'start':np.array([2 if step==1 else 0],np.int64),
+             'end':np.array([0 if step==1 else 2],np.int64),
+             'axis':np.array([1],np.int64),'step':np.array([step],np.int64)})
+    for dtype in (np.int16, np.int32, np.int64, np.float32, np.float64):
+        for step in (2, -2):
+            start, end = (1, 8) if step>0 else (8, 1)
+            yield case('range_'+np.dtype(dtype).name+'_'+str(step), [
+                h.make_node('Range',['start','end','step'],['range']),
+                h.make_node('Cast',['range'],['y'],to=T.FLOAT)], {}, {'y':(4,)},
+                {k:np.array(v,dtype) for k,v in [('start',start),('end',end),('step',step)]})
     yield case('scalar_constants', [
         h.make_node('Constant', [], ['raw'], value=nh.from_array(np.array(2., np.float32))),
         h.make_node('Constant', [], ['typed'], value=h.make_tensor('', T.FLOAT, [], [2.])),
