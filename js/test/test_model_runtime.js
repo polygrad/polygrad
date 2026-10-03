@@ -1423,6 +1423,26 @@ async function checkCompositionCatalogue(pg) {
   } finally { await model.dispose() }
 }
 
+async function checkDescriptionGradient(pg) {
+  const model = await pg.models.GraphAsync({
+    inputs: { x: { shape: [2], dtype: 'float32' } },
+    nodes: [
+      { name: 'sq', type: 'square', inputs: ['x'] },
+      { name: 'loss', type: 'sum', inputs: ['sq'] },
+      { name: 'g', type: 'gradient', inputs: ['loss', 'x'] },
+      { name: 'gs', type: 'sum', inputs: ['g'] },
+      { name: 'gg', type: 'gradient', inputs: ['gs', 'x'] }
+    ], outputs: { loss: 'loss', gradient: 'g', second: 'gg' }
+  })
+  try {
+    for (const x of [[.25, -.5], [1, 2]]) {
+      const out = await model.callAsync('forward', { x: Float32Array.from(x) })
+      assertClose(out.gradient, x.map(v => 2*v), 0)
+      assertClose(out.second, [2, 2], 0)
+    }
+  } finally { await model.dispose() }
+}
+
 async function checkTiedAdamCheckpoint(pg) {
   const w = new pg.Tensor([1], { dtype: 'float32' })
   const model = await pg.Model.fromTensors({
@@ -2026,6 +2046,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model integer controls survive portable import', () => checkIntegerControls(pg))
   await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
+  await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
@@ -2801,6 +2822,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
+  await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))

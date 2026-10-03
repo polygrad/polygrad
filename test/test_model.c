@@ -867,6 +867,37 @@ TEST(model, composition_shape_validation_returns_before_using_dimensions) {
   PASS();
 }
 
+TEST(model, definition_density_gradient) {
+  const char *json = "{\"inputs\":{\"theta\":{\"shape\":[2],\"dtype\":\"float64\"}},\"nodes\":["
+                     "{\"name\":\"s\",\"type\":\"square\",\"inputs\":[\"theta\"]},"
+                     "{\"name\":\"total\",\"type\":\"sum\",\"inputs\":[\"s\"]},"
+                     "{\"name\":\"lp\",\"type\":\"neg\",\"inputs\":[\"total\"]},"
+                     "{\"name\":\"g\",\"type\":\"gradient\",\"inputs\":[\"lp\",\"theta\"]}],"
+                     "\"outputs\":{\"logp\":\"lp\",\"gradient\":\"g\"}}";
+  PolyModelError err = {0};
+  PolyModel *model =
+      poly_model_from_config(NULL, "graph", json, (int)strlen(json), POLY_DEVICE_CPU, &err);
+  ASSERT_NOT_NULL(model);
+  int len = 0;
+  uint8_t *bytes = poly_model_export_ir(model, &len);
+  ASSERT_NOT_NULL(bytes);
+  PolyModel *restored = poly_model_from_ir(bytes, len, NULL, 0);
+  ASSERT_NOT_NULL(restored);
+  free(bytes);
+  for (int i = 0; i < 2; i++) {
+    PolyModel *current = i ? restored : model;
+    double theta[] = {0.25, -0.5}, logp = 0, gradient[2] = {0};
+    PolyIOBinding io[] = {POLY_IO_BINDING_ARRAY("theta", theta, POLY_FLOAT64)};
+    ASSERT_EQ(poly_model_call(current, "forward", io, 1), 0);
+    ASSERT_EQ(poly_model_read_buf_named(current, "logp", &logp, sizeof(logp)), 0);
+    ASSERT_EQ(poly_model_read_buf_named(current, "gradient", gradient, sizeof(gradient)), 0);
+    ASSERT_TRUE(logp == -0.3125 && gradient[0] == -0.5 && gradient[1] == 1);
+  }
+  poly_model_free(restored);
+  poly_model_free(model);
+  PASS();
+}
+
 TEST(model, definition_shared_graph) {
   const char *json =
       "{\"format\":\"poly.modeldef@1\",\"type\":\"graph\","

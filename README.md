@@ -254,8 +254,11 @@ The initial component catalogue is deliberately bounded:
 | `rope` | Split-half rotation of `[batch,heads,sequence,head_dim]`; fixed sequence and even head width; `theta` (default 10000) |
 | `attention` | Query, key, value, optional mask; `is_causal`, `enable_gqa` (default false); no dropout |
 | `relu`, `sigmoid`, `tanh`, `silu`, `gelu` | One input |
-| `identity`, `square`, `exp`, `log` | One input |
+| `identity`, `square`, `neg`, `exp`, `log`, `softplus` | One input; `softplus` uses beta 1 |
 | `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
+| `matmul` | Two inputs, existing Tensor dot semantics |
+| `const_like` | One floating input; finite `value`, with the input's shape and dtype |
+| `gradient` | Two inputs: floating scalar loss and floating target; constructs its derivative graph |
 | `sum`, `mean` | Reduce all axes to a scalar |
 | `reshape` | Positive `shape`, optionally the same bounded leading dimension; unchanged symbolic element count |
 | `permute` | `axes`: a permutation of all input axes |

@@ -7,6 +7,7 @@
 #include "layers.h"
 #include "../nn/nn.h"
 #include "../tensor.h"
+#include "../mixin/gradient.h"
 #include "mlp.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <ctype.h>
@@ -344,16 +345,20 @@ static PolyTensor *apply(
     allowed = "|name||inputs||type||theta|";
   else if (!strcmp(kind, "attention"))
     allowed = "|name||inputs||type||is_causal||enable_gqa|";
+  else if (!strcmp(kind, "const_like"))
+    allowed = "|name||inputs||type||value|";
   if (!fields(d, spec, allowed, path)) return NULL;
   bool binary =
       !strcmp(kind, "add") || !strcmp(kind, "sub") || !strcmp(kind, "mul") || !strcmp(kind, "div");
   bool attention = !strcmp(kind, "attention");
-  if (attention ? (n != 3 && n != 4) : n != (binary ? 2 : 1)) {
+  bool gradient = !strcmp(kind, "gradient"), matmul = !strcmp(kind, "matmul");
+  int arity = binary || gradient || matmul ? 2 : 1;
+  if (attention ? (n != 3 && n != 4) : n != arity) {
     if (attention) {
       def_error(d, path, "expected query, key, value and optional mask inputs");
       return NULL;
     }
-    def_error(d, path, "expected %d inputs, received %d", binary ? 2 : 1, n);
+    def_error(d, path, "expected %d inputs, received %d", arity, n);
     return NULL;
   }
   PolyTensor *x = inputs[0], *out = NULL;
@@ -531,7 +536,35 @@ static PolyTensor *apply(
     out = own(d, poly_tensor_linear_apply(d->ctx, x, layer->weight, layer->bias), path);
     return out ? activation(d, out, act ? act->valuestring : "none", path) : NULL;
   }
-  if (binary) {
+  if (gradient) {
+    /* Tensor.gradient's implicit seed is valid only for a floating scalar.
+     * Differentiate both existing roots; never reconstruct physical execution
+     * from the portable graph. This is construction, not a gradient executor. */
+    PolyTensor *target = inputs[1];
+    if (rank != 0 || !poly_dtype_is_float(xu->dtype) ||
+        !poly_dtype_is_float(poly_tensor_uop_physical(target)->dtype)) {
+      def_error(d, path, "gradient requires a floating scalar and floating target");
+      return NULL;
+    }
+    PolyUOp *physical = poly_uop_grad(d->ctx, xu, poly_tensor_uop_physical(target));
+    PolyUOp *logical =
+        poly_uop_grad(d->ctx, poly_tensor_uop_logical(x), poly_tensor_uop_logical(target));
+    out = physical && logical ? poly_tensor_create_result(
+                                    d->ctx, inputs, n, logical, physical, POLY_TENSOR_VALUE,
+                                    poly_tensor_device(target)
+                                )
+                              : NULL;
+  } else if (matmul) {
+    out = poly_tensor_dot(d->ctx, x, inputs[1]);
+  } else if (!strcmp(kind, "const_like")) {
+    const cJSON *value = field(spec, "value");
+    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
+        !poly_dtype_is_float(xu->dtype)) {
+      def_error(d, path, "const_like requires a finite number and floating input");
+      return NULL;
+    }
+    out = poly_tensor_const_like_float(d->ctx, x, value->valuedouble);
+  } else if (binary) {
     PolyUOp *sources[] = {xu, poly_tensor_uop_physical(inputs[1])}, *broadcast[8];
     if (poly_uop_broadcast_shape(d->ctx, sources, 2, broadcast, 8) < 0) {
       def_error(d, path, "incompatible broadcast dimensions");
@@ -621,6 +654,10 @@ static PolyTensor *apply(
     return NULL;
   } else if (!strcmp(kind, "square"))
     out = poly_tensor_alu2(d->ctx, POLY_OP_MUL, x, x);
+  else if (!strcmp(kind, "neg"))
+    out = poly_tensor_alu1(d->ctx, POLY_OP_NEG, x);
+  else if (!strcmp(kind, "softplus"))
+    out = poly_tensor_softplus(d->ctx, x, 1.0);
   else if (!strcmp(kind, "exp"))
     out = poly_tensor_exp(d->ctx, x);
   else if (!strcmp(kind, "log"))

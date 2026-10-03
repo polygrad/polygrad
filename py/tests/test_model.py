@@ -361,6 +361,56 @@ def test_definition_rejects_invalid_typed_bounds(shape, dtype, message):
                     'layers':[{'name':'id','type':'identity'}], 'output':'y'})
 
 
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_definition_explicit_gradient(dtype):
+    spec = {'inputs': {'x': {'shape': [2], 'dtype': np.dtype(dtype).name}},
+            'nodes': [{'name': 'sq', 'type': 'square', 'inputs': ['x']},
+                      {'name': 'loss', 'type': 'sum', 'inputs': ['sq']},
+                      {'name': 'g', 'type': 'gradient', 'inputs': ['loss', 'x']},
+                      {'name': 'gs', 'type': 'sum', 'inputs': ['g']},
+                      {'name': 'gg', 'type': 'gradient', 'inputs': ['gs', 'x']}],
+            'outputs': {'loss': 'loss', 'gradient': 'g', 'second': 'gg'}}
+    model = Graph(spec)
+    try:
+        for x in ([.25, -.5], [1., 2.]):
+            out = model.call('forward', {'x': np.array(x, dtype=dtype)})
+            np.testing.assert_array_equal(out['gradient'], np.array(x)*2)
+            np.testing.assert_array_equal(out['second'], [2, 2])
+            assert out['gradient'].dtype == dtype
+    finally:
+        model.dispose()
+    spec['nodes'][2]['inputs'][0] = 'sq'
+    with pytest.raises(ValueError, match='floating scalar'):
+        Graph(spec)
+
+
+@pytest.mark.parametrize('node,message', [
+    ({'type': 'gradient', 'inputs': ['x']}, 'expected 2 inputs'),
+    ({'type': 'gradient', 'inputs': ['x', 'x']}, 'floating scalar'),
+    ({'type': 'const_like', 'inputs': ['x']}, 'finite number'),
+    ({'type': 'const_like', 'inputs': ['x'], 'value': '1'}, 'finite number'),
+    ({'type': 'matmul', 'inputs': ['x']}, 'expected 2 inputs'),
+])
+def test_definition_gradient_component_errors(node, message):
+    with pytest.raises(ValueError, match=message):
+        Graph({'inputs': {'x': {'shape': [2], 'dtype': 'float32'}},
+               'nodes': [dict(name='result', **node)], 'outputs': {'value': 'result'}})
+
+
+def test_definition_disconnected_gradient():
+    spec = {'inputs': {'x': {'shape': [2], 'dtype': 'float32'},
+                       'y': {'shape': [3], 'dtype': 'float32'}},
+            'nodes': [{'name': 'loss', 'type': 'sum', 'inputs': ['x']},
+                      {'name': 'g', 'type': 'gradient', 'inputs': ['loss', 'y']}],
+            'outputs': {'gradient': 'g'}}
+    model = Graph(spec)
+    try:
+        np.testing.assert_array_equal(model.call('forward', {'x': np.ones(2, np.float32),
+            'y': np.ones(3, np.float32)})['gradient'], [0, 0, 0])
+    finally:
+        model.dispose()
+
+
 def test_definition_shared_embedding_and_norm_state():
     model = Graph({
         'inputs':{'x':{'shape':[2],'dtype':'int32'}},
