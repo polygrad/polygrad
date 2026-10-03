@@ -1024,59 +1024,13 @@ static PolyTensor *onnx_resize(Import *d, Node *n, bool legacy) {
             ctx, POLY_OP_ADD, a, poly_tensor_alu2(ctx, POLY_OP_MUL, onnx_sub(d, b, a), fraction)
         );
       } else {
-        double A = attr_float(d, n, "cubic_coeff_a", -.75);
-        PolyTensor *ratio = onnx_sub(d, index, low), *weights[4], *neighbors[4];
-        for (int j = 0; j < 4; j++) {
-          neighbors[j] = poly_tensor_alu2(ctx, POLY_OP_ADD, low, onnx_int(d, j - 1));
-          PolyTensor *distance = j == 0 ? poly_tensor_alu2(ctx, POLY_OP_ADD, ratio, onnx_int(d, 1))
-                                 : j == 1 ? ratio
-                                          : onnx_sub(d, onnx_int(d, j == 2 ? 1 : 2), ratio);
-          /* polyN is Horner evaluation, not a reassociated cubic. */
-          double coefficients[4] = {A, -5 * A, 8 * A, -4 * A};
-          if (j == 1 || j == 2) {
-            coefficients[0] = A + 2;
-            coefficients[1] = -(A + 3);
-            coefficients[2] = 0;
-            coefficients[3] = 1;
-          }
-          PolyTensor *w = onnx_float(d, coefficients[0]);
-          for (int c = 1; c < 4; c++)
-            w = poly_tensor_alu2(
-                ctx, POLY_OP_ADD, poly_tensor_alu2(ctx, POLY_OP_MUL, w, distance),
-                onnx_float(d, coefficients[c])
-            );
-          if (attr_int(d, n, "exclude_outside", 0)) {
-            PolyTensor *valid = poly_tensor_alu2(
-                ctx, POLY_OP_AND,
-                onnx_not(d, poly_tensor_alu2(ctx, POLY_OP_CMPLT, neighbors[j], onnx_int(d, 0))),
-                poly_tensor_alu2(ctx, POLY_OP_CMPLT, neighbors[j], onnx_int(d, input[i + 2]))
-            );
-            w = poly_tensor_alu3(ctx, POLY_OP_WHERE, valid, w, onnx_int(d, 0));
-          }
-          weights[j] = w;
-        }
-        if (attr_int(d, n, "exclude_outside", 0)) {
-          PolyTensor *total = weights[0];
-          for (int j = 1; j < 4; j++)
-            total = poly_tensor_alu2(ctx, POLY_OP_ADD, total, weights[j]);
-          total = poly_tensor_alu2(ctx, POLY_OP_ADD, total, onnx_float(d, 1e-9));
-          for (int j = 0; j < 4; j++)
-            weights[j] = poly_tensor_div(ctx, weights[j], total, 0);
-        }
-        PolyTensor *sum = NULL;
-        for (int j = 0; j < 4; j++) {
-          PolyTensor *idx = poly_tensor_expand(
-              ctx,
-              poly_tensor_reshape(ctx, onnx_clamp(d, neighbors[j], 0, input[i + 2] - 1), rs, nr),
-              big, nr
-          );
-          PolyTensor *w =
-              poly_tensor_expand(ctx, poly_tensor_reshape(ctx, weights[j], rs, nr), big, nr);
-          PolyTensor *v =
-              poly_tensor_alu2(ctx, POLY_OP_MUL, poly_tensor_gather_dim(ctx, x, i + 2, idx), w);
-          sum = sum ? poly_tensor_alu2(ctx, POLY_OP_ADD, sum, v) : v;
-        }
-        x = sum;
+        /* Coordinate transforms stay here; Tensor interpolation shares the
+         * separable sampler, including coefficients and edge normalization. */
+        index = poly_tensor_expand(ctx, index, (int64_t[]){sizes[i]}, 1);
+        x = poly_tensor_cubic_sample_axis(
+            ctx, x, index, i + 2, attr_float(d, n, "cubic_coeff_a", -.75),
+            attr_int(d, n, "exclude_outside", 0)
+        );
       }
       if (!x) return NULL;
     }

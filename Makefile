@@ -270,6 +270,10 @@ test-vision: build/polygrad_test build/libpolygrad.so
 	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_vision_models.py
 	POLY_TEST_FILTER=Vision $(MAKE) test-js-native test-js-wasm
 
+.PHONY: test-vision-interpolate
+test-vision-interpolate: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) -m pytest -q test/external/test_vision_interpolate.py
+
 .PHONY: test-llama
 test-llama: build/polygrad_test build/libpolygrad.so
 	$(SAN_RUN) ./build/polygrad_test --require-no-skips llama

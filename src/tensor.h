@@ -544,6 +544,18 @@ PolyTensor *poly_tensor_avg_pool2d(
     bool count_include_pad
 );
 
+/* Sample one axis at 1-D coordinates, using ONNX cubic_coeff_a and optional
+ * outside-sample exclusion. Accumulates in at least float32, without antialiasing. */
+PolyTensor *poly_tensor_cubic_sample_axis(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *coordinates,
+    int axis,
+    double a,
+    bool exclude_outside
+);
+/* linear/nearest/nearest-exact follow Tinygrad. bicubic accepts two spatial
+ * dimensions and floating inputs, with a=-0.75 and no antialiasing. */
 PolyTensor *poly_tensor_interpolate(
     PolyCtx *ctx,
     PolyTensor *src,

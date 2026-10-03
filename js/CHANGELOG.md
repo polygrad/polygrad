@@ -5,6 +5,7 @@
 - Fix Wasm scheduling failures when aggregate temporary sizes exceed 4 GiB but their lifetimes permit a smaller reused arena.
 - Fix Tensor.round() arithmetic promotion for integer inputs.
 - Extend ONNX import with constant Range, empty intermediates and graph-inferred output dimensions; raise the node limit to 4,096.
+- Add Tensor.interpolate(size, {mode:'bicubic'}) with gradients and optional alignCorners; no antialiasing.
 
 ## 0.6.0
 

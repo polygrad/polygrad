@@ -6,6 +6,7 @@
 - Use shared shape-qualified parameter names in C, CUDA, HIP and WGSL to prevent scalar/buffer name collisions without changing argument order.
 - Promote integer round arithmetic like pinned Tinygrad, including integer-Pow expressions used by ONNX shape graphs.
 - Extend ONNX import with constant Range, empty intermediates and graph-inferred output dimensions; raise the node limit to 4,096.
+- Add differentiable bicubic Tensor interpolation and share its configurable cubic sampler with ONNX Resize (PG-DIV-014).
 
 ## 0.6.0
 

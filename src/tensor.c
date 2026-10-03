@@ -3646,6 +3646,103 @@ static int tensor_static_shape(PolyCtx *ctx, PolyUOp *u, int64_t *shape) {
   return n;
 }
 
+/* Evaluate all four polynomials on the same fractional coordinate. Expanding
+ * distances 1+t and 2-t later can contract coordinate arithmetic differently
+ * across samples at integer boundaries. */
+static PolyUOp *cubic_weight(PolyCtx *ctx, PolyUOp *t, double a, double b, double c, double d) {
+  PolyUOp *v = poly_uop_mul(ctx, t, poly_uop_const_typed(ctx, t->dtype, a));
+  v = poly_uop_add(ctx, v, poly_uop_const_typed(ctx, t->dtype, b));
+  v = poly_uop_add(ctx, poly_uop_mul(ctx, v, t), poly_uop_const_typed(ctx, t->dtype, c));
+  return poly_uop_add(ctx, poly_uop_mul(ctx, v, t), poly_uop_const_typed(ctx, t->dtype, d));
+}
+
+static PolyUOp *cubic_sample_axis_root(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *p,
+    int axis,
+    double a,
+    bool exclude_outside
+) {
+  int64_t expand[POLY_MAX_DIMS], reshape[POLY_MAX_DIMS], ps[POLY_MAX_DIMS];
+  int ndim = tensor_static_shape(ctx, x, expand);
+  if (ndim < 1 || axis < 0 || axis >= ndim || tensor_static_shape(ctx, p, ps) != 1 ||
+      expand[axis] <= 0 || !isfinite(a) || !poly_dtype_is_float(x->dtype))
+    return NULL;
+  int64_t in = expand[axis];
+  for (int d = 0; d < ndim; d++)
+    reshape[d] = 1;
+  reshape[axis] = expand[axis] = ps[0];
+  PolyDType calc = poly_dtype_eq(x->dtype, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
+  p = poly_uop_cast(ctx, p, calc);
+  PolyUOp *base = poly_uop_floor(ctx, p);
+  PolyUOp *t = poly_uop_sub(ctx, p, base);
+  PolyUOp *weights[4] = {
+      cubic_weight(ctx, t, a, -2 * a, a, 0),
+      cubic_weight(ctx, t, a + 2, -(a + 3), 0, 1),
+      cubic_weight(ctx, t, -(a + 2), 2 * a + 3, -a, 0),
+      cubic_weight(ctx, t, -a, a, 0, 0),
+  };
+  PolyUOp *indices[4], *total = NULL;
+  base = poly_uop_cast(ctx, base, POLY_INT64);
+  for (int k = 0; k < 4; k++) {
+    PolyUOp *index = poly_uop_add(ctx, base, poly_uop_const_exact_int(ctx, POLY_INT64, k - 1));
+    PolyUOp *weight = weights[k];
+    if (exclude_outside) {
+      PolyUOp *outside = poly_uop_binop(
+          ctx, POLY_OP_OR,
+          poly_uop_binop(ctx, POLY_OP_CMPLT, index, poly_uop_const_exact_int(ctx, POLY_INT64, 0)),
+          poly_uop_binop(
+              ctx, POLY_OP_CMPLT, poly_uop_const_exact_int(ctx, POLY_INT64, in - 1), index
+          )
+      );
+      weight = poly_uop_where(ctx, outside, poly_uop_const_typed(ctx, calc, 0), weight);
+    }
+    weights[k] = weight;
+    total = total ? poly_uop_add(ctx, total, weight) : weight;
+    indices[k] = index;
+  }
+  if (exclude_outside) total = poly_uop_add(ctx, total, poly_uop_const_typed(ctx, calc, 1e-9));
+  PolyUOp *sum = NULL;
+  for (int k = 0; k < 4; k++) {
+    PolyUOp *index = indices[k];
+    /* Clamp samples, not coordinates: negative half-pixels affect weights. */
+    PolyUOp *lo = poly_uop_const_exact_int(ctx, POLY_INT64, 0);
+    PolyUOp *hi = poly_uop_const_exact_int(ctx, POLY_INT64, in - 1);
+    index = poly_uop_where(ctx, poly_uop_binop(ctx, POLY_OP_CMPLT, index, lo), lo, index);
+    index = poly_uop_where(ctx, poly_uop_binop(ctx, POLY_OP_CMPLT, hi, index), hi, index);
+    index = poly_uop_expand(ctx, poly_uop_reshape(ctx, index, reshape, ndim), expand, ndim);
+    PolyUOp *weight = exclude_outside ? poly_uop_div(ctx, weights[k], total) : weights[k];
+    weight = poly_uop_expand(ctx, poly_uop_reshape(ctx, weight, reshape, ndim), expand, ndim);
+    PolyUOp *term = poly_uop_mul(
+        ctx, poly_uop_cast(ctx, poly_uop_gather_dim(ctx, x, axis, index), calc), weight
+    );
+    sum = sum ? poly_uop_add(ctx, sum, term) : term;
+  }
+  return sum;
+}
+
+PolyTensor *poly_tensor_cubic_sample_axis(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *coordinates,
+    int axis,
+    double a,
+    bool exclude_outside
+) {
+  PolyTensor *inputs[] = {x, coordinates};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (logical < 0) return NULL;
+  PolyUOp *p = cubic_sample_axis_root(
+      ctx, x->uop_physical, coordinates->uop_physical, axis, a, exclude_outside
+  );
+  PolyUOp *l = logical ? cubic_sample_axis_root(
+                             ctx, x->uop_logical, coordinates->uop_logical, axis, a, exclude_outside
+                         )
+                       : NULL;
+  return tensor_composite_result(ctx, l, p, inputs, 2);
+}
+
 /* OpMixin.interpolate (mixin/op.py:1046-1085): coordinates stay integer until
  * the linear fraction; never read host indices or substitute max dimensions. */
 static PolyUOp *interpolate_root(
@@ -3660,7 +3757,11 @@ static PolyUOp *interpolate_root(
   int ndim = tensor_static_shape(ctx, x, shape);
   if (!size || !mode || n_size <= 0 || n_size > ndim) return NULL;
   bool linear = strcmp(mode, "linear") == 0, exact = strcmp(mode, "nearest-exact") == 0;
-  if ((!linear && !exact && strcmp(mode, "nearest")) || (align_corners && !linear)) return NULL;
+  bool cubic = strcmp(mode, "bicubic") == 0;
+  if ((!linear && !exact && !cubic && strcmp(mode, "nearest")) ||
+      (align_corners && !linear && !cubic) ||
+      (cubic && (n_size != 2 || !poly_dtype_is_float(x->dtype))))
+    return NULL;
   memcpy(expand, shape, ndim * sizeof(int64_t));
   PolyDType dtype = x->dtype;
   for (int j = n_size - 1; j >= 0; j--) {
@@ -3670,7 +3771,16 @@ static PolyUOp *interpolate_root(
     for (int i = 0; i < ndim; i++)
       reshape[i] = 1;
     reshape[axis] = expand[axis] = out;
-    if (linear) {
+    if (cubic) {
+      PolyDType calc = poly_dtype_eq(x->dtype, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
+      double scale =
+          align_corners ? (out > 1 ? (double)(in - 1) / (out - 1) : 0) : (double)in / out;
+      PolyUOp *p = poly_uop_arange_float_dtype(ctx, 0, (double)out, 1, calc);
+      if (!align_corners) p = poly_uop_add(ctx, p, poly_uop_const_typed(ctx, calc, 0.5));
+      p = poly_uop_mul(ctx, p, poly_uop_const_typed(ctx, calc, scale));
+      if (!align_corners) p = poly_uop_sub(ctx, p, poly_uop_const_typed(ctx, calc, 0.5));
+      x = cubic_sample_axis_root(ctx, x, p, axis, -.75, false);
+    } else if (linear) {
       int64_t den = align_corners ? out - 1 : out * 2;
       int64_t upper_value;
       if (__builtin_mul_overflow(in - 1, den, &upper_value)) return NULL;

@@ -3064,8 +3064,8 @@ function createBoundTensorClass(runtime) {
       if (!Array.isArray(size) || size.length < 1 || size.length > this.ndim || !size.every(Number.isSafeInteger)) {
         throw new Error('invalid interpolate size')
       }
-      if (!['linear', 'nearest', 'nearest-exact'].includes(mode) || (align && mode !== 'linear')) {
-        throw new Error('interpolate supports linear, nearest, nearest-exact; alignCorners requires linear')
+      if (!['linear', 'nearest', 'nearest-exact', 'bicubic'].includes(mode) || (align && !['linear', 'bicubic'].includes(mode))) {
+        throw new Error('interpolate supports linear, nearest, nearest-exact, bicubic; alignCorners requires linear or bicubic')
       }
       const core = this._rt._core.ffi.poly_tensor_interpolate(this._ctx, this._tensor, size, size.length, mode, align)
       if (!core) throw new Error('poly_interpolate failed')

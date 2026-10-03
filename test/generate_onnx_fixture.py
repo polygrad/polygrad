@@ -255,6 +255,15 @@ def fixtures():
     for mode in ['nearest','linear','cubic']:
         yield case('resize_'+mode, [h.make_node('Resize',['x','','','sizes'],['y'],mode=mode)],
                    {'x':f((1,2,3,4))}, {'y':(1,2,5,6)}, {'sizes':np.array([1,2,5,6],np.int64)})
+    for transform, outside, size in [('half_pixel',1,(1,2,7,9)),
+                                     ('align_corners',0,(1,2,1,1)),
+                                     ('asymmetric',0,(1,2,5,6))]:
+        yield case('resize_cubic_'+transform,
+                   [h.make_node('Resize',['x','','','sizes'],['y'],mode='cubic',
+                                cubic_coeff_a=-.5, exclude_outside=outside,
+                                coordinate_transformation_mode=transform)],
+                   {'x':np.linspace(-1,1,24,dtype=np.float32).reshape(1,2,3,4)},
+                   {'y':size}, {'sizes':np.array(size,np.int64)})
     yield case('resize_axes', [h.make_node('Resize',['x','','scales'],['y'],mode='nearest',
                    axes=[2,3],coordinate_transformation_mode='asymmetric',nearest_mode='ceil')],
                    {'x':f((1,1,3,4))}, {'y':(1,1,6,6)}, {'scales':np.array([2.,1.5],np.float32)},opset=18)

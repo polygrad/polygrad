@@ -215,6 +215,18 @@
       "close_when": null
     },
     {
+      "id": "PG-DIV-014",
+      "status": "approved",
+      "stages": ["tensor", "model", "value"],
+      "area": "Bicubic interpolation for checkpoint-preserving vision resolution selection",
+      "tinygrad": "Pinned OpMixin.interpolate supports linear, nearest and nearest-exact, and rejects bicubic.",
+      "polygrad": "The C Tensor interpolation API additionally supports separable bicubic interpolation of two fixed spatial dimensions, with a=-0.75, replicated edge samples, optional align_corners and no antialiasing. Tensor interpolation and ONNX Resize share an axis sampler with configurable coefficient and outside-sample exclusion; callers retain coordinate policies. Cubic weights use fractional-coordinate Horner polynomials rather than the pin's distance-based evaluation.",
+      "rationale": "Support original DINOv2 checkpoints at their processor's input resolution without app-specific weight conversion. Existing interpolation modes and IR vocabulary are unchanged; frontends delegate to C.",
+      "approval": "User 2026-10-02 approves expanding Polygrad primitives for DINO and requests fixing library gaps rather than demo workarounds.",
+      "evidence": ["references/tinygrad_latest/tinygrad/mixin/op.py", "src/tensor.c:cubic_sample_axis_root", "src/loaders/onnx_loader.c:onnx_resize", "src/models/dinov2.c", "test/external/test_vision_interpolate.py", "js/test/test_tensor.js", "temp/cubic-gradient-tinygrad.log", "temp/general-python2.log"],
+      "close_when": null
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

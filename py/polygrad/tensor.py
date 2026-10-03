@@ -3189,8 +3189,8 @@ class Tensor:
 
     def interpolate(self, size, mode='linear', align_corners=False):
         assert isinstance(size, (tuple, list)) and all(isinstance(x, int) for x in size) and 0 < len(size) <= self.ndim, f'invalid size={size}'
-        assert mode in ('linear', 'nearest', 'nearest-exact'), 'only supports linear, nearest or nearest-exact interpolate'
-        assert not (align_corners and mode != 'linear'), 'align_corners option can only be set with the interpolating mode linear'
+        assert mode in ('linear', 'nearest', 'nearest-exact', 'bicubic'), 'unsupported interpolate mode'
+        assert not (align_corners and mode not in ('linear', 'bicubic')), 'align_corners requires linear or bicubic'
         sizes, n = _int64_array(size)
         core = _ffi._lib.poly_tensor_interpolate(self._ctx, self._tensor, sizes, n, mode.encode(), bool(align_corners))
         if not core:

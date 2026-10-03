@@ -267,6 +267,27 @@ TEST(tensor, round_integer_promotes_arithmetic_like_pinned) {
   PASS();
 }
 
+TEST(tensor, bicubic_checkpoint_interpolation) {
+  PolyCtx *ctx = poly_ctx_new();
+  float data[] = {1, 2, 4, 8}, got[9];
+  PolyTensor *x =
+      poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, (int64_t[]){1, 1, 2, 2}, 4);
+  PolyTensor *y = poly_tensor_interpolate(ctx, x, (int64_t[]){3, 3}, 2, "bicubic", false);
+  ASSERT_NOT_NULL(y);
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, y, got, sizeof(got)), 0);
+  /* PyTorch a=-0.75; boundary overshoot distinguishes clamped indices from
+   * incorrectly clamping the half-pixel coordinates. */
+  float expected[] = {0.67538363f, 1.10937512f, 1.54336691f, 2.28298664f, 3.75f,
+                      5.21701384f, 3.89058971f, 6.390625f,   8.89066124f};
+  for (int i = 0; i < 9; i++)
+    ASSERT_FLOAT_EQ(got[i], expected[i], 1e-5f);
+  ASSERT_TRUE(poly_tensor_interpolate(ctx, x, (int64_t[]){3}, 1, "bicubic", false) == NULL);
+  ASSERT_TRUE(poly_tensor_interpolate(ctx, x, (int64_t[]){0, 3}, 2, "bicubic", false) == NULL);
+  poly_tensor_release(y);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+}
+
 TEST(tensor, cat_handles_reuse_shared_uop_and_reject_foreign_owner) {
   PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
   poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);

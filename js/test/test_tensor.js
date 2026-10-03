@@ -5934,6 +5934,15 @@ async function runTensorTests(pg, createRuntime) {
       assertClose(await x.grad.toArray(), grad)
     }
   })
+  await test('spatial owners bicubic interpolation values and gradients', async () => {
+    // PyTorch interpolate, a=-0.75, align_corners=false; edge coordinates are not clamped.
+    const x = new Tensor([[[[1, 2], [4, 8]]]], { dtype: 'float32' })
+    const y = x.interpolate([3, 3], { mode: 'bicubic' })
+    y.mul(y).sum().backward()
+    assertClose(await y.toArray(), [0.67538363, 1.10937512, 1.54336691, 2.28298664,
+      3.75, 5.21701384, 3.89058971, 6.390625, 8.89066124], 1e-5)
+    assertClose(await x.grad.toArray(), [5.25838995, 9.89722443, 18.16140556, 34.18299866], 5e-5)
+  })
   await test('spatial owners transpose convolution groups and gradient', async () => {
     const x = new Tensor([[[1, 2, 3], [4, 5, 6]]], { dtype: 'float32' })
     const w = new Tensor([[[1, 2]], [[3, 4]]], { dtype: 'float32' })
