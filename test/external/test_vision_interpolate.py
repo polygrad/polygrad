@@ -1,7 +1,10 @@
 """Live PyTorch/HF oracle; run with make test-vision-interpolate."""
+import json
 import numpy as np
 import pytest
 import torch
+from safetensors.torch import save
+from transformers import Dinov2Config, Dinov2Model
 import polygrad as pg
 
 
@@ -22,3 +25,31 @@ def test_bicubic_values_and_gradient(shape, size, align, dtype):
         np.testing.assert_allclose(y.numpy(), expected.detach().numpy(), atol=tol, rtol=tol)
         (y * y).sum().backward()
         np.testing.assert_allclose(x.grad.numpy(), ref.grad.numpy(), atol=tol*10, rtol=tol*10)
+
+
+def test_dinov2_input_resolution_preserves_checkpoint_and_bundle():
+    torch.manual_seed(3)
+    config = Dinov2Config(hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
+                         image_size=12, patch_size=2)
+    config._attn_implementation = 'eager'
+    model = Dinov2Model(config).eval()
+    pixels = np.linspace(-1, 1, 3*8*8, dtype=np.float32).reshape(1, 3, 8, 8)
+    with torch.no_grad():
+        expected = model(torch.tensor(pixels))
+    weights = save({k: v.contiguous() for k, v in model.state_dict().items()})
+    cfg = config.to_dict()
+    cfg['input_image_size'] = 8
+    with pg.create(device='CPU') as rt:
+        m = pg.Model.from_hf(config_json=json.dumps(cfg), weight_bytes_list=[weights], runtime=rt)
+        restored = None
+        try:
+            outputs = m.forward(pixel_values=pixels)
+            for name in ('last_hidden_state', 'pooler_output'):
+                np.testing.assert_allclose(outputs[name], getattr(expected, name).numpy(), atol=5e-5, rtol=5e-4)
+            restored = rt.Model.load(m.save())
+            for name, value in restored.forward(pixel_values=pixels).items():
+                np.testing.assert_array_equal(value, outputs[name])
+        finally:
+            if restored is not None:
+                restored.dispose()
+            m.dispose()

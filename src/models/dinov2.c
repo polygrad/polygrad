@@ -23,6 +23,17 @@ PolyModel *model_dinov2_from_config(PolyCtx *ctx, const cJSON *root, PolyModelEr
     model_factory_error(err, "mlp_ratio", "intermediate width must be positive");
     return NULL;
   }
+  /* image_size describes checkpoint positions; input_image_size specializes
+   * the input signature without changing checkpoint storage or weight names. */
+  int checkpoint_grid = c.image / c.patch, input_image;
+  if (!model_vision_int(root, "input_image_size", c.image, 1, &input_image, err)) return NULL;
+  if (input_image % c.patch || input_image / c.patch > 256) {
+    model_factory_error(err, "input_image_size", "expected a whole patch grid of at most 256x256");
+    return NULL;
+  }
+  c.image = input_image;
+  int input_grid = c.image / c.patch;
+  c.tokens = input_grid * input_grid + 1;
   PolyModel *m = poly_model_new(ctx, NULL);
   if (!m) return NULL;
   PolyTensor *x = poly_model_input(
@@ -34,8 +45,25 @@ PolyModel *model_dinov2_from_config(PolyCtx *ctx, const cJSON *root, PolyModelEr
   cls = poly_tensor_expand(ctx, cls, (int64_t[]){c.batch, 1, c.dim}, 3);
   x = poly_tensor_cat(ctx, (PolyTensor *[]){cls, x}, 2, 1);
   PolyTensor *pos = poly_model_param(
-      m, "embeddings.position_embeddings", POLY_FLOAT32, (int64_t[]){1, c.tokens, c.dim}, 3
+      m, "embeddings.position_embeddings", POLY_FLOAT32,
+      (int64_t[]){1, checkpoint_grid * checkpoint_grid + 1, c.dim}, 3
   );
+  if (input_grid != checkpoint_grid) {
+    PolyTensor *class_pos = model_vision_slice(ctx, pos, 1, 0, 1);
+    PolyTensor *patch_pos =
+        model_vision_slice(ctx, pos, 1, 1, checkpoint_grid * checkpoint_grid + 1);
+    patch_pos = poly_tensor_reshape(
+        ctx, patch_pos, (int64_t[]){1, checkpoint_grid, checkpoint_grid, c.dim}, 4
+    );
+    patch_pos = poly_tensor_permute(ctx, patch_pos, (int64_t[]){0, 3, 1, 2}, 4);
+    patch_pos = poly_tensor_interpolate(
+        ctx, patch_pos, (int64_t[]){input_grid, input_grid}, 2, "bicubic", false
+    );
+    patch_pos = poly_tensor_permute(ctx, patch_pos, (int64_t[]){0, 2, 3, 1}, 4);
+    patch_pos =
+        poly_tensor_reshape(ctx, patch_pos, (int64_t[]){1, input_grid * input_grid, c.dim}, 3);
+    pos = poly_tensor_cat(ctx, (PolyTensor *[]){class_pos, patch_pos}, 2, 1);
+  }
   x = poly_tensor_alu2(ctx, POLY_OP_ADD, x, pos);
   for (int i = 0; i < c.layers; i++) {
     char name[160], p[128], proj[4][192];

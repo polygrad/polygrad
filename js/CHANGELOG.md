@@ -6,6 +6,7 @@
 - Fix Tensor.round() arithmetic promotion for integer inputs.
 - Extend ONNX import with constant Range, empty intermediates and graph-inferred output dimensions; raise the node limit to 4,096.
 - Add Tensor.interpolate(size, {mode:'bicubic'}) with gradients and optional alignCorners; no antialiasing.
+- Add DINOv2 input_image_size for a fixed input resolution, interpolating positions in the graph without changing checkpoint weights.
 
 ## 0.6.0
 

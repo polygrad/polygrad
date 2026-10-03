@@ -14,6 +14,29 @@ from vision_fixture import load_vision_cases
 CASES = load_vision_cases()
 
 
+def test_dinov2_resolution_keeps_checkpoint_storage():
+    case = next(c for c in CASES if c['name'] == 'DINOv2')
+    config = {**case['config'], 'input_image_size': 4}
+    pixels = np.linspace(-1, 1, 48, dtype=np.float32).reshape(1, 3, 4, 4)
+    with pg.create(device='CPU') as rt:
+        model = pg.Model.from_hf(config_json=json.dumps(config),
+                                weight_bytes_list=[base64.b64decode(case['weights'])], runtime=rt)
+        restored = None
+        try:
+            original = model.read_buffer('embeddings.position_embeddings').copy()
+            assert model.buf_shape(model.find_buf('embeddings.position_embeddings')) == (1, 5, 16)
+            outputs = model.forward(pixel_values=pixels)
+            assert outputs['last_hidden_state'].shape == (1, 2, 16)
+            np.testing.assert_array_equal(model.read_buffer('embeddings.position_embeddings'), original)
+            restored = rt.Model.load(model.save())
+            for name, value in restored.forward(pixel_values=pixels).items():
+                np.testing.assert_array_equal(value, outputs[name])
+        finally:
+            if restored is not None:
+                restored.dispose()
+            model.dispose()
+
+
 def _replace_weight(blob, name, shape, values, *, remove=False):
     size = struct.unpack('<Q', blob[:8])[0]
     header = json.loads(blob[8:8 + size])

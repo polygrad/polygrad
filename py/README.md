@@ -389,7 +389,9 @@ and return normalized embeddings. Both modalities use the configured batch size.
 This implementation is fixed-square-resolution, unmasked inference. It supports
 HF `CLIPModel`, `ViTModel`, `Dinov2Model` and `DINOv3ViTModel` weights, not
 classification heads, DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations
-or positional interpolation to other resolutions. DINOv3 includes register tokens
+or dynamic input resolutions. DINOv2's optional `input_image_size` config selects
+a fixed input resolution and bicubically interpolates the original checkpoint's
+positions; `image_size` must retain the checkpoint resolution. DINOv3 includes register tokens
 and patch-only 2D RoPE; `last_hidden_state` retains those prefix tokens. DINOv2
 SwiGLU and DINOv3 gated MLP configurations are supported. JSON type tags are
 `clip`, `vit`, `dinov2` and `dinov3_vit`.

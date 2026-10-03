@@ -384,8 +384,10 @@ configured batch size.
 
 Supported checkpoint classes: HF `CLIPModel`, `ViTModel`, `Dinov2Model` and
 `DINOv3ViTModel`. This is unmasked inference, not classification heads,
-DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations or variable-resolution
-position interpolation. DINOv3 includes register tokens and patch-only 2D RoPE;
+DINOv2-with-registers, DINOv3 ConvNeXt, training augmentations or dynamic input
+resolutions. DINOv2's optional `input_image_size` config selects a fixed input
+resolution and bicubically interpolates checkpoint positions; keep `image_size`
+at the checkpoint resolution. DINOv3 includes register tokens and patch-only 2D RoPE;
 the full hidden-state output includes prefix tokens. DINOv2 SwiGLU and DINOv3
 gated MLP are supported. JSON tags: `clip`, `vit`, `dinov2`, `dinov3_vit`.
 
