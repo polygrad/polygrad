@@ -822,6 +822,7 @@ async function checkModelCaptureFailure(pg) {
 }
 
 async function checkModelVariableShapes(pg) {
+  await checkModelMultipleAxes(pg)
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const n = pg.uop.variable('model_batch', 1, 32), bound = n.bind(17)
   const x = pg.Tensor.empty([bound, 2]), y = pg.Tensor.empty([bound, 2])
@@ -893,6 +894,38 @@ async function checkModelVariableShapes(pg) {
     if(first) await first.dispose()
     await input.dispose(); await model.dispose()
     await x.dispose(); await y.dispose(); bound.dispose(); n.dispose()
+  }
+}
+
+async function checkModelMultipleAxes(pg) {
+  const n = pg.uop.variable('matrix_rows', 1, 4), m = pg.uop.variable('matrix_cols', 1, 5)
+  const nb = n.bind(2), mb = m.bind(3)
+  const x = pg.Tensor.empty([nb, mb]), y = x.mul(2).add(1)
+  let model, restored
+  try {
+    model = await pg.Model.fromTensors({inputs:{x}, outputs:{out:y}})
+    restored = pg.Model.load(await model.saveAsync())
+    for (const target of [model, restored]) {
+      for (const [rows, cols] of [[2,3],[3,2],[1,4]]) {
+        const data = Array.from({length:rows}, (_,i)=>Array.from({length:cols}, (_,j)=>i*cols+j))
+        const value = new pg.Tensor(data, {dtype:'float32'})
+        let output
+        try {
+          output = (await target.callAsync('forward', {x:value})).out
+          assertClose(await output.toArrayAsync(), data.flat().map(v=>2*v+1), 0)
+          assertClose(await target.readBufferAsync('out'), data.flat().map(v=>2*v+1), 0)
+          const host = await target.callAsync('forward', {x:{data:Float32Array.from(data.flat()), shape:[rows,cols]}})
+          assertClose(host.out, data.flat().map(v=>2*v+1), 0)
+        } finally {if(output) await output.dispose(); await value.dispose()}
+      }
+      let error
+      try {await target.callAsync('forward', {x:new Float32Array(6)})} catch(e) {error=e}
+      assert(error && /shape/.test(error.message), 'ambiguous flat input needs explicit shape')
+    }
+  } finally {
+    if(restored) await restored.dispose()
+    if(model) await model.dispose()
+    await y.dispose(); await x.dispose(); nb.dispose(); mb.dispose(); n.dispose(); m.dispose()
   }
 }
 

@@ -487,8 +487,10 @@ TEST(model, variable_invocations_preserve_result_owners) {
   PolyUOp *n = poly_uop_variable(
       ctx, "model_batch", poly_arg_int(1), poly_arg_int(32), POLY_WEAKINT, 1, false
   );
-  PolyUOp *dims[] = {
-      poly_uop_bind(ctx, n, 17), poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2))};
+  PolyUOp *m = poly_uop_variable(
+      ctx, "model_width", poly_arg_int(1), poly_arg_int(5), POLY_WEAKINT, 1, false
+  );
+  PolyUOp *dims[] = {poly_uop_bind(ctx, n, 17), poly_uop_bind(ctx, m, 2)};
   PolyTensor *x = poly_tensor_empty_uop_by_id(
       ctx, poly_dtype_id_by_name("float32"), dims, 2, POLY_DEVICE_INTERP
   );
@@ -519,7 +521,8 @@ TEST(model, variable_invocations_preserve_result_owners) {
   ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &first, 1), 0);
   ASSERT_NOT_NULL(first);
   shape[0] = 3;
-  io.nbytes = 6 * sizeof(float);
+  shape[1] = 3;
+  io.nbytes = 9 * sizeof(float);
   ASSERT_EQ(poly_model_call(model, "forward", &io, 1), 0);
   int64_t current[2], lo[2], hi[2];
   ASSERT_EQ(poly_model_buf_current_shape(model, 1, current, 2), 2);
@@ -527,8 +530,9 @@ TEST(model, variable_invocations_preserve_result_owners) {
   ASSERT_EQ(poly_model_buf_shape_bounds(model, 0, lo, hi, 2), 2);
   ASSERT_EQ(lo[0], 1);
   ASSERT_EQ(hi[0], 32);
-  ASSERT_EQ(poly_model_read_buf(model, 1, out, 6 * sizeof(float)), 0);
-  for (int i = 0; i < 6; i++)
+  ASSERT_EQ(hi[1], 5);
+  ASSERT_EQ(poly_model_read_buf(model, 1, out, 9 * sizeof(float)), 0);
+  for (int i = 0; i < 9; i++)
     ASSERT_FLOAT_EQ(out[i], 2 * data[i], 0);
   int len = 0;
   ASSERT_TRUE(poly_model_export_program(model, &len) == NULL);

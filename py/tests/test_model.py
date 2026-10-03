@@ -922,12 +922,16 @@ def test_dynamic_model_singleton_prefix(prefix):
             restored.dispose()
             model.dispose()
             x.dispose()
-        invalid = rt.Tensor.empty(2, n.bind(3), 2)
+        inner = rt.Tensor.empty(2, n.bind(3), 2)
+        inner_model = rt.Model(lambda x: x * 2, inputs={'x': inner})
         try:
-            with pytest.raises((RuntimeError, ValueError)):
-                rt.Model(lambda x: x * 2, inputs={'x': invalid})
+            for width in (4, 1, 3):
+                data = np.arange(4*width, dtype=np.float32).reshape(2,width,2)
+                np.testing.assert_array_equal(inner_model.forward(x=data)['output'], data*2)
+                np.testing.assert_array_equal(inner_model.forward(x=data.ravel())['output'], data*2)
         finally:
-            invalid.dispose()
+            inner_model.dispose()
+            inner.dispose()
 
 
 def test_empty_model_binding_rejects_before_any_input_write():
@@ -945,6 +949,44 @@ def test_empty_model_binding_rejects_before_any_input_write():
     finally:
         model.dispose()
         rt.dispose()
+
+
+@pytest.mark.parametrize('shared', [False, True])
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_dynamic_model_multiple_axes_state_and_roundtrip(shared, device):
+    from polygrad import create
+    with create(device=device, logical='always') as rt:
+        n, m = rt.Variable('rows', 1, 4), rt.Variable('cols', 1, 5)
+        if shared: m = n
+        width = 4 if shared else 5
+        state = rt.Tensor.zeros(4, width).realize().is_param_(False)
+        iteration = rt.Variable('iteration', 0, 10)
+        def step(x, iteration):
+            view = state.shrink(((0, x.shape[0]), (0, x.shape[1])))
+            scale = (x * 0 + iteration < 2).where(2., 1.)
+            view.assign(view + x * scale)
+            return view + 0
+        source = rt.Model(step, inputs={'x':rt.Tensor.empty(n.bind(2), m.bind(2))},
+                          params={'state':state}, controls={'iteration':iteration})
+        restored = rt.Model.load(source.save())
+        try:
+            for model in (source, restored):
+                expected = np.zeros((4, width), np.float32)
+                for rows, cols, i in ((2, 2, 0), (3, 3 if shared else 4, 3), (1, 1 if shared else 2, 1)):
+                    x = np.arange(rows*cols, dtype=np.float32).reshape(rows, cols) + 1
+                    expected[:rows,:cols] += x * (2 if i < 2 else 1)
+                    actual = model.call('forward', {'x':x}, controls={'iteration':i})['output']
+                    np.testing.assert_array_equal(actual, expected[:rows,:cols])
+                    np.testing.assert_array_equal(model.read_buffer('state').reshape(4,width), expected)
+                before = model.read_buffer('state')
+                with pytest.raises(RuntimeError, match='shape|binding'):
+                    model.call('forward', {'x':np.ones((2,3) if shared else (2,6),np.float32)}, controls={'iteration':0})
+                with pytest.raises(RuntimeError, match='shape'):
+                    model.call('forward', {'x':np.ones(4,np.float32)}, controls={'iteration':0})
+                np.testing.assert_array_equal(model.read_buffer('state'), before)
+        finally:
+            restored.dispose()
+            source.dispose()
 
 
 def test_dynamic_model_import_matches_direct_cpu_construction():

@@ -264,10 +264,11 @@ More runnable scripts are in [JavaScript examples](https://github.com/polygrad/p
   `Tensor.training`; changing it later does not recapture the graph.
 - On WebGPU, construct with `await pg.Model.fromCallableAsync(author, options)`.
   The author must remain synchronous and must not start async reads or execution.
-- Inputs may have one bounded variable dimension after any singleton axes
-  (for example `[N, features]` or `[1, N]`); other dimensions stay fixed.
+- Inputs may have bounded dimensions, including `[N, N]` and independent
+  `[N, M]` axes. State shapes remain fixed.
   Storage currently reserves maximum capacity; empty calls reject.
-  Flat typed arrays use the signature, or provide
+  Flat typed arrays can infer one variable axis. For multiple variable axes, use
+  a Tensor or provide
   `{data: typedArray, shape: [rows, columns]}` as a Model input binding.
 - Tensor inputs must share the Model's runtime and device. Any Tensor input
   makes outputs owned device Tensors; array-only calls return host arrays.

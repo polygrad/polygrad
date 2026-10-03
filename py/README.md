@@ -249,12 +249,13 @@ More runnable scripts are in [Python examples](https://github.com/polygrad/polyg
   state. Authoring Tensor roots and training mode are restored even on failure;
   arbitrary Python side effects are not. Capture rejects parameter/input
   assignments and effectful reads.
-- Variable-size calls support one bounded dimension after any singleton axes
-  (for example `[N, features]` or `[1, N]`); other dimensions stay fixed.
+- Variable-size calls support bounded dimensions, including `[N, N]` and
+  independent `[N, M]` axes. State shapes remain fixed.
   Save/load preserves the signature; storage currently reserves
   maximum capacity. Tensor results retain their invocation's values and shape
   across later calls and Model disposal, but require a live runtime.
-- Flat arrays use the signature. Multidimensional NumPy arrays must match the
+- Flat arrays can infer one variable axis; multiple variable axes require a
+  shaped array. Multidimensional NumPy arrays must match the
   declared shape, not merely its element count. The equivalent JS binding is
   `{data: typedArray, shape: [rows, columns]}`.
 

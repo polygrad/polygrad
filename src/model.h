@@ -393,6 +393,8 @@ PolyUOp *poly_model_test_execution(const PolyModel *inst, bool training, bool co
 
 /* Explicit readback/upload for device-resident buffers */
 
+/* Dynamic bindings read the last admitted view as packed bytes, not its
+ * capacity padding. Raw buffer access above still exposes capacity storage. */
 int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len);
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len);
 int poly_model_read_buf_named(PolyModel *inst, const char *name, void *host_dst, size_t dst_len);

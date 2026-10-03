@@ -49,7 +49,7 @@ typedef struct {
   bool needs_weights;
 } NamedBuf;
 
-/* Model inputs may use CreationMixin.empty's zero-origin bounded prefix.
+/* Model inputs may use CreationMixin.empty's zero-origin bounded view.
  * This is not a full-storage identity: keep the core identity predicate strict
  * and preserve the SHRINK in the executable when substituting its backing. */
 static const PolyUOp *model_storage_identity(PolyCtx *ctx, PolyUOp *value) {
@@ -60,7 +60,6 @@ static const PolyUOp *model_storage_identity(PolyCtx *ctx, PolyUOp *value) {
   if (ndim < 1 || ndim > POLY_IR_MAX_DIMS) return NULL;
   identity = poly_uop_get_buffer_identity(value->src[0]);
   if (!identity) return NULL;
-  bool variable = false, singleton_prefix = true;
   for (int d = 0; d < ndim; d++) {
     PolyUOp *start = ndim == 1 ? value->src[1] : value->src[1]->src[d];
     int64_t offset;
@@ -69,14 +68,12 @@ static const PolyUOp *model_storage_identity(PolyCtx *ctx, PolyUOp *value) {
     PolyUOp *capacity = poly_uop_shape_dim(ctx, value->src[0], d);
     if (dim && dim->op != POLY_OP_CONST) {
       int64_t lo, hi, extent;
-      if (variable || !singleton_prefix || poly_uop_const_i64(capacity, &extent) != 0) return NULL;
+      if (poly_uop_const_i64(capacity, &extent) != 0) return NULL;
       poly_uop_minmax(ctx, dim, &lo, &hi);
       if (lo < 0 || hi != extent) return NULL;
-      variable = true;
     } else {
       int64_t extent;
       if (dim != capacity || poly_uop_const_i64(dim, &extent) != 0) return NULL;
-      singleton_prefix &= extent == 1;
     }
   }
   return identity;
@@ -91,8 +88,7 @@ static PolyUOp *model_signature_dim(PolyCtx *ctx, const NamedBuf *b, int axis) {
 }
 
 /* CreationMixin.empty: capacity at vmax, then shrink_to the declared shape.
- * A single variable axis may follow singleton axes: each invocation still
- * occupies a contiguous prefix, also for host read/write APIs. */
+ * Inner bounded axes retain capacity strides, including on host transfers. */
 static PolyUOp *model_storage_view(
     PolyCtx *ctx,
     PolyUOp *buffer,
@@ -113,6 +109,20 @@ static PolyUOp *model_concrete_view(PolyCtx *ctx, const NamedBuf *b, const int64
     dims[d] = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(shape[d]));
   return model_storage_view(ctx, b->buffer, b->shape, dims, b->ndim);
 }
+
+/* Only packed prefixes can use raw byte transfers. Other bounded views need
+ * a graph copy that respects the capacity strides, not a second host layout. */
+static bool model_view_is_prefix(const NamedBuf *b, const int64_t *shape) {
+  bool singleton_prefix = true;
+  for (int d = 0; d < b->ndim; d++) {
+    if (shape[d] != b->shape[d] && !singleton_prefix) return false;
+    singleton_prefix &= shape[d] == 1;
+  }
+  return true;
+}
+
+static PolyTensor *model_result_storage(PolyCtx *, const NamedBuf *, const int64_t *);
+static int model_run_copies(PolyCtx *, PolyUOp **, int);
 
 static bool named_buf_nbytes_checked(const NamedBuf *b, size_t *out) {
   if (out) *out = 0;
@@ -2528,22 +2538,16 @@ static PolyModel *model_from_spec(
       PolyUOp *dim = model_signature_dim(spec->ctx, &inst->bufs[i], d);
       if (!dim) goto fail;
       if (dim->op == POLY_OP_CONST) continue;
-      /* Singleton prefixes, e.g. [1,N], preserve packed prefix storage. A
-       * non-singleton prefix would require strided host upload/readback. */
-      bool prefix = true;
-      for (int k = 0; k < d; k++)
-        prefix &= inst->bufs[i].shape[k] == 1;
-      if (!prefix || inst->bufs[i].dynamic || model_role_is_state(inst->bufs[i].role) ||
+      if (model_role_is_state(inst->bufs[i].role) ||
           (model_role_is_abi_input(inst->bufs[i].role) && !poly_uop_unbind_var(dim))) {
         fprintf(
-            stderr,
-            "poly_model: '%s' requires fixed state and one variable axis after singleton axes\n",
+            stderr, "poly_model: '%s' requires fixed state and directly bound input dimensions\n",
             inst->bufs[i].name
         );
         goto fail;
       }
+      inst->bufs[i].dynamic_axis = inst->bufs[i].dynamic ? -1 : d;
       inst->bufs[i].dynamic = true;
-      inst->bufs[i].dynamic_axis = d;
     }
 
     /* Alias names share the same ctx-owned residency. */
@@ -3467,6 +3471,19 @@ static void model_weight_written(PolyModel *inst, int index) {
 
 int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  NamedBuf *b = &inst->bufs[i];
+  if (b->dynamic && !model_view_is_prefix(b, b->current_shape)) {
+    PolyTensor *packed = model_result_storage(inst->ctx, b, b->current_shape);
+    if (!packed) return -1;
+    PolyUOp *store = poly_uop_store_val(
+        inst->ctx, packed->uop_physical, model_concrete_view(inst->ctx, b, b->current_shape)
+    );
+    int ret = store ? model_run_copies(inst->ctx, &store, 1) : -1;
+    const PolyUOp *buffer = poly_uop_get_buffer_identity(packed->uop_physical);
+    if (!ret) ret = buffer ? poly_buffer_read(inst->ctx, (PolyUOp *)buffer, host_dst, dst_len) : -1;
+    poly_tensor_release(packed);
+    return ret;
+  }
   return poly_buffer_read(inst->ctx, inst->bufs[i].buffer, host_dst, dst_len);
 }
 
@@ -4526,12 +4543,14 @@ static void model_admission_error(
   for (int i = 0; i < entry->n_inputs && used < sizeof(values) - 1; i++) {
     int bi = find_buf_by_name(inst, entry->inputs[i]);
     if (bi < 0 || !inst->bufs[bi].dynamic) continue;
-    int axis = inst->bufs[bi].dynamic_axis;
-    int n = snprintf(
-        values + used, sizeof(values) - used, "%s%s[%d]=%lld", used ? ", " : "", entry->inputs[i],
-        axis, (long long)inv->shapes[bi][axis]
-    );
-    if (n > 0) used += (size_t)n < sizeof(values) - used ? (size_t)n : sizeof(values) - used - 1;
+    for (int axis = 0; axis < inst->bufs[bi].ndim && used < sizeof(values) - 1; axis++) {
+      if (model_signature_dim(inst->ctx, &inst->bufs[bi], axis)->op == POLY_OP_CONST) continue;
+      int n = snprintf(
+          values + used, sizeof(values) - used, "%s%s[%d]=%lld", used ? ", " : "", entry->inputs[i],
+          axis, (long long)inv->shapes[bi][axis]
+      );
+      if (n > 0) used += (size_t)n < sizeof(values) - used ? (size_t)n : sizeof(values) - used - 1;
+    }
   }
   poly_model_set_error(
       inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s': %s (%s)", entry->name, reason, values
@@ -4573,7 +4592,7 @@ static int bind_model_io(
   if (inst->ctx->tensor_capture) return -1;
   inv->shapes = calloc((size_t)(inst->n_bufs ? inst->n_bufs : 1), sizeof(*inv->shapes));
   if (n_controls < 0 || (n_controls && !controls)) return -1;
-  inv->vars = calloc((size_t)n_io + (size_t)n_controls + 1, sizeof(*inv->vars));
+  inv->vars = calloc((size_t)n_io * POLY_IR_MAX_DIMS + (size_t)n_controls + 1, sizeof(*inv->vars));
   if (!inv->shapes || !inv->vars) return -1;
   /* Validate controls before any input upload or state write. BIND samples
    * are not substituted into the graph: these values feed PolyVarBinding. */
@@ -4748,7 +4767,17 @@ static int bind_model_io(
     }
     if (!io[i].tensor && !io[i].shape && b->dynamic) {
       int axis = b->dynamic_axis;
-      int64_t width = poly_shape_numel_checked(b->shape + axis + 1, b->ndim - axis - 1);
+      if (axis < 0) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "input '%s': supply explicit shape for multiple variable axes", io[i].name
+        );
+        return -1;
+      }
+      int64_t other_dims[POLY_IR_MAX_DIMS];
+      memcpy(other_dims, b->shape, sizeof(other_dims));
+      other_dims[axis] = 1;
+      int64_t width = poly_shape_numel_checked(other_dims, b->ndim);
       size_t itemsize = poly_dtype_itemsize(b->buffer->dtype);
       if (width <= 0 || !itemsize || (uint64_t)width > SIZE_MAX / itemsize) return -1;
       size_t stride = (size_t)width * itemsize;
@@ -4853,10 +4882,10 @@ static int prepare_model_io(
   int n_tensors = 0, ret = -1;
   for (int i = 0; i < n_io; i++)
     n_tensors += io[i].tensor != NULL;
-  PolyTensor **snapshots = n_tensors ? calloc((size_t)n_tensors, sizeof(*snapshots)) : NULL;
-  PolyUOp **stores = n_tensors ? calloc((size_t)n_tensors, sizeof(*stores)) : NULL;
+  PolyTensor **snapshots = n_io ? calloc((size_t)n_io, sizeof(*snapshots)) : NULL;
+  PolyUOp **stores = n_io ? calloc((size_t)n_io, sizeof(*stores)) : NULL;
   PolyTensor **sources = n_tensors ? calloc((size_t)n_tensors, 2 * sizeof(*sources)) : NULL;
-  if (n_tensors && (!snapshots || !stores || !sources)) goto cleanup;
+  if ((n_io && (!snapshots || !stores)) || (n_tensors && !sources)) goto cleanup;
   int ti = 0;
   for (int i = 0; i < n_io; i++)
     if (io[i].tensor) sources[ti++] = io[i].tensor;
@@ -4890,13 +4919,29 @@ static int prepare_model_io(
   for (int i = 0; i < n_io; i++) {
     if (!io[i].data) continue;
     int bi = find_buf_by_name(inst, io[i].name);
+    NamedBuf *b = &inst->bufs[bi];
+    if (model_view_is_prefix(b, inv->shapes[bi])) continue;
+    snapshots[ti] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
+    if (!snapshots[ti]) goto cleanup;
+    const PolyUOp *buffer = poly_uop_get_buffer_identity(snapshots[ti]->uop_physical);
+    if (!buffer || poly_buffer_write(inst->ctx, (PolyUOp *)buffer, io[i].data, io[i].nbytes))
+      goto cleanup;
+    stores[ti] = poly_uop_store_val(
+        inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]), snapshots[ti]->uop_physical
+    );
+    if (!stores[ti++]) goto cleanup;
+  }
+  for (int i = 0; i < n_io; i++) {
+    if (!io[i].data) continue;
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (!model_view_is_prefix(&inst->bufs[bi], inv->shapes[bi])) continue;
     size_t nbytes = io[i].nbytes;
     if (poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, io[i].data, nbytes) != 0) goto cleanup;
   }
-  ret = model_run_copies(inst->ctx, stores, n_tensors);
+  ret = model_run_copies(inst->ctx, stores, ti);
 cleanup:
   if (snapshots)
-    for (int i = 0; i < n_tensors; i++)
+    for (int i = 0; i < n_io; i++)
       poly_tensor_release(snapshots[i]);
   free(snapshots);
   free(stores);
