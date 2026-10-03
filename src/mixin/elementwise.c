@@ -740,19 +740,20 @@ PolyUOp *poly_uop_floor(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_uop_round(PolyCtx *ctx, PolyUOp *x) {
   /* Pinned ElementwiseMixin.round: the truncated integer is even precisely
-   * when b = trunc(x)/2 equals trunc(b). Comparing two truncations loses ties. */
+   * when b = trunc(x)/2 equals trunc(b). Comparing two truncations loses ties.
+   * Scalar arithmetic must promote integer inputs, as _broadcasted does. */
   PolyUOp *half = poly_uop_elementwise_float_const(ctx, x, 0.5);
   PolyUOp *two = poly_uop_elementwise_float_const(ctx, x, 2.0);
   PolyUOp *b = poly_uop_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *x_gt_0 =
-      poly_uop_alu2(ctx, POLY_OP_CMPLT, poly_uop_elementwise_float_const(ctx, x, 0.0), x);
-  PolyUOp *b_half = poly_uop_alu2(ctx, POLY_OP_FDIV, b, two);
+      poly_uop_binop(ctx, POLY_OP_CMPLT, poly_uop_elementwise_float_const(ctx, x, 0.0), x);
+  PolyUOp *b_half = poly_uop_binop(ctx, POLY_OP_FDIV, b, two);
   PolyUOp *trunc_b_half = poly_uop_alu1(ctx, POLY_OP_TRUNC, b_half);
   PolyUOp *halves_eq = poly_uop_eq(ctx, trunc_b_half, b_half);
   PolyUOp *cond = poly_uop_eq(ctx, x_gt_0, halves_eq);
   return poly_uop_alu3(
-      ctx, POLY_OP_WHERE, cond, poly_uop_ceil(ctx, poly_uop_alu2(ctx, POLY_OP_SUB, x, half)),
-      poly_uop_floor(ctx, poly_uop_alu2(ctx, POLY_OP_ADD, x, half))
+      ctx, POLY_OP_WHERE, cond, poly_uop_ceil(ctx, poly_uop_binop(ctx, POLY_OP_SUB, x, half)),
+      poly_uop_floor(ctx, poly_uop_binop(ctx, POLY_OP_ADD, x, half))
   );
 }
 

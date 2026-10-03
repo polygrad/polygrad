@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix Wasm scheduling failures when aggregate temporary sizes exceed 4 GiB but their lifetimes permit a smaller reused arena.
+- Fix Tensor.round() arithmetic promotion for integer inputs.
 
 ## 0.6.0
 

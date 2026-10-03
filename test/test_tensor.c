@@ -237,6 +237,36 @@ TEST(tensor, round_half_ties_match_pinned_even_parity) {
   }
 }
 
+TEST(tensor, round_integer_promotes_arithmetic_like_pinned) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+  int64_t values[] = {-3, 0, 2, 9};
+  PolyTensor *x = poly_tensor_from_host(ctx, values, sizeof(values), POLY_INT64, (int64_t[]){4}, 1);
+  PolyTensor *out = poly_tensor_round(ctx, x);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(poly_dtype_eq(out->uop_physical->dtype, POLY_WEAKFLOAT));
+  int count = 0, divisions = 0;
+  PolyUOp **nodes = poly_uop_toposort(ctx, out->uop_physical, &count);
+  for (int i = 0; i < count; i++) {
+    if (nodes[i]->op != POLY_OP_FDIV) continue;
+    ASSERT_TRUE(poly_dtype_is_float(nodes[i]->src[0]->dtype));
+    ASSERT_EQ(nodes[i]->src[0]->op, POLY_OP_CAST);
+    divisions++;
+  }
+  ASSERT_EQ(divisions, 1);
+  /* Match numpy()/Model storage: weak result types are resolved at the edge. */
+  PolyTensor *typed = poly_tensor_cast(ctx, out, POLY_FLOAT32);
+  float got[4];
+  ASSERT_EQ(read_tensor_f32(ctx, typed, got, 4), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], (float)values[i], 0);
+  poly_tensor_release(out);
+  poly_tensor_release(typed);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, cat_handles_reuse_shared_uop_and_reject_foreign_owner) {
   PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
   poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);

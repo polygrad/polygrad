@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix Tensor.round() arithmetic promotion for integer inputs.
+
 ## 0.6.0
 
 - Fix float64 sine range reduction in shared codegen, preserving the full

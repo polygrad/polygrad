@@ -4,6 +4,7 @@
 
 - Bound memory-planner search capacity to addressable offsets on Wasm32 and reject allocator size-rounding overflow.
 - Use shared shape-qualified parameter names in C, CUDA, HIP and WGSL to prevent scalar/buffer name collisions without changing argument order.
+- Promote integer round arithmetic like pinned Tinygrad, including integer-Pow expressions used by ONNX shape graphs.
 
 ## 0.6.0
 

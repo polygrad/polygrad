@@ -54,6 +54,14 @@ def fixtures():
                         h.make_node('Relu', ['hidden'], ['relu']),
                         h.make_node('Gemm', ['relu', 'out'], ['y'], transB=1, alpha=.7)],
                {'x': f((2, 4))}, {'y': (2, 2)}, {'w': f((4, 6)), 'b': f((6,)), 'out': f((2, 6))}, dims={'batch': 2})
+    yield case('integer_pow_shape', [h.make_node('Shape', ['x'], ['shape']),
+               h.make_node('Gather', ['shape', 'axis'], ['rows']),
+               h.make_node('Pow', ['rows', 'exponent'], ['squared']),
+               h.make_node('Unsqueeze', ['squared', 'axes'], ['target']),
+               h.make_node('Reshape', ['x', 'target'], ['y'])],
+               {'x': np.arange(9, dtype=np.float32).reshape(3, 3)}, {'y': (9,)},
+               {'axis': np.array(0, np.int64), 'exponent': np.array(2, np.int64),
+                'axes': np.array([0], np.int64)})
     yield case('scalar_constants', [
         h.make_node('Constant', [], ['raw'], value=nh.from_array(np.array(2., np.float32))),
         h.make_node('Constant', [], ['typed'], value=h.make_tensor('', T.FLOAT, [], [2.])),
