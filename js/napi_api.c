@@ -7066,8 +7066,14 @@ static napi_value napi_poly_tokenize(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_string_utf8(env, argv[1], NULL, 0, &text_len));
   char *text = malloc(text_len + 1);
   NAPI_CALL(env, napi_get_value_string_utf8(env, argv[1], text, text_len + 1, &text_len));
-  int ids[4096];
-  int n = poly_tokenize(tok, text, ids, 4096);
+  int n = poly_tokenize(tok, text, NULL, INT32_MAX);
+  int *ids = n >= 0 ? malloc(((size_t)n + 1) * sizeof(*ids)) : NULL;
+  if (!ids || poly_tokenize(tok, text, ids, n) != n) {
+    free(text);
+    free(ids);
+    napi_throw_error(env, NULL, "polygrad: tokenization failed");
+    return NULL;
+  }
   free(text);
   napi_value result;
   NAPI_CALL(env, napi_create_array_with_length(env, (size_t)n, &result));
@@ -7076,6 +7082,7 @@ static napi_value napi_poly_tokenize(napi_env env, napi_callback_info info) {
     NAPI_CALL(env, napi_create_int32(env, ids[i], &v));
     NAPI_CALL(env, napi_set_element(env, result, (uint32_t)i, v));
   }
+  free(ids);
   return result;
 }
 
@@ -7092,11 +7099,23 @@ static napi_value napi_poly_detokenize(napi_env env, napi_callback_info info) {
     NAPI_CALL(env, napi_get_element(env, argv[1], i, &el));
     NAPI_CALL(env, napi_get_value_int32(env, el, &ids[i]));
   }
-  char buf[8192];
-  poly_detokenize(tok, ids, (int)n, buf, sizeof(buf));
+  int len = poly_detokenize(tok, ids, (int)n, NULL, 0);
+  if (len < 0) {
+    free(ids);
+    napi_throw_error(env, NULL, "polygrad: decode failed");
+    return NULL;
+  }
+  char *buf = malloc((size_t)len + 1);
+  if (!buf) {
+    free(ids);
+    napi_throw_error(env, NULL, "polygrad: decode allocation failed");
+    return NULL;
+  }
+  poly_detokenize(tok, ids, (int)n, buf, len + 1);
   free(ids);
   napi_value result;
   NAPI_CALL(env, napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &result));
+  free(buf);
   return result;
 }
 

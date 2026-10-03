@@ -1,12 +1,9 @@
 /*
  * tokenizer.h -- BPE tokenizer for LLM inference
  *
- * Implements the BPE algorithm used by GPT-2, LLaMA, Qwen, and most
- * modern LLMs. Tokenizer is parameterized by vocabulary (token strings
- * + IDs) extracted from GGUF metadata or loaded from files.
- *
- * Follows tinygrad's SimpleTokenizer approach: uses vocab ordering
- * as merge priority (lower token ID = higher priority merge).
+ * Vocabulary-ranked byte-level BPE following tinygrad's SimpleTokenizer.
+ * Vocabulary and special-token IDs come from GGUF metadata.
+ * HF tokenizer.json pipelines are not supported.
  */
 
 #ifndef POLY_TOKENIZER_H
@@ -34,14 +31,14 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf);
 /*
  * Create tokenizer from explicit vocab arrays.
  * tokens[i] is a UTF-8 string (using GPT-2 byte encoding).
- * types[i]: 1 = normal, 3 = control/special, others = normal.
+ * types[i]: 1 = normal, all other values = literal special token.
  */
 PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int n_tokens);
 
 /*
- * Create tokenizer from HF tokenizer.json content.
- * Parses model.vocab and added_tokens from the JSON.
- * json_data must be null-terminated.
+ * Unsupported: always returns NULL and reports a diagnostic.
+ * Use Hugging Face tokenizers for tokenizer.json pipelines, or GGUF BPE here.
+ * The symbol remains to reject callers of the former partial JSON loader.
  */
 PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len);
 
@@ -50,7 +47,8 @@ void poly_tokenizer_free(PolyTokenizer *tok);
 /* Encode / Decode */
 
 /*
- * Encode text to token IDs. Returns number of tokens written.
+ * Encode UTF-8 text to token IDs. Returns number of tokens written, or -1
+ * for invalid UTF-8, missing byte tokens or allocation failure.
  * If ids_out is NULL, returns the count without writing.
  */
 int poly_tokenize(const PolyTokenizer *tok, const char *text, int *ids_out, int max_ids);

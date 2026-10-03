@@ -8,6 +8,8 @@
 - Add Tensor.interpolate(size, {mode:'bicubic'}) with gradients and optional alignCorners; no antialiasing.
 - Add DINOv2 input_image_size for a fixed input resolution, interpolating positions in the graph without changing checkpoint weights.
 - Support bounded multi-axis Model inputs, including shared dimensions, with stride-aware transfers and portable signatures. State remains fixed-shape.
+- Reject all tokenizer.json imports instead of silently applying incomplete tokenization. Use Hugging Face tokenizers for JSON pipelines; GGUF BPE remains.
+- Remove JavaScript's 4,096-token encode and 8,192-byte decode truncation limits on both native and Wasm runtimes.
 
 ## 0.6.0
 

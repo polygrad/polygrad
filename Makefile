@@ -786,6 +786,14 @@ test-onnx: verify-source-mirrors build/libpolygrad.so
 generate-onnx-fixtures:
 	DEV=CPU $(HF_PYTHON) test/generate_onnx_fixture.py --output test/fixtures/onnx.json
 
+.PHONY: test-tokenizer test-tokenizer-parity
+test-tokenizer: build/polygrad_test build/libpolygrad.so
+	./build/polygrad_test tokenizer_json
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_tokenizer.py
+
+test-tokenizer-parity: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q test/external/test_tokenizer_tinygrad.py
+
 onnx-coverage:
 	$(PARITY_PY) scripts/onnx_coverage.py
 

@@ -2677,19 +2677,24 @@ function createWasmCoreFromModule(Module, device) {
 
     tokenize(tokPtr, text) {
       const textPtr = allocString(text)
-      const idsPtr = malloc(4096 * 4)
-      const n = Module._poly_tokenize(tokPtr, textPtr, idsPtr, 4096)
-      const ids = new Int32Array(n)
-      for (let i = 0; i < n; i++) ids[i] = heap32()[(idsPtr >>> 2) + i]
-      Module._free(idsPtr); Module._free(textPtr)
-      return ids
+      let idsPtr = 0
+      try {
+        const n = Module._poly_tokenize(tokPtr, textPtr, 0, 0x7fffffff)
+        if (n < 0) throw new Error('polygrad: tokenization failed')
+        idsPtr = malloc((n + 1) * 4)
+        if (Module._poly_tokenize(tokPtr, textPtr, idsPtr, n) !== n)
+          throw new Error('polygrad: tokenization failed')
+        return new Int32Array(heap32().subarray(idsPtr >>> 2, (idsPtr >>> 2) + n))
+      } finally {Module._free(idsPtr); Module._free(textPtr)}
     },
 
     detokenize(tokPtr, ids) {
       const idsPtr = malloc(ids.length * 4)
       for (let i = 0; i < ids.length; i++) heap32()[(idsPtr >>> 2) + i] = ids[i]
-      const bufPtr = malloc(8192)
-      Module._poly_detokenize(tokPtr, idsPtr, ids.length, bufPtr, 8192)
+      const size = Module._poly_detokenize(tokPtr, idsPtr, ids.length, 0, 0) + 1
+      if (size <= 0) {Module._free(idsPtr); throw new Error('polygrad: decode failed')}
+      const bufPtr = malloc(size)
+      Module._poly_detokenize(tokPtr, idsPtr, ids.length, bufPtr, size)
       const text = readCString(bufPtr)
       Module._free(bufPtr); Module._free(idsPtr)
       return text

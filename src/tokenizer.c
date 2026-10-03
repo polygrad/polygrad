@@ -1,28 +1,17 @@
 /*
  * tokenizer.c -- BPE tokenizer
  *
- * Port of tinygrad's SimpleTokenizer. Uses vocab ordering as merge
- * priority (lower token ID = higher priority merge). Works for GPT-2,
- * LLaMA 3, Qwen3, and all models using the GGUF tokenizer format.
- *
- * Algorithm:
- *   1. Pre-tokenize: split text into words (UTF-8 aware)
- *   2. For each word: convert to bytes via GPT-2 byte encoding
- *   3. BPE: greedily merge byte pair whose merged token has lowest ID
- *   4. Decode: token IDs -> byte sequences -> UTF-8 text
- *
- * Reference: tinygrad/apps/llm.py SimpleTokenizer
- * Reference: llama.cpp/src/llama-vocab.cpp
+ * GGUF: pinned tinygrad/llm/cli.py SimpleTokenizer, vocabulary-ranked BPE.
+ * HF tokenizer.json pipelines are intentionally unsupported.
  */
 
 #define _POSIX_C_SOURCE 200809L
 #include "tokenizer.h"
 #include "loaders/gguf_decode.h"
-#include "../vendor/cjson/cJSON.h"
+#include "tokenizer_unicode.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <ctype.h>
 #include <stdbool.h>
 #ifndef __EMSCRIPTEN__
 #include <pthread.h>
@@ -77,38 +66,35 @@ static void init_byte_table(void) {
  * Returns the number of bytes written. out must be at least as large as
  * the token string length.
  */
+/* Strict UTF-8 decoding, without normalization or locale-dependent categories. */
+static int decode_utf8(const uint8_t *s, int len, int32_t *out) {
+  if (len <= 0) return -1;
+  int n = s[0] < 0x80                    ? 1
+          : s[0] >= 0xc2 && s[0] <= 0xdf ? 2
+          : s[0] >= 0xe0 && s[0] <= 0xef ? 3
+          : s[0] >= 0xf0 && s[0] <= 0xf4 ? 4
+                                         : 0;
+  if (!n || n > len) return -1;
+  int32_t cp = s[0] & (n == 1 ? 0x7f : (1 << (7 - n)) - 1);
+  for (int i = 1; i < n; i++) {
+    if ((s[i] & 0xc0) != 0x80) return -1;
+    cp = (cp << 6) | (s[i] & 0x3f);
+  }
+  if ((n == 2 && cp < 0x80) || (n == 3 && cp < 0x800) || (n == 4 && cp < 0x10000) ||
+      (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff)
+    return -1;
+  *out = cp;
+  return n;
+}
+
 static int token_str_to_bytes(const char *s, uint8_t *out, int max_out) {
-  int n = 0;
-  const uint8_t *p = (const uint8_t *)s;
-  while (*p && n < max_out) {
-    int cp;
-    /* Decode one UTF-8 codepoint */
-    if (*p < 0x80) {
-      cp = *p++;
-    } else if ((*p & 0xE0) == 0xC0) {
-      cp = (*p & 0x1F) << 6;
-      p++;
-      if ((*p & 0xC0) == 0x80) cp |= (*p++ & 0x3F);
-    } else if ((*p & 0xF0) == 0xE0) {
-      cp = (*p & 0x0F) << 12;
-      p++;
-      if ((*p & 0xC0) == 0x80) {
-        cp |= (*p & 0x3F) << 6;
-        p++;
-      }
-      if ((*p & 0xC0) == 0x80) {
-        cp |= (*p++ & 0x3F);
-      }
-    } else {
-      /* 4-byte UTF-8 or invalid: skip */
-      p++;
-      continue;
-    }
-    /* Map codepoint to byte via GPT-2 table */
-    if (cp >= 0 && cp < 512 && g_char_to_byte[cp] >= 0)
-      out[n++] = (uint8_t)g_char_to_byte[cp];
-    else if (cp < 256)
-      out[n++] = (uint8_t)cp;
+  int pos = 0, n = 0, len = (int)strlen(s);
+  while (pos < len) {
+    int32_t cp;
+    int width = (int)decode_utf8((const uint8_t *)s + pos, len - pos, &cp);
+    if (width <= 0 || cp >= 512 || g_char_to_byte[cp] < 0 || n == max_out) return -1;
+    out[n++] = (uint8_t)g_char_to_byte[cp];
+    pos += width;
   }
   return n;
 }
@@ -141,25 +127,27 @@ static void vocab_map_init(VocabMap *m, int capacity) {
 }
 
 static void vocab_map_free(VocabMap *m) {
-  for (int i = 0; i < m->capacity; i++)
+  for (int i = 0; m->entries && i < m->capacity; i++)
     free(m->entries[i].key);
   free(m->entries);
 }
 
-static void vocab_map_insert(VocabMap *m, const uint8_t *key, int key_len, int token_id) {
+static bool vocab_map_insert(VocabMap *m, const uint8_t *key, int key_len, int token_id) {
   uint32_t h = hash_bytes(key, key_len) % (uint32_t)m->capacity;
   while (m->entries[h].key != NULL) {
     if (m->entries[h].key_len == key_len && memcmp(m->entries[h].key, key, (size_t)key_len) == 0) {
       m->entries[h].token_id = token_id;
-      return;
+      return true;
     }
     h = (h + 1) % (uint32_t)m->capacity;
   }
   m->entries[h].key = malloc((size_t)key_len);
+  if (!m->entries[h].key) return false;
   memcpy(m->entries[h].key, key, (size_t)key_len);
   m->entries[h].key_len = key_len;
   m->entries[h].token_id = token_id;
   m->count++;
+  return true;
 }
 
 /* Returns token_id or -1 if not found */
@@ -201,15 +189,7 @@ struct PolyTokenizer {
   int n_specials;
 };
 
-/* BPE core */
-
-/*
- * BPE encode a single word (as raw bytes).
- * Uses greedy pair merging: find the pair whose merged token has the
- * lowest vocab ID, merge it, repeat until no more merges.
- *
- * Matches tinygrad SimpleTokenizer._encode_word().
- */
+/* Pinned SimpleTokenizer._encode_word: whole words, then vocabulary ranks. */
 static int bpe_encode_word(
     const PolyTokenizer *tok,
     const uint8_t *word,
@@ -218,267 +198,191 @@ static int bpe_encode_word(
     int max_ids
 ) {
   if (word_len <= 0) return 0;
-
-  /* Check if the whole word is a single token */
   int whole = vocab_map_find(&tok->normal, word, word_len);
   if (whole >= 0) {
     if (ids_out && max_ids > 0) ids_out[0] = whole;
-    return 1;
+    return max_ids > 0 ? 1 : 0;
   }
-
-  /* Start with individual bytes as parts */
-  typedef struct {
-    uint8_t *data;
-    int len;
-  } Part;
-  int n_parts = word_len;
-  Part *parts = malloc((size_t)word_len * sizeof(Part));
-  for (int i = 0; i < word_len; i++) {
-    parts[i].data = malloc(1);
-    parts[i].data[0] = word[i];
-    parts[i].len = 1;
+  int *parts = malloc((size_t)word_len * sizeof(*parts));
+  uint8_t *merged = malloc((size_t)word_len);
+  if (!parts || !merged) {
+    free(parts);
+    free(merged);
+    return -1;
   }
-
-  /* Greedy merge loop */
-  while (n_parts > 1) {
-    int best_id = INT32_MAX;
-    int best_j = -1;
-
-    /* Find the pair whose merged token has the lowest ID */
-    for (int j = 0; j < n_parts - 1; j++) {
-      int merged_len = parts[j].len + parts[j + 1].len;
-      uint8_t *merged = malloc((size_t)merged_len);
-      memcpy(merged, parts[j].data, (size_t)parts[j].len);
-      memcpy(merged + parts[j].len, parts[j + 1].data, (size_t)parts[j + 1].len);
-      int tid = vocab_map_find(&tok->normal, merged, merged_len);
+  int n = word_len;
+  for (int i = 0; i < n; i++) {
+    parts[i] = vocab_map_find(&tok->normal, word + i, 1);
+    if (parts[i] < 0) {
+      free(parts);
       free(merged);
-      if (tid >= 0 && tid < best_id) {
-        best_id = tid;
+      return -1;
+    }
+  }
+  while (n > 1) {
+    int best_rank = INT32_MAX, best_j = -1, best_id = -1;
+    for (int j = 0; j < n - 1; j++) {
+      int rank, id;
+      int left = parts[j], right = parts[j + 1];
+      int len = tok->id_to_len[left];
+      memcpy(merged, tok->id_to_bytes[left], (size_t)len);
+      memcpy(merged + len, tok->id_to_bytes[right], (size_t)tok->id_to_len[right]);
+      rank = id = vocab_map_find(&tok->normal, merged, len + tok->id_to_len[right]);
+      if (rank >= 0 && rank < best_rank) {
+        best_rank = rank;
         best_j = j;
+        best_id = id;
       }
     }
-
-    if (best_j < 0) break; /* no more merges possible */
-
-    /* Merge parts[best_j] and parts[best_j + 1] */
-    int new_len = parts[best_j].len + parts[best_j + 1].len;
-    uint8_t *new_data = malloc((size_t)new_len);
-    memcpy(new_data, parts[best_j].data, (size_t)parts[best_j].len);
-    memcpy(new_data + parts[best_j].len, parts[best_j + 1].data, (size_t)parts[best_j + 1].len);
-    free(parts[best_j].data);
-    free(parts[best_j + 1].data);
-    parts[best_j].data = new_data;
-    parts[best_j].len = new_len;
-
-    /* Remove parts[best_j + 1] */
-    for (int k = best_j + 1; k < n_parts - 1; k++)
-      parts[k] = parts[k + 1];
-    n_parts--;
+    if (best_j < 0) break;
+    parts[best_j] = best_id;
+    memmove(parts + best_j + 1, parts + best_j + 2, (size_t)(n - best_j - 2) * sizeof(*parts));
+    n--;
   }
-
-  /* Convert parts to token IDs */
-  int n_ids = 0;
-  for (int i = 0; i < n_parts && n_ids < max_ids; i++) {
-    int tid = vocab_map_find(&tok->normal, parts[i].data, parts[i].len);
-    if (tid >= 0) {
-      if (ids_out) ids_out[n_ids] = tid;
-      n_ids++;
-    }
-  }
-
-  for (int i = 0; i < n_parts; i++)
-    free(parts[i].data);
+  if (n > max_ids) n = max_ids;
+  if (ids_out) memcpy(ids_out, parts, (size_t)n * sizeof(*parts));
   free(parts);
-  return n_ids;
+  free(merged);
+  return n;
 }
 
-/* Pre-tokenization (word splitting) */
-
-/*
- * Port of the GPT-2/LLaMA pre-tokenization regex from tinygrad.
- * Splits text into words before BPE is applied independently per word.
- *
- * The regex alternations (in priority order):
- *   1. (?i:'s|'t|'re|'ve|'m|'ll|'d)  -- contractions
- *   2. [^LN]?[L]+                      -- optional non-letter/digit + letters
- *   3. [N]{1,3}                         -- 1-3 digits
- *   4.  ?[^ws,L,N]+[\r\n]*             -- opt space + punct seq + opt newlines
- *   5. [ws]*[\r\n]+                     -- whitespace before newlines
- *   6. [ws]+(?![^ws])                   -- trailing whitespace (end of string)
- *   7. [ws]+                            -- whitespace
- *
- * ASCII approximation: L = [A-Za-z\x80-\xFF], N = [0-9],
- *                      ws = [ \t\n\r\v\f]
- */
-
-static int is_letter(uint8_t c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80;
-}
-
-static int is_digit(uint8_t c) {
-  return c >= '0' && c <= '9';
-}
-
-static int is_ws(uint8_t c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
-}
-
-static int is_newline(uint8_t c) {
-  return c == '\n' || c == '\r';
-}
-
-/* Case-insensitive contraction check. Returns length matched or 0. */
-static int match_contraction(const uint8_t *p, int remaining) {
-  if (remaining < 2 || p[0] != '\'') return 0;
-  uint8_t c = p[1] | 0x20; /* lowercase */
-  if (c == 's' || c == 't' || c == 'm' || c == 'd') return 2;
-  if (remaining >= 3) {
-    uint8_t c2 = p[2] | 0x20;
-    if (c == 'r' && c2 == 'e') return 3;
-    if (c == 'v' && c2 == 'e') return 3;
-    if (c == 'l' && c2 == 'l') return 3;
+/* Pinned SimpleTokenizer's Unicode L/N/Z classes, not UTF-8 byte classes. */
+static bool in_ranges(int32_t c, const uint32_t ranges[][2], size_t n) {
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if ((uint32_t)c > ranges[mid][1])
+      lo = mid + 1;
+    else
+      hi = mid;
   }
-  return 0;
+  return lo < n && (uint32_t)c >= ranges[lo][0];
+}
+static bool is_letter(int32_t c) {
+  return in_ranges(c, tok_letters, sizeof(tok_letters) / sizeof(*tok_letters));
+}
+static bool is_digit(int32_t c) {
+  return in_ranges(c, tok_numbers, sizeof(tok_numbers) / sizeof(*tok_numbers));
+}
+static bool is_ws(int32_t c) {
+  return (c >= 9 && c <= 13) || c == 0x85 ||
+         in_ranges(c, tok_spaces, sizeof(tok_spaces) / sizeof(*tok_spaces));
+}
+static bool is_newline(int32_t c) {
+  return c == '\n' || c == '\r';
 }
 
 typedef void (*word_callback)(const uint8_t *word, int len, void *ctx);
 
-/*
- * Implements the GPT-2/LLaMA pre-tokenization regex.
- * The regex tries alternations in order, first match wins.
- * Each alternation is tried at the current position.
- */
-static void split_to_words(
+static int split_to_words(
     const uint8_t *text,
     int text_len,
     int preset,
     word_callback cb,
     void *ctx
 ) {
-  int i = 0;
-  while (i < text_len) {
-    /* Alt 1: contraction ('s, 't, 're, 've, 'm, 'll, 'd) */
-    int clen = match_contraction(text + i, text_len - i);
-    if (clen > 0) {
-      cb(text + i, clen, ctx);
-      i += clen;
-      continue;
+  /* Offsets retain the exact original byte slices used by byte-level BPE. */
+  int32_t *cp = malloc(((size_t)text_len + 1) * sizeof(*cp));
+  int *off = malloc(((size_t)text_len + 1) * sizeof(*off));
+  if (!cp || !off) {
+    free(cp);
+    free(off);
+    return -1;
+  }
+  int n = 0, pos = 0;
+  while (pos < text_len) {
+    off[n] = pos;
+    int len = (int)decode_utf8(text + pos, text_len - pos, &cp[n]);
+    if (len <= 0) {
+      free(cp);
+      free(off);
+      return -1;
     }
-
-    /* Alt 2: letter word with optional prefix.
-     * GPT-2:  ' ?[L]+'          (optional space)
-     * LLaMA:  '[^LN\r\n]?[L]+' (optional non-letter/digit, not newline) */
-    {
-      int j = i;
-      if (preset == POLY_TOK_PRESET_GPT2) {
-        if (j < text_len && text[j] == ' ') j++;
-      } else {
-        if (j < text_len && !is_letter(text[j]) && !is_digit(text[j]) && !is_newline(text[j])) j++;
-      }
-      if (j < text_len && is_letter(text[j])) {
-        while (j < text_len && is_letter(text[j]))
-          j++;
-        cb(text + i, j - i, ctx);
-        i = j;
-        continue;
-      }
-    }
-
-    /* Alt 3: digit sequence.
-     * GPT-2:  ' ?[N]+'    (optional space, unlimited digits)
-     * LLaMA:  '[N]{1,3}'  (max 3 digits, no space) */
-    {
-      int j = i;
-      if (preset == POLY_TOK_PRESET_GPT2 && j < text_len && text[j] == ' ') j++;
-      if (j < text_len && is_digit(text[j])) {
-        int d = 0;
-        if (preset == POLY_TOK_PRESET_GPT2) {
-          while (j < text_len && is_digit(text[j]))
-            j++;
-        } else {
-          while (j < text_len && is_digit(text[j]) && d < 3) {
-            j++;
-            d++;
+    pos += len;
+    n++;
+  }
+  off[n] = text_len;
+  for (int i = 0; i < n;) {
+    int end = i;
+    if (cp[i] == '\'') {
+      const char *contractions[] = {"s", "t", "re", "ve", "m", "ll", "d"};
+      for (int c = 0; c < 7; c++) {
+        int len = (int)strlen(contractions[c]), j = 0;
+        for (; j < len && i + 1 + j < n; j++) {
+          int32_t ch = cp[i + 1 + j];
+          /* Simple caseless matching includes long s (U+017F), which lower()
+           * alone leaves unchanged. Contractions only contain ASCII letters. */
+          if (preset != POLY_TOK_PRESET_GPT2) {
+            if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+            if (ch == 0x17f) ch = 's';
           }
+          if (ch != contractions[c][j]) break;
         }
-        cb(text + i, j - i, ctx);
-        i = j;
-        continue;
+        if (j == len) {
+          end = i + 1 + len;
+          break;
+        }
       }
     }
-
-    /* Alt 4: ' ?[^ws,L,N]+[\r\n]*' -- optional space, then 1+ punct/symbols,
-     * then optional newlines. */
-    {
+    if (end == i) {
       int j = i;
-      if (j < text_len && text[j] == ' ') j++;
+      if (preset == POLY_TOK_PRESET_GPT2
+              ? cp[j] == ' '
+              : (!is_letter(cp[j]) && !is_digit(cp[j]) && !is_newline(cp[j])))
+        j++;
       int k = j;
-      while (k < text_len && !is_ws(text[k]) && !is_letter(text[k]) && !is_digit(text[k]))
+      while (k < n && is_letter(cp[k]))
+        k++;
+      if (k > j) end = k;
+    }
+    if (end == i) {
+      int j = i;
+      if (preset == POLY_TOK_PRESET_GPT2 && cp[j] == ' ') j++;
+      int limit = preset == POLY_TOK_PRESET_GPT2 ? n : j + 3;
+      int k = j;
+      while (k < n && k < limit && is_digit(cp[k]))
+        k++;
+      if (k > j) end = k;
+    }
+    if (end == i) {
+      int j = i + (cp[i] == ' '), k = j;
+      while (k < n && !is_ws(cp[k]) && !is_letter(cp[k]) && !is_digit(cp[k]))
         k++;
       if (k > j) {
-        while (k < text_len && is_newline(text[k]))
-          k++;
-        cb(text + i, k - i, ctx);
-        i = k;
-        continue;
+        if (preset != POLY_TOK_PRESET_GPT2)
+          while (k < n && is_newline(cp[k]))
+            k++;
+        end = k;
       }
     }
-
-    /* Alt 5 / 6 / 7: whitespace handling.
-     *
-     * Scan maximal whitespace run, then apply regex semantics:
-     *   Alt 5: [ws]*[\r\n]+ -- match up to last newline in run
-     *   Alt 6: [ws]+(?![^ws]) -- trailing ws or ws before more ws
-     *          (backtrack by 1 if followed by non-ws)
-     *   Alt 7: [ws]+ -- single ws byte fallback
-     */
-    if (is_ws(text[i])) {
-      int j = i;
-      int last_nl_end = -1;
-      while (j < text_len && is_ws(text[j])) {
-        if (is_newline(text[j])) last_nl_end = j + 1;
+    if (end == i && is_ws(cp[i])) {
+      int j = i, last_nl = -1;
+      while (j < n && is_ws(cp[j])) {
+        if (is_newline(cp[j])) last_nl = j + 1;
         j++;
       }
-
-      /* Alt 5: [ws]*[\r\n]+ -- LLaMA only (GPT-2 has no newline alt) */
-      if (preset != POLY_TOK_PRESET_GPT2 && last_nl_end >= 0) {
-        cb(text + i, last_nl_end - i, ctx);
-        i = last_nl_end;
-        continue;
-      }
-
-      /* Alt 6: trailing whitespace at end of input */
-      if (j == text_len) {
-        cb(text + i, j - i, ctx);
-        i = j;
-        continue;
-      }
-
-      /* Alt 6: whitespace before non-ws -- leave 1 byte for next alt */
-      if (j - i > 1) {
-        cb(text + i, j - i - 1, ctx);
-        i = j - 1;
-        continue;
-      }
-
-      /* Alt 7: single whitespace byte */
-      cb(text + i, 1, ctx);
-      i++;
-      continue;
+      if (preset != POLY_TOK_PRESET_GPT2 && last_nl >= 0)
+        end = last_nl;
+      else
+        end = j < n && j - i > 1 ? j - 1 : j;
     }
-
-    /* Fallback: single byte */
-    cb(text + i, 1, ctx);
-    i++;
+    if (end == i) end++;
+    cb(text + off[i], off[end] - off[i], ctx);
+    i = end;
   }
+  free(cp);
+  free(off);
+  return 0;
 }
 
 /* Public API */
 
 PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int n_tokens) {
+  if (!tokens || n_tokens <= 0 || n_tokens > INT32_MAX / 2 - 1) return NULL;
   init_byte_table();
 
   PolyTokenizer *tok = calloc(1, sizeof(PolyTokenizer));
+  if (!tok) return NULL;
   tok->vocab_size = n_tokens;
   tok->bos_id = -1;
   tok->eos_id = -1;
@@ -489,32 +393,35 @@ PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int 
 
   /* Build normal token map (2x capacity for low collision rate) */
   vocab_map_init(&tok->normal, n_tokens * 2 + 1);
+  if (!tok->id_to_bytes || !tok->id_to_len || !tok->normal.entries) goto fail;
 
-  uint8_t buf[1024];
   for (int i = 0; i < n_tokens; i++) {
     if (!tokens[i]) continue;
     /* tinygrad: type==1 is normal, everything else is special
      * (type 3=control, 4=user-defined, 6=unused, etc.) */
     int is_special = types && types[i] != 1;
+    size_t slen = strlen(tokens[i]);
+    if (!slen || slen >= INT32_MAX) goto fail;
+    uint8_t *buf = malloc(slen);
+    if (!buf) goto fail;
+    tok->id_to_bytes[i] = buf;
 
     /* Convert token string to raw bytes via GPT-2 byte encoding */
     int blen;
     if (is_special) {
       /* Special tokens are literal UTF-8, no byte encoding */
       blen = (int)strlen(tokens[i]);
-      if (blen > (int)sizeof(buf)) blen = (int)sizeof(buf);
       memcpy(buf, tokens[i], (size_t)blen);
     } else {
-      blen = token_str_to_bytes(tokens[i], buf, (int)sizeof(buf));
+      blen = token_str_to_bytes(tokens[i], buf, (int)slen);
+      if (blen <= 0) goto fail;
     }
 
     /* Store in reverse map */
-    tok->id_to_bytes[i] = malloc((size_t)blen);
-    memcpy(tok->id_to_bytes[i], buf, (size_t)blen);
     tok->id_to_len[i] = blen;
 
     /* Normal tokens go in the BPE lookup map */
-    if (!is_special) vocab_map_insert(&tok->normal, buf, blen, i);
+    if (!is_special && !vocab_map_insert(&tok->normal, buf, blen, i)) goto fail;
   }
 
   /* Collect special tokens for sentence-level splitting */
@@ -524,11 +431,13 @@ PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int 
 
   if (n_special > 0) {
     tok->specials = calloc((size_t)n_special, sizeof(SpecialToken));
+    if (!tok->specials) goto fail;
     tok->n_specials = 0;
     for (int i = 0; i < n_tokens; i++) {
       if (!tokens[i] || !types || types[i] == 1) continue;
       int slen = (int)strlen(tokens[i]);
       tok->specials[tok->n_specials].text = strdup(tokens[i]);
+      if (!tok->specials[tok->n_specials].text) goto fail;
       tok->specials[tok->n_specials].text_len = slen;
       tok->specials[tok->n_specials].token_id = i;
       tok->n_specials++;
@@ -536,113 +445,20 @@ PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int 
   }
 
   return tok;
+fail:
+  poly_tokenizer_free(tok);
+  return NULL;
 }
 
-/*
- * Load tokenizer from HF tokenizer.json.
- *
- * Format:
- *   model.vocab: { "token_string": id, ... }
- *   added_tokens: [ { "id": N, "content": "...", "special": true/false }, ... ]
- *
- * We build parallel arrays (tokens[], types[]) sorted by ID, then call
- * poly_tokenizer_create(). Special tokens from added_tokens get type != 1.
- */
+/* Retain the ABI entry point to fail explicitly instead of mis-tokenizing. */
 PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len) {
-  if (!json_data || json_len <= 0) return NULL;
-
-  cJSON *root = cJSON_ParseWithLength(json_data, (size_t)json_len);
-  if (!root) {
-    fprintf(stderr, "poly_tokenizer_from_json: JSON parse error\n");
-    return NULL;
-  }
-
-  cJSON *model = cJSON_GetObjectItem(root, "model");
-  cJSON *vocab = model ? cJSON_GetObjectItem(model, "vocab") : NULL;
-  if (!vocab || !cJSON_IsObject(vocab)) {
-    fprintf(stderr, "poly_tokenizer_from_json: no model.vocab\n");
-    cJSON_Delete(root);
-    return NULL;
-  }
-
-  /* Count tokens */
-  int n_tokens = 0;
-  cJSON *item;
-  cJSON_ArrayForEach(item, vocab) {
-    int id = item->valueint;
-    if (id >= n_tokens) n_tokens = id + 1;
-  }
-
-  /* Also check added_tokens for max id */
-  cJSON *added = cJSON_GetObjectItem(root, "added_tokens");
-  if (added && cJSON_IsArray(added)) {
-    cJSON_ArrayForEach(item, added) {
-      cJSON *id_obj = cJSON_GetObjectItem(item, "id");
-      if (id_obj && cJSON_IsNumber(id_obj)) {
-        int id = id_obj->valueint;
-        if (id >= n_tokens) n_tokens = id + 1;
-      }
-    }
-  }
-
-  /* Allocate arrays */
-  const char **tokens = calloc((size_t)n_tokens, sizeof(char *));
-  int *types = calloc((size_t)n_tokens, sizeof(int));
-  /* Default all to type 1 (normal) */
-  for (int i = 0; i < n_tokens; i++)
-    types[i] = 1;
-
-  /* Fill from model.vocab */
-  cJSON_ArrayForEach(item, vocab) {
-    int id = item->valueint;
-    if (id >= 0 && id < n_tokens) tokens[id] = item->string; /* borrowed from cJSON */
-  }
-
-  /* Override with added_tokens (may include special tokens) */
-  if (added && cJSON_IsArray(added)) {
-    cJSON_ArrayForEach(item, added) {
-      cJSON *id_obj = cJSON_GetObjectItem(item, "id");
-      cJSON *content = cJSON_GetObjectItem(item, "content");
-      cJSON *special = cJSON_GetObjectItem(item, "special");
-      if (!id_obj || !content) continue;
-      int id = id_obj->valueint;
-      if (id >= 0 && id < n_tokens) {
-        tokens[id] = content->valuestring;
-        if (special && cJSON_IsTrue(special)) types[id] = 3; /* special/control */
-      }
-    }
-  }
-
-  PolyTokenizer *tok = poly_tokenizer_create(tokens, types, n_tokens);
-
-  /* Find BOS/EOS from added_tokens */
-  if (tok && added && cJSON_IsArray(added)) {
-    cJSON_ArrayForEach(item, added) {
-      cJSON *content = cJSON_GetObjectItem(item, "content");
-      cJSON *id_obj = cJSON_GetObjectItem(item, "id");
-      if (!content || !id_obj) continue;
-      const char *s = content->valuestring;
-      if (strcmp(s, "<|endoftext|>") == 0)
-        tok->eos_id = tok->bos_id = id_obj->valueint;
-      else if (strstr(s, "bos") || strcmp(s, "<s>") == 0)
-        tok->bos_id = id_obj->valueint;
-      else if (strstr(s, "eos") || strcmp(s, "</s>") == 0)
-        tok->eos_id = id_obj->valueint;
-    }
-  }
-
-  /* Detect preset from pre_tokenizer type */
-  if (tok) {
-    cJSON *pre_tok = cJSON_GetObjectItem(root, "pre_tokenizer");
-    cJSON *pt_type = pre_tok ? cJSON_GetObjectItem(pre_tok, "type") : NULL;
-    if (pt_type && cJSON_IsString(pt_type) && strcmp(pt_type->valuestring, "ByteLevel") == 0)
-      tok->preset = POLY_TOK_PRESET_GPT2;
-  }
-
-  free(tokens);
-  free(types);
-  cJSON_Delete(root);
-  return tok;
+  (void)json_data;
+  (void)json_len;
+  fprintf(
+      stderr, "polygrad: tokenizer.json is unsupported; use Hugging Face tokenizers "
+              "for JSON pipelines, or poly_tokenizer_from_gguf for GGUF BPE\n"
+  );
+  return NULL;
 }
 
 PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf) {
@@ -678,7 +494,7 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf) {
 void poly_tokenizer_free(PolyTokenizer *tok) {
   if (!tok) return;
   vocab_map_free(&tok->normal);
-  for (int i = 0; i < tok->vocab_size; i++)
+  for (int i = 0; tok->id_to_bytes && i < tok->vocab_size; i++)
     free(tok->id_to_bytes[i]);
   free(tok->id_to_bytes);
   free(tok->id_to_len);
@@ -698,10 +514,11 @@ typedef struct {
 
 static void encode_word_cb(const uint8_t *word, int len, void *ctx_) {
   EncodeCtx *ctx = (EncodeCtx *)ctx_;
+  if (ctx->count < 0) return;
   int remaining = ctx->max_ids - ctx->count;
   if (remaining <= 0) return;
   int n = bpe_encode_word(ctx->tok, word, len, ctx->ids ? ctx->ids + ctx->count : NULL, remaining);
-  ctx->count += n;
+  ctx->count = n < 0 ? -1 : ctx->count + n;
 }
 
 /* Encode a chunk of normal text (no special tokens) via word split + BPE */
@@ -713,7 +530,7 @@ static int encode_chunk(
     int max_ids
 ) {
   EncodeCtx ctx = {.tok = tok, .ids = ids_out, .max_ids = max_ids, .count = 0};
-  split_to_words(text, len, tok->preset, encode_word_cb, &ctx);
+  if (split_to_words(text, len, tok->preset, encode_word_cb, &ctx) < 0) ctx.count = -1;
   return ctx.count;
 }
 
@@ -752,7 +569,7 @@ static int find_special(
 }
 
 int poly_tokenize(const PolyTokenizer *tok, const char *text, int *ids_out, int max_ids) {
-  if (!tok || !text) return 0;
+  if (!tok || !text || max_ids < 0 || strlen(text) >= INT32_MAX) return -1;
   int text_len = (int)strlen(text);
   int count = 0;
   int pos = 0;
@@ -773,6 +590,7 @@ int poly_tokenize(const PolyTokenizer *tok, const char *text, int *ids_out, int 
       int n = encode_chunk(
           tok, (const uint8_t *)text + pos, sp - pos, ids_out ? ids_out + count : NULL, remaining
       );
+      if (n < 0) return -1;
       count += n;
     }
 
@@ -796,12 +614,13 @@ int poly_detokenize(
     char *text_out,
     int max_len
 ) {
-  if (!tok || !ids) return 0;
+  if (!tok || n_ids < 0 || (!ids && n_ids)) return -1;
   int pos = 0;
   for (int i = 0; i < n_ids; i++) {
     int id = ids[i];
     if (id < 0 || id >= tok->vocab_size) continue;
     int blen = tok->id_to_len[id];
+    if (blen > INT32_MAX - pos) return -1;
     if (text_out && pos + blen < max_len)
       memcpy(text_out + pos, tok->id_to_bytes[id], (size_t)blen);
     pos += blen;

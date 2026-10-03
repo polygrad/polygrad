@@ -275,6 +275,25 @@ TEST(qwen3, forward_cuda) {
 }
 #endif /* POLY_HAS_CUDA */
 
+TEST(qwen3, tokenizer_json_rejected) {
+  const char *json[] = {
+      "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0}}}",
+      "{\"model\":{\"type\":\"WordPiece\",\"vocab\":{\"a\":0}}}",
+      "{\"model\":{\"type\":\"Unigram\",\"vocab\":[[\"a\",0]]}}",
+      "{}",
+      "invalid",
+      ""};
+  bool ok = true;
+  for (size_t i = 0; i < sizeof(json) / sizeof(*json); i++) {
+    PolyTokenizer *tok = poly_tokenizer_from_json(json[i], (int)strlen(json[i]));
+    ok &= tok == NULL;
+    poly_tokenizer_free(tok);
+  }
+  ASSERT_TRUE(ok);
+  ASSERT_EQ(poly_tokenizer_from_json(NULL, 0), NULL);
+  PASS();
+}
+
 TEST(qwen3, tokenizer_from_gguf) {
   SKIP_IF_NO_GGUF();
   PolyTokenizer *tok = poly_tokenizer_from_gguf(g_gguf);

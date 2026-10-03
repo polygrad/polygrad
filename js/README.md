@@ -317,6 +317,11 @@ and Transformer generation methods are not inferred. See the
 
 ### Pretrained And Configured Models
 
+`Tokenizer.fromGGUF` reads supported vocabulary-ranked BPE metadata.
+`Tokenizer.fromJSON` is unsupported and rejects all inputs; use Hugging Face
+`tokenizers` for JSON pipelines. Spaces use a separate Rust/Wasm tokenizer,
+not a Polygrad dependency.
+
 For C-built model types and `models.Sequential` / `models.Graph`, see
 [shared JSON reference](https://github.com/polygrad/polygrad#configuration-driven-models).
 Their configurations support typed inputs, one bounded leading batch dimension,

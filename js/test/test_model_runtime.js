@@ -929,6 +929,42 @@ async function checkModelMultipleAxes(pg) {
   }
 }
 
+function checkTokenizerJSON(pg) {
+  for (const config of [
+    {model:{type:'BPE',vocab:{a:0}}},
+    {model:{type:'WordPiece',vocab:{a:0}}},
+    {model:{type:'Unigram',vocab:[['a',0]]}}, {}
+  ]) {
+    let error, unexpected
+    try {unexpected = pg.Tokenizer.fromJSON(JSON.stringify(config))} catch(e) {error=e}
+    finally {if (unexpected) unexpected.free()}
+    assert(error && /unsupported.*Hugging Face/.test(error.message), 'JSON tokenizer must reject with migration advice')
+  }
+
+  // Minimal metadata-only GGUF exercises the public loader without a checkpoint.
+  const bytes = []
+  const u32 = n => { for (let i=0;i<4;i++) bytes.push((n >>> (8*i)) & 255) }
+  const u64 = n => { u32(n); u32(0) }
+  const str = s => { const b=new TextEncoder().encode(s); u64(b.length); bytes.push(...b) }
+  bytes.push(71,71,85,70); u32(3); u64(0); u64(4)
+  str('tokenizer.ggml.tokens'); u32(9); u32(8); u64(4)
+  for (const token of ['a','b','ab','<end>']) str(token)
+  str('tokenizer.ggml.token_type'); u32(9); u32(5); u64(4)
+  for (const type of [1,1,1,3]) u32(type)
+  str('tokenizer.ggml.pre'); u32(8); str('llama3')
+  str('tokenizer.ggml.eos_token_id'); u32(4); u32(3)
+  while(bytes.length % 32) bytes.push(0)
+  const tok = pg.Tokenizer.fromGGUF(Uint8Array.from(bytes))
+  try {
+    assert(tok.vocabSize === 4 && tok.eosId === 3 && tok.bosId === -1, 'GGUF metadata mismatch')
+    assertClose(tok.encode('ab<end>'),[2,3],0)
+    const text='ab<end>'.repeat(5000), ids=tok.encode(text)
+    assert(ids.length === 10000, 'long encode was silently truncated')
+    assert(tok.decode(ids) === text, 'long decode was silently truncated')
+    assert(tok.encode('').length === 0 && tok.decode([]) === '', 'empty tokenization')
+  } finally {tok.free()}
+}
+
 async function checkModelEmptyInputAdmission(pg) {
   const n = pg.uop.variable('empty_model_batch', 0, 4), bound = n.bind(3)
   const offset = pg.Tensor.empty([1]), x = pg.Tensor.empty([bound, 2])
@@ -2001,6 +2037,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Tokenizer GGUF and JSON rejection', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))
@@ -2775,6 +2812,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Tokenizer GGUF and JSON rejection', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))

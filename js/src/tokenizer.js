@@ -5,12 +5,11 @@
  *
  * Usage:
  *   const tok = polygrad.Tokenizer.fromGGUF(ggufBytes)
- *   const tok = polygrad.Tokenizer.fromJSON(tokenizerJsonBytes)
  *   const ids = tok.encode('Hello world')
  *   const text = tok.decode(ids)
  *   tok.free()
  *
- * Matches tinygrad SimpleTokenizer / HF AutoTokenizer API.
+ * Vocabulary-ranked GGUF BPE following tinygrad SimpleTokenizer.
  */
 
 function createBoundTokenizerClass(runtime) {
@@ -39,7 +38,7 @@ function createBoundTokenizerClass(runtime) {
       if (!(jsonBytes instanceof Uint8Array))
         jsonBytes = new Uint8Array(jsonBytes)
       const handle = api.tokenizerFromJSON(jsonBytes)
-      if (!handle) throw new Error('polygrad: tokenizer fromJSON failed')
+      if (!handle) throw new Error('polygrad: tokenizer.json is unsupported; use Hugging Face tokenizers for JSON pipelines, or Tokenizer.fromGGUF for GGUF BPE')
       return new Tokenizer(handle)
     }
 
