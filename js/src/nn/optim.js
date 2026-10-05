@@ -47,7 +47,7 @@ function createBoundOptim(runtime) {
     }
 
     zeroGrad() {
-      for (const p of this.params) p._grad = null
+      for (const p of this.params) p.grad = null
     }
 
     zero_grad() { this.zeroGrad() }
@@ -84,8 +84,8 @@ function createBoundOptim(runtime) {
       if (!Tensor.training) throw new Error('TRAINING must be enabled to use the optimizer')
       const grads = []
       for (const p of this.params) {
-        if (!p.grad) throw new Error('optimizer parameter has no gradient')
-        grads.push(p.grad)
+        if (!p._grad) throw new Error('optimizer parameter has no gradient')
+        grads.push(p._grad)
       }
       this._validateLearningRate()
       const state = this._stateArgs()

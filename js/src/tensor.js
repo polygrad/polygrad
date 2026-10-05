@@ -678,6 +678,7 @@ function createBoundTensorClass(runtime) {
       this._rt = _runtime
       this._ctx = opts._ctx || core.ctx
       this._grad = null
+      this._ownsGrad = false
       this._isParam = opts.isParam ?? opts.is_param ?? opts._isParam ?? true
       this._isParam = Boolean(this._isParam)
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
@@ -841,10 +842,16 @@ function createBoundTensorClass(runtime) {
     }
 
     dispose() {
+      const grad = this._ownsGrad ? this._grad : null
+      this._grad = null
+      this._ownsGrad = false
+      const gradRelease = grad ? grad.dispose() : null
       const owner = this._tensorOwner
       this._tensorOwner = null
       this._tensor = null
-      return releaseTensorOwner(owner, this)
+      const released = releaseTensorOwner(owner, this)
+      return gradRelease && typeof gradRelease.then === 'function'
+        ? Promise.all([gradRelease, released]).then(() => {}) : released
     }
 
     _coreCreate(uop, role, device) {
@@ -988,9 +995,17 @@ function createBoundTensorClass(runtime) {
       this._isParam = Boolean(isParam)
       return this
     }
-    get grad() { return this._grad }
-    // Tensor.grad owns another Tensor, whose C handle owns its graph roots.
-    set grad(value) { this._grad = value }
+    get grad() {
+      // An exposed wrapper may outlive this Tensor or zeroGrad(). Only gradients
+      // kept private by the frontend can be disposed eagerly on replacement.
+      this._ownsGrad = false
+      return this._grad
+    }
+    set grad(value) {
+      if (this._ownsGrad && this._grad !== value) this._grad.dispose()
+      this._grad = value
+      this._ownsGrad = false
+    }
     get T() { return this.transpose() }
 
     numel() {
@@ -1331,7 +1346,10 @@ function createBoundTensorClass(runtime) {
         _ctx: this._ctx, _tensor: cloned, _dtype: this._dtype, _device: dev
       })
       t._isParam = this._isParam
-      if (this._grad) t._grad = this._grad.clone(dev)
+      if (this._grad) {
+        t._grad = this._grad.clone(dev)
+        t._ownsGrad = true
+      }
       return t
     }
 
@@ -1451,6 +1469,8 @@ function createBoundTensorClass(runtime) {
         _device: dev
       })
       t._grad = this._grad ? this._grad.to(dev) : null
+      t._ownsGrad = !!t._grad && t._grad !== this._grad
+      if (t._grad === this._grad) this._ownsGrad = false
       t._isParam = this._isParam
       return t
     }
@@ -1462,7 +1482,10 @@ function createBoundTensorClass(runtime) {
       this._data = moved._data
       this._dtype = moved._dtype
       this._device = moved._device
-      this._grad = moved._grad
+      this.grad = moved._grad
+      this._ownsGrad = moved._ownsGrad
+      moved._grad = null
+      moved._ownsGrad = false
       this._isParam = moved._isParam
       return this
     }
@@ -3380,7 +3403,10 @@ function createBoundTensorClass(runtime) {
           sum.dispose()
           if (placed !== grad) placed.dispose()
           grad.dispose()
-        } else leaf._grad = grad
+        } else {
+          leaf._grad = grad
+          leaf._ownsGrad = true
+        }
       }
     }
 

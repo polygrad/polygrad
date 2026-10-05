@@ -22,7 +22,7 @@ function assertClose(actual, expected, tol = 1e-4) {
   }
 }
 
-async function runOptimTests(pg) {
+async function runOptimTests(pg, filter = '') {
   const Tensor = pg.Tensor
   let passed = 0
   let failed = 0
@@ -31,6 +31,7 @@ async function runOptimTests(pg) {
   try {
 
   async function test(name, fn) {
+    if (filter && !name.includes(filter)) return
     try {
       await fn()
       console.log(`  [PASS] ${name}`)
@@ -42,6 +43,80 @@ async function runOptimTests(pg) {
   }
 
   console.log('\n== Optimizers ==')
+
+  await test('lifetime: training releases unexposed gradients without waiting for GC', async () => {
+    const p = new Tensor([0.5, 0.25], {dtype: 'float32'})
+    await p.realizeAsync()
+    const opt = new pg.nn.optim.SGD([p], {lr: 0.01})
+    let baseline
+    try {
+      for (let i = 0; i < 30; i++) {
+        const square = p.square()
+        const loss = square.sum()
+        let privateGrads = []
+        try {
+          loss.backward()
+          privateGrads = [p._grad, square._grad, loss._grad].filter(Boolean)
+          await opt.stepAsync()
+        } finally {
+          await loss.dispose()
+          await square.dispose()
+          opt.zeroGrad()
+        }
+        assert(privateGrads.every(g => !g._tensor), 'private gradient was not released')
+        const count = pg.stats().coreStats.tensorRecords
+        if (i === 3) baseline = count
+        if (i > 3) assert(count <= baseline, `Tensor records grew: ${baseline} -> ${count}`)
+      }
+    } finally {
+      await p.dispose()
+      await opt.lr.dispose()
+    }
+  })
+
+  await test('lifetime: clearing gradients preserves caller-owned and exposed Tensors', async () => {
+    const p = new Tensor([2], {dtype: 'float32'})
+    const square = p.square()
+    const loss = square.sum()
+    loss.backward()
+    const held = p.grad
+    const opt = new pg.nn.optim.SGD([p], {lr: 0.01})
+    opt.zeroGrad()
+    assertClose(await held.toArrayAsync(), [4])
+    p.grad = held
+    const privateClone = p.clone()
+    const privateGrad = privateClone._grad
+    await privateClone.dispose()
+    assert(!privateGrad._tensor, 'clone retained its private gradient')
+    const cloned = p.clone()
+    const clonedGrad = cloned.grad
+    await cloned.dispose()
+    await p.dispose()
+    assertClose(await held.toArrayAsync(), [4])
+    assertClose(await clonedGrad.toArrayAsync(), [4])
+    await clonedGrad.dispose()
+    await held.dispose()
+    await loss.dispose()
+    await square.dispose()
+    await opt.lr.dispose()
+  })
+
+  await test('lifetime: moving gradients preserves exposed values and releases private copies', async () => {
+    const p = new Tensor([2], {dtype: 'float32'})
+    await p.realizeAsync()
+    const square = p.square(), loss = square.sum()
+    loss.backward()
+    const oldGrad = p._grad
+    const destination = pg.device === 'webgpu' ? 'cpu' : 'interp'
+    p.to_(destination)
+    assert(!oldGrad._tensor, 'in-place transfer retained an unexposed gradient')
+    const moved = p.grad
+    await p.dispose()
+    assertClose(await moved.toArrayAsync(), [4])
+    await moved.dispose()
+    await loss.dispose()
+    await square.dispose()
+  })
 
   await test('AdamW snake-case weight decay reaches the shared update graph', async () => {
     const p = new Tensor([1], {dtype: 'float32'}); p._grad = new Tensor([0], {dtype: 'float32'})

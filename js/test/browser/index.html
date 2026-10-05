@@ -505,6 +505,7 @@ async function main() {
   }
 
   const jitLifetime = await window.__runJitLifetimeTests(pg)
+  const optimLifetime = await window.__runOptimLifetimeTests(pg)
   let webgpuCapsResult = { passed: 0, failed: 0, skipped: 0 }
   let webgpuLifecycleResult = { passed: 0, failed: 0, skipped: 0 }
   if (isWebGpu) {
@@ -530,8 +531,8 @@ async function main() {
     extensionFailed++
   } finally { await extensionRuntime.dispose() }
 
-  const totalPassed = tensorResult.passed + instanceResult.passed + jitLifetime.passed + webgpuCapsResult.passed + webgpuLifecycleResult.passed + extensionPassed
-  const totalFailed = tensorResult.failed + instanceResult.failed + jitLifetime.failed + webgpuCapsResult.failed + webgpuLifecycleResult.failed + extensionFailed
+  const totalPassed = tensorResult.passed + instanceResult.passed + jitLifetime.passed + optimLifetime.passed + webgpuCapsResult.passed + webgpuLifecycleResult.passed + extensionPassed
+  const totalFailed = tensorResult.failed + instanceResult.failed + jitLifetime.failed + optimLifetime.failed + webgpuCapsResult.failed + webgpuLifecycleResult.failed + extensionFailed
   const totalSkipped = (tensorResult.skipped || 0) + (instanceResult.skipped || 0) +
     (webgpuCapsResult.skipped || 0) + (webgpuLifecycleResult.skipped || 0)
   console.log(

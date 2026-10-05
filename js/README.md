@@ -240,6 +240,15 @@ try {
 }
 ```
 
+For long eager training loops, dispose each temporary Tensor when it is no
+longer needed; anonymous expression chains otherwise wait for JavaScript GC.
+`zeroGrad()` and `Tensor.dispose()` release gradients kept private by the
+frontend. Reading `tensor.grad` exposes that Tensor to the caller: it stays
+valid after `zeroGrad()` or disposal of its parent, and the caller must dispose
+it when finished. Caller-supplied gradients follow the same rule. Clear input
+gradients too if you do not want them accumulated. For repeated training of a
+fixed graph, Model training avoids constructing frontend temporaries each step.
+
 ## Models
 
 Start with [Quickstart: Models](#quickstart-models) for fitting and cross-language loading.
