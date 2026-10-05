@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Generate bindings to existing C declarations, never a second tensor API.
+
+--core refreshes the resolver/export metadata. --source builds a consumer's
+typed imports and a construction-only entry adapter (ctx, tensors, scalars,
+owned outputs). Pointer semantics below are reviewed, not inferred from types.
+"""
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+OPAQUE = {"PolyCtx *", "PolyTensor *", "PolyUOp *", "PolyTensorCapture *"}
+SCALARS = {
+    "int",
+    "_Bool",
+    "bool",
+    "int64_t",
+    "uint64_t",
+    "double",
+    "float",
+    "PolyOps",
+    "PolyDevice",
+}
+ARRAYS = {
+    # Negative counts encode a fixed number of elements, not an argument slot.
+    "poly_tensor_sort": {
+        "out_values": (-1, 4, "out"),
+        "out_indices": (-1, 4, "out"),
+    },
+    **{
+        f"poly_tensor_{op}": {"axes": ("n_axes", 8, "in")}
+        for op in ("sum", "mean", "max", "min", "flip")
+    },
+    **{
+        f"poly_tensor_{op}": {"dims": ("ndim", 8, "in")}
+        for op in ("reshape", "expand", "empty_by_id")
+    },
+    "poly_tensor_permute": {"perm": ("ndim", 8, "in")},
+    "poly_tensor_cat": {"tensors": ("n_tensors", 4, "in")},
+    "poly_tensor_capture_wrap": {
+        "states": ("n_states", 4, "in"),
+        "mutable_state": ("n_states", 4, "in"),
+        "outputs": ("n_outputs", 4, "in"),
+        "wrapped": ("n_outputs", 4, "out"),
+    },
+}
+SPECIAL = {
+    "poly_tensor_sort",
+    "poly_abi_version",
+    "poly_tensor_release",
+    "poly_tensor_capture_begin",
+    "poly_tensor_capture_end",
+    "poly_tensor_capture_wrap",
+    "poly_tensor_uop_physical",
+    "poly_uop_ndim",
+}
+# These return borrowed storage or manipulate implementation/lifetime metadata,
+# rather than creating ordinary tensor results. Assign is explicitly supported.
+EXCLUDE = {
+    "poly_tensor_find_storage_identity",
+    "poly_tensor_create_result",
+    "poly_tensor_create_result_like",
+    "poly_tensor_create_with_roots",
+    "poly_tensor_create",
+    "poly_tensor_detach_logical",
+}
+
+
+def declarations(source):
+    ast = json.loads(
+        subprocess.check_output(
+            [
+                "clang",
+                "-x",
+                "c",
+                "-std=c11",
+                f"-I{ROOT}/src",
+                "-Xclang",
+                "-ast-dump=json",
+                "-fsyntax-only",
+                "-",
+            ],
+            input=source.encode(),
+        )
+    )
+    return {v["name"]: v for v in ast["inner"] if v["kind"] == "FunctionDecl"}
+
+
+def signature(d):
+    return d["type"]["qualType"].split("(")[0].strip(), [
+        v for v in d.get("inner", []) if v["kind"] == "ParmVarDecl"
+    ]
+
+
+def core(check=False):
+    decls = declarations('#include "polygrad.h"\n#include "frontend.h"\n')
+    result = {}
+    for name, d in sorted(decls.items()):
+        ret, args = signature(d)
+        if name not in SPECIAL and (
+            not name.startswith("poly_tensor_")
+            or ret != "PolyTensor *"
+            or name in EXCLUDE
+        ):
+            continue
+        if ret not in OPAQUE | SCALARS | {"void"}:
+            continue
+        arrays = []
+        names = [v["name"] for v in args]
+        for i, v in enumerate(args):
+            t = v["type"]["qualType"]
+            if t.removeprefix("const ") in OPAQUE or t in SCALARS:
+                continue
+            annotation = ARRAYS.get(name, {}).get(v["name"])
+            if not annotation:
+                break
+            count, width, direction = annotation
+            arrays.append([i, names.index(count) if isinstance(count, str) else count, width, direction])
+        else:
+            result[name] = {
+                "return": ret,
+                "args": [[v["type"]["qualType"], v["name"]] for v in args],
+                "arrays": arrays,
+                "failure": 0 if ret in OPAQUE or ret == "void" else -1,
+                # Descriptive only: constructors return owned references;
+                # same-object mutators and the UOp accessor are borrowed.
+                "ownership": (
+                    "borrowed"
+                    if name in (
+                        "poly_tensor_assign", "poly_tensor_assign_after",
+                        "poly_tensor_clone_into", "poly_tensor_uop_physical",
+                    )
+                    else "owned" if ret in ("PolyTensor *", "PolyTensorCapture *")
+                    else "value"
+                ),
+                "cleanup": name in ("poly_tensor_release", "poly_tensor_capture_end"),
+            }
+    if not SPECIAL <= result.keys():
+        raise ValueError(f"missing declarations: {SPECIAL - result.keys()}")
+    text = json.dumps(result, indent=2) + "\n"
+    files = {
+        dest: text
+        for dest in ("js/src/extension_api.json", "py/polygrad/extension_api.json")
+    }
+    files["src/frontend_exports.h"] = (
+        "/* Generated by scripts/extension_bindings.py --core. */\n"
+        + "".join(f"POLY_EXTENSION_SYMBOL({name})\n" for name in result)
+    )
+    for dest, text in files.items():
+        if check:
+            if (ROOT / dest).read_text() != text:
+                raise ValueError(f"stale metadata: {dest}; run make extension-bindings")
+        else:
+            (ROOT / dest).write_text(text)
+    print(
+        f"{'checked' if check else 'generated'} {len(result)} construction API signatures"
+    )
+
+
+def consumer(a):
+    if not 0 <= a.inputs <= 4096 or not 1 <= a.outputs <= 4096:
+        raise ValueError("invalid input/output counts")
+    api = json.loads((ROOT / "js/src/extension_api.json").read_text())
+    source = a.source.resolve()
+    decls = declarations(f'#include "{source}"\n')
+    ret, params = signature(decls[a.entry])
+    types = [p["type"]["qualType"] for p in params]
+    if (
+        ret != "int"
+        or types[:2] != ["PolyCtx *", "PolyTensor **"]
+        or types[-1] != "PolyTensor **"
+        or any(t not in ("int", "double") for t in types[2:-1])
+    ):
+        raise ValueError(
+            "entry must return int: (PolyCtx*, PolyTensor** inputs, int/double scalars..., PolyTensor** owned_outputs)"
+        )
+    # Clang has expanded macros and helper headers. Follow reachable function
+    # bodies instead of scanning spelling, which misses macro calls and includes
+    # dead helpers. The public declarations remain the sole signature source.
+    imports, visited = {"poly_abi_version", "poly_tensor_release"}, set()
+
+    def visit(name):
+        if name in visited:
+            return
+        visited.add(name)
+        bodies = [v for v in decls.get(name, {}).get("inner", [])
+                  if v["kind"] == "CompoundStmt"]
+        if not bodies:
+            if name.startswith("poly_"):
+                imports.add(name)
+            return
+        def walk(node):
+            ref = node.get("referencedDecl", {})
+            if ref.get("kind") == "FunctionDecl":
+                visit(ref["name"])
+            for child in node.get("inner", []):
+                walk(child)
+        for body in bodies:
+            walk(body)
+
+    visit(a.entry)
+    names = sorted(imports)
+    if set(names) - api.keys():
+        raise ValueError(f"unsupported imports: {set(names) - api.keys()}")
+    manifest = {
+        "entry": a.entry,
+        "inputs": a.inputs,
+        "outputs": a.outputs,
+        "scalars": types[2:-1],
+        "imports": names,
+    }
+    c = [
+        "/* Generated from Polygrad public declarations. */",
+        '#include "polygrad.h"',
+        '#include "frontend.h"',
+        "#include <stddef.h>",
+        "#include <math.h>",
+        "#ifdef _WIN32",
+        "#define EXT __declspec(dllexport)",
+        "#define POLY_EXTENSION_LOCAL",
+        "#else",
+        '#define EXT __attribute__((visibility("default")))',
+        '#define POLY_EXTENSION_LOCAL __attribute__((visibility("hidden")))',
+        "#endif",
+    ]
+    for name in names:
+        d = api[name]
+        r = d["return"]
+        args = d["args"]
+        ps = ", ".join(t + " " + n for t, n in args) or "void"
+        call = ", ".join(n for _, n in args)
+        c += [
+            "#ifndef __EMSCRIPTEN__",
+            f"static {r} (*fn_{name})({ps});",
+            f"POLY_EXTENSION_LOCAL {r} {name}({ps}) {{ "
+            + ("return " if r != "void" else "")
+            + f"fn_{name}({call}); }}",
+            "#endif",
+        ]
+    c += [
+        "#ifndef __EMSCRIPTEN__",
+        "static int extension_bound;",
+        "EXT int poly_extension_bind(PolyProcResolver resolve) {",
+        "if (!resolve) return 0;",
+        'int (*abi)(void) = (int (*)(void))resolve("poly_abi_version");',
+        "if (!abi || abi() != POLYGRAD_ABI_VERSION) return 0;",
+    ]
+    # Validate all addresses before publishing any: a failed bind is atomic.
+    for name in names:
+        c += [
+            f'PolyProc addr_{name}=resolve("{name}");',
+            f"if (!addr_{name} || (fn_{name} && (PolyProc)fn_{name}!=addr_{name})) return 0;",
+        ]
+    for name in names:
+        d = api[name]
+        ts = ", ".join(t for t, _ in d["args"]) or "void"
+        c.append(f"fn_{name}=({d['return']} (*)({ts}))addr_{name};")
+    c += [
+        "extension_bound=1; return 1;}",
+        "#endif",
+        f"EXT const char *poly_extension_manifest(void) {{ return {json.dumps(json.dumps(manifest))}; }}",
+        "EXT int poly_extension_abi(void) { return POLYGRAD_ABI_VERSION; }",
+        f"extern int {a.entry}("
+        + ", ".join(t + " " + p["name"] for t, p in zip(types, params))
+        + ");",
+        "EXT int poly_extension_build(PolyCtx *ctx, PolyTensor **inputs, const double *values, PolyTensor **outputs) {",
+        "#ifndef __EMSCRIPTEN__",
+        "if (!extension_bound) return 0;",
+        "#endif",
+    ]
+    for i, t in enumerate(types[2:-1]):
+        c.append(f"if (!isfinite(values[{i}])) return 0;")
+        if t == "int":
+            c.append(
+                f"if (values[{i}] < -2147483648.0 || values[{i}] > 2147483647.0 || values[{i}] != (int)values[{i}]) return 0;"
+            )
+    args = (
+        ["ctx", "inputs"]
+        + [f"({t})values[{i}]" for i, t in enumerate(types[2:-1])]
+        + ["outputs"]
+    )
+    c += [
+        f"return {a.entry}(" + ", ".join(args) + ");",
+        "}",
+        "#ifdef POLY_EXTENSION_NAPI",
+        f"#define POLY_EXTENSION_NINPUTS {a.inputs}",
+        f"#define POLY_EXTENSION_NOUTPUTS {a.outputs}",
+        f"#define POLY_EXTENSION_NSCALARS {len(types) - 3}",
+        '#include "extension_native.h"',
+        "#endif",
+    ]
+    a.output.mkdir(parents=True, exist_ok=True)
+    (a.output / "extension.c").write_text("\n".join(c) + "\n")
+    (a.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--core", action="store_true")
+    p.add_argument("--check", action="store_true")
+    p.add_argument("--source", type=Path)
+    p.add_argument("--entry")
+    p.add_argument("--inputs", type=int)
+    p.add_argument("--outputs", type=int)
+    p.add_argument("--output", type=Path)
+    a = p.parse_args()
+    if a.core:
+        core(a.check)
+    else:
+        if not all(
+            v is not None for v in (a.source, a.entry, a.inputs, a.outputs, a.output)
+        ):
+            p.error("provide source, entry, inputs, outputs and output")
+        consumer(a)

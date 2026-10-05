@@ -2,6 +2,36 @@
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
 
+async function checkPortableGradient(pg) {
+  const x = new pg.Tensor(new Float32Array([1,2,3])).is_param_(false)
+  const square = x.square(), loss = square.sum()
+  const [grad] = loss.gradient(x), sum = grad.sum(), [second] = sum.gradient(x)
+  let model, restored
+  try {
+    assert(x.grad == null, 'targeted gradient must not change .grad')
+    model = await pg.Model.fromTensors({params:{x}, outputs:{gradient:grad, second}})
+    restored = pg.Model.load(await model.saveAsync())
+    for (const current of [model, restored]) for (const values of [[1,2,3], [-4,0,7]]) {
+      await current.writeBufferAsync('x', new Float32Array(values))
+      const result = await current.forwardAsync({})
+      assertClose(result.gradient, values.map(x => 2*x), 0)
+      assertClose(result.second, [2,2,2], 0)
+    }
+    const hidden = new pg.Tensor(new Float32Array([3,4,5]))
+    const invalid = x.add(hidden)
+    try {
+      let error
+      try { await pg.Model.fromTensors({params:{x}, outputs:{invalid}}) }
+      catch (e) { error = e }
+      assert(error && /unbound storage BUFFER/.test(error.message), `lost Model error: ${error}`)
+    } finally { invalid.dispose(); hidden.dispose() }
+  } finally {
+    if (restored) await restored.dispose()
+    if (model) await model.dispose()
+    for (const t of [second,sum,grad,loss,square,x]) t.dispose()
+  }
+}
+
 async function checkPackedGemmModel(pg, gpuTile = false, provider = null) {
   const rows = gpuTile ? 32 : 2, kdim = gpuTile ? 32 : 7, ncols = gpuTile ? 192 : 48
   const a = Float32Array.from({length:2*rows*kdim}, (_, i) => (i % 9 - 4) / 11)
@@ -2084,6 +2114,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
+  await test('Model portable Tensor gradients and construction errors', () => checkPortableGradient(pg))
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))

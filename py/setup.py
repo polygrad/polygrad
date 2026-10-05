@@ -85,7 +85,7 @@ setup(
     name='polygrad',
     version=_read_version(),
     packages=find_packages(include=['polygrad', 'polygrad.*', 'extra', 'extra.*']),
-    package_data={'polygrad': ['_native.c']},
+    package_data={'polygrad': ['_native.c', 'extension_api.json']},
     ext_modules=[
         Extension(
             'polygrad._native',

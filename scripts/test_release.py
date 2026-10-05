@@ -44,7 +44,7 @@ def release_gates():
         test-release-preflight format-check verify-source-mirrors test-headers test-release-py-performance test-analyze-reviewed
         test test-x86 test-interp test-cuda test-qwen3 test-examples
         test-harness-skip-accounting test-release-gates
-        test-py test-py-x86 test-hf-e2e test-llama-pretrained test-onnx-encoder test-kernels
+        test-py test-py-x86 test-hf-e2e test-llama-pretrained test-onnx-encoder test-kernels test-extension
         test-js-native-cpu test-js-native-x86 test-js-native-interp
         test-js-native-cuda test-js-native-gc
         test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm

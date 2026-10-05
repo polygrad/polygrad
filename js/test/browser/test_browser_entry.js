@@ -15,3 +15,4 @@ window.__runTensorTests = runTensorTests
 window.__runModelRuntimeTests = runModelRuntimeTests
 window.__runModelSmokeTests = runModelSmokeTests
 window.__checkOnnxEncoder = checkOnnxEncoder
+window.__checkExtension = require('../check_extension')

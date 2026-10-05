@@ -3329,16 +3329,63 @@ function createBoundTensorClass(runtime) {
 
     // --- Autograd ---
 
-    backward() {
+    gradient(...targets) {
       const { ffi } = this._rt._core
-      const targetEntries = this._liveGradTargets()
-      if (!targetEntries.length) {
-        throw new Error('No leaf tensors require grad')
+      if (this.shape.length) throw new Error('gradient requires a scalar output')
+      if (targets.some(t => !t?._tensor || t._ctx !== this._ctx)) {
+        throw new Error('gradient targets must share the differentiated Tensor context')
       }
+      if (!isFloatDtype(this.dtype) || targets.some(t => !isFloatDtype(t.dtype))) {
+        throw new Error('only float Tensors have gradient')
+      }
+      const callbacks = []
+      const gradUops = this._gradientRoots(this._currentUopRaw(), targets.map(t => t._currentUopRaw()), callbacks)
+      const logical = targets.map(() => null)
+      const root = tensorUopLogical(this._tensor)
+      if (root) {
+        const indices = targets.flatMap((t, i) => tensorUopLogical(t._tensor) ? [i] : [])
+        const grads = this._gradientRoots(root, indices.map(i => tensorUopLogical(targets[i]._tensor)), callbacks.values())
+        indices.forEach((i, j) => { logical[i] = grads[j] })
+      }
+      return targets.map((leaf, i) => {
+        const gradUop = gradUops[i]
+        if (!gradUop) throw new Error('poly_uop_grad_many returned NULL for a target tensor')
+        const handle = tensorCreateResultLike(this._ctx, leaf._tensor, logical[i],
+          gradUop, POLY_TENSOR_VALUE, leaf._device)
+        if (!handle) throw new Error('failed to store gradient roots')
+        let grad = new Tensor(null, { _ctx: this._ctx, _tensor: handle,
+          _dtype: leaf._dtype, _device: leaf._device })
+        if (Number(ffi.poly_uop_device(gradUop)) === deviceId('auto')) {
+          const placed = grad.clone(leaf._device)
+          const paired = tensorCreateResultLike(this._ctx, leaf._tensor, logical[i],
+            placed._currentUopRaw(), POLY_TENSOR_VALUE, leaf._device)
+          grad.dispose()
+          placed.dispose()
+          grad = new Tensor(null, { _ctx:this._ctx, _tensor:paired, _dtype:leaf._dtype, _device:leaf._device })
+        }
+        return grad
+      })
+    }
 
-      const root = this._currentUopRaw()
-      const gradLeaves = targetEntries.map(entry => entry.tensor)
-      const targetUops = targetEntries.map(entry => entry.root)
+    backward() {
+      const leaves = this._liveGradTargets().map(entry => entry.tensor)
+      if (!leaves.length) throw new Error('No leaf tensors require grad')
+      const grads = this.gradient(...leaves)
+      for (let i = 0; i < leaves.length; i++) {
+        const leaf = leaves[i], grad = grads[i]
+        if (leaf._grad) {
+          const placed = grad.to(leaf._grad._device)
+          const sum = leaf._grad.add(placed)
+          leaf._grad.assign(sum)
+          sum.dispose()
+          if (placed !== grad) placed.dispose()
+          grad.dispose()
+        } else leaf._grad = grad
+      }
+    }
+
+    _gradientRoots(root, targetUops, callbacks) {
+      const { ffi } = this._rt._core
       const customRecords = customGradRecordsFor(this._ctx, root)
       let gradUops
       if (customRecords.length) {
@@ -3400,9 +3447,20 @@ function createBoundTensorClass(runtime) {
             }
             continue
           }
-          const returned = upstreams.length > 1
-            ? rec.gradFxn(...upstreams, call)
-            : rec.gradFxn(upstreams[0], call)
+          let returned
+          const args = [...callArgs, ...upstreams].map(rawUop)
+          if (Array.isArray(callbacks)) {
+            returned = upstreams.length > 1 ? rec.gradFxn(...upstreams, call) : rec.gradFxn(upstreams[0], call)
+            returned = returned ? (Array.isArray(returned) ? returned : [returned]).map(gradResultRaw) : null
+            callbacks.push({ fn: rec.gradFxn, args, returned })
+          } else {
+            // Reuse the callback expression, not the physical reverse graph.
+            const template = callbacks.next().value
+            if (!template || template.fn !== rec.gradFxn || template.args.length !== args.length) {
+              throw new Error('custom gradient root domains have incompatible arguments')
+            }
+            returned = template.returned?.map(g => g ? ffi.poly_uop_substitute(this._ctx, g, template.args, args) : null)
+          }
           if (!returned) continue
           const returnedList = Array.isArray(returned) ? returned : [returned]
           if (returnedList.length !== callArgs.length) {
@@ -3432,31 +3490,7 @@ function createBoundTensorClass(runtime) {
         gradUops = gradManyRaw(this._ctx, root, 0, targetUops).grads
       }
 
-      for (let i = 0; i < gradLeaves.length; i++) {
-        const leaf = gradLeaves[i]
-        const gradUop = gradUops[i]
-        if (!gradUop) throw new Error('poly_uop_grad_many returned NULL for a leaf tensor')
-        const gradHandle = tensorCreateResultLike(
-          this._ctx, leaf._tensor, tensorUopLogical(leaf._tensor) ? gradUop : null,
-          gradUop, POLY_TENSOR_VALUE, leaf._device
-        )
-        if (!gradHandle) throw new Error('failed to store backward gradient roots')
-        let gradTensor = new Tensor(null, {
-          _ctx: this._ctx,
-          _tensor: gradHandle,
-          _dtype: leaf._dtype,
-          _device: leaf._device
-        })
-        if (leaf.shape.length > 1) gradTensor = gradTensor.reshape(...leaf.shape)
-        if (Number(ffi.poly_uop_device(gradUop)) === deviceId('auto')) {
-          gradTensor = gradTensor.clone(leaf._device)
-        }
-        if (leaf._grad) {
-          leaf._grad.assign(leaf._grad.add(gradTensor.to(leaf._grad._device)))
-        } else {
-          leaf._grad = gradTensor
-        }
-      }
+      return gradUops
     }
 
     // --- Static constructors ---

@@ -31,9 +31,11 @@ const server = http.createServer((req, res) => {
     res.end()
     return
   }
-  const filePath = path.join(jsDir, url === '/' ? '/test/browser/index.html' : url)
+  const extension = url === '/extension/author.wasm'
+  const filePath = extension ? path.join(jsDir, '../build/extension/author.wasm') :
+    path.join(jsDir, url === '/' ? '/test/browser/index.html' : url)
 
-  if (!filePath.startsWith(jsDir)) {
+  if (!extension && !filePath.startsWith(jsDir)) {
     res.writeHead(403)
     res.end('forbidden')
     return

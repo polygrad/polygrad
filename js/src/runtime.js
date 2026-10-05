@@ -78,6 +78,8 @@ class PolyRuntime {
 
   get device() { return this._core.caps.device }
 
+  loadExtension(source) { return require('./extension').loadExtension(this, source) }
+
   // Compilation policy is shared by native contexts, or local to a Wasm module.
   // Set before compilation; changing it does not rewrite existing JIT captures.
   get noopt() { return this._core.ffi.poly_get_noopt() }

@@ -29,6 +29,7 @@
 #include "bundle.h"
 
 static bool napi_is_nullish(napi_env env, napi_value value);
+static napi_value napi_poly_extension_resolver(napi_env env, napi_callback_info info);
 #include "models/mlp.h"
 #include "models/models.h"
 #include "engine/schedule.h"
@@ -71,6 +72,12 @@ static napi_value make_external(napi_env env, void *ptr) {
   }
   NAPI_CALL(env, napi_create_external(env, ptr, NULL, NULL, &result));
   return result;
+}
+
+static napi_value napi_poly_extension_resolver(napi_env env, napi_callback_info info) {
+  (void)info;
+  static const PolyProcResolver resolver = poly_get_proc_address;
+  return make_external(env, (void *)&resolver);
 }
 
 static napi_value make_external_pair(napi_env env, void *a, void *b) {
@@ -7702,6 +7709,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_op_count", napi_poly_op_count),
       DECLARE_NAPI_METHOD("poly_op_name", napi_poly_op_name),
       DECLARE_NAPI_METHOD("poly_abi_version", napi_poly_abi_version),
+      DECLARE_NAPI_METHOD("poly_extension_resolver", napi_poly_extension_resolver),
 
       /* Cache cleanup */
 

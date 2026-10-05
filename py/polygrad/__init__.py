@@ -406,6 +406,10 @@ class Runtime:
       if _ffi.get_lib().poly_ctx_collect(self._ctx) != 0:
           raise RuntimeError('poly_ctx_collect failed')
 
+    def load_extension(self, path):
+      from .extension import Extension
+      return Extension(self, path)
+
     def clear_schedule_cache(self):
       """Release this idle runtime's schedule-cache owners, without collecting."""
       self._check_live()

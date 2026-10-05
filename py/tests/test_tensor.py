@@ -832,7 +832,7 @@ print('leaving_live_instance')
         assert cloned.is_param is False
         assert cloned.grad is not None
         assert cloned.grad.uop_logical.op_name == 'AFTER'
-        assert cloned.grad.uop_logical.src[0].buffer.raw != source.grad.uop_logical.src[0].buffer.raw
+        assert cloned.grad.uop_physical.src[0].buffer.raw != source.grad.uop_physical.src[0].buffer.raw
         np.testing.assert_allclose(cloned.numpy(), [1.0, 2.0, 3.0, 4.0])
         np.testing.assert_allclose(cloned.grad.numpy(), np.ones(4, dtype=np.float32))
 
@@ -884,7 +884,8 @@ print('leaving_live_instance')
         loss = x.sum()
         loss.backward()
         first_grad = x.grad
-        first_root = first_grad.uop_logical
+        # Storage belongs to the executable graph, not portable provenance.
+        first_root = first_grad.uop_physical
         first_buffer = first_root.src[0].buffer.raw
         assert first_root.op_name == 'AFTER'
         assert int(_ffi._lib.poly_uop_device(first_grad.uop_logical.raw)) == int(
@@ -897,7 +898,7 @@ print('leaving_live_instance')
 
         loss.backward()
         assert x.grad is first_grad
-        second_root = x.grad.uop_logical
+        second_root = x.grad.uop_physical
         assert second_root.src[0].raw == first_root.raw
         assert second_root.src[0].src[0].buffer.raw == first_buffer
         np.testing.assert_allclose(x.grad.numpy(), np.full(4, 2.0, dtype=np.float32))

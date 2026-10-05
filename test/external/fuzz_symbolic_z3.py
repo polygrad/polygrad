@@ -234,8 +234,9 @@ def load_lib() -> ctypes.CDLL:
     # Neither changes these graph layouts or operator enums;
     # test_api_parity compares every mirrored
     # top-level field offset and size against the compiled C header.
-    if (abi := lib.poly_abi_version()) != 107:
-        raise SystemExit(f"Z3 harness requires reviewed ABI107 layouts; core has ABI{abi}")
+    # ABI108 adds a function-address resolver; no proof-relevant layout changes.
+    if (abi := lib.poly_abi_version()) != 108:
+        raise SystemExit(f"Z3 harness requires reviewed ABI108 layouts; core has ABI{abi}")
 
     lib.poly_ctx_new.restype = ctypes.c_void_p
     lib.poly_ctx_new.argtypes = []

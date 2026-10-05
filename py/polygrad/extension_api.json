@@ -1,0 +1,2721 @@
+{
+  "poly_abi_version": {
+    "return": "int",
+    "args": [],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
+  "poly_tensor_abs": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_acos": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_acosh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_alu1": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyOps",
+        "op"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_alu2": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyOps",
+        "op"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_alu3": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyOps",
+        "op"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ],
+      [
+        "PolyTensor *",
+        "c"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_arange_float_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "double",
+        "start"
+      ],
+      [
+        "double",
+        "stop"
+      ],
+      [
+        "double",
+        "step"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_arange_int_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "int64_t",
+        "start"
+      ],
+      [
+        "int64_t",
+        "stop"
+      ],
+      [
+        "int64_t",
+        "step"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_argmax": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_argmin": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_asin": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_asinh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_assign": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "PolyTensor *",
+        "value"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false
+  },
+  "poly_tensor_assign_after": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "PolyUOp *",
+        "logical_after"
+      ],
+      [
+        "PolyUOp *",
+        "physical_after"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false
+  },
+  "poly_tensor_atan": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_atanh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_binary_crossentropy": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "int",
+        "reduction"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_binary_crossentropy_logits": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "PolyTensor *",
+        "weight"
+      ],
+      [
+        "int",
+        "reduction"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_bitcast_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_bitwise_not": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_capture_begin": {
+    "return": "PolyTensorCapture *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_capture_end": {
+    "return": "void",
+    "args": [
+      [
+        "PolyTensorCapture *",
+        "capture"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "value",
+    "cleanup": true
+  },
+  "poly_tensor_capture_wrap": {
+    "return": "int",
+    "args": [
+      [
+        "PolyTensorCapture *",
+        "capture"
+      ],
+      [
+        "PolyTensor **",
+        "states"
+      ],
+      [
+        "const int *",
+        "mutable_state"
+      ],
+      [
+        "int",
+        "n_states"
+      ],
+      [
+        "PolyTensor **",
+        "outputs"
+      ],
+      [
+        "int",
+        "n_outputs"
+      ],
+      [
+        "PolyTensor **",
+        "wrapped"
+      ]
+    ],
+    "arrays": [
+      [
+        1,
+        3,
+        4,
+        "in"
+      ],
+      [
+        2,
+        3,
+        4,
+        "in"
+      ],
+      [
+        4,
+        5,
+        4,
+        "in"
+      ],
+      [
+        6,
+        5,
+        4,
+        "out"
+      ]
+    ],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
+  "poly_tensor_cast_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cat": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor **",
+        "tensors"
+      ],
+      [
+        "int",
+        "n_tensors"
+      ],
+      [
+        "int",
+        "dim"
+      ]
+    ],
+    "arrays": [
+      [
+        1,
+        2,
+        4,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_ceil": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_celu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "alpha"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cholesky": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "upper"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cholesky_solve": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "chol"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ],
+      [
+        "int",
+        "upper"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_clone": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "source"
+      ],
+      [
+        "PolyDevice",
+        "device"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_clone_into": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "PolyTensor *",
+        "source"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false
+  },
+  "poly_tensor_const_float_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "double",
+        "value"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_const_int_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "int64_t",
+        "value"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_const_like_float": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "ref"
+      ],
+      [
+        "double",
+        "value"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_const_like_int": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "ref"
+      ],
+      [
+        "int64_t",
+        "value"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_const_uint_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "uint64_t",
+        "value"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_contiguous": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_contiguous_backward": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_copysign": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "other"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cos": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cosh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cross_entropy": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "int",
+        "axis"
+      ],
+      [
+        "int",
+        "reduction"
+      ],
+      [
+        "double",
+        "smoothing"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cubic_sample_axis": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "coordinates"
+      ],
+      [
+        "int",
+        "axis"
+      ],
+      [
+        "double",
+        "a"
+      ],
+      [
+        "_Bool",
+        "exclude_outside"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cumprod": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_cumsum": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_detach": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_diag": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_diagonal": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t",
+        "offset"
+      ],
+      [
+        "int",
+        "dim1"
+      ],
+      [
+        "int",
+        "dim2"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_div": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "dividend"
+      ],
+      [
+        "PolyTensor *",
+        "divisor"
+      ],
+      [
+        "int",
+        "rounding"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_dot": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "PolyTensor *",
+        "weight"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_dot_dtype_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "PolyTensor *",
+        "weight"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_elu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "double",
+        "alpha"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_empty_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "const int64_t *",
+        "dims"
+      ],
+      [
+        "int",
+        "ndim"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_erf": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_exp": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_expand": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "dims"
+      ],
+      [
+        "int",
+        "ndim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_expm1": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_eye_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "int64_t",
+        "n"
+      ],
+      [
+        "int64_t",
+        "m"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_flip": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_floor": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_gather_dim": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "int",
+        "dim"
+      ],
+      [
+        "PolyTensor *",
+        "index"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_gelu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_gelu_exact": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_gradient": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "loss"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_hardswish": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_index_select": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "int",
+        "dim"
+      ],
+      [
+        "PolyTensor *",
+        "index"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_isclose": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "other"
+      ],
+      [
+        "PolyTensor *",
+        "rtol"
+      ],
+      [
+        "PolyTensor *",
+        "atol"
+      ],
+      [
+        "_Bool",
+        "equal_nan"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_isfinite": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_isinf": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_isnan": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_leaky_relu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "double",
+        "slope"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_lerp": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "end"
+      ],
+      [
+        "PolyTensor *",
+        "weight"
+      ],
+      [
+        "_Bool",
+        "scalar_weight"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_linspace_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "double",
+        "start"
+      ],
+      [
+        "double",
+        "stop"
+      ],
+      [
+        "int64_t",
+        "steps"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "int",
+        "device_id"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_log": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_log10": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_log1p": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_log_softmax": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_logcumsumexp": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_logsigmoid": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_lstsq": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_max": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_mean": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_min": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_minimum": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_mish": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_mse_loss": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_nll_loss": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "PolyTensor *",
+        "weight"
+      ],
+      [
+        "PolyTensor *",
+        "ignore_index"
+      ],
+      [
+        "int",
+        "reduction"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_normalize": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "double",
+        "p"
+      ],
+      [
+        "int",
+        "axis"
+      ],
+      [
+        "double",
+        "eps"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_one_hot": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "int64_t",
+        "num_classes"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_permute": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "perm"
+      ],
+      [
+        "int",
+        "ndim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_quick_gelu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_reciprocal": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_release": {
+    "return": "void",
+    "args": [
+      [
+        "PolyTensor *",
+        "tensor"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "value",
+    "cleanup": true
+  },
+  "poly_tensor_relu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_reshape": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "dims"
+      ],
+      [
+        "int",
+        "ndim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_retain": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyTensor *",
+        "tensor"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_rope": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "freqs_cos"
+      ],
+      [
+        "PolyTensor *",
+        "freqs_sin"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_round": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_selu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "alpha"
+      ],
+      [
+        "PolyTensor *",
+        "gamma"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_sigmoid": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_sign": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_silu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_sinh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_softmax": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_softplus": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "double",
+        "beta"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_softsign": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_solve": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_sort": {
+    "return": "int",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "dim"
+      ],
+      [
+        "int",
+        "descending"
+      ],
+      [
+        "PolyTensor **",
+        "out_values"
+      ],
+      [
+        "PolyTensor **",
+        "out_indices"
+      ]
+    ],
+    "arrays": [
+      [
+        4,
+        -1,
+        4,
+        "out"
+      ],
+      [
+        5,
+        -1,
+        4,
+        "out"
+      ]
+    ],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
+  "poly_tensor_sparse_categorical_crossentropy": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ],
+      [
+        "PolyTensor *",
+        "target"
+      ],
+      [
+        "int64_t",
+        "ignore_index"
+      ],
+      [
+        "double",
+        "smoothing"
+      ],
+      [
+        "int",
+        "reduction"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_sum": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_tan": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_tanh": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_to_device": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "tensor"
+      ],
+      [
+        "PolyDevice",
+        "device"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_triangular_solve": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "a"
+      ],
+      [
+        "PolyTensor *",
+        "b"
+      ],
+      [
+        "int",
+        "upper"
+      ],
+      [
+        "int",
+        "transpose_a"
+      ],
+      [
+        "int",
+        "unit_diagonal"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_tril": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "diagonal"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_triu": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "diagonal"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_unfold": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int",
+        "dim"
+      ],
+      [
+        "int64_t",
+        "size"
+      ],
+      [
+        "int64_t",
+        "step"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_uop_physical": {
+    "return": "PolyUOp *",
+    "args": [
+      [
+        "PolyTensor *",
+        "tensor"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false
+  },
+  "poly_uop_ndim": {
+    "return": "int",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "const PolyUOp *",
+        "u"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  }
+}

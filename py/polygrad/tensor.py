@@ -3933,6 +3933,52 @@ class Tensor:
 
         root = _uop_wrap(self._ctx, Tensor._core_uop_raw(self._tensor))
         target_roots = tuple(Tensor._core_uop_raw(target._tensor) for target in targets)
+        callbacks = []
+        out_grads, out_present = self._gradient_roots(root, initial_grad, target_roots, callbacks)
+        logical_grads = [None] * len(targets)
+        # Differentiate the existing portable roots independently. A physical
+        # BUFFER is never a valid substitute for a missing logical expression.
+        if self.uop_logical is not None and (gradient is None or gradient.uop_logical is not None):
+            indices = [i for i, target in enumerate(targets) if target.uop_logical is not None]
+            portable, _ = self._gradient_roots(
+                self.uop_logical, gradient.uop_logical if gradient is not None else None,
+                tuple(targets[i].uop_logical for i in indices),
+                iter(callbacks),
+            )
+            for i, grad in zip(indices, portable):
+                logical_grads[i] = grad
+
+        grads = []
+        for target, grad_uop, logical, present in zip(targets, out_grads, logical_grads, out_present):
+            if not present:
+                grads.append(target.const_like(0))
+                continue
+            if not grad_uop:
+                raise RuntimeError('poly_uop_grad_many returned NULL for a present target')
+            grad_handle = target._core_create_result_like(
+                logical, grad_uop, _POLY_TENSOR_VALUE, target._device,
+            )
+            if not grad_handle:
+                raise RuntimeError('failed to store backward gradient roots')
+            grad_tensor = Tensor(
+                _ctx=self._ctx, _tensor=grad_handle, _shape=target.shape,
+                _dtype=target._dtype_str, _device=target._device,
+            )
+            if int(_ffi._lib.poly_uop_device(grad_uop)) == 0:
+                placed = grad_tensor.clone(device=target._device)
+                # Placement of a constant derivative needs physical storage,
+                # but that temporary allocation is not portable model state.
+                paired = target._core_create_result_like(
+                    logical, Tensor._core_uop_raw(placed._tensor), _POLY_TENSOR_VALUE, target._device)
+                grad_tensor.dispose()
+                placed.dispose()
+                grad_tensor = Tensor(_ctx=self._ctx, _tensor=paired, _shape=target.shape,
+                                     _dtype=target._dtype_str, _device=target._device)
+            grads.append(grad_tensor)
+        return grads
+
+    def _gradient_roots(self, root, initial_grad, target_roots, callbacks):
+        """Apply the same reverse pass to either root domain, including callbacks."""
         custom_records = Tensor._custom_grad_records_for(self._ctx, root)
         if custom_records:
             # Pinned tinygrad differentiates AFTER(data, CALL) along two
@@ -4002,10 +4048,26 @@ class Tensor:
                             f'expected TUPLE body for gradient, got Ops.{body_op}'
                         )
                     continue
-                if len(upstreams) > 1:
-                    returned = rec['grad_fxn'](*upstreams, call=call)
+                if isinstance(callbacks, list):
+                    returned = (rec['grad_fxn'](*upstreams, call=call) if len(upstreams) > 1
+                                else rec['grad_fxn'](upstreams[0], call))
+                    if isinstance(returned, (Tensor, UOp)):
+                        returned = (returned,)
+                    returned = None if returned is None else tuple(Tensor._grad_result_raw(g) for g in returned)
+                    callbacks.append((rec['grad_fxn'], tuple(map(_uop_raw, (*call_args, *upstreams))), returned))
                 else:
-                    returned = rec['grad_fxn'](upstreams[0], call)
+                    # A host callback runs once. Instantiate its derivative
+                    # expression on the logical arguments/upstreams, then let
+                    # the independent logical reverse pass propagate it.
+                    fn, physical_args, returned = next(callbacks)
+                    logical_args = tuple(map(_uop_raw, (*call_args, *upstreams)))
+                    if fn is not rec['grad_fxn'] or len(physical_args) != len(logical_args):
+                        raise RuntimeError('custom gradient root domains have incompatible arguments')
+                    n = len(physical_args)
+                    if returned is not None:
+                        returned = tuple(_ffi._lib.poly_uop_substitute(
+                            self._ctx, g, (_ffi._ptr*n)(*physical_args),
+                            (_ffi._ptr*n)(*logical_args), n) if g else None for g in returned)
                 if returned is None:
                     continue
                 if isinstance(returned, (Tensor, UOp)):
@@ -4044,27 +4106,7 @@ class Tensor:
                 self._ctx, root, initial_grad, target_roots, return_present=True
             )
 
-        grads = []
-        for target, grad_uop, present in zip(targets, out_grads, out_present):
-            if not present:
-                grads.append(target.const_like(0))
-                continue
-            if not grad_uop:
-                raise RuntimeError('poly_uop_grad_many returned NULL for a present target')
-            grad_handle = target._core_create_result_like(
-                grad_uop if target.uop_logical is not None else None,
-                grad_uop, _POLY_TENSOR_VALUE, target._device,
-            )
-            if not grad_handle:
-                raise RuntimeError('failed to store backward gradient roots')
-            grad_tensor = Tensor(
-                _ctx=self._ctx, _tensor=grad_handle, _shape=target.shape,
-                _dtype=target._dtype_str, _device=target._device,
-            )
-            if int(_ffi._lib.poly_uop_device(grad_uop)) == 0:
-                grad_tensor = grad_tensor.clone(device=target._device)
-            grads.append(grad_tensor)
-        return grads
+        return out_grads, out_present
 
     def backward(self, gradient=None):
         """Populate gradients for every live reachable floating Tensor."""

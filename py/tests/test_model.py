@@ -54,6 +54,33 @@ def test_high_rank_internal_view_with_flat_model_bindings():
             for t in (output, view, cube, x): t.dispose()
 
 @pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+@pytest.mark.parametrize('seeded', [False, True])
+def test_portable_tensor_gradient(device, seeded):
+    from polygrad import create
+    with create(device=device, logical='always') as rt:
+        x = rt.Tensor(np.array([1, 2, 3], np.float32)).is_param_(False)
+        square = x.square()
+        loss = square.sum()
+        seed = x * 0 + 3
+        grad = (square.gradient(x, gradient=seed) if seeded else loss.gradient(x))[0]
+        second = grad.sum().gradient(x)[0]
+        model = rt.Model.from_tensors(params={'x': x}, outputs={'gradient': grad, 'second': second})
+        restored = rt.Model.load(model.save())
+        try:
+            for current in (model, restored):
+                for values in ([1, 2, 3], [-4, 0, 7]):
+                    current.write_buffer('x', np.array(values, np.float32))
+                    result = current.forward()
+                    scale = 6 if seeded else 2
+                    np.testing.assert_array_equal(result['gradient'], np.array(values) * scale)
+                    np.testing.assert_array_equal(result['second'], np.full(3, scale))
+        finally:
+            restored.dispose()
+            model.dispose()
+            for t in (second, grad, seed, loss, square, x):
+                t.dispose()
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
 def test_output_lookup_does_not_enumerate_buffers(device, monkeypatch):
     from polygrad import create
     with create(device=device, logical='always') as rt:

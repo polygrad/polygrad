@@ -516,8 +516,21 @@ async function main() {
     webgpuLifecycleResult = await runWebGpuLifecycleChecks()
   }
 
-  const totalPassed = tensorResult.passed + instanceResult.passed + webgpuCapsResult.passed + webgpuLifecycleResult.passed
-  const totalFailed = tensorResult.failed + instanceResult.failed + webgpuCapsResult.failed + webgpuLifecycleResult.failed
+  let extensionPassed = 0, extensionFailed = 0
+  const extensionRuntime = await polygrad.create({core: 'wasm', device, logical: 'always'})
+  try {
+    const response = await fetch('/extension/author.wasm')
+    if (!response.ok) throw new Error('extension fixture missing')
+    await window.__checkExtension(extensionRuntime, await response.arrayBuffer(), polygrad.create)
+    console.log('  [PASS] C extension gradient, checkpoint and rollback')
+    extensionPassed++
+  } catch (e) {
+    console.log('  [FAIL] C extension: ' + (e.stack || e.message))
+    extensionFailed++
+  } finally { await extensionRuntime.dispose() }
+
+  const totalPassed = tensorResult.passed + instanceResult.passed + webgpuCapsResult.passed + webgpuLifecycleResult.passed + extensionPassed
+  const totalFailed = tensorResult.failed + instanceResult.failed + webgpuCapsResult.failed + webgpuLifecycleResult.failed + extensionFailed
   const totalSkipped = (tensorResult.skipped || 0) + (instanceResult.skipped || 0) +
     (webgpuCapsResult.skipped || 0) + (webgpuLifecycleResult.skipped || 0)
   console.log(

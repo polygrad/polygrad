@@ -2031,7 +2031,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 107
+  const EXPECTED_ABI = 108
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -2498,8 +2498,12 @@ function createWasmCoreFromModule(Module, device) {
       const entryOutputCountsPtr = writeI32Array(entryOutputCounts)
       const entryObjectivesPtr = allocStringArray(entryObjectives, true)
       const entryFlagsPtr = writeI32Array(entryFlags)
+      // wasm32 PolyModelError: int code, pointer func, char message[256].
+      const errorPtr = malloc(264)
+      heapU8().fill(0, errorPtr, errorPtr + 264)
 
       const cleanup = () => {
+        Module._free(errorPtr)
         for (const p of stringPtrs) Module._free(p)
         Module._free(bindingNamesPtr)
         if (bindingRolesPtr) Module._free(bindingRolesPtr)
@@ -2517,16 +2521,20 @@ function createWasmCoreFromModule(Module, device) {
         bindingNamesPtr, bindingRolesPtr, bindingTensorsPtr, bindingFlagsPtr, bindings.length,
         entryNamesPtr, entryInputsPtr, entryInputCountsPtr,
         entryOutputsPtr, entryOutputCountsPtr, entryObjectivesPtr, entryFlagsPtr,
-        entries.length, 0, 0]
+        entries.length, 0, errorPtr]
+      const finish = inst => {
+        if (!inst) throw new Error(readCString(errorPtr + 8) || 'Model construction failed')
+        return async ? inst : configureModelDevice(inst)
+      }
       try {
         if (async) {
           // Sealing uses this runtime's preferred device, now initialized.
           // Keep argument storage alive across snapshot realization/readback.
           return Module.ccall('poly_model_from_binding_arrays', 'number',
-            args.map(() => 'number'), args, { async: true }).finally(cleanup)
+            args.map(() => 'number'), args, { async: true }).then(finish).finally(cleanup)
         }
         const inst = Module._poly_model_from_binding_arrays(...args)
-        const result = configureModelDevice(inst)
+        const result = finish(inst)
         cleanup()
         return result
       } catch (err) {

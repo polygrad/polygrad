@@ -56,7 +56,7 @@ def model_bundle(tmp_path_factory):
 @pytest.mark.parametrize('path,index,lang,code,mode', BLOCKS,
                          ids=[f'{p}:{i}:{lang}' for p, i, lang, _, _ in BLOCKS])
 def test_readme_block(path, index, lang, code, mode, tmp_path, request):
-    assert mode in {'run', 'browser', 'network', 'config', 'export', 'package'}, mode
+    assert mode in {'run', 'browser', 'network', 'config', 'export', 'package', 'extension'}, mode
     if mode == 'browser':
         pytest.skip('Browser-only example: requires bundling/HTML and a browser; not certified by Node')
     if mode == 'network' and os.environ.get('README_NETWORK') != '1':
@@ -71,6 +71,14 @@ def test_readme_block(path, index, lang, code, mode, tmp_path, request):
         json.loads(code)
         return
     assert lang in {'python', 'js', 'javascript'}, f'Unclassified example: {path}:{index} ({lang})'
+
+    if mode == 'extension':
+        artifact = 'author.so' if lang == 'python' else 'native.node'
+        source = ROOT / 'build/extension' / artifact
+        assert source.is_file(), f'run make build/extension/{artifact}'
+        target = tmp_path / 'build/extension'
+        target.mkdir(parents=True)
+        shutil.copy2(source, target / artifact)
 
     if "linear.pgb" in code or mode == 'export':
         (tmp_path / 'linear.pgb').write_bytes(request.getfixturevalue('model_bundle'))

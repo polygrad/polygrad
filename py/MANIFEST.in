@@ -2,6 +2,7 @@ include LICENSE
 include CHANGELOG.md
 recursive-include csrc *.c *.h
 include polygrad/_native.c
+include polygrad/extension_api.json
 prune tests
 prune build
 prune dist

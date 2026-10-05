@@ -12,6 +12,16 @@
 #include "ctx.h"
 #include "engine/realize.h"
 #include "tensor.h"
+#include <string.h>
+
+PolyProc poly_get_proc_address(const char *name) {
+  if (!name) return NULL;
+#define POLY_EXTENSION_SYMBOL(symbol)                                                              \
+  if (!strcmp(name, #symbol)) return (PolyProc)symbol;
+#include "frontend_exports.h"
+#undef POLY_EXTENSION_SYMBOL
+  return NULL;
+}
 
 /* Current Tinygrad UOp.new_buffer always records a concrete device.  FFI
  * constructors without a device argument use the context/default device. */

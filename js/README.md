@@ -736,6 +736,53 @@ function create({ polygrad: pg }) {
 | Compilation | `jit`, `jitAsync`, `compile`, `compileAsync`, `Tensor.customKernel` |
 | Neural nets | `nn.Linear`, `nn.SGD`, `nn.Adam`, `nn.AdamW`, `nn.getParameters`, `nn.getStateDict` |
 
+## C-authored graphs (development ABI108)
+
+`pg.loadExtension(source)` attaches a construction-only C author to the current
+runtime: pass a generated Node addon in native mode, or Wasm bytes/a compiled
+`WebAssembly.Module` in Wasm mode. The author calls existing `poly_tensor_*`
+functions. Polygrad owns symbol resolution, array copying and Tensor adoption.
+No second Polygrad core or execution path is involved.
+
+From the checkout root, run `make build/extension/native.node` to build the
+supplied Gaussian-density author. Its mode `0` returns a log density and gradient:
+
+<!-- readme-test: extension -->
+```js
+const polygrad = require('polygrad')
+const path = require('node:path')
+
+;(async () => {
+  const pg = await polygrad.create({core: 'native', device: 'cpu', logical: 'always'})
+  try {
+    const x = new pg.Tensor(new Float32Array([1, 2, 3]))
+    const author = await pg.loadExtension(require(path.resolve('build/extension/native.node')))
+    try {
+      const [logp, gradient] = author.build([x, x, x], [0])
+      author.dispose() // Returned Tensors remain valid.
+      try {
+        if (logp.item() !== -7 || String(gradient.toArray()) !== '-1,-2,-3')
+          throw new Error('Unexpected density or gradient')
+      } finally { logp.dispose(); gradient.dispose() }
+    } finally { author.dispose(); x.dispose() }
+  } finally { await pg.dispose() }
+})().catch(error => { console.error(error); process.exitCode = 1 })
+```
+
+Generate the adapter using `scripts/extension_bindings.py` in the matching
+Polygrad source checkout (see the Python README's C author contract). Native
+builds include the packaged `extension_native.h`. Signatures and Wasm copying
+metadata are generated from the public headers plus reviewed pointer annotations;
+unsupported imports and ABI mismatches reject. Construction requires an idle
+runtime. The author borrows inputs, returns owned references and cleans up its
+intermediates/capture scopes on failure. Wasm handles belong to Polygrad's memory:
+never dereference them or free them with the author's allocator.
+
+These are trusted extensions, not a security sandbox. Loading does not make
+arbitrary C code safe, and not every public C signature is supported. Native
+integration is tested on Linux; Chrome Wasm/WebGPU are tested. Build ordinary
+Models with `pg.Model.fromTensors` for execution, training and save/load.
+
 ## Troubleshooting
 
 - **`unknown type name '__fp16'`:** float16 CPU kernels require Clang.

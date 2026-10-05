@@ -350,6 +350,10 @@ PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
 
+/* Scalar-output gradient. Both root domains are differentiated independently;
+ * host-language custom gradient callbacks must be handled by their frontend. */
+PolyTensor *poly_tensor_gradient(PolyCtx *ctx, PolyTensor *loss, PolyTensor *target);
+
 PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);
 
 PolyTensor *poly_tensor_sum(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);

@@ -611,6 +611,48 @@ def normalize(x: Tensor) -> Tensor:
 This keeps execution in the caller's Polygrad context and avoids unnecessary
 NumPy readback.
 
+### C-authored graphs (development ABI108)
+
+`rt.load_extension(path)` attaches a separately built C author to this runtime's
+existing core. The author calls existing `poly_tensor_*` functions; it does not
+link another Polygrad implementation. Build its adapter with
+`scripts/extension_bindings.py --source author.c --entry build_graph --inputs 1 --outputs 1 --output build/author`
+from a matching Polygrad checkout. Clang reads the public declarations; unknown
+pointer signatures reject rather than being forwarded incorrectly.
+
+For a runnable example from the checkout root, first run
+`make build/extension/author.so`. The supplied `test/extension_fixture.c`
+constructs a Gaussian log density and its gradient (mode `0`):
+
+<!-- readme-test: extension -->
+```python
+import polygrad
+
+with polygrad.create(device='CPU', logical='always') as rt:
+    x = rt.Tensor([1., 2., 3.])
+    author = rt.load_extension('./build/extension/author.so')
+    try:
+        logp, gradient = author.build([x, x, x], [0])
+        author.dispose()  # Returned Tensors remain valid.
+        try:
+            assert logp.item() == -7.0
+            assert gradient.numpy().tolist() == [-1., -2., -3.]
+        finally:
+            logp.dispose()
+            gradient.dispose()
+    finally:
+        author.dispose()
+        x.dispose()
+```
+
+The C entry returns `int` and takes `PolyCtx*`, a borrowed `PolyTensor**` input
+array, optional `int`/`double` values, and an owned `PolyTensor**` output array.
+It builds graphs only: no execution, retained host callbacks or private struct
+access. It must release intermediate references and unwind captures on failure.
+Seal results with `rt.Model.from_tensors` when persistence is needed. ABI
+mismatches and inputs from another context reject. This loads trusted native
+code, not sandboxed plugins. Linux is tested; other native platforms are untested.
+
 ## API Overview
 
 | Area | Main APIs |

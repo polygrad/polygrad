@@ -4,10 +4,12 @@
 import pathlib
 import re
 import sys
+import json
 
 
 roots = [pathlib.Path(arg) for arg in sys.argv[1:]] or [pathlib.Path("js/src")]
 exports = {"malloc", "free"}
+exports.update(json.loads((pathlib.Path(__file__).resolve().parents[1] / 'js/src/extension_api.json').read_text()))
 for root in roots:
   for path in root.rglob("*.js"):
     source = path.read_text(encoding="utf-8")

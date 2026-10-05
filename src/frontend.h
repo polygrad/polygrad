@@ -8,6 +8,13 @@
 extern "C" {
 #endif
 
+/* Address lookup in this loaded core, not a second mathematical API. Call only
+ * through the exact declared function type, with matching POLYGRAD_ABI_VERSION.
+ * Unsupported symbols return NULL. The provider must outlive its consumers. */
+typedef void (*PolyProc)(void);
+typedef PolyProc (*PolyProcResolver)(const char *name);
+PolyProc poly_get_proc_address(const char *name);
+
 /* Dtype-ID adapters for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_uop_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
 PolyUOp *poly_uop_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);

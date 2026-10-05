@@ -87,6 +87,31 @@ FILC_SRC += src/kernels/portable.c src/kernels/webgpu.c
 WASM_SRC = $(filter-out src/runtime_cpu.c src/renderer/cuda.c src/runtime_cuda.c src/renderer/hip.c src/runtime_hip.c src/renderer/isa/x86.c,$(SRC)) $(CODEC_SRC)
 WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
 
+.PHONY: extension-bindings check-extension-bindings extension-fixture test-extension test-extension-python test-extension-native test-extension-wasm
+NODE_INCLUDE ?= /usr/local/include/node
+extension-bindings:
+	$(PYTHON) scripts/extension_bindings.py --core
+check-extension-bindings:
+	$(PYTHON) scripts/extension_bindings.py --core --check
+build/extension/extension.c: test/extension_fixture.c scripts/extension_bindings.py js/src/extension_api.json $(PROJECT_HEADERS)
+	$(PYTHON) scripts/extension_bindings.py --source $< --entry extension_density --inputs 3 --outputs 2 --output build/extension
+build/extension/author.so: build/extension/extension.c test/extension_fixture.c
+	$(CC) -std=c11 -fPIC -shared -Isrc $^ -o $@ -lm
+build/extension/native.node: build/extension/extension.c test/extension_fixture.c js/extension_native.h
+	$(CC) -std=c11 -fPIC -shared -DPOLY_EXTENSION_NAPI -Isrc -Ijs -I$(NODE_INCLUDE) $(filter %.c,$^) -o $@ -lm
+build/extension/author.wasm: build/extension/extension.c test/extension_fixture.c
+	$(EMCC) -O2 -Isrc $^ -sSTANDALONE_WASM=1 -sALLOW_MEMORY_GROWTH=1 --no-entry -Wl,--allow-undefined \
+	  -Wl,--export=poly_extension_build -Wl,--export=poly_extension_manifest -Wl,--export=poly_extension_abi \
+	  -Wl,--export=malloc -Wl,--export=free -o $@
+extension-fixture: build/extension/author.so build/extension/native.node build/extension/author.wasm
+test-extension: test-extension-python test-extension-native test-extension-wasm
+test-extension-python: check-extension-bindings build/extension/author.so build/libpolygrad.so
+	PYTHONPATH=py POLY_LIB=$(CURDIR)/build/libpolygrad.so $(PYTHON) -m pytest -q py/tests/test_extension.py py/tests/test_extension_bindings.py
+test-extension-native: check-extension-bindings build/extension/native.node js/build/Release/polygrad_napi.node
+	$(NODE) js/test/test_extension.js
+test-extension-wasm: check-extension-bindings build/extension/author.wasm wasm-pkg
+	POLY_CORE=wasm $(NODE) js/test/test_extension.js
+
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
 # Instrument suspension-bearing paths (including Model I/O and BEAM), preserving
 # the synchronous compiler fast path. Do not rely on helper inlining for safety.
@@ -840,11 +865,11 @@ test-onnx-encoder: test-onnx-encoder-python js/build/Release/polygrad_napi.node 
 	$(NODE) js/test/test_onnx_encoder.js wasm '$(ONNX_ENCODER_DIR)'
 	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-browser
 
-test-py: verify-source-mirrors build/libpolygrad.so
+test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
 .PHONY: test-readme
-test-readme: verify-source-mirrors build/libpolygrad.so
+test-readme: verify-source-mirrors build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_api_parity.py py/tests/test_readme.py -k readme
 
 # Supply an isolated interpreter with the published baseline installed. Run on
@@ -930,7 +955,7 @@ test-browser-runner:
 	$(NODE) js/test/test_browser_runner.js
 	$(NODE) js/test/test_wasm_addresses.js
 
-test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg
+test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg build/extension/author.wasm
 	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js
 
 test-browser-matrix: test-js-browser-matrix
@@ -966,7 +991,7 @@ test-browser-legacy: wasm-pkg
 #           native core + cpu/x86/interp/cuda*/hip* backends
 #   Python: py/tests/
 #   * only when hardware is available
-TEST_ALL_DEPS = test test-x86 test-interp test-runtime-wasm test-js-wasm test-js-package test-js-native-cpu test-js-native-x86 test-js-native-interp test-py test-model-interchange
+TEST_ALL_DEPS = test test-x86 test-interp test-runtime-wasm test-js-wasm test-js-package test-js-native-cpu test-js-native-x86 test-js-native-interp test-py test-model-interchange test-extension
 ifeq ($(HAS_CUDA), 1)
   TEST_ALL_DEPS += test-cuda test-js-native-cuda
 endif
@@ -1234,5 +1259,5 @@ build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 # ── Full verification ──────────────────────────────────────────────────
 
-verify: test test-harness-skip-accounting test-parity format-check analyze fuzz-smoke
+verify: test test-harness-skip-accounting test-parity format-check analyze fuzz-smoke test-extension
 	@echo "All verification checks passed."

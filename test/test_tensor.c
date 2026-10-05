@@ -23,6 +23,17 @@
 #include "../src/tensor.h"
 #include "../src/codegen/codegen.h"
 
+TEST(tensor, extension_resolver_uses_current_core) {
+  ASSERT_TRUE(poly_get_proc_address(NULL) == NULL);
+  ASSERT_TRUE(poly_get_proc_address("not_a_polygrad_symbol") == NULL);
+  ASSERT_TRUE(poly_get_proc_address("poly_tensor_abs") == (PolyProc)poly_tensor_abs);
+  ASSERT_TRUE(poly_get_proc_address("poly_tensor_gradient") == (PolyProc)poly_tensor_gradient);
+  int (*abi)(void) = (int (*)(void))poly_get_proc_address("poly_abi_version");
+  ASSERT_NOT_NULL(abi);
+  ASSERT_EQ(abi(), POLYGRAD_ABI_VERSION);
+  PASS();
+}
+
 TEST(tensor, typed_core_and_ffi_share_graphs) {
   for (int policy = POLY_LOGICAL_NEVER; policy <= POLY_LOGICAL_UNTIL_REALIZE; policy++) {
     PolyCtx *ctx = poly_ctx_new();

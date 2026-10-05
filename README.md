@@ -351,6 +351,7 @@ inference-only; unsupported operators and shapes produce an import error.
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.
 Polygrad 0.6.0 requires C ABI107 and writes PGIR22/PGPM10.
+The current development tree requires ABI108; the graph formats are unchanged.
 PGIR19 bundles remain readable; incompatible artifacts are rejected.
 Cached models save their program and weights, not conversation history.
 

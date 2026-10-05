@@ -1192,7 +1192,7 @@ async function runTensorTests(pg, createRuntime) {
     assert(cloned.isParam === false, 'clone should preserve isParam')
     assert(cloned.grad && cloned.grad.uopLogical.src.length === 2, 'clone should recursively clone grad')
     assert(
-      cloned.grad.uopLogical.src[0].buffer.key !== source.grad.uopLogical.src[0].buffer.key,
+      cloned.grad.uopPhysical.src[0].buffer.key !== source.grad.uopPhysical.src[0].buffer.key,
       'cloned grad needs a separate buffer'
     )
     assertClose(await cloned.toArray(), [1, 2, 3, 4])
@@ -1277,13 +1277,14 @@ async function runTensorTests(pg, createRuntime) {
     const loss = x.sum()
     await loss.backward()
     const firstGrad = x.grad
-    const firstRoot = firstGrad.uopLogical
+    // Storage identity belongs to the executable graph, not portable provenance.
+    const firstRoot = firstGrad.uopPhysical
     const firstBuffer = firstRoot.src[0].buffer.key
     assert(firstRoot.src.length === 2, 'first grad should be AFTER')
 
     await loss.backward()
     assert(x.grad === firstGrad, 'gradient accumulation should preserve Tensor identity')
-    const secondRoot = x.grad.uopLogical
+    const secondRoot = x.grad.uopPhysical
     assert(secondRoot.src[0].key === firstRoot.key, 'gradient effect root changed')
     assert(secondRoot.src[0].src[0].buffer.key === firstBuffer, 'gradient buffer identity changed')
     assertClose(await x.grad.toArray(), [2, 2, 2, 2])

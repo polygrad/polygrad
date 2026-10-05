@@ -68,6 +68,7 @@
     "napi_api.c",
     "binding.gyp",
     "scripts/",
+    "extension_native.h",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"

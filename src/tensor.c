@@ -8,6 +8,7 @@
 #include "tensor.h"
 #include "mixin/elementwise.h"
 #include "mixin/movement.h"
+#include "mixin/gradient.h"
 #include "bigint.h"
 #include "ctx.h"
 #include "device.h"
@@ -792,6 +793,42 @@ PolyTensor *poly_tensor_create_result_like(
 ) {
   PolyTensor *inputs[1] = {input};
   return poly_tensor_create_result(ctx, inputs, 1, uop_logical, uop_physical, role, device);
+}
+
+PolyTensor *poly_tensor_gradient(PolyCtx *ctx, PolyTensor *loss, PolyTensor *target) {
+  PolyTensor *inputs[] = {loss, target};
+  int portable = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (portable < 0 || !tensor_roots_owned_by_ctx(ctx, loss) ||
+      !tensor_roots_owned_by_ctx(ctx, target) || poly_uop_ndim(ctx, loss->uop_physical) != 0 ||
+      !poly_dtype_is_float(loss->uop_physical->dtype) ||
+      !poly_dtype_is_float(target->uop_physical->dtype))
+    return NULL;
+  /* This native helper cannot invoke a host custom-gradient callback. Do not
+   * silently differentiate only AFTER's direct data edge. */
+  int n = 0;
+  PolyUOp **topo = poly_uop_toposort(ctx, loss->uop_physical, &n);
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_CALL && topo[i]->arg.kind == POLY_ARG_CALL_INFO &&
+        topo[i]->arg.call_info && topo[i]->arg.call_info->grad_fxn_key)
+      return NULL;
+  PolyUOp *physical = poly_uop_grad(ctx, loss->uop_physical, target->uop_physical);
+  PolyUOp *logical = portable ? poly_uop_grad(ctx, loss->uop_logical, target->uop_logical) : NULL;
+  if (!physical || (portable && !logical)) return NULL;
+  PolyTensor *out = poly_tensor_create_result(
+      ctx, inputs, 2, logical, physical, POLY_TENSOR_VALUE, target->device
+  );
+  if (out && poly_uop_device(physical) == POLY_DEVICE_AUTO) {
+    PolyTensor *placed = poly_tensor_clone(ctx, out, target->device);
+    PolyTensor *paired = placed ? poly_tensor_create_result(
+                                      ctx, inputs, 2, logical, placed->uop_physical,
+                                      POLY_TENSOR_VALUE, target->device
+                                  )
+                                : NULL;
+    poly_tensor_release(placed);
+    poly_tensor_release(out);
+    out = paired;
+  }
+  return out;
 }
 
 int poly_tensor_custom_kernel(
