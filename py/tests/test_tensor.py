@@ -478,6 +478,80 @@ print('copy ownership passed')
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize('mode', ['assign', 'view', 'indirect', 'pending-chain'])
+def test_repeated_writes_bound_logical_lifetime(mode):
+    with Runtime(device='cpu', logical='until_realize') as rt:
+        x = rt.Tensor([1., 2., 3., 4.]).realize()
+        baseline = None
+        for step in range(32):
+            target = x[:2] if mode == 'view' else x
+            target.assign(target + 1)
+            assert target.logical_state == 'available'
+            if mode == 'pending-chain':
+                target.assign(target + 1)
+            # Rewriting this dependent's input must not retire its unevaluated sum.
+            future = x + 7
+            out = x + 1 if mode == 'indirect' else target
+            out.realize()
+            assert x.logical_state == 'retired'
+            assert x.uop_logical.op_name == 'BUFFER'
+            assert future.logical_state == 'available'
+            assert future.uop_logical.op_name != 'BUFFER'
+            future.dispose()
+            if out is not target:
+                out.dispose()
+            if target is not x:
+                target.dispose()
+            gc.collect()
+            rt.collect()
+            stats = rt.stats()
+            if step == 7:
+                baseline = stats
+            if step > 7:
+                assert stats['arena_bytes'] == baseline['arena_bytes']
+                assert stats['cse_entries'] == baseline['cse_entries']
+        np.testing.assert_array_equal(x.numpy(),
+            [33, 34, 3, 4] if mode == 'view' else
+            [65, 66, 67, 68] if mode == 'pending-chain' else [33, 34, 35, 36])
+
+
+def test_repeated_training_bounds_parameter_and_gradient_graphs():
+    from polygrad.nn.optim import Adam
+    with Runtime(device='cpu', logical='until_realize') as rt, Context(TRAINING=1):
+        p = rt.Tensor([1., 2.]).realize()
+        opt = Adam([p], lr=.01)
+        counts = []
+        def nodes(root):
+            seen, stack = set(), [root]
+            while stack:
+                node = stack.pop()
+                if node in seen:
+                    continue
+                seen.add(node)
+                stack.extend(node.src)
+            return len(seen)
+        for step in range(40):
+            opt.zero_grad()
+            square = p.square()
+            loss = square.sum()
+            loss.backward()
+            counts.append(nodes(p.grad.uop_logical))
+            opt.step()
+            loss.dispose()
+            square.dispose()
+            assert nodes(p.uop_logical) <= 6
+            gc.collect()
+            rt.collect()
+            current = rt.stats()
+            if step == 7:
+                baseline = current
+            if step > 7:
+                assert current['arena_bytes'] == baseline['arena_bytes']
+                assert current['runtime_cache_entries'] == baseline['runtime_cache_entries']
+        assert len(set(counts[1:])) == 1
+        assert np.all(p.numpy() < [1, 2])
+
+
 class TestCreation:
     def test_invalid_logical_environment_fails_import(self):
         env = os.environ.copy()

@@ -2384,6 +2384,8 @@ static int poly_realize_tensors_impl(
   PolyUOp **map_orig = NULL;
   PolyUOp **map_repl = NULL;
   int map_n = 0;
+  PolyTensor **materialized = NULL;
+  int n_mapped_materialized = 0;
   PolyUOp *linear = NULL;
   PolyVarBinding *var_bindings = NULL;
   int n_var_bindings = 0;
@@ -2467,7 +2469,9 @@ static int poly_realize_tensors_impl(
   );
   if (!big_call) goto cleanup;
   if (map_n > 0 &&
-      poly_tensor_apply_realize_map(ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO) != 0)
+      poly_tensor_apply_realize_map_tracked(
+          ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, &materialized, &n_mapped_materialized
+      ) != 0)
     goto cleanup;
 
   for (int pending = 0; pending < n_pending; pending++) {
@@ -2501,12 +2505,16 @@ static int poly_realize_tensors_impl(
     if (pending_out[pending] != pending_roots[pending])
       pending_tensors[n_materialized++] = pending_tensors[pending];
   }
-  if (poly_tensor_retire_logical_resources(ctx, pending_tensors, n_materialized) != 0) {
+  if (poly_tensor_retire_logical_resources(ctx, materialized, n_mapped_materialized) != 0 ||
+      poly_tensor_retire_logical_resources(ctx, pending_tensors, n_materialized) != 0) {
     rc = -1;
     goto cleanup;
   }
 
 cleanup:
+  for (int i = 0; i < n_mapped_materialized; i++)
+    poly_tensor_release(materialized[i]);
+  free(materialized);
   free(var_bindings);
   free(map_repl);
   free(map_orig);

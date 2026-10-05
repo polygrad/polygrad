@@ -488,13 +488,22 @@ static bool tensor_map_scope_visit(
   return poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq) != NULL;
 }
 
-int poly_tensor_apply_realize_map(
+static PolyUOp *tensor_exact_logical_resource(PolyCtx *ctx, const PolyTensor *tensor);
+
+int poly_tensor_apply_realize_map_tracked(
     PolyCtx *ctx,
     PolyUOp **from,
     PolyUOp **to,
     int n,
-    PolyDevice device
+    PolyDevice device,
+    PolyTensor ***materialized,
+    int *n_materialized
 ) {
+  if (!!materialized != !!n_materialized) return -1;
+  if (materialized) {
+    *materialized = NULL;
+    *n_materialized = 0;
+  }
   if (!ctx || n < 0 || (n > 0 && (!from || !to))) return -1;
   if (n == 0) return 0;
 
@@ -574,6 +583,7 @@ int poly_tensor_apply_realize_map(
       updates[snapshot_indices[slot]] = rewrite_results[rewrite];
   }
 
+  int n_retiring = 0;
   for (int i = 0; i < n_tensors; i++) {
     PolyTensor *tensor = ctx->tensors[i];
     PolyUOp *realized = updates[i];
@@ -581,7 +591,7 @@ int poly_tensor_apply_realize_map(
     /* Pinned tinygrad applies transform_to_call's becomes_map to every live
      * current Tensor.uop before schedule creation (tensor.py:195-206).
      * Polygrad installs the same rewrite only in its current physical root;
-     * the portable logical root is immutable across realization. */
+     * the portable logical root stays intact until successful execution. */
     PolyTensorRole role = tensor->role;
     PolyDevice tensor_device = tensor->device;
     if (role == POLY_TENSOR_PLACE && poly_uop_has_buffer_identity(realized)) {
@@ -592,6 +602,18 @@ int poly_tensor_apply_realize_map(
       }
     }
     tensor_replace_roots_commit(tensor, tensor->uop_logical, realized, role, tensor_device);
+    /* A changed dependent can still contain unevaluated work. Only exact
+     * storage/views qualify; keep owners alive until execution succeeds (or
+     * fails), without retiring portable producers before the launch. */
+    if (materialized && tensor->logical_policy == POLY_LOGICAL_UNTIL_REALIZE &&
+        tensor->logical_state == POLY_LOGICAL_AVAILABLE &&
+        tensor_exact_logical_resource(ctx, tensor))
+      snapshot_tensors[n_retiring++] = poly_tensor_retain(tensor);
+  }
+  if (materialized) {
+    *materialized = snapshot_tensors;
+    *n_materialized = n_retiring;
+    snapshot_tensors = NULL;
   }
   rc = 0;
 
@@ -606,6 +628,16 @@ cleanup:
   free(snapshot_tensors);
   free(updates);
   return rc;
+}
+
+int poly_tensor_apply_realize_map(
+    PolyCtx *ctx,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyDevice device
+) {
+  return poly_tensor_apply_realize_map_tracked(ctx, from, to, n, device, NULL, NULL);
 }
 
 PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *storage) {
@@ -1515,6 +1547,11 @@ int poly_tensor_replace_roots(
   if (!tensor_roots_owned_by_ctx(ctx, tensor) || !poly_ctx_owns_ptr(ctx, uop_physical) ||
       (uop_logical && !poly_ctx_owns_ptr(ctx, uop_logical)) || has_logical != (uop_logical != NULL))
     return -1;
+  /* Retirement describes the current producer, not the wrapper's lifetime.
+   * Mutation installs a new expression over the retired storage leaf; it does
+   * not recover history discarded by earlier materialization. */
+  if (uop_logical && uop_logical != tensor->uop_logical)
+    tensor->logical_state = POLY_LOGICAL_AVAILABLE;
   tensor_replace_roots_commit(tensor, uop_logical, uop_physical, role, device);
   return 0;
 }

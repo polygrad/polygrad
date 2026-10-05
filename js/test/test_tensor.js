@@ -2311,7 +2311,8 @@ async function runTensorTests(pg, createRuntime) {
         ['log1p', x.log1p(), [-1e-6, 0, 1e-6, 0.25].map(Math.log1p)],
         ['expm1', x.expm1(), [-1e-6, 0, 1e-6, 0.25].map(Math.expm1)]
       ]
-      for (const [name, actual, expectedValues] of rows) {
+      // Compare authoring roots before any readback retires their shared input.
+      for (const [name, actual] of rows) {
         const rawFn = pg._core.ffi[`poly_uop_${name}`]
         const expectedLogical = rawFn(x._ctx, x.uopLogical.raw)
         const expectedPhysical = rawFn(x._ctx, x.uop.raw)
@@ -2323,8 +2324,9 @@ async function runTensorTests(pg, createRuntime) {
           actual.uop.key === String(pg._core.ffi.poly_uop_key(expectedPhysical)),
           `${name} physical graph differs`
         )
-        assertClose(await actual.toArray(), expectedValues, 1e-6)
       }
+      for (const [, actual, expectedValues] of rows)
+        assertClose(await actual.toArray(), expectedValues, 1e-6)
 
       const moved = (await Tensor.empty([4], {
         device: 'cpu'
@@ -5729,6 +5731,82 @@ async function runTensorTests(pg, createRuntime) {
   await test('indexed owners: scalar Tensor index', async () => {
     assertClose(await Tensor.arange(6).reshape(2, 3).getitem(new Tensor(1)).toArray(), [3, 4, 5])
   })
+
+  await test('logical repeated training bounds gradients', isolatedRuntime(async rt => {
+    const T = rt.Tensor
+    const previous = T.training
+    T.training = true
+    const p = new T([1, 2], {dtype: 'float32', logical: 'until_realize'})
+    await p.realizeAsync()
+    const opt = new rt.nn.optim.Adam([p], {lr: .01})
+    let baseline, gradNodes
+    try {
+      for (let step = 0; step < 40; step++) {
+        // Release test-owned gradients explicitly: JS finalizers need not run
+        // before the C collection checkpoint used for memory assertions.
+        if (p.grad) p.grad.dispose()
+        opt.zeroGrad()
+        const square = p.square(), loss = square.sum()
+        loss.backward()
+        const count = countGraphNodes(p.grad.uopLogical)
+        if (step === 1) gradNodes = count
+        if (step > 1) assert(count === gradNodes, 'gradient graph grows across steps')
+        await opt.stepAsync()
+        for (const t of [loss, square]) {
+          if (t.grad) t.grad.dispose()
+          t.dispose()
+        }
+        assert(countGraphNodes(p.uopLogical) <= 6, 'parameter history retained')
+        rt.collect()
+        const stats = rt.stats().coreStats
+        if (step === 7) baseline = stats
+        if (step > 7) {
+          assert(stats.arenaBytes === baseline.arenaBytes, 'training arena grows after warmup')
+          assert(stats.runtimeCacheEntries === baseline.runtimeCacheEntries, 'kernel cache grows')
+        }
+      }
+      assert((await p.toArrayAsync()).every((v, i) => v < i + 1), 'optimizer did not update')
+    } finally { T.training = previous }
+  }))
+
+  for (const mode of ['assign', 'view', 'indirect', 'pending-chain']) {
+    await test(`logical repeated writes: ${mode}`, isolatedRuntime(async rt => {
+      const x = new rt.Tensor([1, 2, 3, 4], {dtype: 'float32', logical: 'until_realize'})
+      await x.realizeAsync()
+      let baseline
+      for (let step = 0; step < 32; step++) {
+        const target = mode === 'view' ? x.getitem({start: 0, stop: 2}) : x
+        const next = target.add(1)
+        target.assign(next)
+        next.dispose()
+        assert(target.logicalState === 'available', 'new update must rearm retirement')
+        if (mode === 'pending-chain') {
+          const second = target.add(1)
+          target.assign(second)
+          second.dispose()
+        }
+        const future = x.add(7)
+        const out = mode === 'indirect' ? x.add(1) : target
+        await out.realizeAsync()
+        assert(x.logicalState === 'retired', 'indirect storage owner must retire')
+        assert(countGraphNodes(x.uopLogical) === 2, 'parameter history must collapse to storage')
+        assert(future.logicalState === 'available', 'dependent still has pending work')
+        future.dispose()
+        if (out !== target) out.dispose()
+        if (target !== x) target.dispose()
+        rt.collect()
+        const stats = rt.stats().coreStats
+        if (step === 7) baseline = stats
+        if (step > 7) {
+          assert(stats.arenaBytes === baseline.arenaBytes, 'logical arena grows after warmup')
+          assert(stats.cseEntries === baseline.cseEntries, 'CSE grows after warmup')
+        }
+      }
+      assertClose(await x.toArrayAsync(), mode === 'view' ? [33, 34, 3, 4]
+        : mode === 'pending-chain' ? [65, 66, 67, 68] : [33, 34, 35, 36])
+      x.dispose()
+    }))
+  }
 
   await test('indexed inplace: unrealized assignment and realized forward', async () => {
     const expected = {add: [11, 22, 3, 4], sub: [-9, -18, 3, 4],

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix repeated eager training retaining optimizer history under `until_realize`, including view writes and indirect realization; preserve portable gradient export and `always` retention.
 - Fix large indexed reads retaining dense reduction loops after scheduling splits; restore pinned Tinygrad load-collapse behavior.
 - Fix construction of large Tensor sorts by expanding the core's internal shape workspace; keep tinygrad's sort graph and existing Model binding limits.
 - `Runtime(kernels=True)` can lower FP32 masked interval sums to direct loops; portable Models and gradients keep ordinary Tensor operations. Empty, overlapping and clipped intervals preserve mask semantics.

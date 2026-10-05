@@ -778,7 +778,9 @@ TEST(realize, indirect_immutable_place_input_commits_realized_copy_once) {
   ASSERT_FLOAT_EQ(first_values[1], 3.0f, 1e-6f);
   ASSERT_INT_EQ(placed->role, POLY_TENSOR_VALUE);
   ASSERT_TRUE(placed->source == NULL);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(placed), source_logical);
+  ASSERT_INT_EQ(placed->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(placed)->op, POLY_OP_BUFFER);
+  ASSERT_PTR_NEQ(poly_tensor_uop_logical(placed), source_logical);
   const PolyUOp *placed_identity = poly_uop_get_buffer_identity(poly_tensor_uop(placed));
   ASSERT_NOT_NULL(placed_identity);
   ASSERT_PTR_NEQ(placed_identity, source_physical);
@@ -1409,7 +1411,15 @@ TEST(realize, aggregate_map_preserves_saved_place_version_topology) {
 
   for (int version = 0; version < 4; version++) {
     PolyUOp *current = poly_tensor_uop(saved[version]);
-    ASSERT_PTR_EQ(poly_tensor_uop_logical(saved[version]), versions[version]);
+    /* Only version zero finished. Later versions still own pending writes,
+     * despite the realization map replacing their common input prefix. */
+    if (version == 0) {
+      ASSERT_INT_EQ(saved[version]->logical_state, POLY_LOGICAL_RETIRED);
+      ASSERT_INT_EQ(poly_tensor_uop_logical(saved[version])->op, POLY_OP_BUFFER);
+    } else {
+      ASSERT_INT_EQ(saved[version]->logical_state, POLY_LOGICAL_AVAILABLE);
+      ASSERT_PTR_EQ(poly_tensor_uop_logical(saved[version]), versions[version]);
+    }
     ASSERT_INT_EQ(count_root_ops(ctx, current, POLY_OP_AFTER), version);
     ASSERT_TRUE(poly_uop_reachable(ctx, current, (PolyUOp *)placed_identity));
 
@@ -3069,7 +3079,11 @@ TEST(realize, tensor_chained_assign_versions_execute_once) {
   ASSERT_FLOAT_EQ(values[0], 0.0f, 1e-5f);
   ASSERT_FLOAT_EQ(values[1], 1.0f, 1e-5f);
 
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(counter), second_logical_after);
+  /* The counter was materialized through result, not an explicit realize
+   * argument. UNTIL_REALIZE must retire its completed update history too. */
+  ASSERT_INT_EQ(counter->logical_state, POLY_LOGICAL_RETIRED);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(counter)->op, POLY_OP_BUFFER);
+  ASSERT_PTR_NEQ(poly_tensor_uop_logical(counter), second_logical_after);
   PolyTensor *counter_out = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &counter, 1, &counter_out), 0);
   ASSERT_PTR_EQ(counter_out, counter);

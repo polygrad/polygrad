@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Retire completed logical update graphs after every materialization under `until_realize`, including view writes and indirect outputs. Fix growing eager-training time and memory while preserving portable gradients and explicit `always` retention.
 - Match both comparison operand orders in gather load-collapse, as pinned Tinygrad does; prevent split large gathers from scanning the source for every output. Reduction splitting remains enabled.
 - Expand internal shape workspaces from 16 to 64 axes so bitonic sort can construct large vectors without changing pinned Tensor graphs. Public Model binding ranks and ABI are unchanged.
 - Add opt-in FP32 masked interval-sum lowering through the existing kernel policy on CPU, X86, interpreter, Wasm, CUDA and WebGPU. Preserve portable Tensor graphs and gradients; bound reads to the original mask domain (PG-DIV-016).

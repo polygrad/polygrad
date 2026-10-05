@@ -786,6 +786,19 @@ int poly_tensor_apply_realize_map(
     PolyDevice device
 );
 
+/* Internal realization bookkeeping: same map, additionally returning retained
+ * exact-resource owners. Retire only after successful execution; release each
+ * returned Tensor and free the array on every exit. No second graph traversal. */
+int poly_tensor_apply_realize_map_tracked(
+    PolyCtx *ctx,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyDevice device,
+    PolyTensor ***materialized,
+    int *n_materialized
+);
+
 /* Approved logical/physical boundary: after successful own materialization,
  * replace an UNTIL_REALIZE producer with an exact device-free current
  * resource, or mark unsupported forms unavailable without altering physical. */

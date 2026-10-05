@@ -943,6 +943,56 @@ TEST(tensor, logical_until_realize_retires_producer_to_exact_current_resource) {
   PASS();
 }
 
+TEST(tensor, logical_repeated_writes_retire_all_materialized_owners) {
+  for (int mode = 0; mode < 4; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+    poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_UNTIL_REALIZE);
+    int64_t shape[] = {4}, pairs[1][2] = {{0, 2}};
+    float values[] = {1, 2, 3, 4};
+    PolyTensor *x = poly_tensor_from_host(ctx, values, sizeof(values), POLY_FLOAT32, shape, 1);
+    PolyTensor *realized = NULL;
+    ASSERT_INT_EQ(poly_realize_tensors(ctx, &x, 1, &realized), 0);
+    PolyCtxStats baseline = {0};
+    for (int step = 0; step < 32; step++) {
+      PolyTensor *target = mode == 1 ? poly_tensor_shrink(ctx, x, pairs, 1) : x;
+      PolyTensor *one = poly_tensor_const_like_float(ctx, target, 1);
+      PolyTensor *next = poly_tensor_alu2(ctx, POLY_OP_ADD, target, one);
+      ASSERT_NOT_NULL(poly_tensor_assign(ctx, target, next));
+      ASSERT_INT_EQ(target->logical_state, POLY_LOGICAL_AVAILABLE);
+      poly_tensor_release(next);
+      if (mode == 3) {
+        next = poly_tensor_alu2(ctx, POLY_OP_ADD, target, one);
+        ASSERT_NOT_NULL(poly_tensor_assign(ctx, target, next));
+        poly_tensor_release(next);
+      }
+      PolyTensor *out = mode == 2 ? poly_tensor_alu2(ctx, POLY_OP_ADD, x, one) : target;
+      ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+      ASSERT_INT_EQ(x->logical_state, POLY_LOGICAL_RETIRED);
+      ASSERT_INT_EQ(x->uop_logical->op, POLY_OP_BUFFER);
+      ASSERT_INT_EQ(x->uop_physical->op, POLY_OP_BUFFER);
+      if (out != target) poly_tensor_release(out);
+      if (target != x) poly_tensor_release(target);
+      poly_tensor_release(one);
+      ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+      PolyCtxStats stats = {0};
+      ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+      if (step == 7) baseline = stats;
+      if (step > 7) {
+        ASSERT_INT_EQ(stats.arena_bytes, baseline.arena_bytes);
+        ASSERT_INT_EQ(stats.cse_entries, baseline.cse_entries);
+      }
+    }
+    float got[4];
+    ASSERT_INT_EQ(read_tensor_f32(ctx, x, got, 4), 0);
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], i + 1 + ((mode == 1 && i >= 2) ? 0 : mode == 3 ? 64 : 32), 0);
+    poly_tensor_release(x);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(tensor, logical_until_realize_does_not_rewrite_always_sibling) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

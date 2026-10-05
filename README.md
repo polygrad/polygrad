@@ -528,6 +528,11 @@ the Tinygrad-shaped physical graph. Logical lifetime is configurable:
 - `always` keeps the full producer graph for portable export or later placement;
 - `never` builds only the physical graph and cannot provide portable export.
 
+Use `until_realize` for repeated eager training or assignment loops. `always`
+also retains previous updates, so their graph and differentiation cost grow
+with the loop. Scope `always` to portable graph authoring/capture instead;
+captured Models own their programs independently of the source Tensors.
+
 If any operand has no logical root, a new pure result remains physical-only
 even after the ambient context returns to another policy. This never changes
 the eager physical graph.
