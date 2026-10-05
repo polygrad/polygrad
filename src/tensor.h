@@ -786,17 +786,29 @@ int poly_tensor_apply_realize_map(
     PolyDevice device
 );
 
-/* Internal realization bookkeeping: same map, additionally returning retained
- * exact-resource owners. Retire only after successful execution; release each
- * returned Tensor and free the array on every exit. No second graph traversal. */
+typedef struct {
+  PolyTensor *tensor;
+  PolyUOp *physical;
+  PolyTensorRole role;
+  PolyDevice device;
+} PolyTensorRealizeSnapshot;
+
+/* Internal realization bookkeeping. Retain exact old roots, not an inverse
+ * substitution: distinct expressions can map to the same storage. */
 int poly_tensor_apply_realize_map_tracked(
     PolyCtx *ctx,
     PolyUOp **from,
     PolyUOp **to,
     int n,
     PolyDevice device,
-    PolyTensor ***materialized,
-    int *n_materialized
+    PolyTensorRealizeSnapshot **snapshots,
+    int *n_snapshots
+);
+int poly_tensor_finish_realize_map(
+    PolyCtx *ctx,
+    PolyTensorRealizeSnapshot *snapshots,
+    int n,
+    bool success
 );
 
 /* Approved logical/physical boundary: after successful own materialization,

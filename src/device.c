@@ -667,7 +667,28 @@ int poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
 
 void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf) {
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  return b && !poly_buffer_is_multi(b) ? b->ptr : NULL;
+  return b && !poly_buffer_failed(b) && !poly_buffer_is_multi(b) ? b->ptr : NULL;
+}
+
+bool poly_buffer_failed(const PolyBuffer *buffer) {
+  if (!buffer) return false;
+  if (buffer->failed || poly_buffer_failed(buffer->base) || poly_buffer_failed(buffer->src))
+    return true;
+  for (int i = 0; i < buffer->n_bufs; i++)
+    if (poly_buffer_failed(buffer->bufs[i])) return true;
+  return false;
+}
+
+void poly_buffer_fail(PolyBuffer *buffer) {
+  if (!buffer || buffer->failed) return;
+  buffer->failed = true;
+  buffer->valid = false;
+  /* Writes through a view can damage its base; stale host mirrors must not
+   * recover pre-write values either. Failure is not transaction rollback. */
+  poly_buffer_fail(buffer->base);
+  poly_buffer_fail(buffer->src);
+  for (int i = 0; i < buffer->n_bufs; i++)
+    poly_buffer_fail(buffer->bufs[i]);
 }
 
 PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf) {
@@ -738,7 +759,8 @@ PolyBuffer *poly_buffer_multi_child(PolyBuffer *buffer, int index) {
 }
 
 int poly_buffer_handle_ensure_allocated(PolyCtx *ctx, PolyBuffer *buffer) {
-  if (!ctx || !buffer || poly_buffer_is_multi(buffer) || buffer->device == POLY_DEVICE_AUTO)
+  if (!ctx || !buffer || poly_buffer_failed(buffer) || poly_buffer_is_multi(buffer) ||
+      buffer->device == POLY_DEVICE_AUTO)
     return -1;
 
   if (buffer->base) return poly_buffer_refresh_view(ctx, buffer);
@@ -1309,6 +1331,7 @@ static const PolyAllocator *buffer_allocator(const PolyBuffer *b) {
 }
 
 int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src) {
+  if (poly_buffer_failed(dst) || poly_buffer_failed(src)) return -1;
   if (!dst || !src) return -1;
 
   const PolyAllocator *dst_alloc = buffer_allocator(dst);
@@ -1485,7 +1508,7 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
   if (host_out) *host_out = NULL;
   if (!ctx || !buf) return -1;
   PolyBuffer *cur = poly_uop_buffer_handle(ctx, buf);
-  if (!cur) return -1;
+  if (!cur || poly_buffer_failed(cur)) return -1;
   /* Tinygrad Buffer.view derives its device handle from base+offset before
    * readback (device.py:120-155,193-205). */
   if (cur->base && poly_buffer_refresh_view(ctx, cur) != 0) return -1;
@@ -1625,6 +1648,7 @@ int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice d
   if (!ctx || !buf) return -1;
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
   PolyBuffer *existing = poly_buffer_get(ctx, buf);
+  if (poly_buffer_failed(existing)) return -1;
   if (existing && existing->base) return poly_buffer_refresh_view(ctx, existing);
   if (existing && poly_devices_share_storage(existing->device, device) && existing->ptr) {
     existing->device = device;
@@ -1642,7 +1666,7 @@ int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice d
 }
 
 static const PolyBuffer *poly_buffer_valid_source(PolyBuffer *cur) {
-  if (!cur) return NULL;
+  if (!cur || poly_buffer_failed(cur)) return NULL;
   /* Browser HOST residencies can be frontend keys with ptr=NULL.  If a concrete
    * valid mirror is attached, generic migration must copy from that mirror. */
   if (cur->device == POLY_DEVICE_HOST && !cur->ptr && cur->src && cur->src->valid) return cur->src;
@@ -1656,6 +1680,7 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
 
   PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  if (poly_buffer_failed(cur)) return -1;
   /* A callify-published DISK BUFFER may not have mapped the file yet. Its
    * producer wrote through another mapping; resolve storage before testing
    * the host/device validity bookkeeping. */
@@ -1705,7 +1730,7 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
 int poly_buffer_mark_residency_written(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
   if (!ctx || !buf) return -1;
   PolyBuffer *cur = poly_buffer_get(ctx, buf);
-  if (!cur) return -1;
+  if (!cur || poly_buffer_failed(cur)) return -1;
   if (!poly_devices_share_storage(cur->device, device) &&
       !(poly_device_is_host_addressable(cur->device) && poly_device_is_host_addressable(device)))
     return -1;
@@ -1724,6 +1749,7 @@ int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
 int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
   if (!ctx || !buf) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
+  if (poly_buffer_failed(b)) return -1;
   if (b && b->base) {
     if (poly_buffer_handle_ensure_allocated(ctx, b->base) != 0) return -1;
     if (!b->base->src) b->base->valid = true;
@@ -1745,6 +1771,7 @@ int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) 
 int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes) {
   if (!ctx || !buf || !src) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
+  if (poly_buffer_failed(b)) return -1;
   if (!b || !b->ptr || !b->allocator || !b->allocator->copy_in || nbytes == 0 || b->nbytes < nbytes)
     return -1;
   PolyBuffer src_view = poly_buffer_make_host_view((void *)src, nbytes);
@@ -1759,6 +1786,7 @@ int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbyte
 int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   if (!ctx || !buf || !dst) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
+  if (poly_buffer_failed(b)) return -1;
   if (!b || !b->ptr || !b->allocator || !b->allocator->copy_out || nbytes == 0 ||
       b->nbytes < nbytes)
     return -1;

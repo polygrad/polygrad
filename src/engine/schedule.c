@@ -4070,6 +4070,7 @@ static int poly_exec_linear_copy(
      * mirror; valid is coherence metadata, not a defined-byte requirement. */
     bool timing = update_stats && ctx->stats_suppression_depth == 0 && poly_debug_at_least(2);
     double start = timing ? poly_now_ms() : 0.0;
+    ctx->execution_write_epoch++;
     if (poly_buffer_copy(dst, src) != 0) return -1;
     double elapsed = timing ? poly_now_ms() - start : -1.0;
     dst->valid = true;
@@ -4200,6 +4201,7 @@ static int poly_exec_linear_program(
     int exec_rc = runner.execute                ? runner.execute(&runner, args, n_runtime_args)
                   : backend && backend->execute ? backend->execute(&runner, args, n_runtime_args)
                                                 : -1;
+    if (exec_rc != POLY_RUNNER_NOT_STARTED) ctx->execution_write_epoch++;
 #ifdef POLY_HAS_HIP
     if (exec_rc == 0 && wait && device == POLY_DEVICE_HIP) exec_rc = poly_hip_sync();
 #endif
@@ -4617,6 +4619,7 @@ static int poly_exec_linear_graph(
   }
 
   double elapsed_us = 0;
+  ctx->execution_write_epoch++;
   int launch_rc = wait ? poly_cuda_graph_launch_timed(entry->graph, &elapsed_us)
                        : poly_cuda_graph_launch(entry->graph);
   if (launch_rc != 0) goto fail_prepared;
@@ -4655,6 +4658,14 @@ fail:
 }
 #endif
 
+static void fail_linear_outputs(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    int n_calls,
+    PolyUOp **inputs,
+    int n_inputs
+);
+
 /* C control body for current Tinygrad run_linear; the public wrapper below
  * scopes deferred residency collection across every early return. */
 static int run_linear_impl(
@@ -4674,10 +4685,11 @@ static int run_linear_impl(
   PolyUOp *executable = jit ? linear : poly_compile_linear(ctx, linear, -1);
   if (!executable || executable->op != POLY_OP_LINEAR) return -1;
   bool debug = poly_debug_at_least(7);
+  int attempted_calls = 0;
 
   for (int call_index = 0; call_index < executable->n_src; call_index++) {
     PolyUOp *call = executable->src[call_index];
-    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) return -1;
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) goto failed;
     PolyUOp *body = call->src[0];
     if (debug)
       fprintf(
@@ -4688,16 +4700,18 @@ static int run_linear_impl(
                  body->arg.str && strcmp(body->arg.str, "graph") == 0;
     if (graph) {
 #ifdef POLY_HAS_CUDA
-      if (poly_exec_linear_graph(
-              ctx, call, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, wait
-          ) != 0)
-        return -1;
+      uint64_t before = ctx->execution_write_epoch;
+      int rc = poly_exec_linear_graph(
+          ctx, call, var_bindings, n_var_bindings, input_uops, n_input_uops, update_stats, wait
+      );
+      if (ctx->execution_write_epoch != before) attempted_calls = call_index + 1;
+      if (rc != 0) goto failed;
       continue;
 #else
-      return -1;
+      goto failed;
 #endif
     }
-    if (body->op != POLY_OP_COPY && body->op != POLY_OP_PROGRAM) return -1;
+    if (body->op != POLY_OP_COPY && body->op != POLY_OP_PROGRAM) goto failed;
 
     int n_args = poly_call_n_buffer_args(call);
     bool *outs = n_args > 0 ? calloc((size_t)n_args, sizeof(*outs)) : NULL;
@@ -4708,7 +4722,7 @@ static int run_linear_impl(
       free(outs);
       free(ins);
       poly_resolved_linear_args_free(resolved, n_args);
-      return -1;
+      goto failed;
     }
 
     bool ok = true;
@@ -4739,6 +4753,7 @@ static int run_linear_impl(
       }
     }
     int rc = -1;
+    uint64_t before = ctx->execution_write_epoch;
     if (ok && body->op == POLY_OP_COPY) {
       int lanes = 1;
       for (int i = 0; i < n_args; i++) {
@@ -4758,6 +4773,7 @@ static int run_linear_impl(
           ctx, call, resolved, n_args, var_bindings, n_var_bindings, update_stats, wait
       );
     }
+    if (ctx->execution_write_epoch != before) attempted_calls = call_index + 1;
     free(outs);
     free(ins);
     poly_resolved_linear_args_free(resolved, n_args);
@@ -4767,10 +4783,43 @@ static int run_linear_impl(
             stderr, "[polygrad:run_linear] call=%d body=%s execution failed\n", call_index,
             poly_op_name(body->op)
         );
-      return -1;
+      goto failed;
     }
   }
   return 0;
+failed:
+  fail_linear_outputs(ctx, executable, attempted_calls, input_uops, n_input_uops);
+  return -1;
+}
+
+static void fail_linear_outputs(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    int n_calls,
+    PolyUOp **inputs,
+    int n_inputs
+) {
+  /* Runtime construction can fail between dispatches. Only the attempted
+   * prefix may have written storage; never invalidate the untouched suffix. */
+  for (int c = 0; c < n_calls; c++) {
+    PolyUOp *call = linear->src[c];
+    if (!call || call->op != POLY_OP_CALL || call->n_src == 0) continue;
+    PolyUOp *body = call->src[0];
+    if (body->op == POLY_OP_CUSTOM_FUNCTION && body->n_src > 0 &&
+        body->src[0]->op == POLY_OP_LINEAR) {
+      /* Graph PARAMs use the same invocation inputs as exec_graph. */
+      fail_linear_outputs(ctx, body->src[0], body->src[0]->n_src, inputs, n_inputs);
+      continue;
+    }
+    const PolyProgramInfo *info = body->op == POLY_OP_PROGRAM ? poly_program_info(ctx, body) : NULL;
+    int n = info ? info->n_outs : body->op == POLY_OP_COPY ? 1 : 0;
+    for (int i = 0; i < n; i++) {
+      int slot = info ? info->outs[i] : 0;
+      PolyUOp *arg =
+          poly_resolve_linear_param(ctx, poly_call_buffer_arg(call, slot), inputs, n_inputs);
+      poly_buffer_fail(poly_uop_buffer_handle(ctx, arg));
+    }
+  }
 }
 
 /* Current Tinygrad engine/realize.py:run_linear. LINEAR is consumed directly;

@@ -2384,13 +2384,14 @@ static int poly_realize_tensors_impl(
   PolyUOp **map_orig = NULL;
   PolyUOp **map_repl = NULL;
   int map_n = 0;
-  PolyTensor **materialized = NULL;
-  int n_mapped_materialized = 0;
+  PolyTensorRealizeSnapshot *snapshots = NULL;
+  int n_snapshots = 0;
   PolyUOp *linear = NULL;
   PolyVarBinding *var_bindings = NULL;
   int n_var_bindings = 0;
   int rc = -1;
   int n_pending = 0;
+  bool execution_succeeded = false;
   if (!pending_tensors || !pending_roots || !pending_out || !pending_indices) goto cleanup;
 
   for (int i = 0; i < n; i++) {
@@ -2441,6 +2442,13 @@ static int poly_realize_tensors_impl(
        * residency: creating a valid row for an absent mapped BUFFER would
        * falsely execute capture-time state. */
       PolyBuffer *storage = poly_buffer_get(ctx, (PolyUOp *)identity);
+      if (poly_buffer_failed(storage)) {
+        fprintf(
+            stderr,
+            "poly_realize_tensors: storage may contain partial writes from a failed execution\n"
+        );
+        goto cleanup;
+      }
       PolyDevice requested = poly_realize_tensor_requested_device(ctx, inputs[i]);
       if (storage && (storage->valid || (storage->src && storage->src->valid)) &&
           poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, requested) != 0)
@@ -2468,10 +2476,9 @@ static int poly_realize_tensors_impl(
       ctx, pending_roots, n_pending, pending_out, &map_orig, &map_repl, &map_n
   );
   if (!big_call) goto cleanup;
-  if (map_n > 0 &&
-      poly_tensor_apply_realize_map_tracked(
-          ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, &materialized, &n_mapped_materialized
-      ) != 0)
+  if (map_n > 0 && poly_tensor_apply_realize_map_tracked(
+                       ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO, &snapshots, &n_snapshots
+                   ) != 0)
     goto cleanup;
 
   for (int pending = 0; pending < n_pending; pending++) {
@@ -2496,6 +2503,7 @@ static int poly_realize_tensors_impl(
   if (!linear) goto cleanup;
   rc = poly_realize_linear(ctx, linear, var_bindings, n_var_bindings);
   if (rc != 0) goto cleanup;
+  execution_succeeded = true;
   int n_materialized = 0;
   for (int pending = 0; pending < n_pending; pending++) {
     outputs[pending_indices[pending]] = pending_tensors[pending];
@@ -2505,16 +2513,16 @@ static int poly_realize_tensors_impl(
     if (pending_out[pending] != pending_roots[pending])
       pending_tensors[n_materialized++] = pending_tensors[pending];
   }
-  if (poly_tensor_retire_logical_resources(ctx, materialized, n_mapped_materialized) != 0 ||
-      poly_tensor_retire_logical_resources(ctx, pending_tensors, n_materialized) != 0) {
+  if (poly_tensor_retire_logical_resources(ctx, pending_tensors, n_materialized) != 0) {
     rc = -1;
     goto cleanup;
   }
 
 cleanup:
-  for (int i = 0; i < n_mapped_materialized; i++)
-    poly_tensor_release(materialized[i]);
-  free(materialized);
+  /* A retirement allocation error after execution must not restore an update
+   * expression and replay a STORE that already completed. */
+  if (poly_tensor_finish_realize_map(ctx, snapshots, n_snapshots, execution_succeeded) != 0)
+    rc = -1;
   free(var_bindings);
   free(map_repl);
   free(map_orig);

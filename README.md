@@ -585,6 +585,13 @@ owner for related Tensors, layers and Models. See the
 [Python](py/README.md#devices-and-runtimes) and
 [JavaScript](js/README.md#devices-and-runtimes) guides.
 
+When realization reports an error, Tensor roots return to their previous
+expressions. Preparation failures before any dispatch leave existing values
+intact and allow retry. After partial execution, storage written by attempted
+calls is unusable; reads and reuse fail rather than return partial results.
+Recreate affected state from a checkpoint. This does not roll back writes or
+recover a lost GPU device (PG-DIV-017).
+
 The schedule cache has no automatic eviction or size cap. Every distinct
 cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
 graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can

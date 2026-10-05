@@ -496,13 +496,13 @@ int poly_tensor_apply_realize_map_tracked(
     PolyUOp **to,
     int n,
     PolyDevice device,
-    PolyTensor ***materialized,
-    int *n_materialized
+    PolyTensorRealizeSnapshot **snapshots,
+    int *n_snapshots
 ) {
-  if (!!materialized != !!n_materialized) return -1;
-  if (materialized) {
-    *materialized = NULL;
-    *n_materialized = 0;
+  if (!!snapshots != !!n_snapshots) return -1;
+  if (snapshots) {
+    *snapshots = NULL;
+    *n_snapshots = 0;
   }
   if (!ctx || n < 0 || (n > 0 && (!from || !to))) return -1;
   if (n == 0) return 0;
@@ -583,7 +583,23 @@ int poly_tensor_apply_realize_map_tracked(
       updates[snapshot_indices[slot]] = rewrite_results[rewrite];
   }
 
-  int n_retiring = 0;
+  if (snapshots) {
+    *snapshots = calloc((size_t)n_rewrite, sizeof(**snapshots));
+    if (!*snapshots) goto cleanup;
+    for (int rewrite = 0; rewrite < n_rewrite; rewrite++) {
+      int slot = rewrite_slots[rewrite];
+      PolyTensor *tensor = snapshot_tensors[slot];
+      if (!updates[snapshot_indices[slot]]) continue;
+      if (poly_uop_retain(ctx, snapshot_roots[slot]) != 0) {
+        poly_tensor_finish_realize_map(ctx, *snapshots, *n_snapshots, false);
+        *snapshots = NULL;
+        *n_snapshots = 0;
+        goto cleanup;
+      }
+      (*snapshots)[(*n_snapshots)++] = (PolyTensorRealizeSnapshot
+      ){poly_tensor_retain(tensor), snapshot_roots[slot], tensor->role, tensor->device};
+    }
+  }
   for (int i = 0; i < n_tensors; i++) {
     PolyTensor *tensor = ctx->tensors[i];
     PolyUOp *realized = updates[i];
@@ -602,18 +618,6 @@ int poly_tensor_apply_realize_map_tracked(
       }
     }
     tensor_replace_roots_commit(tensor, tensor->uop_logical, realized, role, tensor_device);
-    /* A changed dependent can still contain unevaluated work. Only exact
-     * storage/views qualify; keep owners alive until execution succeeds (or
-     * fails), without retiring portable producers before the launch. */
-    if (materialized && tensor->logical_policy == POLY_LOGICAL_UNTIL_REALIZE &&
-        tensor->logical_state == POLY_LOGICAL_AVAILABLE &&
-        tensor_exact_logical_resource(ctx, tensor))
-      snapshot_tensors[n_retiring++] = poly_tensor_retain(tensor);
-  }
-  if (materialized) {
-    *materialized = snapshot_tensors;
-    *n_materialized = n_retiring;
-    snapshot_tensors = NULL;
   }
   rc = 0;
 
@@ -627,6 +631,28 @@ cleanup:
   free(snapshot_roots);
   free(snapshot_tensors);
   free(updates);
+  return rc;
+}
+
+int poly_tensor_finish_realize_map(
+    PolyCtx *ctx,
+    PolyTensorRealizeSnapshot *snapshots,
+    int n,
+    bool success
+) {
+  int rc = 0;
+  for (int i = 0; i < n; i++) {
+    PolyTensorRealizeSnapshot *s = &snapshots[i];
+    if (!success)
+      tensor_replace_roots_commit(
+          s->tensor, s->tensor->uop_logical, s->physical, s->role, s->device
+      );
+    else if (s->tensor->logical_policy == POLY_LOGICAL_UNTIL_REALIZE && s->tensor->logical_state == POLY_LOGICAL_AVAILABLE && tensor_exact_logical_resource(ctx, s->tensor) && poly_tensor_retire_logical_resources(ctx, &s->tensor, 1) != 0)
+      rc = -1;
+    poly_uop_release(ctx, s->physical);
+    poly_tensor_release(s->tensor);
+  }
+  free(snapshots);
   return rc;
 }
 

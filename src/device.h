@@ -69,6 +69,7 @@ struct PolyBuffer {
   const PolyAllocator *allocator; /* allocator for this buffer (set at allocation time) */
   PolyBuffer *src; /* root source buffer (usually host), or NULL */
   bool valid; /* does ptr contain current logical contents? */
+  bool failed; /* a failed execution may have left these bytes unwritten or partial */
   PolyFrontendBufferReleaseFn frontend_release; /* imported HOST owner release hook */
   bool memory_accounted; /* contributes to ctx GlobalCounters.mem_used */
   PolyDevice memory_device; /* allocation device used for per-device accounting */
@@ -154,6 +155,9 @@ void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf);
 
 /* Look up full PolyBuffer for a BUFFER UOp. Returns NULL if not attached. */
 PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf);
+/* Failure is terminal for this storage and shared by all its views. */
+bool poly_buffer_failed(const PolyBuffer *buffer);
+void poly_buffer_fail(PolyBuffer *buffer);
 
 /* C analogue of tinygrad UOp.buffer. It resolves tuple BUFFER/MSTACK/MSELECT
  * runtime values as well as the existing scalar identities/views. */

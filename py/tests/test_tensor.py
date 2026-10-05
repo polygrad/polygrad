@@ -16,6 +16,27 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('assignment', [False, True])
+def test_failed_compilation_restores_roots_and_aliases(monkeypatch, assignment):
+    with Runtime(device='cpu') as rt:
+        x = rt.Tensor([1., 2., 3., 4.]).realize()
+        y = rt.Tensor([5., 6., 7., 8.]).realize() if assignment else x * 7 + 3
+        alias = y.reshape(2, 2)
+        if assignment:
+            y.assign(x * 7 + 3)
+        roots = (y.uop.raw, alias.uop.raw)
+        with monkeypatch.context() as patch:
+            patch.setenv('CC', '/bin/false')
+            patch.setenv('POLY_CACHE', '0')
+            with pytest.raises(RuntimeError):
+                y.realize()
+        assert (y.uop.raw, alias.uop.raw) == roots
+        np.testing.assert_array_equal(y.numpy(), [10., 17., 24., 31.])
+        np.testing.assert_array_equal(alias.numpy().reshape(-1), [10., 17., 24., 31.])
+        np.testing.assert_array_equal(y.to('interp').numpy(), [10., 17., 24., 31.])
+        np.testing.assert_array_equal((x * 7 + 3).numpy(), [10., 17., 24., 31.])
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
 @pytest.mark.parametrize('logical', ['never', 'always', 'until_realize'])
 @pytest.mark.parametrize('kind', ['plain', 'causal', 'bool', 'bias', 'gqa', 'dropout'])

@@ -312,6 +312,77 @@ async function runTensorTests(pg, createRuntime) {
     } finally { pg.noopt = before }
   })
 
+  await testIf(['cpu', 'wasm', 'webgpu'].includes(pg.device), 'execution compile failure restores assignment and aliases', isolatedRuntime(async rt => {
+    const x = new rt.Tensor([1, 2, 3, 4], {dtype: 'float32'})
+    const y = new rt.Tensor([5, 6, 7, 8], {dtype: 'float32'})
+    await x.realizeAsync()
+    await y.realizeAsync()
+    const alias = y.reshape(2, 2)
+    y.assign(x.mul(7.125).add(3.25))
+    const roots = [y.uop.key, alias.uop.key]
+    const module = rt._core.Module
+    const device = module && module.__polygradWebGpuState && module.__polygradWebGpuState.device
+    let restore, failures = 0
+    if (device) {
+      const original = device.createComputePipeline
+      device.createComputePipeline = function () {
+        failures++
+        throw new Error('intentional test pipeline failure')
+      }
+      restore = () => { device.createComputePipeline = original }
+    } else if (module) {
+      const original = WebAssembly.Module
+      WebAssembly.Module = function () {
+        failures++
+        throw new Error('intentional test Wasm compilation failure')
+      }
+      restore = () => { WebAssembly.Module = original }
+    } else {
+      const oldCC = process.env.CC, oldCache = process.env.POLY_CACHE
+      process.env.CC = '/bin/false'
+      process.env.POLY_CACHE = '0'
+      restore = () => {
+        if (oldCC === undefined) delete process.env.CC; else process.env.CC = oldCC
+        if (oldCache === undefined) delete process.env.POLY_CACHE; else process.env.POLY_CACHE = oldCache
+      }
+    }
+    let failed = false
+    try { await y.realizeAsync() } catch (_) { failed = true }
+    finally { restore() }
+    assert(failed, 'injected compiler failure was not observed')
+    if (module) assert(failures > 0, 'compiler injection was bypassed')
+    assert(y.uop.key === roots[0] && alias.uop.key === roots[1], 'failure changed roots')
+    assertClose(await y.toArrayAsync(), [10.375, 17.5, 24.625, 31.75])
+    assertClose(await alias.toArrayAsync(), [10.375, 17.5, 24.625, 31.75])
+    assertClose(await x.toArrayAsync(), [1, 2, 3, 4])
+  }))
+
+  await testIf(pg.device === 'webgpu', 'execution submit failure rejects damaged aliases', isolatedRuntime(async rt => {
+    const x = new rt.Tensor([1, 2, 3, 4], {dtype: 'float32'})
+    const y = new rt.Tensor([5, 6, 7, 8], {dtype: 'float32'})
+    await x.realizeAsync()
+    await y.realizeAsync()
+    const alias = y.reshape(2, 2)
+    y.assign(x.mul(8.125))
+    const queue = rt._core.Module.__polygradWebGpuState.device.queue
+    const original = queue.submit
+    let submissions = 0, failed = false
+    queue.submit = function (commands) {
+      original.call(this, commands)
+      submissions++
+      throw new Error('intentional failure after submission')
+    }
+    try { await y.realizeAsync() } catch (_) { failed = true }
+    finally { queue.submit = original }
+    assert(failed && submissions === 1, 'submission failure was not exercised')
+    for (const t of [y, alias]) {
+      let rejected = false
+      try { await t.toArrayAsync() } catch (_) { rejected = true }
+      assert(rejected, 'failed write remained readable through an alias')
+    }
+    assertClose(await x.toArrayAsync(), [1, 2, 3, 4])
+  }))
+
   await test('execution IGNORE_BEAM_CACHE policy reaches core', async () => {
     const old = pg.ignoreBeamCache
     try {

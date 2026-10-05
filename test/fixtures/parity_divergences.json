@@ -251,6 +251,18 @@
       "close_when": "Revisit after pinned tinygrad provides equivalent optional interval reduction lowering."
     },
     {
+      "id": "PG-DIV-017",
+      "status": "approved",
+      "stages": ["realize", "runtime"],
+      "area": "Recovery from failed realization",
+      "tinygrad": "Pinned Tensor.linear_with_vars publishes the buffer map before execution. Errors do not restore Tensor roots, so retry can read unwritten storage.",
+      "polygrad": "Retain exact affected Tensor roots through execution and restore them on failure. Compilation/runtime preparation before the first application write is retryable. After a partial execution, output storage of attempted calls is invalidated, including aliases; untouched calls and read-only inputs are not invalidated. No rollback of bytes or allowance for successful graph/value differences.",
+      "rationale": "Prevent silently wrong retry values while preserving valid weights on preparation failures. Backend runtime construction is lazy and may fail between dispatches, so the failure boundary follows attempted writes, not the name compile_linear.",
+      "approval": "User 2026-10-05 says go after reviewing exact-root rollback before writes and separate handling of partial execution.",
+      "evidence": ["src/tensor.c:poly_tensor_finish_realize_map", "src/engine/schedule.c:fail_linear_outputs", "py/tests/test_tensor.py:test_failed_compilation_restores_roots_and_aliases", "test/test_schedule_runtime.c:failed_batch_invalidates_written_prefix_only", "temp/lifetime-audit-20261005/compile-retry-tinygrad.log"],
+      "close_when": "Pinned tinygrad provides equivalent failure recovery."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

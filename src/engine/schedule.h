@@ -15,6 +15,10 @@ typedef enum {
   POLY_RUNNER_INTERP,
 } PolyRunnerKind;
 
+/* execute may report a preparation failure with no application writes. Other
+ * nonzero results conservatively mean that execution may have begun. */
+enum { POLY_RUNNER_NOT_STARTED = -2 };
+
 /* C handle below Tinygrad's PROGRAM/runtime_cache boundary. */
 typedef struct {
   PolyRunnerKind kind;

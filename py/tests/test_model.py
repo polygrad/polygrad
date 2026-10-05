@@ -142,6 +142,27 @@ def test_captured_partial_state_write_with_reduced_outputs():
             model.dispose()
             rt.dispose()
 
+def test_failed_model_compilation_preserves_state_and_checkpoint(monkeypatch):
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        state = rt.Tensor([2., 3., 4., 5.]).realize().is_param_(False)
+        def author(x):
+            state.assign(state * x + 1.125)
+            return state
+        model = rt.Model(author, inputs={'x': rt.Tensor.empty(4)}, params={'state': state})
+        try:
+            original = model.read_buffer('state').copy()
+            with monkeypatch.context() as patch:
+                patch.setenv('CC', '/bin/false')
+                patch.setenv('POLY_CACHE', '0')
+                with pytest.raises(RuntimeError):
+                    model.forward(x=np.full(4, 2, np.float32))
+                np.testing.assert_array_equal(model.read_buffer('state'), original)
+                assert len(model.save()) > 0
+            np.testing.assert_array_equal(model.forward(x=np.full(4, 2, np.float32))['output'], original * 2 + 1.125)
+        finally:
+            model.dispose()
+
 def test_control_declarations_reject_same_internal_name():
     from polygrad import create, Variable
     with create(device='INTERP') as rt:

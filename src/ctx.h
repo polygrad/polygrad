@@ -62,6 +62,7 @@ struct PolyCtx {
   size_t ir_collection_baseline_bytes; /* UOp bytes after the last full IR sweep */
   bool collecting;
   int execution_depth;
+  uint64_t execution_write_epoch; /* application writes attempted, excluding preparation failures */
   /* Pinned Tensor._device_seeds/_device_rng_counters, keyed by the exact
    * canonical DEVICE UOp. The state objects themselves are arena-owned. */
   PolyMap *rng_states;

@@ -42,6 +42,63 @@ static PolyUOp *cache_clear_schedule(PolyCtx *ctx, int size) {
   return linear;
 }
 
+TEST(schedule_runtime, failed_batch_invalidates_written_prefix_only) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *untouched = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  float old = 3, value = 0;
+  ASSERT_INT_EQ(poly_buffer_write(ctx, out, &old, sizeof(old)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, untouched, &old, sizeof(old)), 0);
+  PolyUOp *param = poly_test_program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *idx = poly_uop_const_int(ctx, 0);
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, param, &idx, 1),
+      poly_uop_const_float(ctx, 7), poly_arg_none()
+  );
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &store, 1, "failure_prefix");
+  PolyUOp *first = poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, out, poly_arg_none());
+  PolyUOp *bad =
+      poly_uop0(ctx, POLY_OP_CUSTOM_FUNCTION, POLY_VOID, poly_arg_str("invalid execution body"));
+  PolyUOp *calls[] = {
+      first, poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, bad, untouched, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_CALL, POLY_VOID, sink, untouched, poly_arg_none())};
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 3, poly_arg_none());
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, false, false), -1);
+  ASSERT_INT_EQ((int)ctx->launch_count, 1);
+  ASSERT_TRUE(poly_buffer_failed(poly_buffer_get(ctx, out)));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, &value, sizeof(value)), -1);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, untouched, &value, sizeof(value)), 0);
+  ASSERT_TRUE(value == old);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, realization_snapshot_restores_noninvertible_map) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
+  PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
+  PolyUOp *common = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
+  PolyTensor *x =
+      poly_tensor_create_with_roots(ctx, NULL, a, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+  PolyTensor *y =
+      poly_tensor_create_with_roots(ctx, NULL, b, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+  PolyUOp *from[] = {a, b}, *to[] = {common, common};
+  PolyTensorRealizeSnapshot *snapshots = NULL;
+  int n = 0;
+  ASSERT_INT_EQ(
+      poly_tensor_apply_realize_map_tracked(ctx, from, to, 2, POLY_DEVICE_AUTO, &snapshots, &n), 0
+  );
+  ASSERT_INT_EQ(n, 2);
+  ASSERT_TRUE(poly_tensor_uop_physical(x) == common && poly_tensor_uop_physical(y) == common);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_tensor_finish_realize_map(ctx, snapshots, n, false), 0);
+  ASSERT_TRUE(poly_tensor_uop_physical(x) == a && poly_tensor_uop_physical(y) == b);
+  poly_tensor_release(x);
+  poly_tensor_release(y);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, schedule_cache_clear_growth_and_repopulation) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

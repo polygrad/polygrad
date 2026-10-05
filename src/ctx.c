@@ -103,6 +103,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->ir_collection_baseline_bytes = 0;
   ctx->collecting = false;
   ctx->execution_depth = 0;
+  ctx->execution_write_epoch = 0;
   ctx->rng_states = poly_map_new(8);
   ctx->rng_seed = (uint64_t)time(NULL);
   ctx->rng_device_count = 0;

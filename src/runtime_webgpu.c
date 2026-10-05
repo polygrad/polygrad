@@ -385,17 +385,19 @@ EM_JS(
       if (Asyncify.state === Asyncify.State.Rewinding)
         return Asyncify.handleAsync(() => {});
       const st = Module.__polygradWebGpuState;
-      if (!st || !st.device) return -1;
+      if (!st || !st.device) return -2;
       const rec = st.pipelines.get(pipeline_id);
-      if (!rec) return -1;
+      if (!rec) return -2;
       // Pinned WebGPU wait uses device timestamps, not queue wall time.
-      if (elapsed_us && !st.device.features.has('timestamp-query')) return -1;
+      if (elapsed_us && !st.device.features.has('timestamp-query')) return -2;
 
       const bgEntries = [ {binding : 0, resource : {buffer : st.infinityBuf}} ];
       const tempUniforms = [];
       const tempCopies = [];
       let querySet = null, queryBuffer = null, queryReadback = null;
       let deferredCleanup = false;
+      // -2 is POLY_RUNNER_NOT_STARTED. Scratch copies do not modify model state.
+      let submitted = false;
       const cleanup = () => {
         if (queryReadback) queryReadback.destroy();
         if (queryBuffer) queryBuffer.destroy();
@@ -414,7 +416,7 @@ EM_JS(
         const handle = HEAPU32[(args >>> 2) + i];
         paramHandles.push(handle);
         let buf = st.buffers.get(handle);
-        if (!buf) return -1;
+        if (!buf) return -2;
         let offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
         let size = st.bufferSizes.get(handle) || 0;
         if (i > 0 && handle === outHandle) {
@@ -520,7 +522,9 @@ EM_JS(
         encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0);
         encoder.copyBufferToBuffer(queryBuffer, 0, queryReadback, 0, 16);
       }
-      st.device.queue.submit([encoder.finish()]);
+      const commands = encoder.finish();
+      submitted = true;
+      st.device.queue.submit([commands]);
       };
 
       // Ordinary launches only enqueue, like pinned WebGPUProgram(wait=False).
@@ -540,7 +544,7 @@ EM_JS(
             return 0;
           } catch (error) {
             console.error('polygrad: WebGPU dispatch failed:', error);
-            return -1;
+            return submitted ? -1 : -2;
           } finally { cleanup(); }
         });
       }
@@ -548,7 +552,7 @@ EM_JS(
       return 0;
       } catch (error) {
         console.error('polygrad: WebGPU dispatch failed:', error);
-        return -1;
+        return submitted ? -1 : -2;
       } finally {
       if (!deferredCleanup) cleanup();
       }
@@ -743,13 +747,13 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, 
 }
 
 int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
-  if (!runner || !runner->handle) return -1;
+  if (!runner || !runner->handle) return POLY_RUNNER_NOT_STARTED;
   /* WGSL uniforms remain 32-bit; widening host vals must not silently
    * truncate an unsupported value or submit a partially prepared call. */
   for (int i = runner->n_params; i < n_args; i++) {
-    if (!args[i]) return -1;
+    if (!args[i]) return POLY_RUNNER_NOT_STARTED;
     int64_t value = *(const int64_t *)args[i];
-    if (value < INT32_MIN || value > UINT32_MAX) return -1;
+    if (value < INT32_MIN || value > UINT32_MAX) return POLY_RUNNER_NOT_STARTED;
   }
   PolyWebGpuRunnerHandle *wh = (PolyWebGpuRunnerHandle *)runner->handle;
   bool timing = poly_debug_at_least(7);
@@ -767,7 +771,7 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
         wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level(), !runner->capture_binary
     );
     wh->n_bindings = n_args;
-    if (!wh->pipeline_id) return -1;
+    if (!wh->pipeline_id) return POLY_RUNNER_NOT_STARTED;
     if (timing) {
       double t_pipeline = poly_now_ms();
       fprintf(
