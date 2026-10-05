@@ -264,6 +264,8 @@ function createBoundJit(runtime) {
           if (ffi.poly_jit_end_capture(this._jit, liveHandles) !== 0) throw new Error("didn't jit anything")
         } catch (err) {
           if (this._jit && ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(this._jit)
+          if (this._jit) ffi.poly_jit_free(this._jit)
+          this._jit = 0 // Preserve cnt=1 so the next call retries capture.
           throw err
         } finally {
           capturing.length = 0
@@ -344,6 +346,8 @@ function createBoundJit(runtime) {
           if (await endCapture(this._jit, liveHandles) !== 0) throw new Error("didn't jit anything")
         } catch (err) {
           if (this._jit && ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(this._jit)
+          if (this._jit) ffi.poly_jit_free(this._jit)
+          this._jit = 0 // Preserve cnt=1 so the next call retries capture.
           throw err
         } finally {
           capturing.length = 0

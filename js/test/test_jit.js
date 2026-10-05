@@ -34,12 +34,13 @@ async function assertThrowsAsync(fn, expected) {
   throw new Error('expected function to throw')
 }
 
-async function runJitTests(pg) {
+async function runJitTests(pg, filter = '') {
   const Tensor = pg.Tensor
   let passed = 0
   let failed = 0
 
   async function test(name, fn) {
+    if (filter && !name.includes(filter)) return
     try {
       await fn()
       console.log(`  [PASS] ${name}`)
@@ -51,6 +52,67 @@ async function runJitTests(pg) {
   }
 
   console.log('\n== JIT ==')
+
+  await test('lifetime: failed captures release handles and retry without another warmup', async () => {
+    const original = pg._core.ffi
+    const ffi = Object.fromEntries(Object.getOwnPropertyNames(original).map(k => [k, original[k]]))
+    const active = new Set()
+    ffi.poly_jit_new = (...args) => {
+      const handle = original.poly_jit_new(...args)
+      if (handle) active.add(handle)
+      return handle
+    }
+    ffi.poly_jit_free = handle => {
+      assert(active.delete(handle), 'free of an unowned JIT')
+      return original.poly_jit_free(handle)
+    }
+    // The real factory/core are unchanged; the forwarding object counts owners
+    // even when N-API exports themselves cannot be replaced.
+    const core = pg._core
+    let jit
+    try {
+      pg._core = {...core, ffi}
+      jit = require('../src/jit').createBoundJit(pg)
+    } finally { pg._core = core }
+    const x = new Tensor(new Float32Array([1, 2]))
+    await x.realizeAsync()
+    try {
+      for (const asyncMode of [false, true]) {
+        if (!asyncMode && pg.device === 'webgpu') continue
+        for (const failure of ['exception', 'empty']) {
+          let failing = false
+          const f = jit(value => {
+            if (failing) {
+              if (failure === 'empty') return value
+              throw new Error('capture probe')
+            }
+            return value.add(3)
+          })
+          const call = asyncMode ? f.async : f
+          try {
+            const warmup = await call(x)
+            assertClose(await warmup.toArrayAsync(), [4, 5])
+            await warmup.dispose()
+            failing = true
+            for (let i = 0; i < 20; i++) {
+              await assertThrowsAsync(() => call(x), failure === 'empty' ? "didn't jit anything" : 'capture probe')
+              assert(active.size === 0, 'cancelled capture still owns a native JIT')
+              assert(f.stats().callCount === 1, 'failure changed the warmup count')
+            }
+            failing = false
+            const out = await call(x)
+            assertClose(await out.toArrayAsync(), [4, 5])
+            assertClose(await (await call(x)).toArrayAsync(), [4, 5])
+            assert(f.stats().replayCount === 1 && active.size === 1, 'retry did not capture/replay')
+            await out.dispose()
+          } finally {
+            await f.dispose()
+            for (const handle of [...active]) ffi.poly_jit_free(handle)
+          }
+        }
+      }
+    } finally { await x.dispose() }
+  })
 
   await test('captures on second call and replays with new inputs', async () => {
     const f = pg.jit((x) => x.add(1).mul(2))

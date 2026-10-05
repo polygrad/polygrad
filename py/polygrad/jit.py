@@ -341,6 +341,10 @@ class TinyJit:
                     raise JitError("didn't JIT anything")
             except Exception:
                 _ffi._lib.poly_jit_cancel_capture(self._jit)
+                _ffi._lib.poly_jit_free(self._jit)
+                self._jit = None
+                self._ctx = None
+                # Keep cnt=1: the next call retries capture, not warmup.
                 raise
             finally:
                 capturing.clear()
