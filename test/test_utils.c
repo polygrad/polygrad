@@ -7,10 +7,37 @@ TEST_BACKEND(harness, runtime_skip_accounting) {
 #include "../src/polygrad.h"
 #include "../src/utils.h"
 #include "../src/device.h"
+#include "../src/ctx.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+TEST(ctx, exact_device_counters_release_empty_entries) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_device_uop_from_name(ctx, "CPU:0");
+  PolyUOp *b = poly_device_uop_from_name(ctx, "CPU:1");
+  size_t arena = poly_arena_used(poly_ctx_arena(ctx));
+  for (int i = 0; i < 300; i++) {
+    poly_ctx_record_memory_alloc_exact(ctx, a, POLY_DEVICE_CPU, 12);
+    poly_ctx_record_memory_alloc_exact(ctx, b, POLY_DEVICE_CPU, 20);
+    ASSERT_INT_EQ(poly_ctx_mem_used_for_device_uop(ctx, a), 12);
+    ASSERT_INT_EQ(poly_ctx_mem_used_for_device_uop(ctx, b), 20);
+    poly_ctx_record_memory_free_exact(ctx, a, POLY_DEVICE_CPU, 4);
+    ASSERT_INT_EQ(poly_ctx_mem_used_for_device_uop(ctx, a), 8);
+    ASSERT_INT_EQ(poly_map_len(ctx->mem_used_by_device), 2);
+    poly_ctx_record_memory_free_exact(ctx, a, POLY_DEVICE_CPU, 8);
+    ASSERT_INT_EQ(poly_ctx_mem_used_for_device_uop(ctx, a), 0);
+    ASSERT_INT_EQ(poly_map_len(ctx->mem_used_by_device), 1);
+    poly_ctx_record_memory_free_exact(ctx, b, POLY_DEVICE_CPU, 20);
+    ASSERT_INT_EQ(poly_map_len(ctx->mem_used_by_device), 0);
+    ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), arena);
+  }
+  /* Teardown also owns records left by callers with unmatched accounting. */
+  poly_ctx_record_memory_alloc_exact(ctx, a, POLY_DEVICE_CPU, 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 typedef struct {
   const char *key;

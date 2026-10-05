@@ -38,6 +38,12 @@ static void free_buffer_entry(const void *key, void *value, void *userdata) {
   poly_buffer_free_chain(ctx, (PolyBuffer *)value);
 }
 
+static void free_memory_entry(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  free(value);
+}
+
 static bool logical_policy_from_env(const char *value, PolyLogicalPolicy *policy) {
   if (!value || !policy) return false;
   if (strcmp(value, "0") == 0)
@@ -164,6 +170,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->retained_uops);
   poly_map_destroy(ctx->collection_roots);
   poly_map_destroy(ctx->rng_states);
+  poly_map_foreach(ctx->mem_used_by_device, free_memory_entry, NULL);
   poly_map_destroy(ctx->mem_used_by_device);
   free(ctx->tensors);
   poly_map_destroy(ctx->cse);
@@ -763,7 +770,7 @@ static PolyDeviceMemoryEntry *poly_ctx_memory_entry(
   PolyDeviceMemoryEntry *entry =
       poly_map_get(ctx->mem_used_by_device, poly_ptr_hash(device_uop), device_uop, poly_ptr_eq);
   if (entry || !create) return entry;
-  entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyDeviceMemoryEntry));
+  entry = malloc(sizeof(*entry));
   if (!entry) return NULL;
   *entry = (PolyDeviceMemoryEntry){.device_uop = device_uop, .bytes = 0};
   poly_map_set(ctx->mem_used_by_device, poly_ptr_hash(device_uop), device_uop, entry, poly_ptr_eq);
@@ -808,7 +815,15 @@ void poly_ctx_record_memory_free_exact(
     *per_device = *per_device >= bytes ? *per_device - bytes : 0;
   }
   PolyDeviceMemoryEntry *entry = poly_ctx_memory_entry(ctx, device_uop, false);
-  if (entry) entry->bytes = entry->bytes >= bytes ? entry->bytes - bytes : 0;
+  if (entry) {
+    entry->bytes = entry->bytes >= bytes ? entry->bytes - bytes : 0;
+    /* No residency remains to keep this DEVICE alive. Drop the weak key and
+     * its record together rather than accumulating entries in the arena. */
+    if (entry->bytes == 0) {
+      poly_map_remove(ctx->mem_used_by_device, poly_ptr_hash(device_uop), device_uop, poly_ptr_eq);
+      free(entry);
+    }
+  }
 }
 
 void poly_ctx_record_memory_alloc(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
