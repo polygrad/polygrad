@@ -2861,6 +2861,18 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await out3.toArray(), [0, 9, 4, 1, 20, 17, 12, 21])
   })
 
+  await test('large gather split reduction', async () => {
+    for (const n of [32767, 32768, 60000, 150000]) {
+      const data = Float32Array.from({ length: n }, (_, i) => i % 113 - 57)
+      const indices = Int32Array.from({ length: 4096 }, (_, i) => (i * 37) % n)
+      indices.set([0, n - 1, Math.floor(n / 2), n - 1])
+      const source = new Tensor(data), index = new Tensor(indices, { dtype: 'int32' })
+      const out = source.gather(0, index)
+      try { assertClose(await out.toArray(), Array.from(indices, i => data[i])) }
+      finally { out.dispose(); index.dispose(); source.dispose() }
+    }
+  })
+
   await test('oneHot matches tinygrad probe', async () => {
     const out = new Tensor(new Int32Array([0, 2, 1]), { dtype: 'int32' }).oneHot(4)
     assertShape(out.shape, [3, 4])

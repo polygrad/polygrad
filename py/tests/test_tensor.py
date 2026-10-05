@@ -3009,6 +3009,15 @@ class TestMovement:
         assert out3.shape == (2, 2, 2)
         np.testing.assert_allclose(out3.numpy(), [[[0, 9], [4, 1]], [[20, 17], [12, 21]]])
 
+    @pytest.mark.parametrize('n', [32767, 32768, 60000, 150000])
+    def test_large_index_select_split_reduce(self, n):
+        # Above REDUCEOP_SPLIT_THRESHOLD the gather must still collapse to loads.
+        data = (np.arange(n, dtype=np.float32) % 113) - 57
+        indices = (np.arange(4096, dtype=np.int32) * 37) % n
+        indices[:4] = [0, n - 1, n // 2, n - 1]
+        source, index = Tensor(data), Tensor(indices)
+        np.testing.assert_array_equal(source[index].numpy(), data[indices])
+
     def test_one_hot_matches_tinygrad_probe(self):
         out = Tensor(np.array([0, 2, 1], dtype=np.int32), dtype='int32').one_hot(4)
         assert out.shape == (3, 4)
@@ -3322,6 +3331,20 @@ class TestReduce:
             empty.argmax(axis=1).numpy(),
             np.full((2, 3), np.iinfo(np.int32).min, dtype=np.int32),
         )
+
+    @pytest.mark.parametrize('n', [32769, 150000])
+    def test_sort_large_vector_values(self, n):
+        data = ((np.arange(n, dtype=np.int32) * 97) % 1009) - 504
+        x = Tensor(data)
+        values, indices = x.sort()
+        try:
+            # Indices have the pin's quadratic construction; only realize values.
+            assert values.shape == indices.shape == (n,)
+            np.testing.assert_array_equal(values.numpy(), np.sort(data))
+        finally:
+            indices.dispose()
+            values.dispose()
+            x.dispose()
 
     def test_sort_argsort_topk_match_tinygrad_probe(self):
         x = Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]])
@@ -5021,7 +5044,8 @@ class TestDevice:
         cache = Tensor.zeros(2, 1, 8, 1, 4).contiguous().preserve_logical().realize()
         logical_value = cache.uop_logical
         physical_identity = cache.uop_physical
-        assert logical_value.op_name == 'AFTER'
+        assert logical_value.op_name == 'CONTIGUOUS'
+        assert logical_value.src[0].op_name == 'AFTER'
         assert physical_identity.has_buffer_identity()
 
         xk = Tensor.arange(12).float().reshape(1, 3, 1, 4)
