@@ -7722,6 +7722,19 @@ TEST(codegen, owner_load_insertion_distinguishes_alu_from_no_address_space) {
   PASS();
 }
 
+TEST(codegen, owner_load_insertion_visits_shared_dag_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop_cast(ctx, poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP), POLY_FLOAT32);
+  /* Forty nodes, not 2^40 paths. Address-space lookup must use the immutable
+   * UOp property cache, as tinygrad's recursive_property does. */
+  for (int i = 0; i < 40; i++)
+    value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, value, value, poly_arg_none());
+  PolyUOp *outer = poly_uop_stack(ctx, &value, 1);
+  ASSERT_TRUE(poly_test_add_loads(ctx, outer) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, owner_expand_reduce_preserves_declared_axis_order) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *value = poly_uop_placeholder(

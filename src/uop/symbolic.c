@@ -2832,14 +2832,6 @@ PolyUOp *poly_uop_given_valid(PolyCtx *ctx, PolyUOp *valid, PolyUOp *uop, bool t
   return uop;
 }
 
-static bool valid_contains_op(PolyUOp *u, PolyOps op) {
-  if (!u) return false;
-  if (u->op == op) return true;
-  for (int i = 0; i < u->n_src; i++)
-    if (valid_contains_op(u->src[i], op)) return true;
-  return false;
-}
-
 static int valid_priority(PolyCtx *ctx, PolyUOp *clause, PolyUOp **clauses, int n) {
   PolyUOp *expr = NULL;
   bool upper = false;
@@ -2855,7 +2847,9 @@ static int valid_priority(PolyCtx *ctx, PolyUOp *clause, PolyUOp **clauses, int 
 
 static PolyUOp *rule_simplify_valid(PolyCtx *ctx, PolyUOp *valid, const PolyBindings *b) {
   (void)b;
-  if (!valid || valid->op != POLY_OP_AND || valid_contains_op(valid, POLY_OP_INDEX)) return NULL;
+  if (!valid || valid->op != POLY_OP_AND ||
+      poly_uop_op_in_backward_slice_with_self(ctx, valid, POLY_OP_INDEX))
+    return NULL;
   int n = 0;
   PolyUOp **clauses = poly_uop_split(valid, POLY_OP_AND, &n);
   int *priorities = n > 0 ? malloc((size_t)n * sizeof(*priorities)) : NULL;
@@ -2910,7 +2904,8 @@ static PolyUOp *rule_gated_given_valid(PolyCtx *ctx, PolyUOp *root, const PolyBi
   (void)b;
   PolyUOp *cond = NULL, *value = NULL, *invalid = NULL;
   if (!invalid_gate_parts(root, &cond, &value, &invalid) ||
-      !poly_dtype_eq(value->dtype, POLY_WEAKINT) || valid_contains_op(value, POLY_OP_INDEX))
+      !poly_dtype_eq(value->dtype, POLY_WEAKINT) ||
+      poly_uop_op_in_backward_slice_with_self(ctx, value, POLY_OP_INDEX))
     return NULL;
   PolyUOp *simplified = poly_uop_given_valid(ctx, cond, value, false);
   if (!simplified || simplified == value) return NULL;
@@ -3139,8 +3134,11 @@ static PolyUOp *rule_fold_where_closure(PolyCtx *ctx, PolyUOp *root, const PolyB
     return NULL;
   PolyUOp *cond = root->src[0], *t = root->src[1], *f = root->src[2];
   if (!poly_uop_reachable(ctx, t, cond) && !poly_uop_reachable(ctx, f, cond)) return NULL;
-  if (valid_contains_op(cond, POLY_OP_INDEX) || valid_contains_op(t, POLY_OP_INDEX) ||
-      valid_contains_op(f, POLY_OP_INDEX))
+  /* A backward slice visits shared nodes once; recursive tree traversal is
+   * exponential on the compare/select DAGs produced by sorting. */
+  if (poly_uop_op_in_backward_slice_with_self(ctx, cond, POLY_OP_INDEX) ||
+      poly_uop_op_in_backward_slice_with_self(ctx, t, POLY_OP_INDEX) ||
+      poly_uop_op_in_backward_slice_with_self(ctx, f, POLY_OP_INDEX))
     return NULL;
 
   PolyUOp *from[1] = {cond};

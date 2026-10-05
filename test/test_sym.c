@@ -699,6 +699,26 @@ TEST(sym, where_closure_folds_condition_inside_true_branch) {
   PASS();
 }
 
+TEST(sym, where_closure_visits_shared_dag_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *cond = Variable(ctx, "cond", 0, 1, POLY_BOOL);
+  PolyUOp *value = poly_uop_cast(ctx, cond, POLY_FLOAT32);
+  /* Only forty distinct nodes, but a recursive tree walk has 2^40 paths.
+   * Match only the root so simplification cannot erase the shared DAG first. */
+  for (int i = 0; i < 40; i++)
+    value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, value, value, poly_arg_none());
+  PolyUOp *other = Variable(ctx, "other", -1, 1, POLY_FLOAT32);
+  PolyUOp *root = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, cond, value, other, poly_arg_none());
+  PolyUOp *out = poly_pm_rewrite(poly_symbolic(), ctx, root);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(out->op, POLY_OP_WHERE);
+  ASSERT_PTR_EQ(out->src[0], cond);
+  ASSERT_PTR_EQ(out->src[2], other);
+  ASSERT_TRUE(!poly_uop_reachable(ctx, out->src[1], cond));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sym, variable_and_bind_use_current_alu_storage_topology) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *n =

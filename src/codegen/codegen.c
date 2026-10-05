@@ -5374,41 +5374,6 @@ PolyUOp *poly_apply_expander2(PolyCtx *ctx, PolyUOp *sink) {
 
 static bool codegen_shape_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
-static bool codegen_value_addrspace(PolyUOp *u, PolyAddrSpace *out) {
-  if (!u) return false;
-  if (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) {
-    if (out) *out = poly_program_memory_addrspace(u);
-    return true;
-  }
-  if (u->op == POLY_OP_LOAD || u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) {
-    /* UOp.addrspace: ALU is a real space, not the absent-space sentinel.
-     * It must participate in the common-space check below. */
-    if (out) *out = POLY_ADDR_ALU;
-    return true;
-  }
-  if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_CAST || u->op == POLY_OP_AFTER ||
-       u->op == POLY_OP_REDUCE || u->op == POLY_OP_STORE || u->op == POLY_OP_MSTACK ||
-       u->op == POLY_OP_MSELECT || u->op == POLY_OP_END || u->op == POLY_OP_UNSHARD ||
-       poly_opset_has(POLY_GROUP_MOVEMENT, u->op)) &&
-      u->n_src > 0)
-    return codegen_value_addrspace(u->src[0], out);
-  if (u->op == POLY_OP_STACK || u->op == POLY_OP_WMMA || u->op == POLY_OP_GROUP ||
-      poly_opset_has(POLY_GROUP_ELEMENTWISE, u->op)) {
-    bool found = false;
-    PolyAddrSpace addrspace = POLY_ADDR_GLOBAL;
-    for (int i = 0; i < u->n_src; i++) {
-      PolyAddrSpace src_addrspace;
-      if (!codegen_value_addrspace(u->src[i], &src_addrspace)) continue;
-      if (found && src_addrspace != addrspace) return false;
-      found = true;
-      addrspace = src_addrspace;
-    }
-    if (found && out) *out = addrspace;
-    return found;
-  }
-  return false;
-}
-
 /* Tinygrad 2026-08-22/a9069c177a9d codegen/__init__.py:236-237. */
 static bool is_shape_changing_bitcast(PolyCtx *ctx, PolyUOp *u) {
   return u && u->op == POLY_OP_BITCAST && u->n_src == 1 && !codegen_shape_equal(ctx, u, u->src[0]);
@@ -5416,7 +5381,9 @@ static bool is_shape_changing_bitcast(PolyCtx *ctx, PolyUOp *u) {
 
 static PolyUOp *maybe_load(PolyCtx *ctx, PolyUOp *u) {
   PolyAddrSpace addrspace;
-  if (!codegen_value_addrspace(u, &addrspace)) return u;
+  /* Reuse UOp.addrspace's immutable cache; walking shared expression paths
+   * recursively here is exponential for sorting and scan graphs. */
+  if (!poly_uop_addrspace(u, &addrspace)) return u;
   if (addrspace != POLY_ADDR_GLOBAL && addrspace != POLY_ADDR_LOCAL && addrspace != POLY_ADDR_REG)
     return u;
   return poly_uop1(ctx, POLY_OP_LOAD, u->dtype, u, poly_arg_none());
