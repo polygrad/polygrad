@@ -44,7 +44,45 @@ static PolyUOp *collapse_substitute(PolyCtx *ctx, PolyUOp *u, PolyUOp **from, Po
   return out;
 }
 
-/* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:flatten_range. */
+int poly_codegen_range_operands(PolyCtx *ctx, PolyUOp **src, int n, PolyUOp **out, int capacity) {
+  PolyUOp **scratch = capacity > 0 ? malloc((size_t)capacity * sizeof(*scratch)) : NULL;
+  if (capacity > 0 && !scratch) return -1;
+  int count = 0;
+  for (int i = 0; i < n; i++) {
+    /* Match UOp._ranges' distinction between END(inner) and END(expression).
+     * The dependency used to compute inner's bound is not itself ended. */
+    int nr;
+    if (src[i]->op == POLY_OP_RANGE) {
+      if (capacity == 0) {
+        free(scratch);
+        return -1;
+      }
+      scratch[0] = src[i];
+      nr = 1;
+    } else {
+      nr = poly_uop_ranges(ctx, src[i], scratch, capacity);
+    }
+    if (nr < 0) {
+      free(scratch);
+      return -1;
+    }
+    for (int j = 0; j < nr; j++) {
+      bool seen = false;
+      for (int k = 0; k < count; k++)
+        seen |= out[k] == scratch[j];
+      if (seen) continue;
+      if (count == capacity) {
+        free(scratch);
+        return -1;
+      }
+      out[count++] = scratch[j];
+    }
+  }
+  free(scratch);
+  return count;
+}
+
+/* Pinned flatten_range, with PG-DIV-015 for dependent explicit operands. */
 static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   int off = poly_range_start(root->op);
@@ -80,7 +118,7 @@ static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
       free(backedge);
       return NULL;
     }
-    n_flat = poly_uop_ranges(ctx, sink, flat, n_topo);
+    n_flat = poly_codegen_range_operands(ctx, ordinary, n_ordinary, flat, n_topo);
     poly_uop_toposort_free(topo);
     if (n_flat < 0) {
       free(flat);

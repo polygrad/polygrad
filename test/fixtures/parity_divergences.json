@@ -227,6 +227,18 @@
       "close_when": null
     },
     {
+      "id": "PG-DIV-015",
+      "status": "approved",
+      "stages": ["codegen", "linearize"],
+      "area": "Explicit dependent range closeout",
+      "tinygrad": "flatten_range and do_split_ends collect the transitive active ranges of every operand, so END(inner) also ends outer when inner's bound depends on outer.",
+      "polygrad": "Explicit RANGE operands name only that range. Non-RANGE integer expressions still expand to their active ranges; boolean and void backedges are preserved rather than expanded into loop operands.",
+      "rationale": "Preserve UOp._ranges semantics for data-dependent nested reductions, including segmented sums. Closing the outer range prematurely creates invalid control flow. No new IR operation or Tensor topology allowance.",
+      "approval": "User 2026-10-04 says proceed after reviewing the reproduced inherited bug and proposed compiler correction.",
+      "evidence": ["references/tinygrad_latest/tinygrad/uop/ops.py:UOp._ranges", "references/tinygrad_latest/tinygrad/codegen/simplify.py:flatten_range", "src/codegen/simplify.c:poly_codegen_range_operands", "src/codegen/late/linearizer.c:do_split_ends", "test/test_reduce_simplify.c:dependent_range_closeout_preserves_outer_scope", "temp/segment-sum-20261004/README.md", "temp/segment-integration-20261004/before.log"],
+      "close_when": "Pinned tinygrad preserves explicit dependent range closeout with equivalent nested-loop tests."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

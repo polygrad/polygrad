@@ -7,6 +7,7 @@
 
 #include "codegen/late/linearizer.h"
 #include "codegen/codegen.h"
+#include "codegen/simplify.h"
 #include "bigint.h"
 #include "ctx.h"
 #include "utils.h"
@@ -1224,7 +1225,7 @@ static PolyUOp *do_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b)
     free(srcs);
     return NULL;
   }
-  int n_ranges = poly_uop_ranges(ctx, range_sink, ranges, n_topo);
+  int n_ranges = poly_codegen_range_operands(ctx, srcs, n_range_srcs, ranges, n_topo);
   free(range_topo);
   if (n_ranges < 0) {
     free(ranges);

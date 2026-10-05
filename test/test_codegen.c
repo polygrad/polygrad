@@ -2662,6 +2662,55 @@ TEST(codegen, split_ends_preserves_nested_end_backedge) {
   PASS();
 }
 
+TEST(codegen, dependent_range_executes_inner_then_outer_store) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_INT32, 16, 0);
+  PolyUOp *row = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *col =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, row, poly_arg_range(1, POLY_AXIS_LOOP));
+  PolyUOp *base = poly_uop_mul(ctx, row, poly_uop_const_int(ctx, 4));
+  PolyUOp *idx = poly_uop_add(ctx, base, col);
+  PolyUOp *value = poly_uop_cast(
+      ctx, poly_uop_add(ctx, poly_uop_mul(ctx, row, poly_uop_const_int(ctx, 10)), col), POLY_INT32
+  );
+  PolyUOp *store = poly_uop_store(ctx, poly_uop_index(ctx, out, &idx, 1), value);
+  PolyUOp *done = poly_uop_end(ctx, store, &col, 1);
+  /* The diagonal write must still execute inside row, after its possibly
+   * empty inner loop. Prematurely closing row makes this graph invalid. */
+  PolyUOp *diagonal = poly_uop_add(ctx, base, row);
+  PolyUOp *finish = poly_uop_store(
+      ctx, poly_uop_index(ctx, poly_uop_after(ctx, out, done), &diagonal, 1),
+      poly_uop_cast(ctx, poly_uop_const_int(ctx, 99), POLY_INT32)
+  );
+  PolyUOp *end = poly_uop_end(ctx, finish, &row, 1);
+  PolyKernelInfo info = {.name = "dependent_range", .has_opts_to_apply = true};
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_kernel_info(&info));
+  PolyUOp *lowered = poly_full_rewrite_to_sink_ex(
+      ctx, sink, (PolyRewriteOpts){.caps = poly_c_renderer_caps(), .optimize = true}
+  );
+  int count = 0;
+  PolyUOp **linear = lowered ? poly_do_linearize(ctx, lowered, &count) : NULL;
+  char *source = linear ? poly_render_c(ctx, linear, count, "dependent_range") : NULL;
+  PolyProgram *program = source ? poly_compile_c(source, "dependent_range") : NULL;
+  bool correct = program != NULL;
+  int32_t values[16];
+  for (int i = 0; i < 16; i++)
+    values[i] = -1;
+  if (program) {
+    void *args[] = {values};
+    poly_program_call(program, args, 1);
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++)
+        correct &= values[4 * i + j] == (j < i ? 10 * i + j : j == i ? 99 : -1);
+    poly_program_destroy(program);
+  }
+  free(source);
+  free(linear);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, split_ends_retains_ranges_still_active_in_dependency) {
   /* An arithmetic dependency on RANGE rebuilds exactly END(body, r). */
   PolyCtx *ctx = poly_ctx_new();

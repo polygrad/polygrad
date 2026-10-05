@@ -17,6 +17,9 @@ extern "C" {
 #endif
 
 /* simplify.py stage helpers used by full_rewrite_to_sink. */
+/* Expand range expressions, but preserve an explicitly named RANGE as one
+ * operand even when its bound depends on another range (PG-DIV-015). */
+int poly_codegen_range_operands(PolyCtx *ctx, PolyUOp **src, int n, PolyUOp **out, int capacity);
 PolyPatternMatcher *poly_pm_flatten_range(void);
 PolyPatternMatcher *poly_pm_split_ranges(void);
 PolyPatternMatcher *poly_pm_simplify_ranges(void);

@@ -555,6 +555,42 @@ TEST(reduce_simplify, split_ranges_without_ctx_is_noop_not_abort) {
   PASS();
 }
 
+TEST(reduce_simplify, dependent_range_closeout_preserves_outer_scope) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *outer = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *inner = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_uop_add(ctx, outer, poly_uop_const_int(ctx, 1)),
+      poly_arg_range(2, POLY_AXIS_REDUCE)
+  );
+  PolyUOp *other = poly_uop_range(ctx, 3, 1, POLY_AXIS_LOOP);
+  PolyUOp *value = poly_uop_add(ctx, inner, outer);
+  /* Cover a direct operand, a mixed range expression, and a bool backedge.
+   * Only expressions expand to active ranges; naming inner must not end outer. */
+  for (int mode = 0; mode < 3; mode++) {
+    PolyUOp *src[] = {value, inner, NULL};
+    if (mode == 1) src[2] = poly_uop_add(ctx, other, poly_uop_const_int(ctx, 1));
+    if (mode == 2) src[2] = poly_uop_alu2(ctx, POLY_OP_CMPLT, other, poly_uop_const_int(ctx, 2));
+    PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, mode ? 3 : 2, poly_arg_none());
+    PolyUOp *flat = poly_graph_rewrite(ctx, end, poly_pm_flatten_range());
+    ASSERT_NOT_NULL(flat);
+    ASSERT_EQ(flat->n_src, mode ? 3 : 2);
+    ASSERT_PTR_EQ(flat->src[1], inner);
+    if (mode) ASSERT_PTR_EQ(flat->src[2], mode == 1 ? other : src[2]);
+    ASSERT_TRUE(poly_uop_in_ranges(ctx, flat, outer));
+    ASSERT_TRUE(!poly_uop_in_ranges(ctx, flat, inner));
+    PolyUOp *split = poly_graph_rewrite(ctx, end, poly_pm_split_ends());
+    ASSERT_NOT_NULL(split);
+    ASSERT_TRUE(poly_uop_in_ranges(ctx, split, outer));
+    ASSERT_TRUE(!poly_uop_in_ranges(ctx, split, inner));
+  }
+  PolyUOp *src[] = {value, inner};
+  PolyUOp *red =
+      poly_uop(ctx, POLY_OP_REDUCE, value->dtype, src, 2, poly_arg_reduce(POLY_OP_ADD, 0));
+  ASSERT_PTR_EQ(poly_graph_rewrite(ctx, red, poly_pm_flatten_range()), red);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(reduce_simplify, flatten_range_preserves_bool_backedge) {
   /* tinygrad@2026-08-22/a9069c177a9d codegen/simplify.py:8-18. */
   PolyCtx *ctx = poly_ctx_new();
