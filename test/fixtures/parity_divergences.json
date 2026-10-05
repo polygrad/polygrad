@@ -29,7 +29,7 @@
       "area": "retained logical and explicit placement capability",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEVICE", "UNIQUE"]},
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
-      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Model, export, and explicit place outside default realization",
+      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Model, export, and explicit place outside default realization. Portable BUFFER(UNIQUE) graphs preserve CONTIGUOUS requests until placement; unlike storage-free expressions, absence of a device does not make them virtual.",
       "rationale": "Portable logical retention, export, explicit placement, and PolyModel capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
       "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
       "evidence": [
@@ -713,8 +713,8 @@
       "area": "device-free raw contiguous folding",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
       "tinygrad": "UOp.contiguous returns the original UOp when device is None",
-      "polygrad": "poly_uop_contiguous and Tensor.contiguous both return the original UOp when device is AUTO; genuine rangeify-created device-free STAGE nodes inherit the physical sink device",
-      "rationale": "The legacy raw CONTIGUOUS barrier is removed. Raw, Tensor, logical, placement, rangeify and CUDA schedule regressions now enforce the pinned fold without restoring implicit realization-time placement.",
+      "polygrad": "poly_uop_contiguous and Tensor.contiguous preserve the pinned fold for physical and genuinely storage-free graphs. Portable BUFFER(UNIQUE) materialization is retained under PG-DIV-002; genuine rangeify-created device-free STAGE nodes inherit the physical sink device.",
+      "rationale": "The legacy raw CONTIGUOUS barrier is removed without restoring implicit realization-time placement. A portable storage graph is not a storage-free expression: the October 4 sort Model regression requires its requested barriers to survive until explicit placement.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/mixin/elementwise.py:ElementwiseMixin.contiguous",

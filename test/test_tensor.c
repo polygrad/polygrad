@@ -5172,6 +5172,31 @@ TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
   PASS();
 }
 
+TEST(pe, sort_large_vector_internal_rank) {
+  const int64_t lengths[] = {32768, 32769, 65536, 65537, 150000};
+  for (int i = 0; i < 5; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *x = poly_test_buffer(ctx, POLY_INT32, lengths[i]);
+    PolyUOp *values = NULL, *indices = NULL;
+    int rc = poly_uop_sort(ctx, x, 0, 0, &values, &indices);
+    bool valid = rc == 0 && values && indices && poly_uop_ndim(ctx, values) == 1 &&
+                 poly_uop_ndim(ctx, indices) == 1 &&
+                 poly_uop_max_shape_dims(ctx, values)[0] == lengths[i];
+    int max_rank = 0, count = 0;
+    PolyUOp **nodes = valid ? poly_uop_toposort_alloc(ctx, values, &count) : NULL;
+    for (int j = 0; j < count; j++) {
+      int rank = poly_uop_ndim(ctx, nodes[j]);
+      if (rank > max_rank) max_rank = rank;
+    }
+    poly_uop_toposort_free(nodes);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(valid);
+    /* Unflatten plus cat's STACK must retain the pinned high-rank graph. */
+    if (lengths[i] > 32768) ASSERT_TRUE(max_rank > 16);
+  }
+  PASS();
+}
+
 TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 5}, 2);
@@ -7298,7 +7323,8 @@ TEST(tensor, contiguous_tensor_matches_pinned_device_rules) {
   PolyTensor *permuted = poly_tensor_permute(ctx, storage, order, 2);
   PolyTensor *materialized = poly_tensor_contiguous(ctx, permuted);
   ASSERT_NOT_NULL(materialized);
-  ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized), poly_tensor_uop_logical(permuted));
+  ASSERT_INT_EQ(poly_tensor_uop_logical(materialized)->op, POLY_OP_CONTIGUOUS);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized)->src[0], poly_tensor_uop_logical(permuted));
   ASSERT_INT_EQ(poly_tensor_uop_physical(materialized)->op, POLY_OP_CONTIGUOUS);
   ASSERT_PTR_EQ(poly_tensor_uop_physical(materialized)->src[0], poly_tensor_uop_physical(permuted));
 

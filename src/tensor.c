@@ -1727,7 +1727,12 @@ PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src) {
   /* Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61 applies
    * UOp.contiguous directly; the shared helper below owns every fold. */
   PolyUOp *physical = poly_uop_contiguous(ctx, current);
-  PolyUOp *logical = build_logical ? poly_uop_contiguous(ctx, src->uop_logical) : NULL;
+  /* Realization retains the authoring expression but already supplies storage.
+   * A no-op on that storage must not add a new barrier to the retained graph. */
+  PolyUOp *logical = build_logical ? (poly_uop_has_buffer_identity(current)
+                                          ? src->uop_logical
+                                          : poly_uop_contiguous(ctx, src->uop_logical))
+                                   : NULL;
   if (!physical || (build_logical && !logical)) return NULL;
   return tensor_unary_result(ctx, src, logical, physical);
 }

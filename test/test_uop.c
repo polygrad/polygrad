@@ -4029,11 +4029,12 @@ extern PolyUOp *poly_test_limit_bufs(PolyCtx *ctx, PolyUOp *sink, int fail_after
 
 TEST(uop, range_capacity_limit_buffers_rejects_unrepresentable_stage_rank) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *ranges[20];
-  PolyUOp *idx = capacity_coordinate(ctx, 0, 20, ranges);
+  PolyUOp *ranges[POLY_MAX_DIMS + 1];
+  PolyUOp *idx = capacity_coordinate(ctx, 0, POLY_MAX_DIMS + 1, ranges);
   PolyUOp *values[32];
   for (int i = 0; i < 32; i++) {
-    PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 21, POLY_DEVICE_CPU);
+    PolyUOp *buf =
+        poly_test_buffer_on_device(ctx, POLY_FLOAT32, POLY_MAX_DIMS + 2, POLY_DEVICE_CPU);
     PolyUOp *param = poly_uop_param(ctx, i, buf);
     values[i] = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, param, idx, poly_arg_none());
   }

@@ -5949,14 +5949,16 @@ TEST(rangeify, limit_bufs_scratch_failure_is_not_success) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *leaf = poly_uop0(ctx, POLY_OP_CUSTOM, POLY_VOID, poly_arg_none());
-  PolyUOp *src[40];
-  for (int i = 0; i < 40; i++)
+  /* Exceed limit_bufs' inline workspace so the injected allocation fails. */
+  enum { N = POLY_MAX_DIMS + 5 };
+  PolyUOp *src[N];
+  for (int i = 0; i < N; i++)
     src[i] = leaf;
-  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, 40, poly_arg_none());
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, N, poly_arg_none());
   ASSERT_NOT_NULL(sink);
   PolyUOp *failed = poly_test_limit_bufs(ctx, sink, 0);
   PolyUOp *retry = poly_test_limit_bufs(ctx, sink, -1);
-  bool correct = failed == NULL && retry == sink && sink->n_src == 40;
+  bool correct = failed == NULL && retry == sink && sink->n_src == N;
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(correct);
   PASS();

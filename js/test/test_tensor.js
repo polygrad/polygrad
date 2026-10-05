@@ -3503,6 +3503,22 @@ async function runTensorTests(pg, createRuntime) {
     )
   })
 
+  await test('sort large vector internal rank', async () => {
+    const n = 32769
+    const data = Int32Array.from({length: n}, (_, i) => (i * 97) % 1009 - 504)
+    const x = new Tensor(data, {dtype: 'int32'})
+    const [values, indices] = x.sort()
+    try {
+      assertShape(values.shape, [n])
+      assertShape(indices.shape, [n])
+      assertClose(await values.toArray(), data.slice().sort(), 0)
+    } finally {
+      await indices.dispose()
+      await values.dispose()
+      await x.dispose()
+    }
+  })
+
   await test('sort argsort topk match tinygrad probe', async () => {
     const x = new Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]])
     let pair = x.sort(1, false)
@@ -4431,7 +4447,7 @@ async function runTensorTests(pg, createRuntime) {
 
     const out = source.contiguous()
     assert(out !== source, 'contiguous should return a new Tensor object')
-    assert(out.uopLogical.key === sourceLogical, 'device-free logical result should fold contiguous')
+    assert(out.uopLogical.key === sourceLogical, 'realized contiguous must preserve logical provenance')
     assert(out.uopPhysical && out.uopPhysical.key === sourceCurrent,
       'physical result should reuse the exact current buffer')
     assert(out.uop.key === sourceCurrent, 'current result should reuse the exact current buffer')

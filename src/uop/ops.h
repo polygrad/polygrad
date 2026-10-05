@@ -278,7 +278,12 @@ typedef struct {
 } PolyShape;
 
 #define POLY_SHAPE_NONE ((PolyShape){NULL, -1})
-#define POLY_MAX_DIMS 16
+/* Internal composition needs more axes than its input/output rank: bitonic
+ * sort unflattens into binary axes, and cat adds a STACK axis. Reserve room
+ * for the signed-64-bit extent's binary axes plus that temporary. This is
+ * still a bounded C workspace, not an arbitrary-rank contract; public Model
+ * binding layouts have their own unchanged limits. */
+#define POLY_MAX_DIMS 64
 
 PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_shape_numel(PolyShape s);

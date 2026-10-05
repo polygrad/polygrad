@@ -5241,11 +5241,13 @@ static int model_classify_effects(PolyModel *inst) {
        * call-side mutation; producer metadata is not a bounds guarantee. */
       PolyUOp *v = topo[j];
       if (v->op == POLY_OP_SHRINK) {
-        PolyUOp *starts[POLY_IR_MAX_DIMS], *sizes[POLY_IR_MAX_DIMS];
+        /* Named binding ranks use the file-format limit; internal tensor
+         * views (e.g. bitonic sort stages) use the core's full rank limit. */
+        PolyUOp *starts[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
         int rank = v->n_src == 3 ? poly_uop_ndim(inst->ctx, v->src[0]) : -1;
-        if (rank < 0 || rank > POLY_IR_MAX_DIMS ||
-            poly_uop_as_shape(inst->ctx, v->src[1], starts, POLY_IR_MAX_DIMS) != rank ||
-            poly_uop_as_shape(inst->ctx, v->src[2], sizes, POLY_IR_MAX_DIMS) != rank) {
+        if (rank < 0 || rank > POLY_MAX_DIMS ||
+            poly_uop_as_shape(inst->ctx, v->src[1], starts, POLY_MAX_DIMS) != rank ||
+            poly_uop_as_shape(inst->ctx, v->src[2], sizes, POLY_MAX_DIMS) != rank) {
           free(topo);
           return -1;
         }

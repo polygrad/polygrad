@@ -6,6 +6,53 @@ from polygrad.model import Model, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
+def test_portable_sort_preserves_materialization_boundaries():
+    from polygrad import create
+    def barriers(root):
+        seen, pending = {}, [root]
+        while pending:
+            u = pending.pop()
+            if u.raw in seen:
+                continue
+            seen[u.raw] = u
+            pending.extend(u.src)
+        return sum(u.op_name == 'CONTIGUOUS' for u in seen.values())
+    with create(device='CPU', logical='always') as rt:
+        x = rt.Tensor.empty(448, dtype='int32')
+        values, indices = x.sort()
+        model = restored = None
+        try:
+            assert barriers(values.uop_logical) == barriers(values.uop_physical) == 53
+            model = rt.Model.from_tensors(inputs={'x': x}, outputs={'y': values})
+            restored = rt.Model.load(model.save())
+            data = np.random.default_rng(42).permutation(448).astype(np.int32)
+            for m in (model, restored):
+                for inputs in (data, data[::-1].copy()):
+                    np.testing.assert_array_equal(m.call('forward', {'x': inputs})['y'], np.sort(data))
+        finally:
+            if restored: restored.dispose()
+            if model: model.dispose()
+            for t in (indices, values, x): t.dispose()
+
+def test_high_rank_internal_view_with_flat_model_bindings():
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        x = rt.Tensor.empty(512).is_param_(False)
+        cube = x.reshape((2,) * 9)
+        view = cube.shrink(((0, 2),) * 8 + ((0, 1),))
+        output = view.reshape(256)
+        model = restored = None
+        try:
+            model = rt.Model.from_tensors(inputs={'x': x}, outputs={'y': output})
+            restored = rt.Model.load(model.save())
+            data = np.arange(512, dtype=np.float32)
+            for m in (model, restored):
+                np.testing.assert_array_equal(m.call('forward', {'x': data})['y'], data[::2])
+        finally:
+            if restored: restored.dispose()
+            if model: model.dispose()
+            for t in (output, view, cube, x): t.dispose()
+
 @pytest.mark.parametrize('device', ['CPU', 'INTERP'])
 def test_output_lookup_does_not_enumerate_buffers(device, monkeypatch):
     from polygrad import create

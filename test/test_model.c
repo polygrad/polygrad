@@ -3021,7 +3021,7 @@ TEST(model, stochastic_named_state_requires_checkpoint_for_portable_activation) 
   ASSERT_NOT_NULL(w);
   ASSERT_NOT_NULL(x);
   ASSERT_NOT_NULL(out);
-  ASSERT_INT_EQ(model_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_CONTIGUOUS), 0);
+  ASSERT_INT_EQ(model_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_CONTIGUOUS), 1);
   ASSERT_TRUE(model_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_AFTER) > 0);
   ASSERT_TRUE(model_count_root_op(ctx, poly_tensor_uop_logical(w), POLY_OP_STORE) > 0);
 

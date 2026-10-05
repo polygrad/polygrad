@@ -327,12 +327,25 @@ PolyUOp *poly_uop_elementwise_scalar_binop(
 
 PolyUOp *poly_uop_contiguous(PolyCtx *ctx, PolyUOp *x) {
   if (!ctx || !x) return NULL;
-  /* Tinygrad 2026-08-22/a9069c177a9d mixin/elementwise.py:55-61: weak and
-   * device-free values have no storage materialization to request. */
+  /* Tinygrad mixin/elementwise.py:contiguous: weak and storage-free
+   * expressions have no materialization to request. */
   if (poly_dtype_is_weak(x->dtype)) return x;
   if (x->op == POLY_OP_CONTIGUOUS) return x;
-  if (poly_uop_device(x) == POLY_DEVICE_AUTO) return x;
   if (poly_uop_has_buffer_identity(x)) return x;
+  if (poly_uop_device(x) == POLY_DEVICE_AUTO) {
+    /* Portable BUFFER(UNIQUE) is unplaced storage, not a virtual expression.
+     * Preserve its materialization requests for Model placement/export;
+     * genuinely storage-free values still follow tinygrad's device=None rule. */
+    int n = 0;
+    PolyUOp **topo = poly_uop_toposort_alloc(ctx, x, &n);
+    if (!topo) return NULL;
+    bool storage = false;
+    for (int i = 0; i < n && !storage; i++)
+      storage = topo[i]->op == POLY_OP_BUFFER && topo[i]->n_src == 1 &&
+                topo[i]->src[0]->op == POLY_OP_UNIQUE;
+    poly_uop_toposort_free(topo);
+    if (!storage) return x;
+  }
   return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
 }
 
