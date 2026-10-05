@@ -458,6 +458,107 @@ def test_definition_disconnected_gradient():
         model.dispose()
 
 
+@pytest.mark.parametrize('dtype', ['float32', 'float64'])
+def test_definition_state_controls_and_simultaneous_writes(dtype, monkeypatch):
+    spec = {'inputs': {}, 'state': {'a': {'shape': [2], 'dtype': 'float32'},
+                                  'b': {'shape': [2], 'dtype': 'float32'}},
+            'controls': {'iteration': {'min': 0, 'max': 10}},
+            'nodes': [{'name': 'inc', 'type': 'cast', 'dtype': 'float32', 'inputs': ['iteration']},
+                      {'name': 'next_b', 'type': 'add', 'inputs': ['a', 'inc']},
+                      {'name': 'status', 'type': 'sum', 'inputs': ['next_b']}],
+            'outputs': {'status': 'status'},
+            'entrypoints': [{'name': 'step', 'inputs': [], 'outputs': ['status'],
+                             'controls': ['iteration'], 'writes': {'a': 'b', 'b': 'next_b'}}]}
+    for state in spec['state'].values(): state['dtype'] = dtype
+    spec['nodes'][0]['dtype'] = dtype
+    model = Graph(spec)
+    try:
+        model.write_buffer('a', np.array([1, 2], dtype))
+        model.write_buffer('b', np.array([3, 4], dtype))
+        with monkeypatch.context() as patch:
+            patch.setattr(model, '_collect_outputs', lambda *_: pytest.fail('unexpected readback'))
+            assert model.call('step', {}, controls={'iteration': 1}, readback=False) == {}
+        np.testing.assert_array_equal(model.read_buffer('a'), [3, 4])
+        np.testing.assert_array_equal(model.read_buffer('b'), [2, 3])
+        with pytest.raises((ValueError, RuntimeError)):
+            model.call('step', {}, controls={'iteration': 11})
+        np.testing.assert_array_equal(model.read_buffer('a'), [3, 4])
+        np.testing.assert_array_equal(model.read_buffer('b'), [2, 3])
+        restored = Model.load(model.save())
+        try:
+            restored.call('step', {}, controls={'iteration': 2})
+            np.testing.assert_array_equal(restored.read_buffer('a'), [2, 3])
+            np.testing.assert_array_equal(restored.read_buffer('b'), [5, 6])
+        finally:
+            restored.dispose()
+    finally:
+        model.dispose()
+
+
+@pytest.mark.parametrize('kind', ['array', 'tensor', 'bool'])
+def test_call_readback_keyword_preserves_declared_input(kind):
+    x = Tensor.empty((), dtype='bool') if kind == 'bool' else Tensor.empty(2)
+    y = x.cast('float32') + 1
+    model = Model.from_tensors(inputs={'readback': x}, outputs={'y': y})
+    values = False if kind == 'bool' else np.array([1, 2], np.float32)
+    if kind == 'tensor': values = Tensor(values)
+    try:
+        got = model.call('forward', readback=values)['y']
+        try:
+            np.testing.assert_array_equal(got.numpy() if kind == 'tensor' else got,
+                                          1 if kind == 'bool' else [2, 3])
+        finally:
+            if kind == 'tensor': got.dispose()
+        assert model.call('forward', {'readback': values}, readback=False) == {}
+    finally:
+        model.dispose(); y.dispose(); x.dispose()
+        if kind == 'tensor': values.dispose()
+
+
+@pytest.mark.parametrize('value', [False, True, np.bool_(False), [True, False]])
+def test_call_preserves_boolean_host_inputs(value):
+    data = np.asarray(value, dtype=np.bool_)
+    x = Tensor.empty(data.shape, dtype='bool')
+    y = x.cast('float32') + 1
+    model = Model.from_tensors(inputs={'flag': x}, outputs={'y': y})
+    try:
+        np.testing.assert_array_equal(model.call('forward', flag=value)['y'], data + 1)
+        assert model.call('forward', {'flag': value}, readback=False) == {}
+        np.testing.assert_array_equal(model.read_buffer('y'), data + 1)
+    finally:
+        model.dispose(); y.dispose(); x.dispose()
+
+
+def test_call_without_readback_accepts_tensor_inputs(monkeypatch):
+    x = Tensor.empty(2)
+    y = x + 1
+    model = Model.from_tensors(inputs={'x': x}, outputs={'y': y})
+    values = Tensor([3., 4.])
+    try:
+        monkeypatch.setattr(model, '_collect_outputs', lambda *_: pytest.fail('unexpected readback'))
+        assert model.call('forward', {'x': values}, readback=False) == {}
+        np.testing.assert_array_equal(model.read_buffer('y'), [4., 5.])
+    finally:
+        model.dispose()
+        x.dispose(); y.dispose(); values.dispose()
+
+
+@pytest.mark.parametrize('change,message', [
+    ({'state': {'a': {'shape': [{'name': 'n', 'min': 1, 'max': 2}], 'dtype': 'float32'}}}, 'fixed'),
+    ({'writes': {'missing': 'next_b'}}, 'unknown state'),
+    ({'writes': {'a': 'status'}}, 'identical shape'),
+    ({'controls': ['missing']}, 'unknown control'),
+    ({'controls': ['iteration', 'iteration']}, 'duplicate name'),
+])
+def test_definition_state_rejects_invalid_contract(change, message):
+    import json
+    from pathlib import Path
+    spec = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/model_state.json').read_text())
+    if 'state' in change: spec['state'] = change['state']
+    else: spec['entrypoints'][0].update(change)
+    with pytest.raises(ValueError, match=message): Graph(spec)
+
+
 def test_definition_shared_embedding_and_norm_state():
     model = Graph({
         'inputs':{'x':{'shape':[2],'dtype':'int32'}},

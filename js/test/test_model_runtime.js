@@ -1440,6 +1440,39 @@ async function checkDescriptionGradient(pg) {
       assertClose(out.gradient, x.map(v => 2*v), 0)
       assertClose(out.second, [2, 2], 0)
     }
+    const input = new pg.Tensor(new Float32Array([3,4]))
+    try {
+      await model.callAsync('forward', {x:input}, {readback:false})
+      assertClose(await model.readBufferAsync('gradient'), [6,8], 0)
+    } finally { input.dispose() }
+  } finally { await model.dispose() }
+}
+
+async function checkDescriptionState(pg) {
+  const model = await pg.models.GraphAsync(require('../../test/fixtures/model_state.json'))
+  try {
+    await model.writeBufferAsync('a', new Float32Array([1,2]))
+    await model.writeBufferAsync('b', new Float32Array([3,4]))
+    // Skipping readback must not call either frontend output collector.
+    const sync = model._collectOutputsRaw, async = model._collectOutputsRawAsync
+    model._collectOutputsRaw = model._collectOutputsRawAsync = () => { throw Error('unexpected readback') }
+    try {
+      const out = await model.callAsync('step', {}, {controls:{iteration:1},readback:false})
+      assert(Object.keys(out).length === 0)
+    } finally { model._collectOutputsRaw = sync; model._collectOutputsRawAsync = async }
+    assertClose(await model.readBufferAsync('a'), [3,4], 0)
+    assertClose(await model.readBufferAsync('b'), [2,3], 0)
+    let rejected = false
+    try { await model.callAsync('step', {}, {controls:{iteration:11},readback:false}) }
+    catch (_) { rejected = true }
+    assert(rejected, 'out-of-bounds control accepted')
+    assertClose(await model.readBufferAsync('a'), [3,4], 0)
+    const restored = pg.Model.load(await model.saveAsync())
+    try {
+      await restored.callAsync('step', {}, {controls:{iteration:2},readback:false})
+      assertClose(await restored.readBufferAsync('a'), [2,3], 0)
+      assertClose(await restored.readBufferAsync('b'), [5,6], 0)
+    } finally { await restored.dispose() }
   } finally { await model.dispose() }
 }
 
@@ -2047,6 +2080,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
+  await test('Model description state writes and deferred readback', () => checkDescriptionState(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))
@@ -2823,6 +2857,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
+  await test('Model description state writes and deferred readback', () => checkDescriptionState(pg))
   await test('Model tied Adam placement freeze and checkpoint', () => checkTiedAdamCheckpoint(pg))
   await test('Model constructor collects object state', () => checkModelConstructor(pg, Model))
   await test('Model constructor dispatch and explicit factories', () => checkModelDispatch(pg, Model))

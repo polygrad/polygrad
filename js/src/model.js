@@ -1221,30 +1221,30 @@ function createBoundModelClass(runtime) {
       return new Error(this._rt._core.model.lastError(this._handle).trim() || fallback)
     }
 
-    call(entrypoint, io, { controls = null } = {}) {
+    call(entrypoint, io, { controls = null, readback = true } = {}) {
       this._requireSync('call()', 'callAsync()')
       const controlRows = controlEntries(controls)
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
-      if (tensors) {
+      if (tensors && readback) {
         return this._wrapTensorOutputs(String(entrypoint),
           this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays, controlRows))
       }
       const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays, controlRows)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
       if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
-      return this._collectOutputsRaw(String(entrypoint))
+      return readback ? this._collectOutputsRaw(String(entrypoint)) : {}
     }
 
     forwardAsync(io) {
       return this.callAsync('forward', io)
     }
 
-    callAsync(entrypoint, io, { controls = null } = {}) {
+    callAsync(entrypoint, io, { controls = null, readback = true } = {}) {
       entrypoint = String(entrypoint)
       const controlRows = controlEntries(controls)
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
       const run = () => {
-        if (tensors) {
+        if (tensors && readback) {
           const handles = this._rt._core.model.callTensors(this._handle, entrypoint, names, arrays, controlRows)
           return isPromiseLike(handles) ? handles.then(v => this._wrapTensorOutputs(entrypoint, v))
             : this._wrapTensorOutputs(entrypoint, handles)
@@ -1253,11 +1253,11 @@ function createBoundModelClass(runtime) {
         if (isPromiseLike(rc)) {
           return rc.then(v => {
             if (v !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${v})`)
-            return this._collectOutputsRawAsync(entrypoint)
+            return readback ? this._collectOutputsRawAsync(entrypoint) : {}
           })
         }
         if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
-        return this._collectOutputsRaw(entrypoint)
+        return readback ? this._collectOutputsRaw(entrypoint) : {}
       }
       // Queue now, before a subsequent Tensor.dispose can enqueue its release.
       // No C calls are made while an earlier Asyncify invocation is suspended.

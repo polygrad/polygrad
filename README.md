@@ -257,9 +257,12 @@ The initial component catalogue is deliberately bounded:
 | `identity`, `square`, `neg`, `exp`, `log`, `softplus` | One input; `softplus` uses beta 1 |
 | `add`, `sub`, `mul`, `div` | Two inputs, existing Tensor broadcasting |
 | `matmul` | Two inputs, existing Tensor dot semantics |
+| `maximum`, `lt`, `eq` | Two inputs, existing Tensor broadcasting/comparisons |
+| `where` | Condition, true value, false value |
+| `arange` | No inputs; integer `start`, `stop`, positive `step`, concrete `dtype`; nonempty bounded range |
 | `const_like` | One floating input; finite `value`, with the input's shape and dtype |
 | `gradient` | Two inputs: floating scalar loss and floating target; constructs its derivative graph |
-| `sum`, `mean` | Reduce all axes to a scalar |
+| `sum`, `mean`, `max` | Optional nonempty `axes` and boolean `keepdim`; otherwise reduce all axes |
 | `reshape` | Positive `shape`, optionally the same bounded leading dimension; unchanged symbolic element count |
 | `permute` | `axes`: a permutation of all input axes |
 | `cast` | Explicit destination `dtype` |
@@ -268,11 +271,28 @@ The initial component catalogue is deliberately bounded:
 Graph configurations replace `input/layers/output` with:
 
 - `inputs`: name maps to `{shape, dtype, role?}`; role is `input` or `target`.
+  An empty mapping is allowed for state-only entrypoints.
+- Optional `state`: name maps to `{shape, dtype}`. Fixed-shape AUX buffers start
+  at zero, persist across calls, and are included in checkpoints.
+- Optional `controls`: name maps to integer `{min, max}` bounds. Controls are
+  scalar values available to nodes, not shape declarations.
 - `nodes`: ordered `{name, type, inputs: [earlier_value_names], ...}` records.
 - `outputs`: output name maps to input or node name.
-- Optional `entrypoints`: `{name, inputs, outputs, objective?}` records. Without
+- Optional `entrypoints`: `{name, inputs, outputs, objective?, controls?, writes?}` records. Without
   them, `forward` exposes all declared inputs and outputs. An explicit scalar
   objective enables the existing Model training path.
+  `controls` lists declared control names; `writes` maps state names to node/value
+  names of exactly the same shape and dtype. Writes use pre-update values and
+  commit together on a successful call (execution failures are not rolled back).
+  Writing entrypoints require distinct output names. At least one output is
+  required, even when it is only a scalar status.
+
+Stateful loops can call `model.call('step', {}, controls={...}, readback=False)`
+in Python or `await model.callAsync('step', {}, {controls: {...}, readback: false})`
+in JS. This returns an empty mapping without collecting outputs; use
+`read_buffer` / `readBufferAsync` for occasional snapshots. It does not make an
+in-flight GPU operation cancellable or relax runtime serialization.
+See [the state/control example](test/fixtures/model_state.json).
 
 Both model types accept `modules`, a table of named leaf-component configurations.
 Use `{name, call: "shared", inputs: [...]}` instead of `type` in a Graph node

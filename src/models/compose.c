@@ -52,6 +52,12 @@ typedef struct {
   int64_t batch_min, batch_max;
   const cJSON *used_modules[DEF_NODES];
   int n_used_modules;
+  PolyTensor *states[DEF_IO];
+  const char *state_names[DEF_IO];
+  int n_states;
+  PolyUOp *controls[DEF_IO];
+  const char *control_names[DEF_IO];
+  int n_controls;
 } Definition;
 
 static bool def_error(Definition *d, const char *path, const char *fmt, ...) {
@@ -326,6 +332,26 @@ static PolyTensor *apply(
     return NULL;
   }
   const char *kind = type->valuestring;
+  if (!strcmp(kind, "arange")) {
+    int64_t start, stop, step;
+    PolyDType dt;
+    if (n || !fields(d, spec, "|name||inputs||type||start||stop||step||dtype|", path) ||
+        !integer(d, field(spec, "start"), -DEF_ELEMENTS, DEF_ELEMENTS, &start, path) ||
+        !integer(d, field(spec, "stop"), -DEF_ELEMENTS, DEF_ELEMENTS, &stop, path) ||
+        !integer(d, field(spec, "step"), 1, DEF_ELEMENTS, &step, path) ||
+        !dtype(d, field(spec, "dtype"), &dt, path) || stop <= start ||
+        (stop - start + step - 1) / step > DEF_ELEMENTS) {
+      def_error(d, path, "arange requires no inputs and a bounded positive-step range");
+      return NULL;
+    }
+    return own(
+        d,
+        poly_tensor_arange_int(
+            d->ctx, start, stop, step, dt, poly_ctx_get_preferred_device(d->ctx)
+        ),
+        path
+    );
+  }
   const char *allowed = "|name||inputs||type|";
   if (!strcmp(kind, "linear"))
     allowed = "|name||inputs||type||out_features||bias||activation|";
@@ -347,12 +373,15 @@ static PolyTensor *apply(
     allowed = "|name||inputs||type||is_causal||enable_gqa|";
   else if (!strcmp(kind, "const_like"))
     allowed = "|name||inputs||type||value|";
+  else if (!strcmp(kind, "sum") || !strcmp(kind, "mean") || !strcmp(kind, "max"))
+    allowed = "|name||inputs||type||axes||keepdim|";
   if (!fields(d, spec, allowed, path)) return NULL;
-  bool binary =
-      !strcmp(kind, "add") || !strcmp(kind, "sub") || !strcmp(kind, "mul") || !strcmp(kind, "div");
+  bool binary = !strcmp(kind, "add") || !strcmp(kind, "sub") || !strcmp(kind, "mul") ||
+                !strcmp(kind, "div") || !strcmp(kind, "maximum") || !strcmp(kind, "lt") ||
+                !strcmp(kind, "eq");
   bool attention = !strcmp(kind, "attention");
   bool gradient = !strcmp(kind, "gradient"), matmul = !strcmp(kind, "matmul");
-  int arity = binary || gradient || matmul ? 2 : 1;
+  int arity = !strcmp(kind, "where") ? 3 : binary || gradient || matmul ? 2 : 1;
   if (attention ? (n != 3 && n != 4) : n != arity) {
     if (attention) {
       def_error(d, path, "expected query, key, value and optional mask inputs");
@@ -546,14 +575,7 @@ static PolyTensor *apply(
       def_error(d, path, "gradient requires a floating scalar and floating target");
       return NULL;
     }
-    PolyUOp *physical = poly_uop_grad(d->ctx, xu, poly_tensor_uop_physical(target));
-    PolyUOp *logical =
-        poly_uop_grad(d->ctx, poly_tensor_uop_logical(x), poly_tensor_uop_logical(target));
-    out = physical && logical ? poly_tensor_create_result(
-                                    d->ctx, inputs, n, logical, physical, POLY_TENSOR_VALUE,
-                                    poly_tensor_device(target)
-                                )
-                              : NULL;
+    out = poly_tensor_gradient(d->ctx, x, target);
   } else if (matmul) {
     out = poly_tensor_dot(d->ctx, x, inputs[1]);
   } else if (!strcmp(kind, "const_like")) {
@@ -564,6 +586,8 @@ static PolyTensor *apply(
       return NULL;
     }
     out = poly_tensor_const_like_float(d->ctx, x, value->valuedouble);
+  } else if (!strcmp(kind, "where")) {
+    out = poly_tensor_alu3(d->ctx, POLY_OP_WHERE, x, inputs[1], inputs[2]);
   } else if (binary) {
     PolyUOp *sources[] = {xu, poly_tensor_uop_physical(inputs[1])}, *broadcast[8];
     if (poly_uop_broadcast_shape(d->ctx, sources, 2, broadcast, 8) < 0) {
@@ -576,15 +600,40 @@ static PolyTensor *apply(
       PolyTensor *neg = own(d, poly_tensor_alu1(d->ctx, POLY_OP_NEG, inputs[1]), path);
       out = neg ? poly_tensor_alu2(d->ctx, POLY_OP_ADD, x, neg) : NULL;
     } else
-      out =
-          poly_tensor_alu2(d->ctx, !strcmp(kind, "add") ? POLY_OP_ADD : POLY_OP_MUL, x, inputs[1]);
-  } else if (!strcmp(kind, "sum") || !strcmp(kind, "mean")) {
+      out = poly_tensor_alu2(
+          d->ctx,
+          !strcmp(kind, "add")       ? POLY_OP_ADD
+          : !strcmp(kind, "maximum") ? POLY_OP_MAX
+          : !strcmp(kind, "lt")      ? POLY_OP_CMPLT
+          : !strcmp(kind, "eq")      ? POLY_OP_CMPEQ
+                                     : POLY_OP_MUL,
+          x, inputs[1]
+      );
+  } else if (!strcmp(kind, "sum") || !strcmp(kind, "mean") || !strcmp(kind, "max")) {
     int64_t axes[8];
-    for (int i = 0; i < rank; i++) {
-      axes[i] = i;
+    const cJSON *specified = field(spec, "axes"), *keep = field(spec, "keepdim");
+    int na = specified ? cJSON_GetArraySize(specified) : rank;
+    if ((specified && (!cJSON_IsArray(specified) || na < 1 || na > rank)) ||
+        (keep && !cJSON_IsBool(keep))) {
+      def_error(d, path, "expected nonempty axes and boolean keepdim");
+      return NULL;
     }
-    out = !strcmp(kind, "sum") ? poly_tensor_sum(d->ctx, x, axes, rank, false)
-                               : poly_tensor_mean(d->ctx, x, axes, rank, false);
+    bool seen[8] = {0};
+    for (int i = 0; i < na; i++) {
+      axes[i] = i;
+      if (specified &&
+          !integer(d, cJSON_GetArrayItem(specified, i), -rank, rank - 1, &axes[i], path))
+        return NULL;
+      if (axes[i] < 0) axes[i] += rank;
+      if (seen[axes[i]]) {
+        def_error(d, path, "duplicate reduction axis");
+        return NULL;
+      }
+      seen[axes[i]] = true;
+    }
+    out = !strcmp(kind, "sum")   ? poly_tensor_sum(d->ctx, x, axes, na, cJSON_IsTrue(keep))
+          : !strcmp(kind, "max") ? poly_tensor_max(d->ctx, x, axes, na, cJSON_IsTrue(keep))
+                                 : poly_tensor_mean(d->ctx, x, axes, na, cJSON_IsTrue(keep));
   } else if (!strcmp(kind, "reshape")) {
     int64_t maximum[8];
     PolyUOp *dest[8];
@@ -701,8 +750,8 @@ static bool input(Definition *d, const char *name, const cJSON *spec, bool seque
 }
 
 static bool names(Definition *d, const cJSON *array, const char **out, int *n, const char *path) {
-  if (!cJSON_IsArray(array) || (*n = cJSON_GetArraySize(array)) > DEF_IO || !*n)
-    return def_error(d, path, "expected 1..64 names");
+  if (!cJSON_IsArray(array) || (*n = cJSON_GetArraySize(array)) > DEF_IO)
+    return def_error(d, path, "expected at most 64 names");
   int i = 0;
   for (const cJSON *v = array->child; v; v = v->next) {
     if (!cJSON_IsString(v) || !name_ok(d, v->valuestring, path)) return false;
@@ -712,6 +761,154 @@ static bool names(Definition *d, const cJSON *array, const char **out, int *n, c
     out[i++] = v->valuestring;
   }
   return true;
+}
+
+static bool declare_state_controls(Definition *d, const cJSON *root) {
+  const cJSON *state = field(root, "state"), *controls = field(root, "controls");
+  if (state && (!cJSON_IsObject(state) || cJSON_GetArraySize(state) > DEF_IO))
+    return def_error(d, "state", "expected at most 64 named states");
+  for (const cJSON *s = state ? state->child : NULL; s; s = s->next) {
+    PolyDType dt;
+    int rank;
+    int64_t dims[8], size = 1;
+    PolyUOp *sdims[8];
+    const cJSON *sh = field(s, "shape");
+    if (!fields(d, s, "|shape||dtype|", "state") || !dtype(d, field(s, "dtype"), &dt, "state"))
+      return false;
+    for (const cJSON *dim = sh ? sh->child : NULL; dim; dim = dim->next)
+      if (!cJSON_IsNumber(dim)) return def_error(d, "state", "state shapes must be fixed");
+    if (!shape(d, sh, sdims, dims, &rank, "state")) return false;
+    for (int i = 0; i < rank; i++)
+      size *= dims[i];
+    if (!reserve_storage(d, size, "state")) return false;
+    PolyTensor *t =
+        own(d, poly_tensor_empty(d->ctx, dt, dims, rank, poly_ctx_get_preferred_device(d->ctx)),
+            "state");
+    if (!t || !add_value(d, s->string, t, "state") || poly_model_aux(d->model, s->string, t, 0))
+      return false;
+    d->state_names[d->n_states] = s->string;
+    d->states[d->n_states++] = t;
+  }
+  if (controls && (!cJSON_IsObject(controls) || cJSON_GetArraySize(controls) > DEF_IO))
+    return def_error(d, "controls", "expected at most 64 integer controls");
+  for (const cJSON *c = controls ? controls->child : NULL; c; c = c->next) {
+    int64_t lo, hi;
+    if (!fields(d, c, "|min||max|", "controls") ||
+        !integer(d, field(c, "min"), INT32_MIN, INT32_MAX, &lo, "controls") ||
+        !integer(d, field(c, "max"), lo, INT32_MAX, &hi, "controls"))
+      return false;
+    PolyUOp *u = poly_uop_variable(
+        d->ctx, c->string, poly_arg_int(lo), poly_arg_int(hi), POLY_WEAKINT, 1, false
+    );
+    PolyTensor *t =
+        u ? own(d,
+                poly_tensor_create_with_roots(
+                    d->ctx, u, u, POLY_TENSOR_VALUE, poly_ctx_get_preferred_device(d->ctx)
+                ),
+                "controls")
+          : NULL;
+    if (!t || !add_value(d, c->string, t, "controls")) return false;
+    d->control_names[d->n_controls] = c->string;
+    d->controls[d->n_controls++] = u;
+  }
+  return true;
+}
+
+/* Each writing entrypoint owns its output bindings. Capture restores authoring
+ * roots afterward, so effects cannot leak into another entrypoint's graph. */
+static bool entry_outputs(
+    Definition *d,
+    const cJSON *definitions,
+    const cJSON *writes,
+    const char **outs,
+    int no,
+    int *published
+) {
+  if (!no) return def_error(d, "entrypoints", "at least one output is required");
+  PolyTensor *values[DEF_IO], *wrapped[DEF_IO] = {0};
+  int indices[DEF_IO];
+  bool effects = writes && writes->child;
+  if (writes && (!cJSON_IsObject(writes) || cJSON_GetArraySize(writes) > DEF_IO))
+    return def_error(d, "writes", "expected at most 64 state assignments");
+  for (int i = 0; i < no; i++) {
+    const cJSON *ref = field(definitions, outs[i]);
+    int index = 0;
+    for (const cJSON *v = definitions->child; v && v != ref; v = v->next)
+      index++;
+    if (!ref || !(values[i] = lookup(d, ref, "outputs"))) return false;
+    indices[i] = index;
+    if (published[index] && (effects || published[index] == 2))
+      return def_error(d, "outputs", "writing entrypoints require distinct output names");
+  }
+  PolyTensorCapture *capture = effects ? poly_tensor_capture_begin(d->ctx) : NULL;
+  if (effects && !capture) return false;
+  bool ok = false;
+  int mutable[DEF_IO] = {0};
+  /* Resolve all RHS handles before assigning. Tensor capture supplies the same
+   * dependency/anti-dependency semantics as an ordinary captured Tensor program. */
+  PolyTensor *rhs[DEF_IO] = {0};
+  for (const cJSON *w = writes ? writes->child : NULL; w; w = w->next) {
+    int j = 0;
+    while (j < d->n_states && strcmp(d->state_names[j], w->string))
+      j++;
+    if (j == d->n_states) {
+      def_error(d, "writes", "unknown state '%s'", w->string);
+      goto done;
+    }
+    rhs[j] = lookup(d, w, "writes");
+    int ar, br;
+    int64_t a[8], b[8];
+    if (!rhs[j] || !tensor_shape(d, d->states[j], a, &ar, "writes") ||
+        !tensor_shape(d, rhs[j], b, &br, "writes"))
+      goto done;
+    if (ar != br || memcmp(a, b, (size_t)ar * sizeof(int64_t)) ||
+        !poly_dtype_eq(d->states[j]->uop_physical->dtype, rhs[j]->uop_physical->dtype)) {
+      def_error(d, "writes", "state assignment requires identical shape and dtype");
+      goto done;
+    }
+    /* Writes are simultaneous. Force a scheduler-owned materialization even
+     * for direct state views: Tensor.contiguous() can be an identity there,
+     * while Tensor.clone() introduces an explicit unbound storage allocation.
+     * CONTIGUOUS leaves scratch allocation/lifetime to the ordinary scheduler. */
+    PolyUOp *l = poly_uop1(
+        d->ctx, POLY_OP_CONTIGUOUS, rhs[j]->uop_logical->dtype, rhs[j]->uop_logical, poly_arg_none()
+    );
+    PolyUOp *p = poly_uop1(
+        d->ctx, POLY_OP_CONTIGUOUS, rhs[j]->uop_physical->dtype, rhs[j]->uop_physical,
+        poly_arg_none()
+    );
+    rhs[j] =
+        own(d,
+            poly_tensor_create_result(
+                d->ctx, &rhs[j], 1, l, p, POLY_TENSOR_VALUE, poly_tensor_device(rhs[j])
+            ),
+            "writes");
+    if (!rhs[j]) goto done;
+    mutable[j] = 1;
+  }
+  for (int j = 0; j < d->n_states; j++)
+    if (mutable[j]) {
+      /* assign returns the already-owned target, not a new Tensor handle. */
+      if (!poly_tensor_assign(d->ctx, d->states[j], rhs[j])) {
+        def_error(d, "writes", "assignment construction failed");
+        goto done;
+      }
+    }
+  if (effects &&
+      poly_tensor_capture_wrap(capture, d->states, mutable, d->n_states, values, no, wrapped))
+    goto done;
+  for (int i = 0; i < no; i++) {
+    PolyTensor *out = effects ? own(d, wrapped[i], "outputs") : values[i];
+    wrapped[i] = NULL;
+    if (!out || (!published[indices[i]] && !publish_output(d, outs[i], out))) goto done;
+    published[indices[i]] = effects ? 2 : 1;
+  }
+  ok = true;
+done:
+  for (int i = 0; i < no; i++)
+    if (wrapped[i]) poly_tensor_release(wrapped[i]);
+  if (capture) poly_tensor_capture_end(capture);
+  return ok;
 }
 
 static bool construct(Definition *d, const cJSON *root) {
@@ -724,7 +921,8 @@ static bool construct(Definition *d, const cJSON *root) {
   if (!fields(
           d, root,
           seq ? "|format||type||seed||input||layers||output||modules|"
-              : "|format||type||seed||inputs||nodes||outputs||entrypoints||modules|",
+              : "|format||type||seed||inputs||nodes||outputs||entrypoints||modules||state||"
+                "controls|",
           "$"
       ))
     return false;
@@ -755,12 +953,13 @@ static bool construct(Definition *d, const cJSON *root) {
   } else {
     const cJSON *inputs = field(root, "inputs"), *nodes = field(root, "nodes"),
                 *outputs = field(root, "outputs");
-    if (!cJSON_IsObject(inputs) || !inputs->child || cJSON_GetArraySize(inputs) > DEF_IO)
-      return def_error(d, "inputs", "expected 1..64 named input schemas");
+    if (!cJSON_IsObject(inputs) || cJSON_GetArraySize(inputs) > DEF_IO)
+      return def_error(d, "inputs", "expected at most 64 named input schemas");
     for (const cJSON *v = inputs->child; v; v = v->next) {
       if (!input(d, v->string, v, false)) return false;
       ins[ni++] = v->string;
     }
+    if (!declare_state_controls(d, root)) return false;
     if (!cJSON_IsArray(nodes) || cJSON_GetArraySize(nodes) > DEF_NODES)
       return def_error(d, "nodes", "expected at most 1024 ordered nodes");
     for (const cJSON *node = nodes->child; node; node = node->next) {
@@ -772,8 +971,8 @@ static bool construct(Definition *d, const cJSON *root) {
       for (int i = 0; i < d->n_values; i++)
         if (!strcmp(d->values[i].name, name->valuestring))
           return def_error(d, path, "duplicate value '%s'", name->valuestring);
-      if (!cJSON_IsArray(refs) || cJSON_GetArraySize(refs) < 1 || cJSON_GetArraySize(refs) > 4)
-        return def_error(d, path, "expected 1..4 input references");
+      if (!cJSON_IsArray(refs) || cJSON_GetArraySize(refs) > 4)
+        return def_error(d, path, "expected at most 4 input references");
       PolyTensor *args[4];
       int n = 0;
       for (const cJSON *ref = refs->child; ref; ref = ref->next) {
@@ -788,7 +987,7 @@ static bool construct(Definition *d, const cJSON *root) {
     for (const cJSON *v = outputs->child; v; v = v->next) {
       if (!name_ok(d, v->string, "outputs")) return false;
       PolyTensor *y = lookup(d, v, "outputs");
-      if (!y || !publish_output(d, v->string, y)) return false;
+      if (!y) return false;
       outs[no++] = v->string;
     }
   }
@@ -799,12 +998,17 @@ static bool construct(Definition *d, const cJSON *root) {
     if (!used) return def_error(d, "modules", "unused shared component '%s'", m->string);
   }
   const cJSON *entries = field(root, "entrypoints");
-  if (!entries)
+  const cJSON *outputs = field(root, "outputs");
+  int published[DEF_IO] = {0};
+  if (!entries) {
+    if (!seq && !entry_outputs(d, outputs, NULL, outs, no, published)) return false;
     return poly_model_entrypoint(d->model, "forward", ins, ni, outs, no, NULL) == POLY_STATUS_OK;
+  }
   if (!cJSON_IsArray(entries) || !entries->child || cJSON_GetArraySize(entries) > DEF_IO)
     return def_error(d, "entrypoints", "expected 1..64 entrypoints");
   for (const cJSON *ep = entries->child; ep; ep = ep->next) {
-    if (!fields(d, ep, "|name||inputs||outputs||objective|", "entrypoints")) return false;
+    if (!fields(d, ep, "|name||inputs||outputs||objective||writes||controls|", "entrypoints"))
+      return false;
     const cJSON *name = field(ep, "name"), *objective = field(ep, "objective");
     if (!cJSON_IsString(name) || !name_ok(d, name->valuestring, "entrypoints")) return false;
     if (!names(d, field(ep, "inputs"), ins, &ni, name->valuestring) ||
@@ -812,9 +1016,26 @@ static bool construct(Definition *d, const cJSON *root) {
       return false;
     if (objective && !cJSON_IsString(objective))
       return def_error(d, name->valuestring, "objective must name an output");
+    if (!entry_outputs(d, outputs, field(ep, "writes"), outs, no, published)) return false;
     PolyEntrypointOptions opts = {.objective = objective ? objective->valuestring : NULL};
     if (poly_model_entrypoint(d->model, name->valuestring, ins, ni, outs, no, &opts)) return false;
+    const cJSON *controls = field(ep, "controls");
+    if (controls) {
+      const char *cn[DEF_IO];
+      int nc;
+      if (!names(d, controls, cn, &nc, "controls")) return false;
+      for (int i = 0; i < nc; i++) {
+        int j = 0;
+        while (j < d->n_controls && strcmp(cn[i], d->control_names[j]))
+          j++;
+        if (j == d->n_controls) return def_error(d, "controls", "unknown control '%s'", cn[i]);
+        if (poly_model_control(d->model, name->valuestring, cn[i], d->controls[j])) return false;
+      }
+    }
   }
+  int i = 0;
+  for (const cJSON *v = outputs->child; v; v = v->next, i++)
+    if (!published[i] && !publish_output(d, v->string, lookup(d, v, "outputs"))) return false;
   return true;
 }
 
@@ -855,6 +1076,17 @@ static PolyModel *compose_build(
   if (poly_model_build(d->model, err)) goto done;
   /* Initialize through the coherent buffer API after sealing. These bytes are
    * model state, never host-pointer aliases or a second residency table. */
+  for (int i = 0; i < d->n_states; i++) {
+    int index = poly_model_find_buf(d->model, d->state_names[i]);
+    size_t bytes = poly_model_buf_nbytes(d->model, index);
+    void *zero = calloc(1, bytes);
+    int rc = zero ? poly_model_write_buf_named(d->model, d->state_names[i], zero, bytes) : -1;
+    free(zero);
+    if (rc) {
+      def_error(d, "state", "zero initialization failed");
+      goto done;
+    }
+  }
   for (int i = 0; i < d->n_layers; i++) {
     DefLayer *layer = &d->layers[i];
     if (!strcmp(layer->kind, "rope")) continue; /* AUX tables were captured before sealing. */

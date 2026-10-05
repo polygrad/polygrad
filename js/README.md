@@ -245,6 +245,12 @@ try {
 Start with [Quickstart: Models](#quickstart-models) for fitting and cross-language loading.
 More runnable scripts are in [JavaScript examples](https://github.com/polygrad/polygrad/tree/main/js/examples).
 
+For stateful loops, `await model.callAsync('step', {}, {controls: {iteration: i}, readback: false})`
+executes without collecting outputs and returns `{}`. Use `await model.readBufferAsync(name)`
+for occasional snapshots. `models.GraphAsync` accepts fixed-shape state and explicit
+entrypoint writes through the shared
+[Graph schema](https://github.com/polygrad/polygrad#configuration-driven-models).
+
 ### Capture and input rules
 
 - `controls` declares named integer variables. Pass values through

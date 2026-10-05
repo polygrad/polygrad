@@ -1,0 +1,18 @@
+{
+  "inputs": {},
+  "state": {
+    "a": {"shape": [2], "dtype": "float32"},
+    "b": {"shape": [2], "dtype": "float32"}
+  },
+  "controls": {"iteration": {"min": 0, "max": 10}},
+  "nodes": [
+    {"name": "inc", "type": "cast", "dtype": "float32", "inputs": ["iteration"]},
+    {"name": "next_b", "type": "add", "inputs": ["a", "inc"]},
+    {"name": "status", "type": "sum", "inputs": ["next_b"]}
+  ],
+  "outputs": {"status": "status"},
+  "entrypoints": [
+    {"name": "step", "inputs": [], "outputs": ["status"], "controls": ["iteration"],
+     "writes": {"a": "b", "b": "next_b"}}
+  ]
+}

@@ -231,6 +231,12 @@ Layers include `Linear`, `LayerNorm`, `LayerNorm2d`, `RMSNorm`, `Embedding`,
 Start with [Quickstart: Models](#quickstart-models) for capture, fitting and export.
 More runnable scripts are in [Python examples](https://github.com/polygrad/polygrad/tree/main/py/examples).
 
+For stateful loops, `model.call('step', {}, controls={'iteration': i}, readback=False)`
+executes without collecting outputs and returns `{}`. Read a named state/output
+with `model.read_buffer(name)` when needed. The shared `models.Graph` description
+supports fixed-shape state and explicit entrypoint writes; see the
+[Graph schema](https://github.com/polygrad/polygrad#configuration-driven-models).
+
 ### Capture and input rules
 
 - `controls` declares named integer Variables. Pass values through

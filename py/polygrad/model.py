@@ -1174,7 +1174,22 @@ class Model:
         Results are eager snapshots, not differentiable calls through the Model.
         Their Runtime must remain alive; subsequent calls and Model disposal do
         not change them. Array-only inputs retain the NumPy output contract.
+        With readback=False, return {} without collecting outputs; state and
+        named output buffers remain available through read_buffer.
+        A declared keyword input named readback takes precedence. Use an explicit
+        input mapping to select the readback option for such an entrypoint.
         """
+        readback = True
+        if 'readback' in kwargs:
+            lib = _get_lib()
+            ep = str(entrypoint).encode('utf-8')
+            named_input = inputs is None and any(
+                lib.poly_model_entrypoint_input_name(self._ptr, ep, i) == b'readback'
+                for i in range(lib.poly_model_entrypoint_input_count(self._ptr, ep)))
+            if not named_input:
+                readback = kwargs.pop('readback')
+                if not isinstance(readback, bool):
+                    raise TypeError('readback option must be boolean')
         if inputs is not None and kwargs:
             raise TypeError('Model.call accepts either an input mapping or keyword inputs')
         io = dict(inputs or kwargs)
@@ -1187,7 +1202,7 @@ class Model:
             control_rows.append(_ffi.PolyControlBinding(_name_bytes(name), value))
         control_array = (_ffi.PolyControlBinding * len(control_rows))(*control_rows)
         from .tensor import Tensor
-        if any(isinstance(value, Tensor) for value in io.values()):
+        if readback and any(isinstance(value, Tensor) for value in io.values()):
             lib = _get_lib()
             ep = str(entrypoint).encode('utf-8')
             count = lib.poly_model_entrypoint_output_count(self._ptr, ep)
@@ -1211,7 +1226,7 @@ class Model:
             self._ptr, str(entrypoint).encode('utf-8'), bindings, n, control_array, len(control_rows))
         if ret != 0:
             raise self._error(f"call('{entrypoint}') failed")
-        return self._collect_outputs(str(entrypoint))
+        return self._collect_outputs(str(entrypoint)) if readback else {}
 
     def train_step(self, inputs=None, *, entrypoint=None, **io):
         """Run one training step with a named mapping or input+target kwargs.
@@ -1354,7 +1369,11 @@ class Model:
                 data_shape = data.shape
                 data = np.ascontiguousarray(data)
             else:
-                data = np.asarray(data, dtype=np.float32)
+                # Preserve boolean storage; ordinary numeric lists/scalars
+                # retain the documented float32 convenience conversion.
+                data = np.asarray(data)
+                if data.dtype.kind != 'b':
+                    data = np.asarray(data, dtype=np.float32)
                 # A plain number, like JS number input, is flat one-element
                 # storage. A zero-dimensional ndarray above is explicitly scalar.
                 data_shape = data.shape if data.ndim else (1,)

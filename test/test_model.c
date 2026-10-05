@@ -898,6 +898,33 @@ TEST(model, definition_density_gradient) {
   PASS();
 }
 
+TEST(model, definition_state_updates_are_simultaneous) {
+  FILE *f = fopen("test/fixtures/model_state.json", "rb");
+  ASSERT_NOT_NULL(f);
+  char json[4096];
+  size_t n = fread(json, 1, sizeof(json) - 1, f);
+  fclose(f);
+  json[n] = 0;
+  PolyModelError err = {0};
+  PolyModel *m = poly_model_from_config(NULL, "graph", json, (int)n, POLY_DEVICE_CPU, &err);
+  ASSERT_NOT_NULL(m);
+  float a[] = {1, 2}, b[] = {3, 4}, got[2];
+  ASSERT_EQ(poly_model_write_buf_named(m, "a", a, sizeof(a)), 0);
+  ASSERT_EQ(poly_model_write_buf_named(m, "b", b, sizeof(b)), 0);
+  PolyControlBinding control = {"iteration", 1};
+  ASSERT_EQ(poly_model_call_with_controls(m, "step", NULL, 0, &control, 1), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "a", got, sizeof(got)), 0);
+  ASSERT_TRUE(got[0] == 3 && got[1] == 4);
+  ASSERT_EQ(poly_model_read_buf_named(m, "b", got, sizeof(got)), 0);
+  ASSERT_TRUE(got[0] == 2 && got[1] == 3);
+  control.value = 11;
+  ASSERT_TRUE(poly_model_call_with_controls(m, "step", NULL, 0, &control, 1) != 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "b", got, sizeof(got)), 0);
+  ASSERT_TRUE(got[0] == 2 && got[1] == 3);
+  poly_model_free(m);
+  PASS();
+}
+
 TEST(model, definition_shared_graph) {
   const char *json =
       "{\"format\":\"poly.modeldef@1\",\"type\":\"graph\","
