@@ -2,6 +2,42 @@
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
 
+async function checkIntervalSum(createRuntime) {
+  for (const kernels of [false,true]) {
+    const pg=await createRuntime({kernels,logical:'always'})
+    let model,restored
+    try {
+      const n=17,width=3,starts=[0,0,3,8,-5,17,2147483647,-2147483648],stops=[0,3,8,3,26,17,-2147483648,2147483647]
+      const x=pg.Tensor.empty(n,width),lo=pg.Tensor.empty(8,1,1,{dtype:'int32'}),hi=pg.Tensor.empty(8,1,1,{dtype:'int32'})
+      const i=pg.Tensor.arange(n,{dtype:'int32'}).reshape(1,n,1)
+      // Existing C AND constructor, also used by separately compiled authors.
+      const y=i.ge(lo)._binop(i.lt(hi),'AND').where(x.reshape(1,n,width),0).sum(1)
+      const [dx]=y.sum().gradient(x)
+      model=await pg.Model.fromTensors({inputs:{x,lo,hi},outputs:{y,dx}})
+      const saved=await model.saveAsync()
+      const values=Float32Array.from({length:n*width},(_,j)=>(j%13-6)/8)
+      const expected=new Float32Array(8*width),gradient=new Float32Array(n*width)
+      for(let s=0;s<8;s++)for(let row=0;row<n;row++)if(row>=starts[s]&&row<stops[s])for(let c=0;c<width;c++) {
+        expected[s*width+c]+=values[row*width+c];gradient[row*width+c]++
+      }
+      const inputs={x:values,lo:Int32Array.from(starts),hi:Int32Array.from(stops)}
+      for(let repeat=0;repeat<2;repeat++) {
+        const got=await model.forwardAsync(inputs)
+        assertClose(got.y,expected,0);assertClose(got.dx,gradient,0)
+      }
+      const program=new TextDecoder().decode(await model.exportProgramAsync())
+      assert(program.includes('segment_sum')===kernels,'interval reduction provider selection')
+      restored=pg.Model.load(saved)
+      const got=await restored.forwardAsync(inputs)
+      assertClose(got.y,expected,0);assertClose(got.dx,gradient,0)
+    } finally {
+      if(restored)await restored.dispose()
+      if(model)await model.dispose()
+      await pg.dispose()
+    }
+  }
+}
+
 async function checkPortableGradient(pg) {
   const x = new pg.Tensor(new Float32Array([1,2,3])).is_param_(false)
   const square = x.square(), loss = square.sum()
@@ -2091,6 +2127,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
+  await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
@@ -2876,6 +2913,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
+  await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))

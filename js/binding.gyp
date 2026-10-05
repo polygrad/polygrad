@@ -46,7 +46,7 @@
         "csrc/src/codegen/late/gater.c",
         "csrc/src/codegen/late/linearizer.c",
         "csrc/src/renderer/cstyle.c",
-        "csrc/src/kernels/select.c", "csrc/src/kernels/match.c", "csrc/src/kernels/gemm.c", "csrc/src/kernels/cpu.c", "csrc/src/kernels/portable.c", "csrc/src/kernels/webgpu.c",
+        "csrc/src/kernels/select.c", "csrc/src/kernels/match.c", "csrc/src/kernels/gemm.c", "csrc/src/kernels/cpu.c", "csrc/src/kernels/portable.c", "csrc/src/kernels/webgpu.c", "csrc/src/kernels/segment.c",
         "csrc/src/renderer/wgsl.c",
         "csrc/src/runtime_wasm.c",
         "csrc/src/runtime_webgpu.c",

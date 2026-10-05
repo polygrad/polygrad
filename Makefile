@@ -82,8 +82,8 @@ PARITY_SCRIPT = test/test_tinygrad_parity.py
 PARITY_PY ?= $(if $(wildcard references/.venv-tinygrad-py311/bin/python),references/.venv-tinygrad-py311/bin/python,conda run -n tiny python)
 
 # Emscripten uses the complete core/codec set minus native backend owners.
-SRC += src/kernels/portable.c src/kernels/webgpu.c
-FILC_SRC += src/kernels/portable.c src/kernels/webgpu.c
+SRC += src/kernels/portable.c src/kernels/webgpu.c src/kernels/segment.c
+FILC_SRC += src/kernels/portable.c src/kernels/webgpu.c src/kernels/segment.c
 WASM_SRC = $(filter-out src/runtime_cpu.c src/renderer/cuda.c src/runtime_cuda.c src/renderer/hip.c src/runtime_hip.c src/renderer/isa/x86.c,$(SRC)) $(CODEC_SRC)
 WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
 
@@ -687,10 +687,13 @@ test-bench-wasm:
 # Require a real selected provider on each supported target, not just a
 # numerically correct generic fallback. Keep ordinary parity gates kernels-off.
 test-kernels: build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
-	POLY_REQUIRE_KERNELS=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_cpu_gemm.py
+	POLY_REQUIRE_KERNELS=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q py/tests/test_cpu_gemm.py py/tests/test_segment_sum.py
 	POLY_REQUIRE_KERNELS=1 POLY_DEV=cpu POLY_TEST_FILTER='Model portable GEMM selection' $(NODE) js/test/test_native.js
 	POLY_REQUIRE_KERNELS=1 POLY_TEST_FILTER='Model portable GEMM selection' $(NODE) js/test/test_wasm.js
 	POLY_ONNX_ENCODER_DIR= POLY_TEST_FILTER='Model portable GEMM selection' POLY_BROWSER_DEVICES=auto,webgpu POLY_BROWSER_SKIP_UNAVAILABLE=0 $(MAKE) test-browser
+	POLY_DEV=cpu POLY_TEST_FILTER='Model interval sum' $(NODE) js/test/test_native.js
+	POLY_TEST_FILTER='Model interval sum' $(NODE) js/test/test_wasm.js
+	POLY_ONNX_ENCODER_DIR= POLY_TEST_FILTER='Model interval sum' POLY_BROWSER_DEVICES=auto,webgpu POLY_BROWSER_SKIP_UNAVAILABLE=0 $(MAKE) test-browser
 
 EXAMPLE_BINS = $(patsubst examples/%.c,build/examples/%,$(wildcard examples/*.c))
 build/examples/%: examples/%.c build/libpolygrad.so

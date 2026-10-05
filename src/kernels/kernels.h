@@ -41,6 +41,13 @@ const PolyKernelImpl *poly_cpu_kernel_impls(int *count);
 const PolyKernelImpl *poly_portable_kernel_impls(const char *device, int *count);
 const char *poly_kernel_webgpu_supported(PolyCtx *, const PolyGemmDesc *);
 PolyUOp *poly_kernel_webgpu_lower(PolyCtx *, const PolyGemmDesc *);
+typedef struct {
+  PolyUOp *values, *starts, *stops;
+  int64_t rows, segments, width;
+  const char *device;
+} PolySegmentDesc;
+bool poly_kernel_match_segment(PolyCtx *, PolyUOp *, PolySegmentDesc *);
+PolyUOp *poly_kernel_segment_lower(PolyCtx *, const PolySegmentDesc *);
 PolyUOp *poly_kernel_select(PolyCtx *, PolyUOp *);
 
 #endif

@@ -21,10 +21,63 @@
 #include "../src/kernels/kernels.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/device.h"
+#include "../src/mixin/creation.h"
+#include "../src/mixin/elementwise.h"
 
 #include <inttypes.h>
 #include <unistd.h>
 #include <sys/stat.h>
+
+TEST(codegen, interval_sum_selection_preserves_generic_fallback) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyTensor *v = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1, 5, 2}, 3, POLY_DEVICE_CPU);
+  PolyTensor *lo = poly_tensor_empty(ctx, POLY_INT32, (int64_t[]){4, 1, 1}, 3, POLY_DEVICE_CPU);
+  PolyTensor *hi = poly_tensor_empty(ctx, POLY_INT32, (int64_t[]){4, 1, 1}, 3, POLY_DEVICE_CPU);
+  PolyUOp *idx = poly_uop_reshape(
+      ctx, poly_uop_arange_int_dtype(ctx, 0, 5, 1, POLY_INT32), (int64_t[]){1, 5, 1}, 3
+  );
+  PolyUOp *mask = poly_uop_alu2(
+      ctx, POLY_OP_AND, poly_uop_ge(ctx, idx, lo->uop_physical),
+      poly_uop_alu2(ctx, POLY_OP_CMPLT, idx, hi->uop_physical)
+  );
+  PolyUOp *zero = poly_uop_const_float(ctx, 0);
+  PolyUOp *root = poly_uop_sum_reduce(ctx, poly_uop_where(ctx, mask, v->uop_physical, zero), 1, 0);
+  ASSERT_EQ(poly_ctx_set_kernel_policy(ctx, 1), 0);
+  PolyUOp *selected = poly_kernel_select(ctx, root);
+  bool replaced = selected && selected != root;
+  PolyUOp *one = poly_uop_expand(
+      ctx,
+      poly_uop_reshape(
+          ctx, poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true)), (int64_t[]){1, 1, 1},
+          3
+      ),
+      (int64_t[]){4, 5, 1}, 3
+  );
+  PolyUOp *broadcast_mask = poly_uop_alu2(
+      ctx, POLY_OP_AND,
+      poly_uop_alu2(
+          ctx, POLY_OP_CMPNE, poly_uop_alu2(ctx, POLY_OP_CMPLT, idx, lo->uop_physical), one
+      ),
+      poly_uop_alu2(ctx, POLY_OP_CMPLT, idx, hi->uop_physical)
+  );
+  PolyUOp *broadcast =
+      poly_uop_sum_reduce(ctx, poly_uop_where(ctx, broadcast_mask, v->uop_physical, zero), 1, 0);
+  PolyUOp *chosen = poly_kernel_select(ctx, broadcast);
+  bool broadcast_replaced = chosen && chosen != broadcast;
+  /* A nonzero mask fallback cannot be implemented by skipping excluded rows. */
+  PolyUOp *other = poly_uop_sum_reduce(
+      ctx, poly_uop_where(ctx, mask, v->uop_physical, poly_uop_const_float(ctx, 1)), 1, 0
+  );
+  bool rejected = poly_kernel_select(ctx, other) == other;
+  poly_tensor_release(v);
+  poly_tensor_release(lo);
+  poly_tensor_release(hi);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(replaced);
+  ASSERT_TRUE(broadcast_replaced);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
 
 TEST(codegen, gemm_recognizes_forward_and_backward_views) {
   PolyCtx *ctx = poly_ctx_new();

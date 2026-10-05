@@ -239,6 +239,18 @@
       "close_when": "Pinned tinygrad preserves explicit dependent range closeout with equivalent nested-loop tests."
     },
     {
+      "id": "PG-DIV-016",
+      "status": "approved",
+      "stages": ["rangeify", "codegen", "renderer-source"],
+      "area": "Opt-in masked interval-sum kernel",
+      "tinygrad": "Pinned Tensor graphs express interval sums with comparisons, WHERE and REDUCE; generic lowering visits the masked reduction domain.",
+      "polygrad": "With kernels=true, recognize fixed FP32 [1,N,W] values masked by int32 [S,1,1] lower/upper bounds and the canonical arange(N), then summed over N. An existing-UOp CALL kernel reads only the intersection of each interval with [0,N). Empty or reversed intervals return zero; arbitrary, overlapping and out-of-range bounds retain the mask's semantics. Each output accumulates serially, which can round differently from generic reduction trees. Shapes outside the conservative matcher and unsupported targets retain generic lowering.",
+      "rationale": "Remove repeated scan dispatches for grouped sparse reductions without a new IR op, executor, public tensor API or opaque authoring graph. Autograd and portable exports continue to contain ordinary Tensor operations; kernels=false retains that graph. No default numerical-parity allowance.",
+      "approval": "User 2026-10-04 requests implementing a general segmented reduction and subsequently says go after the dependent-loop compiler correction.",
+      "evidence": ["src/kernels/segment.c", "src/kernels/select.c", "test/test_codegen.c:interval_sum_selection_preserves_generic_fallback", "py/tests/test_segment_sum.py", "js/test/test_model_runtime.js:checkIntervalSum", "temp/segment-kernel-20261004/"],
+      "close_when": "Revisit after pinned tinygrad provides equivalent optional interval reduction lowering."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

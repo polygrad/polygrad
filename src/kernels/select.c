@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "ctx.h"
 #include <stdio.h>
+#include <string.h>
 
 typedef struct {
   bool failed, debug;
@@ -10,8 +11,27 @@ typedef struct {
 static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
   (void)bindings;
   KernelSelection *s = poly_graph_rewrite_userctx();
+  if (s->failed) return NULL;
+  PolySegmentDesc segment;
+  if (poly_kernel_match_segment(ctx, u, &segment)) {
+    const char *dev = segment.device;
+    bool supported = !strcmp(dev, "CPU") || !strncmp(dev, "CPU:", 4) || !strcmp(dev, "X86") ||
+                     !strcmp(dev, "INTERP") || !strcmp(dev, "WASM") || !strcmp(dev, "CUDA") ||
+                     !strcmp(dev, "WEBGPU");
+    if (s->debug)
+      fprintf(
+          stderr, "polygrad: kernel %s N=%lld S=%lld W=%lld segment_sum: %s\n", dev,
+          (long long)segment.rows, (long long)segment.segments, (long long)segment.width,
+          supported ? "selected" : "unsupported target"
+      );
+    if (supported) {
+      PolyUOp *result = poly_kernel_segment_lower(ctx, &segment);
+      if (!result) s->failed = true;
+      return result;
+    }
+  }
   PolyGemmDesc d;
-  if (s->failed || !poly_kernel_match_gemm(ctx, u, &d)) return NULL;
+  if (!poly_kernel_match_gemm(ctx, u, &d)) return NULL;
   int count = 0;
   const PolyKernelImpl *impls = poly_portable_kernel_impls(d.device, &count);
   if (!count) impls = poly_cpu_kernel_impls(&count);

@@ -416,6 +416,16 @@ SIMD128 on Wasm and tiled FP32 GEMM on WebGPU. Unsupported shapes use the defaul
 path. Policy is fixed at first compilation; portable bundles keep the original operations.
 These kernels are opt-in experiments, not guaranteed speedups.
 
+The same policy optimizes FP32 interval sums expressed as
+`((arange(N) >= lo) & (arange(N) < hi)).where(values, 0).sum(1)`, with
+int32 bounds `[S,1,1]` and values `[1,N,W]`. CPU, X86, interpreter, Wasm,
+CUDA and WebGPU execute direct interval loops instead of scanning all N values
+for every segment. Bounds clip to `[0,N]`; empty or reversed intervals return
+zero. Overlapping intervals are allowed. This is a compiler optimization of
+existing Tensor operations, not a new sparse Tensor API. Authoring, gradients
+and portable bundles keep those operations; unsupported patterns fall back.
+Serial summation can round differently from the default reduction tree.
+
 `POLY_KERNELS=1` sets the default for newly created runtimes; an explicit
 `kernels` option overrides it. Changing the environment does not change an
 existing runtime. The CPU path also materializes bounded softmax tables to
