@@ -27,6 +27,37 @@
 
 int poly_test_x86_program_call_entry(void *entry, void **args, int n_args);
 
+TEST_BACKEND(x86, constrained_loop_live_ins_survive_nested_ranges) {
+  /* Unsigned division requires a zero high dividend in RDX on every outer
+   * iteration, even when an inner range reuses RDX for its counter. */
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
+  uint32_t indices[200];
+  float values[80], actual[400];
+  for (int i = 0; i < 200; i++)
+    indices[i] = (uint32_t)i * 747796405u + 388445122u;
+  for (int i = 0; i < 80; i++)
+    values[i] = (float)i;
+  PolyTensor *idx =
+      poly_tensor_from_host(ctx, indices, sizeof(indices), POLY_UINT32, (int64_t[]){200}, 1);
+  PolyTensor *data =
+      poly_tensor_from_host(ctx, values, sizeof(values), POLY_FLOAT32, (int64_t[]){40, 2}, 2);
+  idx = poly_tensor_to_device(ctx, idx, POLY_DEVICE_X86);
+  data = poly_tensor_to_device(ctx, data, POLY_DEVICE_X86);
+  PolyTensor *divisor = poly_tensor_const_like_int(ctx, idx, 40);
+  PolyTensor *mod = poly_tensor_alu2(ctx, POLY_OP_CMOD, idx, divisor);
+  PolyTensor *index = poly_tensor_cast(ctx, mod, POLY_INT32);
+  PolyTensor *out = poly_tensor_index_select(ctx, data, 0, index), *realized = NULL;
+  bool ok = out && poly_realize_tensors(ctx, &out, 1, &realized) == 0 && realized;
+  const PolyUOp *buf = ok ? poly_uop_get_buffer_identity(poly_tensor_uop(realized)) : NULL;
+  ok = buf && poly_buffer_read(ctx, (PolyUOp *)buf, actual, sizeof(actual)) == 0;
+  for (int i = 0; ok && i < 400; i++)
+    ok = actual[i] == values[2 * (indices[i / 2] % 40) + i % 2];
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST_BACKEND(x86, variable_shifts_preserve_each_lane_count) {
   /* Pinned x86.shift/isel allocate distinct virtual values constrained to RCX.
    * Unrolled lanes must not share one live value merely because all use CL. */

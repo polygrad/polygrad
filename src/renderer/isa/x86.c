@@ -3531,22 +3531,20 @@ static bool x86_loop_live_class_saturated(X86LoopLiveSet *set, int32_t vreg) {
   X86RegClass cls = x86_tag_class(vreg);
   X86RegClass real_cls = x86_real_class_for_constraint(cls);
   int n_pool = 0;
-  (void)x86_real_pool(cls, &n_pool);
-  int used[32];
-  int n_used = 0;
-  for (int i = 0; i < set->n; i++) {
-    if (x86_tag_class(set->items[i].real) != real_cls) continue;
-    bool seen = false;
-    for (int j = 0; j < n_used; j++) {
-      if (used[j] == set->items[i].real) {
-        seen = true;
+  const int32_t *pool = x86_real_pool(cls, &n_pool);
+  /* tinygrad regalloc: set(v.cons).issubset(live_in.values()). Fixed-register
+   * constraints must not count unrelated occupied registers of the same class. */
+  for (int p = 0; p < n_pool; p++) {
+    int32_t real = x86_tag_real(real_cls, pool[p]);
+    bool occupied = false;
+    for (int i = 0; i < set->n; i++)
+      if (set->items[i].real == real) {
+        occupied = true;
         break;
       }
-    }
-    if (!seen && n_used < (int)(sizeof(used) / sizeof(used[0])))
-      used[n_used++] = set->items[i].real;
+    if (!occupied) return false;
   }
-  return n_used >= n_pool;
+  return true;
 }
 
 static bool x86_regalloc_pseudo_op(PolyUOp *u) {
