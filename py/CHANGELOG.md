@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fix large indexed reads retaining dense reduction loops after scheduling splits; restore pinned Tinygrad load-collapse behavior.
+- Fix construction of large Tensor sorts by expanding the core's internal shape workspace; keep tinygrad's sort graph and existing Model binding limits.
+- `Runtime(kernels=True)` can lower FP32 masked interval sums to direct loops; portable Models and gradients keep ordinary Tensor operations. Empty, overlapping and clipped intervals preserve mask semantics.
+- Preserve Tensor materialization boundaries when capturing and loading portable Models, including sorting networks.
+- Add Runtime.load_extension for matching-ABI C graph authors attached to the existing runtime; require ABI108.
+- Preserve portable logical gradients independently of executable gradients when saving Tensor-built Models.
+- Add Graph state, controls and simultaneous writes, plus Model.call(readback=False) without reserving a declared input of that name. Preserve boolean host input dtypes.
 - Fix Tensor.round() arithmetic promotion for integer inputs.
 - Extend ONNX import with constant Range, empty intermediates and graph-inferred output dimensions; raise the node limit to 4,096.
 - Add Tensor.interpolate(..., mode='bicubic') with gradients and optional align_corners; no antialiasing.

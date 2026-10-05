@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fix large indexed reads retaining dense reduction loops on native, Wasm and WebGPU; restore pinned Tinygrad load-collapse behavior without disabling reduction splitting.
+- Fix construction of large Tensor sorts on native and Wasm backends by expanding the core's internal shape workspace; the sort graph is unchanged.
+- `kernels: true` can lower FP32 masked interval sums to direct loops; portable Models and gradients keep ordinary Tensor operations. Empty, overlapping and clipped intervals preserve mask semantics.
+- Preserve Tensor materialization boundaries in portable Models; support the existing C sort constructor in extension bindings.
+- Add Runtime.loadExtension for native addons and separate Wasm graph authors, with generated imports, ownership checks and matching ABI108.
+- Preserve portable gradient roots and detailed Wasm Model errors; test extension gradient checkpoints and rollback in the browser suite.
+- Add Graph state, controls and simultaneous writes, plus Model.call/callAsync(..., {readback: false}) for device-resident iteration.
 - Fix Wasm scheduling failures when aggregate temporary sizes exceed 4 GiB but their lifetimes permit a smaller reused arena.
 - Fix Tensor.round() arithmetic promotion for integer inputs.
 - Extend ONNX import with constant Range, empty intermediates and graph-inferred output dimensions; raise the node limit to 4,096.

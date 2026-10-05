@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Match both comparison operand orders in gather load-collapse, as pinned Tinygrad does; prevent split large gathers from scanning the source for every output. Reduction splitting remains enabled.
+- Expand internal shape workspaces from 16 to 64 axes so bitonic sort can construct large vectors without changing pinned Tensor graphs. Public Model binding ranks and ABI are unchanged.
+- Add opt-in FP32 masked interval-sum lowering through the existing kernel policy on CPU, X86, interpreter, Wasm, CUDA and WebGPU. Preserve portable Tensor graphs and gradients; bound reads to the original mask domain (PG-DIV-016).
+- Preserve outer-loop scope when closing an inner loop whose bound depends on it; fix the inherited Tinygrad closeout bug without changing Tensor graphs (PG-DIV-015).
+- Preserve requested materialization boundaries in portable Models, preventing excessive fusion of sorting networks; realized Tensor.contiguous() still preserves both root identities. Avoid exponential shared-DAG traversal in symbolic validity and codegen address-space queries.
+- Validate internal Model views up to the Tensor rank limit without expanding public binding ranks; expose the existing C sort constructor through extension bindings.
+- Fix X86 loop live-in register constraints to match pinned Tinygrad, preserving division operands across nested loops.
+- Require ABI108 for the added public gradient constructor and native symbol resolver; graph formats are unchanged.
+- Add construction-only C extension loading in Python and JS, using the existing C API in the frontend's runtime, with generated Wasm argument copying and matching-ABI checks.
+- Preserve logical and physical autodiff roots independently when exporting Tensor gradients as Models; retain detailed Wasm Model errors.
+- Extend Graph descriptions with explicit gradient outputs, matmul, scalar-like constants, axis reductions, comparisons and bounded arange; reuse existing Tensor/autograd construction.
+- Add fixed-shape Graph AUX state, bounded integer controls and simultaneous entrypoint writes using existing Model capture. Add Python/JS `readback=false` call options for device-resident iteration.
+- Preserve boolean host inputs in Python Model calls instead of converting them to float32.
 - Bound memory-planner search capacity to addressable offsets on Wasm32 and reject allocator size-rounding overflow.
 - Use shared shape-qualified parameter names in C, CUDA, HIP and WGSL to prevent scalar/buffer name collisions without changing argument order.
 - Promote integer round arithmetic like pinned Tinygrad, including integer-Pow expressions used by ONNX shape graphs.
