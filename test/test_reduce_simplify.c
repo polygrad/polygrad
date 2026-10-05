@@ -1018,6 +1018,39 @@ TEST(reduce_simplify, s2_take1d_reduce_is_removed) {
   PASS();
 }
 
+/* split_reduceop offsets the reduction index. Both CMPNE and ADD are
+ * commutative in the pinned load-collapse pattern, including a cast sum. */
+TEST(reduce_simplify, s2_split_gather_operand_orders) {
+  for (int order = 0; order < 8; order++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *r = poly_uop_range(ctx, 2048, 0, POLY_AXIS_REDUCE);
+    PolyUOp *offset = poly_uop_const_like_int(ctx, r, 2048);
+    PolyUOp *sum = poly_uop_add(ctx, (order & 1) ? offset : r, (order & 1) ? r : offset);
+    if (order & 4) sum = poly_uop_cast(ctx, sum, POLY_INT32);
+    PolyUOp *index =
+        poly_uop_variable(ctx, "idx", poly_arg_int(0), poly_arg_int(65535), POLY_INT32, 1, false);
+    index = poly_uop_cast(ctx, index, sum->dtype);
+    PolyUOp *cmp = poly_uop2(
+        ctx, POLY_OP_CMPNE, POLY_BOOL, (order & 2) ? index : sum, (order & 2) ? sum : index,
+        poly_arg_none()
+    );
+    PolyUOp *p = poly_test_uop_param(ctx, POLY_FLOAT32, 65536, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *value = poly_uop_load(ctx, poly_uop_index(ctx, p, &sum, 1));
+    PolyUOp *where = poly_uop3(
+        ctx, POLY_OP_WHERE, POLY_FLOAT32, cmp, poly_uop_const_float(ctx, 0), value, poly_arg_none()
+    );
+    PolyUOp *red = poly_uop(
+        ctx, POLY_OP_REDUCE, POLY_FLOAT32, (PolyUOp *[]){where, r}, 2,
+        poly_arg_reduce(POLY_OP_ADD, 0)
+    );
+    PolyUOp *out = poly_pm_rewrite(poly_pm_load_collapse(), ctx, red);
+    bool collapsed = out && count_op(ctx, out, POLY_OP_REDUCE) == 0;
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(collapsed);
+  }
+  PASS();
+}
+
 TEST(reduce_simplify, s2_loaded_index_add_lt_is_undone) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *p = poly_test_uop_param(ctx, POLY_INT32, 8, 0, POLY_ADDR_GLOBAL);

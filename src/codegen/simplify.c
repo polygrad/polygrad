@@ -1160,19 +1160,20 @@ static bool is_range_or_cast_of_range(PolyUOp *u, PolyUOp *r) {
 static PolyUOp *rule_lift_add_from_cmpne(PolyCtx *ctx, PolyUOp *cmpne, const PolyBindings *b) {
   (void)b;
   if (!cmpne || cmpne->op != POLY_OP_CMPNE || cmpne->n_src != 2) return NULL;
-  PolyUOp *lhs = cmpne->src[0];
-  PolyUOp *c = cmpne->src[1];
-  if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
-  if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  if (!poly_uop_no_range(ctx, c)) return NULL;
-  for (int swap = 0; swap < 2; swap++) {
-    PolyUOp *x = lhs->src[swap];
-    PolyUOp *y = lhs->src[swap ^ 1];
-    /* Same commutative UPat permutation behavior as tinygrad's load-collapse
-     * `(x+y) != c` rule. */
-    if (!poly_uop_no_range(ctx, y)) continue;
-    PolyUOp *rhs = poly_uop_sub(ctx, poly_uop_cast(ctx, c, y->dtype), y);
-    return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
+  /* Pinned UPat permutes both CMPNE and ADD. A split gather can put the
+   * offset range on either side of the comparison. */
+  for (int side = 0; side < 2; side++) {
+    PolyUOp *lhs = cmpne->src[side];
+    PolyUOp *c = cmpne->src[side ^ 1];
+    if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
+    if (lhs->op != POLY_OP_ADD || lhs->n_src != 2 || !poly_uop_no_range(ctx, c)) continue;
+    for (int swap = 0; swap < 2; swap++) {
+      PolyUOp *x = lhs->src[swap];
+      PolyUOp *y = lhs->src[swap ^ 1];
+      if (!poly_uop_no_range(ctx, y)) continue;
+      PolyUOp *rhs = poly_uop_sub(ctx, poly_uop_cast(ctx, c, y->dtype), y);
+      return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
+    }
   }
   return NULL;
 }
