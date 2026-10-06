@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-06)
+
+- Restore Tensor roots after failed realization so compilation failures can be retried without reading unwritten storage. Reject reads of storage whose writes were attempted before a reported execution failure (PG-DIV-017).
+- Release cancelled JIT capture handles and reclaim empty device-memory counters. Dispose JavaScript's private gradient temporaries eagerly; explicitly accessed gradients remain caller-owned.
+
+- Close frontend gaps: expose C tokenization in Python, forward `create(kernels=...)`, and add JavaScript FUNCTION capture, integer Tensor helpers, reverse arithmetic options and UOp helpers. Match pinned UOp equality topology and Kaiming-uniform initialization in both frontends. Rebuild Wasm when JS export inputs change.
+- Python `Tensor.kaiming_uniform` seeded values change: use pinned Tinygrad's uniform construction, default `a=0.01` and fan-in of 1 for one-dimensional shapes. Built-in NN layers do not call this helper, so their initialization is unaffected by this change.
 
 - Retire completed logical update graphs after every materialization under `until_realize`, including view writes and indirect outputs. Fix growing eager-training time and memory while preserving portable gradients and explicit `always` retention.
 - Match both comparison operand orders in gather load-collapse, as pinned Tinygrad does; prevent split large gathers from scanning the source for every output. Reduction splitting remains enabled.
@@ -23,7 +29,7 @@
 - Add differentiable bicubic Tensor interpolation and share its configurable cubic sampler with ONNX Resize (PG-DIV-014).
 - Add DINOv2 input_image_size for a fixed input resolution, interpolating positions in the graph without changing checkpoint weights.
 - Support bounded multi-axis Model inputs, including shared dimensions, with stride-aware transfers and portable signatures. State remains fixed-shape.
-- Reject all tokenizer.json imports instead of silently applying incomplete tokenization. Use Hugging Face tokenizers for JSON pipelines; GGUF BPE remains.
+- Validate tokenizer.json byte-level BPE pipelines and honor explicit merge ranks. Reject unsupported stages; opt-in best effort can skip NFC with a warning. No Unicode normalization dependency; GGUF BPE is unchanged.
 - Remove JavaScript's 4,096-token encode and 8,192-byte decode truncation limits on both native and Wasm runtimes.
 - Match pinned Tinygrad GGUF splitting with compact Unicode character-class ranges, without a normalization-library dependency.
 

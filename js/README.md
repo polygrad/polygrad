@@ -333,9 +333,20 @@ and Transformer generation methods are not inferred. See the
 ### Pretrained And Configured Models
 
 `Tokenizer.fromGGUF` reads supported vocabulary-ranked BPE metadata.
-`Tokenizer.fromJSON` is unsupported and rejects all inputs; use Hugging Face
-`tokenizers` for JSON pipelines. Spaces use a separate Rust/Wasm tokenizer,
-not a Polygrad dependency.
+`pg.Tokenizer.fromJSON(jsonBytes)` loads validated byte-level BPE: explicit
+merge rules, GPT-2 ByteLevel or the recognized Qwen/Llama split patterns, and
+literal added tokens using one matching phase (a common `normalized` flag,
+without `single_word`, `lstrip` or `rstrip`). Unsupported pipeline stages fail
+with a specific error.
+JSON does not infer BOS/EOS roles, insert special tokens, pad or truncate;
+decode retains special tokens.
+
+`pg.Tokenizer.fromJSON(jsonBytes, {strict:false})` additionally permits a
+declared NFC normalizer to be skipped, with a console warning at load time.
+This can change token IDs for decomposed text; it is not exact Qwen tokenization.
+No other unsupported stage is ignored. CLIP pipelines, WordPiece and Unigram
+still require an external tokenizer. Spaces can keep their Rust/Wasm tokenizer;
+it is not a Polygrad dependency.
 
 For C-built model types and `models.Sequential` / `models.Graph`, see
 [shared JSON reference](https://github.com/polygrad/polygrad#configuration-driven-models).
@@ -613,6 +624,21 @@ Explicit async startup bundle:
 
 ## JIT And Compile
 
+`pg.function(fn, {allowImplicit, precompile, precompileBackward})` wraps a
+synchronous Tensor computation in the same C `FUNCTION` graph as Python's
+`@function`. It accepts nested Tensor/UOp arguments and returns a Tensor or a
+nonempty Tensor array; method calls include the receiver's Tensor state. Inputs
+are captured before the body runs. Closure buffers require `allowImplicit: true`.
+All options default to false. Custom `gradFxn` callbacks are not implemented,
+matching the Python wrapper. Build graphs in the body; realize/read back after
+the call (use async realization on WebGPU).
+
+Tensor integer helpers include `bitwiseAnd`, `bitwiseOr`, `bitwiseXor`, `lshift`,
+`rshift`, `logicalNot` and `threefry`. `Tensor.kaimingUniform(shape, {a: 0.01})`
+matches the pinned initializer. `sub(other, reverse)` and `mod(other, reverse)`
+support reversed operands. Division keeps its existing second argument:
+`div(other, roundingMode = null, reverse = false)`.
+
 `jit(fn)` follows tinygrad raw Tensor JIT behavior: first call runs normally,
 second call captures realized schedules, later calls replay.
 
@@ -745,7 +771,7 @@ function create({ polygrad: pg }) {
 | Compilation | `jit`, `jitAsync`, `compile`, `compileAsync`, `Tensor.customKernel` |
 | Neural nets | `nn.Linear`, `nn.SGD`, `nn.Adam`, `nn.AdamW`, `nn.getParameters`, `nn.getStateDict` |
 
-## C-authored graphs (development ABI108)
+## C-authored graphs (ABI108)
 
 `pg.loadExtension(source)` attaches a construction-only C author to the current
 runtime: pass a generated Node addon in native mode, or Wasm bytes/a compiled

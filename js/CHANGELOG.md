@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-06)
+
+- Restore Tensor roots after failed realization, allowing compilation failures to be retried; reject reads after reported failures that may have partially written storage. Release cancelled JIT capture handles.
+- Dispose private gradients without waiting for garbage collection; explicitly accessed gradients remain caller-owned.
+
+- Add `function` capture through the existing C API, integer Tensor helpers, `kaimingUniform`, reversed sub/mod/div and UOp contiguous/logicalNot. Match pinned equality topology. Keep division's rounding argument in position two; reverse is position three.
 
 - Fix repeated eager training retaining optimizer history under `until_realize` on native, Wasm and WebGPU, including view writes and indirect realization; preserve portable gradient export and `always` retention.
 - Fix large indexed reads retaining dense reduction loops on native, Wasm and WebGPU; restore pinned Tinygrad load-collapse behavior without disabling reduction splitting.
@@ -16,7 +21,7 @@
 - Add Tensor.interpolate(size, {mode:'bicubic'}) with gradients and optional alignCorners; no antialiasing.
 - Add DINOv2 input_image_size for a fixed input resolution, interpolating positions in the graph without changing checkpoint weights.
 - Support bounded multi-axis Model inputs, including shared dimensions, with stride-aware transfers and portable signatures. State remains fixed-shape.
-- Reject all tokenizer.json imports instead of silently applying incomplete tokenization. Use Hugging Face tokenizers for JSON pipelines; GGUF BPE remains.
+- Validate byte-level BPE in Tokenizer.fromJSON and honor explicit merge ranks. Reject unsupported stages with specific errors; {strict:false} can skip NFC with a warning. GGUF BPE is unchanged.
 - Remove JavaScript's 4,096-token encode and 8,192-byte decode truncation limits on both native and Wasm runtimes.
 
 ## 0.6.0

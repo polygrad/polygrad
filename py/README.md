@@ -611,7 +611,7 @@ def normalize(x: Tensor) -> Tensor:
 This keeps execution in the caller's Polygrad context and avoids unnecessary
 NumPy readback.
 
-### C-authored graphs (development ABI108)
+### C-authored graphs (ABI108)
 
 `rt.load_extension(path)` attaches a separately built C author to this runtime's
 existing core. The author calls existing `poly_tensor_*` functions; it does not
@@ -655,6 +655,16 @@ code, not sandboxed plugins. Linux is tested; other native platforms are unteste
 
 ## API Overview
 
+`Tokenizer.from_gguf(bytes)` and `Tokenizer.from_json(bytes_or_text)` use the
+shared C tokenizer. Instances expose `encode(text)`, `decode(ids)`, `vocab_size`,
+`bos_id`, `eos_id`, and `free()`, and support `with` for cleanup. They own their
+vocabulary independently of Tensor runtimes; `runtime.Tokenizer` is the same
+class. JSON accepts the supported byte-level BPE pipeline. Unsupported pipelines
+raise `ValueError`; `strict=False` permits skipping NFC only, with `UserWarning`.
+Use Hugging Face tokenizers for other pipelines. No Unicode dependency is added.
+
+`create(device='cpu', kernels=True)` accepts the same kernel option as `Runtime`.
+
 | Area | Main APIs |
 |---|---|
 | Runtime | `polygrad.create`, `polygrad.stats`, `polygrad.can_run`, `Device` |
@@ -665,7 +675,8 @@ code, not sandboxed plugins. Linux is tested; other native platforms are unteste
 | Movement/indexing | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
 | Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
 | Data/readback | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
-| Compilation | `jit`, `compile`, `Tensor.custom_kernel` |
+| Compilation | `function`, `jit`, `compile`, `Tensor.custom_kernel` |
+| Tokenization | `Tokenizer.from_json`, `Tokenizer.from_gguf`, `encode`, `decode` |
 | Neural nets | `polygrad.nn` layers, `SGD`, `Adam`, `AdamW`, `get_parameters`, `get_state_dict` |
 
 ## Troubleshooting

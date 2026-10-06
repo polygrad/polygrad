@@ -197,6 +197,14 @@ export. `models.list()` reports construction/import capabilities. Cached generat
 requires `cache_capacity` / `cacheCapacity`; specialize an imported Model with
 `Transformer.from_model()` / `Transformer.fromModel()`.
 
+Tokenization is separate from model loading. Python `Tokenizer.from_json` and
+JavaScript `Tokenizer.fromJSON` use the same C tokenizer and accept validated
+byte-level BPE pipelines; unsupported normalizers and tokenizer algorithms
+reject. Explicit Python `strict=False` / JS `{strict:false}` (C:
+`poly_tokenizer_from_json_ex`) can skip NFC with a warning, at the cost of
+potentially different token IDs. Both frontends also expose GGUF tokenization.
+See [tokenizer support](js/README.md#pretrained-and-configured-models).
+
 ### Configuration-driven Models
 
 Sequential and Graph use the same JSON definitions in Python and JavaScript.
@@ -350,8 +358,8 @@ inference-only; unsupported operators and shapes produce an import error.
 ### Export Products
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.
-Polygrad 0.6.0 requires C ABI107 and writes PGIR22/PGPM10.
-The current development tree requires ABI108; the graph formats are unchanged.
+Polygrad 0.7.0 requires C ABI108 and writes PGIR22/PGPM10.
+The graph formats are unchanged from 0.6.0; C extensions must match ABI108.
 PGIR19 bundles remain readable; incompatible artifacts are rejected.
 Cached models save their program and weights, not conversation history.
 

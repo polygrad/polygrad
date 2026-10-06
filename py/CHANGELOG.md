@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-06)
+
+- Restore Tensor roots after failed realization, allowing compilation failures to be retried; reject reads after reported failures that may have partially written storage. Release cancelled JIT capture handles.
+
+- Add public C-backed `Tokenizer` JSON/GGUF loading, encode/decode and context-managed cleanup. Forward `create(kernels=...)` and match pinned Kaiming-uniform `a` and fan-in semantics.
+- `Tensor.kaiming_uniform` seeded values change: use pinned Tinygrad's uniform construction, default `a=0.01` and fan-in of 1 for one-dimensional shapes. Built-in NN layers do not call this helper, so their initialization is unaffected by this change.
 
 - Fix repeated eager training retaining optimizer history under `until_realize`, including view writes and indirect realization; preserve portable gradient export and `always` retention.
 - Fix large indexed reads retaining dense reduction loops after scheduling splits; restore pinned Tinygrad load-collapse behavior.
