@@ -3698,15 +3698,12 @@ class Tensor:
         bound = math.sqrt(6.0 / (shape[0] + _prod(shape[1:])))
         return cls.uniform(*shape, low=-bound, high=bound, **kwargs)
 
-    @staticmethod
-    def kaiming_uniform(*shape, **kwargs):
+    @classmethod
+    def kaiming_uniform(cls, *shape, a=0.01, **kwargs):
         """tinygrad-compatible Kaiming uniform initializer."""
         shape = _shape_tuple(*shape)
-        if not shape:
-            raise ValueError("kaiming_uniform requires a non-scalar shape")
-        fan_in = shape[0] if len(shape) == 1 else math.prod(shape[1:])
-        bound = math.sqrt(6.0 / fan_in)
-        return Tensor.rand(*shape, **kwargs) * (2.0 * bound) - bound
+        bound = math.sqrt(6.0 / (1 + a*a) / math.prod(shape[1:]))
+        return cls.uniform(*shape, low=-bound, high=bound, **kwargs)
 
     @staticmethod
     def randint(*shape, low=0, high=10, dtype=dtypes.int32, **kwargs):

@@ -1021,6 +1021,26 @@ def _declare_signatures(lib):
         ctypes.POINTER(_ptr),
     ]
 
+    lib.poly_gguf_decode.restype = ctypes.c_int
+    lib.poly_gguf_decode.argtypes = [ctypes.c_char_p, ctypes.c_int64, _ptrp]
+    lib.poly_gguf_decoded_free.restype = None
+    lib.poly_gguf_decoded_free.argtypes = [_ptr]
+    lib.poly_tokenizer_from_gguf.restype = _ptr
+    lib.poly_tokenizer_from_gguf.argtypes = [_ptr]
+    lib.poly_tokenizer_from_json_ex.restype = _ptr
+    lib.poly_tokenizer_from_json_ex.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int,
+                                               ctypes.c_char_p, ctypes.c_int]
+    lib.poly_tokenizer_free.restype = None
+    lib.poly_tokenizer_free.argtypes = [_ptr]
+    lib.poly_tokenize.restype = ctypes.c_int
+    lib.poly_tokenize.argtypes = [_ptr, ctypes.c_char_p, _ip, ctypes.c_int]
+    lib.poly_detokenize.restype = ctypes.c_int
+    lib.poly_detokenize.argtypes = [_ptr, _ip, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    for name in ('vocab_size', 'bos_id', 'eos_id'):
+        fn = getattr(lib, 'poly_tokenizer_' + name)
+        fn.restype = ctypes.c_int
+        fn.argtypes = [_ptr]
+
     lib.poly_tensor_sum.restype = _ptr
     lib.poly_tensor_sum.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_mean.restype = _ptr

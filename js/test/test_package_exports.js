@@ -61,13 +61,13 @@ function testNodeCjsRoot() {
 
 function testNodeEsmRoot() {
   const out = nodeModuleEval(`
-    import { Tensor, Model, create, disposeDefault } from 'polygrad'
+    import { Tensor, Model, create, disposeDefault, function as capture } from 'polygrad'
     for (const name of ['fromCallable', 'fromCallableAsync', 'fromTensors', 'load']) {
       if (typeof Model[name] !== 'function') throw new Error('missing Model.' + name + ' export')
     }
     const rt = create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
-    const y = new Tensor([1,2,3]).mul(3)
+    const y = capture(x => x.mul(3))(new Tensor([1,2,3]))
     console.log(Array.from(y.toArray()).join(','))
     disposeDefault(); rt.dispose()
   `)
@@ -76,11 +76,11 @@ function testNodeEsmRoot() {
 
 function testBrowserConditionSync() {
   const out = nodeModuleEval(`
-    import { Tensor, Model, create, disposeDefault } from 'polygrad'
+    import { Tensor, Model, create, disposeDefault, function as capture } from 'polygrad'
     if (typeof Model.fromTensors !== 'function') throw new Error('missing browser Model export')
     const rt = create({core:'wasm'})
     if (rt && typeof rt.then === 'function') throw new Error('create returned Promise')
-    const y = new Tensor([1,2,3]).mul(4)
+    const y = capture(x => x.mul(4))(new Tensor([1,2,3]))
     console.log(Array.from(y.toArray()).join(','))
     disposeDefault(); rt.dispose()
   `, ['--conditions=browser'])

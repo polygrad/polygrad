@@ -23,6 +23,7 @@ from .device import Device
 from .model import Model, _dispose_models_for_ctx, _model_capture_active
 from .jit import CompiledCallable, Jit, JitError, TinyJit, _dispose_jits_for_ctx, compile, jit
 from .function import function
+from .tokenizer import Tokenizer
 from .uop.ops import UOp, _dispose_uops_for_ctx
 from .helpers import Context, LOGICAL, _normalize_logical_policy, fetch, getenv
 from . import nn as nn
@@ -355,6 +356,7 @@ class Runtime:
               return Variable(name, min_val, max_val, _ctx=self._ctx)
           self.Variable = runtime_variable
           self.Model = _bound_model_class(self)
+          self.Tokenizer = Tokenizer
           self.nn = nn._bind_runtime(self)
           from . import models
           self.models = SimpleNamespace(**{
@@ -445,16 +447,16 @@ class Runtime:
       return False
 
 
-def create(*, device='auto', logical=None):
+def create(*, device='auto', logical=None, kernels=None):
     """Create an explicit Polygrad runtime/context."""
-    return Runtime(device=device, logical=logical)
+    return Runtime(device=device, logical=logical, kernels=kernels)
 
 
 __all__ = [
     'Tensor', 'Variable', 'BoundVariable', 'UOp', 'dtypes', 'Device', 'Model', 'nn',
     'GlobalCounters', 'Context', 'LOGICAL', 'fetch', 'getenv', 'function',
     'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
-    'compile', 'jit', 'stats', 'collect', 'clear_schedule_cache', 'can_run',
+    'compile', 'jit', 'stats', 'collect', 'clear_schedule_cache', 'can_run', 'Tokenizer',
 ]
 
 try:

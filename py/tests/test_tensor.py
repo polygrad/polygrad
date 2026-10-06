@@ -5821,3 +5821,14 @@ class TestMaterializationParity:
                 detect_negative=detect_negative,
             )
             assert count_op(result.uop, 'COPY') == 2
+@pytest.mark.parametrize('shape', [(3,), (2, 3)])
+def test_kaiming_uniform_matches_pinned_uniform_formula(shape):
+    import math
+    import polygrad as pg
+    with pg.Runtime(device='cpu') as rt:
+        bound = math.sqrt(6 / (1 + 0.2**2) / math.prod(shape[1:]))
+        rt.Tensor.manual_seed(17)
+        actual = rt.Tensor.kaiming_uniform(shape, a=0.2).numpy()
+        rt.Tensor.manual_seed(17)
+        expected = rt.Tensor.uniform(shape, low=-bound, high=bound).numpy()
+        np.testing.assert_array_equal(actual, expected)

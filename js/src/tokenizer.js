@@ -31,14 +31,15 @@ function createBoundTokenizerClass(runtime) {
       return new Tokenizer(handle)
     }
 
-    static fromJSON(jsonBytes) {
+    static fromJSON(jsonBytes, { strict = true } = {}) {
+      if (typeof strict !== 'boolean') throw new TypeError('polygrad: tokenizer strict must be a boolean')
       const api = _runtime._core.model
       if (typeof jsonBytes === 'string')
         jsonBytes = new TextEncoder().encode(jsonBytes)
       if (!(jsonBytes instanceof Uint8Array))
         jsonBytes = new Uint8Array(jsonBytes)
-      const handle = api.tokenizerFromJSON(jsonBytes)
-      if (!handle) throw new Error('polygrad: tokenizer.json is unsupported; use Hugging Face tokenizers for JSON pipelines, or Tokenizer.fromGGUF for GGUF BPE')
+      const { handle, warning } = api.tokenizerFromJSON(jsonBytes, strict)
+      if (warning) console.warn('polygrad: ' + warning)
       return new Tokenizer(handle)
     }
 

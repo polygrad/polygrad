@@ -1218,3 +1218,12 @@ def test_tinyjit_optimizer_replay_uses_current_onecyclelr_tensor():
     assert step.cnt == 3
     np.testing.assert_allclose(params, [0.9, 0.725, 0.475], rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(lrs, [0.175, 0.25, 0.325], rtol=1e-6, atol=1e-6)
+
+
+def test_runtime_factory_forwards_kernel_policy():
+    import polygrad as pg
+    for enabled in (False, True):
+        with pg.create(device='cpu', kernels=enabled) as rt:
+            assert rt.Tensor([1]).add(2).tolist() == [3]
+    with pytest.raises(TypeError, match='bool'):
+        pg.create(kernels='true')

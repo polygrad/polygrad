@@ -3617,6 +3617,76 @@ static napi_value napi_poly_tensor_device(napi_env env, napi_callback_info info)
   return out;
 }
 
+static napi_value napi_poly_tensor_function(napi_env env, napi_callback_info info) {
+  napi_value argv[8];
+  size_t argc = 8;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 8) {
+    napi_throw_type_error(env, NULL, "poly_tensor_function expects eight arguments");
+    return NULL;
+  }
+  uint32_t counts[3];
+  for (int i = 0; i < 3; i++) {
+    NAPI_CALL(env, napi_get_array_length(env, argv[i + 1], &counts[i]));
+  }
+  if (!counts[0] || counts[0] > INT_MAX || counts[1] != counts[2] || counts[1] > INT_MAX) {
+    napi_throw_range_error(env, NULL, "invalid function input/output counts");
+    return NULL;
+  }
+  bool flags[3];
+  for (int i = 0; i < 3; i++) {
+    NAPI_CALL(env, napi_get_value_bool(env, argv[i + 5], &flags[i]));
+  }
+  size_t name_len;
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[4], NULL, 0, &name_len));
+  char *name = malloc(name_len + 1);
+  size_t n = counts[0], m = counts[1];
+  void **slots = calloc(2 * n + 2 * m, sizeof(*slots));
+  if (!name || !slots) {
+    free(name);
+    free(slots);
+    napi_throw_error(env, NULL, "function allocation failed");
+    return NULL;
+  }
+  napi_get_value_string_utf8(env, argv[4], name, name_len + 1, &name_len);
+  size_t offset = 0;
+  for (int i = 0; i < 3; i++) {
+    for (uint32_t j = 0; j < counts[i]; j++) {
+      napi_value item;
+      napi_get_element(env, argv[i + 1], j, &item);
+      slots[offset++] = get_external_nullable(env, item);
+    }
+  }
+  PolyTensor **outputs = (PolyTensor **)(slots + n + 2 * m);
+  int rc = poly_tensor_function(
+      get_external(env, argv[0]), (PolyTensor **)slots, (int)n, (PolyUOp **)(slots + n),
+      (PolyUOp **)(slots + n + m), (int)m, name, flags[0], flags[1], flags[2], outputs
+  );
+  free(name);
+  napi_value out = NULL;
+  napi_status status = napi_ok;
+  if (!rc) {
+    status = napi_create_array_with_length(env, n, &out);
+    for (size_t i = 0; status == napi_ok && i < n; i++) {
+      napi_value item;
+      status = napi_create_external(env, outputs[i], NULL, NULL, &item);
+      if (status == napi_ok) status = napi_set_element(env, out, i, item);
+    }
+  }
+  if (rc || status != napi_ok) {
+    for (size_t i = 0; i < n; i++)
+      if (outputs[i]) poly_tensor_release(outputs[i]);
+    napi_throw_error(
+        env, NULL,
+        rc == -2 ? "function has implicit buffer(s), but allowImplicit=false"
+                 : "poly_tensor_function failed"
+    );
+    out = NULL;
+  }
+  free(slots);
+  return out;
+}
+
 static napi_value napi_poly_tensor_custom_kernel(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -7055,13 +7125,22 @@ static napi_value napi_poly_tokenizer_from_json(napi_env env, napi_callback_info
   void *data;
   size_t len;
   NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
-  PolyTokenizer *tok = poly_tokenizer_from_json((const char *)data, (int)len);
+  bool strict = true;
+  if (argc > 1) NAPI_CALL(env, napi_get_value_bool(env, argv[1], &strict));
+  char diagnostic[256];
+  PolyTokenizer *tok = poly_tokenizer_from_json_ex(
+      (const char *)data, (int)len, strict, diagnostic, sizeof(diagnostic)
+  );
   if (!tok) {
-    napi_value n;
-    napi_get_null(env, &n);
-    return n;
+    napi_throw_error(env, NULL, diagnostic);
+    return NULL;
   }
-  return make_external(env, tok);
+  napi_value result, warning;
+  NAPI_CALL(env, napi_create_object(env, &result));
+  NAPI_CALL(env, napi_create_string_utf8(env, diagnostic, NAPI_AUTO_LENGTH, &warning));
+  NAPI_CALL(env, napi_set_named_property(env, result, "handle", make_external(env, tok)));
+  NAPI_CALL(env, napi_set_named_property(env, result, "warning", warning));
+  return result;
 }
 
 static napi_value napi_poly_tokenize(napi_env env, napi_callback_info info) {
@@ -7580,6 +7659,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_set_logical_policy", napi_poly_tensor_set_logical_policy),
       DECLARE_NAPI_METHOD("poly_tensor_device", napi_poly_tensor_device),
       DECLARE_NAPI_METHOD("poly_tensor_custom_kernel", napi_poly_tensor_custom_kernel),
+      DECLARE_NAPI_METHOD("poly_tensor_function", napi_poly_tensor_function),
       DECLARE_NAPI_METHOD("poly_realize_tensors", napi_poly_realize_tensors),
       DECLARE_NAPI_METHOD("poly_optim_build_step", napi_poly_optim_build_step),
       DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),

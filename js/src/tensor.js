@@ -1680,25 +1680,42 @@ function createBoundTensorClass(runtime) {
     // Pinned named add/mul preserve the optional reverse operand order
     // (mixin/elementwise.py:72-88,110-126).
     add(other, reverse = false) { return this._binop(other, 'ADD', reverse) }
-    sub(other) {
+    sub(other, reverse = false) {
       // C owns tinygrad's `a + (-b)` topology for every frontend
       // (mixin/elementwise.py:90-109).
-      return this._binop(other, 'SUB')
+      return this._binop(other, 'SUB', reverse)
     }
     mul(other, reverse = false) { return this._binop(other, 'MUL', reverse) }
+    _bitwise(other, op, reverse) {
+      if (!isIntegerDtype(this._dtype) && this._dtype !== 'bool') {
+        throw new Error(`bitwise ops require integer or bool dtype, got ${this._dtype}`)
+      }
+      return this._binop(other, op, reverse)
+    }
+    bitwiseAnd(other, reverse = false) { return this._bitwise(other, 'AND', reverse) }
+    bitwiseOr(other, reverse = false) { return this._bitwise(other, 'OR', reverse) }
+    bitwiseXor(other, reverse = false) { return this._bitwise(other, 'XOR', reverse) }
+    lshift(other, reverse = false) { return this._binop(other, 'SHL', reverse) }
+    rshift(other, reverse = false) { return this._binop(other, 'SHR', reverse) }
+    threefry(seed) { return this._binop(seed, 'THREEFRY') }
+    logicalNot() {
+      const value = this.cast('bool')
+      try { return value.ne(true) } finally { if (value !== this) value.dispose() }
+    }
     floorDiv(other) { return this.div(other, 'floor') }
     bitwiseNot() {
       const core = this._rt._core.ffi.poly_tensor_bitwise_not(this._ctx, this._tensor)
       return this._makeResultFromCore(core)
     }
-    mod(other) {
-      return this._remainder(other, 'floor', 'FLOORMOD')
+    mod(other, reverse = false) {
+      return this._remainder(other, 'floor', 'FLOORMOD', reverse)
     }
     fmod(other) {
       return this._remainder(other, 'trunc', 'CMOD')
     }
-    _remainder(other, rounding, op) {
+    _remainder(other, rounding, op, reverse = false) {
       return this._withTensorOperands([other], rhs => {
+        if (reverse) return rhs._remainder(this, rounding, op)
         if (isIntegerDtype(this._dtype) && isIntegerDtype(rhs._dtype)) return this._binop(rhs, op)
         const quotient = this.div(rhs, rounding)
         let product
@@ -1711,13 +1728,14 @@ function createBoundTensorClass(runtime) {
     maskedFill(mask, value) {
       return this._withTensorOperands([mask], condition => condition.where(value, this))
     }
-    div(other, roundingMode = null) {
+    div(other, roundingMode = null, reverse = false) {
       // Pinned mixin/elementwise.py:219-247 selects integer CDIV/FLOORDIV
       // after promotion; floating rounding composes over true division.
       const rounding = [null, 'trunc', 'floor'].indexOf(roundingMode)
       if (rounding < 0) throw new Error(`rounding_mode='${roundingMode}' is not supported`)
       return this._withTensorOperands([other], rhs => this._makeResultFromCore(
-        this._rt._core.ffi.poly_tensor_div(this._ctx, this._tensor, rhs._tensor, rounding)
+        this._rt._core.ffi.poly_tensor_div(this._ctx,
+          reverse ? rhs._tensor : this._tensor, reverse ? this._tensor : rhs._tensor, rounding)
       ))
     }
     pow(other, reverse = false) {
@@ -3716,6 +3734,17 @@ function createBoundTensorClass(runtime) {
       delete opts.a
       const fanIn = shape.slice(1).reduce((a, b) => a*b, 1)
       return Tensor.normal(shape, { ...opts, mean: 0, std: Math.sqrt(2 / (1+a*a) / fanIn) })
+    }
+
+    static kaimingUniform(...args) {
+      let opts = {}
+      if (args.length && typeof args.at(-1) === 'object' && !Array.isArray(args.at(-1))) opts = { ...args.pop() }
+      const shape = args.length === 1 && Array.isArray(args[0]) ? args[0] : args
+      const a = opts.a == null ? 0.01 : opts.a
+      delete opts.a
+      const fanIn = shape.slice(1).reduce((product, dim) => product * dim, 1)
+      const bound = Math.sqrt(6 / (1 + a*a) / fanIn)
+      return Tensor.uniform(shape, { ...opts, low:-bound, high:bound })
     }
 
     static uniform(...args) {

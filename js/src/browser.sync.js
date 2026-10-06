@@ -61,6 +61,7 @@ Object.defineProperties(api, {
   Tensor: defaultGetter('Tensor'),
   uop: defaultGetter('uop'),
   jit: defaultGetter('jit'),
+  function: defaultGetter('function'),
   jitAsync: defaultGetter('jitAsync'),
   compile: defaultGetter('compile'),
   compileAsync: defaultGetter('compileAsync'),

@@ -1097,6 +1097,27 @@ function createWasmCoreFromModule(Module, device) {
     poly_device_name: (device) => coreDeviceName(device),
     poly_device_is_host_addressable: (device) =>
       Boolean(Module._poly_device_is_host_addressable(device)),
+    poly_tensor_function: (ctx, results, logical, physical, name, allowImplicit, precompile, precompileBackward) => {
+      const n = results.length, m = physical.length
+      const ptr = malloc((2*n + 2*m) * 4)
+      let namePtr = 0
+      const logicalPtr = ptr + n*4, physicalPtr = logicalPtr + m*4, outputsPtr = physicalPtr + m*4
+      try {
+        namePtr = allocString(name)
+        heap32().set([...results, ...logical.map(x => x || 0), ...physical, ...Array(n).fill(0)], ptr >>> 2)
+        const rc = Module._poly_tensor_function(ctx, ptr, n, logicalPtr, physicalPtr, m,
+          namePtr, +allowImplicit, +precompile, +precompileBackward, outputsPtr)
+        const outputs = readPtrArray(outputsPtr, n).map(x => x >>> 0)
+        if (rc !== 0) {
+          for (const output of outputs) if (output) Module._poly_tensor_release(output)
+          throw new Error(rc === -2 ? 'function has implicit buffer(s), but allowImplicit=false' : 'poly_tensor_function failed')
+        }
+        return outputs
+      } finally {
+        if (namePtr) Module._free(namePtr)
+        Module._free(ptr)
+      }
+    },
     poly_tensor_custom_kernel: (ctx, body, inputs, gradFxnKey) => {
       const n = inputs.length
       if (n <= 0) return null
@@ -2676,11 +2697,18 @@ function createWasmCoreFromModule(Module, device) {
       return tok || null
     },
 
-    tokenizerFromJSON(jsonBytes) {
+    tokenizerFromJSON(jsonBytes, strict) {
       const ptr = allocBytes(jsonBytes)
-      const tok = Module._poly_tokenizer_from_json(ptr, jsonBytes.length)
-      Module._free(ptr)
-      return tok || null
+      const diagnostic = malloc(256)
+      try {
+        const handle = Module._poly_tokenizer_from_json_ex(ptr, jsonBytes.length, strict ? 1 : 0, diagnostic, 256)
+        const warning = Module.UTF8ToString(diagnostic)
+        if (!handle) throw new Error('polygrad: ' + warning)
+        return { handle, warning }
+      } finally {
+        Module._free(diagnostic)
+        Module._free(ptr)
+      }
     },
 
     tokenize(tokPtr, text) {

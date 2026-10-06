@@ -236,8 +236,8 @@ function createNativeCore(device) {
     tokenizerFromGGUF(ggufBytes) {
       return binding.poly_tokenizer_from_gguf(ggufBytes)
     },
-    tokenizerFromJSON(jsonBytes) {
-      return binding.poly_tokenizer_from_json(jsonBytes, jsonBytes.length)
+    tokenizerFromJSON(jsonBytes, strict) {
+      return binding.poly_tokenizer_from_json(jsonBytes, strict)
     },
     tokenize(tokPtr, text) { return binding.poly_tokenize(tokPtr, text) },
     detokenize(tokPtr, ids) {

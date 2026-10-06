@@ -10,6 +10,8 @@ export const PolyWasmSyncUnsupported = cjs.PolyWasmSyncUnsupported
 export const Tensor = cjs.Tensor
 export const uop = cjs.uop
 export const jit = cjs.jit
+const captureFunction = cjs.function
+export { captureFunction as function }
 export const jitAsync = cjs.jitAsync
 export const compile = cjs.compile
 export const compileAsync = cjs.compileAsync

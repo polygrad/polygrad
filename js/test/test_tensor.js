@@ -6257,6 +6257,96 @@ async function runTensorTests(pg, createRuntime) {
     const labels = new Tensor([2, 99], { dtype: 'int32' })
     assertClose(await logits.sparseCategoricalCrossentropy(labels, { ignoreIndex: 99, labelSmoothing: 0.2, reduction: 'none' }).toArray(), [0.60760596, 0])
   })
+  await test('frontend parity Tensor integer operations and reverse arithmetic', async () => {
+    const x = new Tensor([0, 10], {dtype:'int32'})
+    for (const [name, arg, expected] of [
+      ['bitwiseAnd',3,[0,2]], ['bitwiseOr',3,[3,11]], ['bitwiseXor',3,[3,9]],
+      ['lshift',1,[0,20]], ['rshift',1,[0,5]], ['logicalNot',undefined,[1,0]],
+      ['sub',2,[2,-8]], ['mod',3,[0,3]]
+    ]) {
+      const input = name === 'mod' ? new Tensor([1,10], {dtype:'int32'}) : x
+      assertClose(await input[name](arg, name === 'sub' || name === 'mod').toArray(), expected, 0)
+    }
+    const y = new Tensor([2,4], {dtype:'int32'})
+    assertClose(await y.div(9, 'floor', true).toArray(), [4,2], 0)
+    assertClose(await y.div(9, 'floor').toArray(), [0,0], 0)
+    assert(x.threefry(new Tensor([1,2], {dtype:'int32'})).uop.op === pg._core.ops.THREEFRY)
+    let error
+    try { new Tensor([1.5]).bitwiseAnd(1) } catch (e) { error = e }
+    assert(error, 'bitwise operations must reject floating input')
+    Tensor.manual_seed(17)
+    const init = Tensor.kaimingUniform([2,3], {a:0.2})
+    assertShape(init.shape, [2,3])
+    assert(Array.from(await init.toArray()).every(v => v >= -Math.sqrt(2) && v <= Math.sqrt(2)))
+    Tensor.manual_seed(17)
+    const bound = Math.sqrt(6 / (1 + 0.2**2) / 3)
+    assertClose(await init.toArray(), await Tensor.uniform([2,3], {low:-bound,high:bound}).toArray(), 0)
+  })
+  await test('frontend parity UOp equality and helpers follow pinned topology', async () => {
+    const x = pg.uop.variable('frontend_eq', 0, 10)
+    const eq = x.eq(3), ops = pg._core.ops
+    assert(eq.op === ops.CMPNE && eq.src[0].op === ops.CMPNE,
+      'eq must be logical-not of CMPNE, not CMPEQ')
+    assert(x.logicalNot().op === ops.CMPNE)
+    assert(x.contiguous().key === x.key, 'scalar contiguous is a pinned no-op')
+    const value = new Tensor([1,2], {dtype:'float32'}).add(1).uop
+    assert(value.contiguous().op === ops.CONTIGUOUS)
+  })
+  await test('frontend parity function capture forward backward and implicit inputs', async () => {
+    const x = new Tensor([3,4], {dtype:'float32'})
+    await x.realize()
+    const pair = pg.function(a => [a.add(1), a.mul(2)])
+    const [first, second] = pair(x)
+    assert(first.uop.src[0].key === second.uop.src[0].key)
+    assert(countGraphOp(first.uop, pg._core.ops.FUNCTION) === 1)
+    const loss = first.square().sum().add(second.square().sum())
+    loss.backward()
+    assertClose(await loss.toArray(), [141])
+    assertClose(await x.grad.toArray(), [32,42])
+    const closure = new Tensor([10,20], {dtype:'float32'})
+    await closure.realize()
+    let error
+    try { pg.function(a => a.add(closure))(x) } catch (e) { error = e }
+    assert(error && /implicit buffer/.test(error.message))
+    const accepted = pg.function(a => a.add(closure), {allowImplicit:true, precompile:true})
+    assertClose(await accepted(x).toArray(), [13,24])
+    const obj = {weight:closure, forward:pg.function(function(a) { return a.add(this.weight) })}
+    assertClose(await obj.forward(x).toArray(), [13,24])
+  })
+  await test('frontend parity function snapshots state and rejects invalid owners', async () => {
+    const state = new Tensor([1], {dtype:'float32'}), x = new Tensor([3], {dtype:'float32'})
+    const before = state.uop
+    const f = pg.function((obj, input) => { obj.state.assign(obj.state.add(1)); return input.add(2) })
+    const out = f({state}, x)
+    const reachable = key => {
+      const seen = new Set(), stack = [out.uop]
+      while (stack.length) {
+        const node = stack.pop()
+        if (node.key === key) return true
+        if (seen.has(node.key)) continue
+        seen.add(node.key); stack.push(...node.src)
+      }
+      return false
+    }
+    assert(reachable(before.key) && !reachable(state.uop.key), 'capture used state after mutation')
+    assertClose(await out.toArray(), [5])
+    const other = await createRuntime()
+    try {
+      let error
+      try { pg.function(a => a)(new other.Tensor([1])) } catch (e) { error = e }
+      assert(error && /runtime/.test(error.message))
+    } finally { await other.dispose() }
+    for (const body of [() => [], () => 1, () => { throw new Error('body failure') }]) {
+      let error
+      try { pg.function(body)(x) } catch (e) { error = e }
+      assert(error, 'invalid function body succeeded')
+    }
+    const dead = new Tensor([1]); dead.dispose()
+    let error
+    try { pg.function(a => a)(dead) } catch (e) { error = e }
+    assert(error, 'disposed input succeeded')
+    assertClose(await pg.function(a => a.add(1))(x).toArray(), [4])
+  })
   await test('raw UOp sub matches C composed helper', async () => {
     const a = pg.uop.variable('sp', 0, 12)
     const b = pg.uop.variable('toks', 1, 4)

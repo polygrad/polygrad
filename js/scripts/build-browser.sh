@@ -68,10 +68,17 @@ build_entry() {
     --outfile="${DIST_DIR}/${PKG_NAME}.${suffix}.mjs"
 
   IFS=',' read -ra keys <<< "$exports"
-  local destructure export_line
-  destructure=$(IFS=','; echo "${keys[*]}")
-  export_line=$(IFS=','; echo "${keys[*]}")
+  # Public property names can be reserved words (e.g. function). Use safe local
+  # bindings while retaining the public ESM export names.
+  local destructure='' export_line='' separator='' index=0
+  for key in "${keys[@]}"; do
+    destructure+="${separator}${key}:__pg_export_${index}"
+    export_line+="${separator}__pg_export_${index} as ${key}"
+    separator=','
+    index=$((index + 1))
+  done
   echo "var {${destructure}}=${internal};export{${export_line}};" >> "${DIST_DIR}/${PKG_NAME}.${suffix}.mjs"
+  node --check "${DIST_DIR}/${PKG_NAME}.${suffix}.mjs"
 }
 
 echo "=== Building browser bundles ==="

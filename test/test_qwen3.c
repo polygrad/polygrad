@@ -14,6 +14,7 @@
 #include "../src/model.h"
 #include "../src/engine/schedule.h"
 #include "../src/tokenizer.h"
+#include "../vendor/cjson/cJSON.h"
 #include <string.h>
 
 /* GGUF file loading */
@@ -291,6 +292,50 @@ TEST(qwen3, tokenizer_json_rejected) {
   }
   ASSERT_TRUE(ok);
   ASSERT_EQ(poly_tokenizer_from_json(NULL, 0), NULL);
+  PASS();
+}
+
+TEST(qwen3, tokenizer_json_byte_bpe) {
+  FILE *f = fopen("test/fixtures/tokenizer_byte_bpe.json", "rb");
+  ASSERT_NOT_NULL(f);
+  char raw[8192], diagnostic[256];
+  size_t n = fread(raw, 1, sizeof(raw), f);
+  fclose(f);
+  ASSERT_TRUE(n > 0 && n < sizeof(raw));
+  PolyTokenizer *tok = poly_tokenizer_from_json_ex(raw, (int)n, 1, diagnostic, sizeof(diagnostic));
+  ASSERT_NOT_NULL(tok);
+  int ids[8];
+  int count = poly_tokenize(tok, "abc<end>ab", ids, 8);
+  bool ok = count == 4 && ids[0] == 97 && ids[1] == 257 && ids[2] == 259 && ids[3] == 256 &&
+            diagnostic[0] == '\0' && poly_tokenizer_bos_id(tok) == -1;
+  char text[32];
+  ok &= poly_detokenize(tok, ids, count, text, sizeof(text)) == 10 && !strcmp(text, "abc<end>ab");
+  poly_tokenizer_free(tok);
+  ASSERT_TRUE(ok);
+  cJSON *config = cJSON_ParseWithLength(raw, n);
+  ASSERT_NOT_NULL(config);
+  cJSON_ReplaceItemInObjectCaseSensitive(config, "normalizer", cJSON_Parse("{\"type\":\"NFC\"}"));
+  char *json = cJSON_PrintUnformatted(config);
+  tok = poly_tokenizer_from_json_ex(json, (int)strlen(json), 1, diagnostic, sizeof(diagnostic));
+  ok = !tok && strstr(diagnostic, "NFC") != NULL;
+  poly_tokenizer_free(tok);
+  tok = poly_tokenizer_from_json_ex(json, (int)strlen(json), 0, diagnostic, sizeof(diagnostic));
+  ok &= tok && strstr(diagnostic, "NFC normalization skipped") != NULL;
+  poly_tokenizer_free(tok);
+  free(json);
+  /* HF handles these tokens in two phases, which our single pass cannot do. */
+  cJSON *added = cJSON_GetObjectItemCaseSensitive(config, "added_tokens");
+  cJSON_AddItemToArray(
+      added, cJSON_Parse("{\"id\":256,\"content\":\"ab\",\"special\":true,\"normalized\":true,"
+                         "\"single_word\":false,\"lstrip\":false,\"rstrip\":false}")
+  );
+  json = cJSON_PrintUnformatted(config);
+  tok = poly_tokenizer_from_json_ex(json, (int)strlen(json), 0, diagnostic, sizeof(diagnostic));
+  ok &= !tok && strstr(diagnostic, "matching phases") != NULL;
+  poly_tokenizer_free(tok);
+  free(json);
+  cJSON_Delete(config);
+  ASSERT_TRUE(ok);
   PASS();
 }
 

@@ -3,7 +3,7 @@
  *
  * Vocabulary-ranked byte-level BPE following tinygrad's SimpleTokenizer.
  * Vocabulary and special-token IDs come from GGUF metadata.
- * HF tokenizer.json pipelines are not supported.
+ * JSON supports validated byte-level BPE pipelines with explicit merge ranks.
  */
 
 #ifndef POLY_TOKENIZER_H
@@ -36,11 +36,24 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf);
 PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int n_tokens);
 
 /*
- * Unsupported: always returns NULL and reports a diagnostic.
- * Use Hugging Face tokenizers for tokenizer.json pipelines, or GGUF BPE here.
- * The symbol remains to reject callers of the former partial JSON loader.
+ * Strict JSON byte-level BPE import. Returns NULL with a stderr diagnostic for
+ * unsupported pipelines. No normalization, padding or special-token insertion.
  */
 PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len);
+
+/*
+ * strict=0 permits skipping NFC normalization, and no other approximation.
+ * diagnostic (optional, caller-owned) receives a NUL-terminated error on NULL,
+ * warning on approximated success, or an empty string on exact success.
+ * No diagnostic is printed; the caller must surface nonempty warnings.
+ */
+PolyTokenizer *poly_tokenizer_from_json_ex(
+    const char *json_data,
+    int json_len,
+    int strict,
+    char *diagnostic,
+    int diagnostic_size
+);
 
 void poly_tokenizer_free(PolyTokenizer *tok);
 

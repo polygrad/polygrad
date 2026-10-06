@@ -107,7 +107,9 @@ async function runOptimTests(pg, filter = '') {
     const square = p.square(), loss = square.sum()
     loss.backward()
     const oldGrad = p._grad
-    const destination = pg.device === 'webgpu' ? 'cpu' : 'interp'
+    p.to_(p.device)
+    assert(p._grad === oldGrad && oldGrad._tensor, 'same-device transfer changed gradient ownership')
+    const destination = pg.device === 'interp' || pg.device === 'webgpu' ? 'cpu' : 'interp'
     p.to_(destination)
     assert(!oldGrad._tensor, 'in-place transfer retained an unexposed gradient')
     const moved = p.grad

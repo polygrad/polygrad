@@ -386,7 +386,18 @@ class UOp {
   shr(other) { return this._alu2('SHR', other) }
   pow(other) { return this._alu2('POW', other) }
   lt(other) { return this._alu2('CMPLT', other) }
-  eq(other) { return this._alu2('CMPEQ', other) }
+  eq(other) {
+    const ne = this.ne(other)
+    try { return ne.logicalNot() } finally { ne.dispose() }
+  }
+  logicalNot() {
+    const value = this.cast('bool')
+    try { return value.ne(true) } finally { if (value !== this) value.dispose() }
+  }
+  contiguous() {
+    const raw = this.ffi.poly_uop_contiguous(this.ctx, this.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
   ne(other) { return this._alu2('CMPNE', other) }
   cmplt(other) { return this.lt(other) }
   cmpeq(other) { return this.eq(other) }

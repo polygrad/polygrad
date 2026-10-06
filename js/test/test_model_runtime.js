@@ -1004,8 +1004,41 @@ function checkTokenizerJSON(pg) {
     let error, unexpected
     try {unexpected = pg.Tokenizer.fromJSON(JSON.stringify(config))} catch(e) {error=e}
     finally {if (unexpected) unexpected.free()}
-    assert(error && /unsupported.*Hugging Face/.test(error.message), 'JSON tokenizer must reject with migration advice')
+    assert(error && /BPE|pre-tokenizer/.test(error.message), 'JSON tokenizer must explain the unsupported pipeline')
   }
+
+  const config = JSON.parse(JSON.stringify(require('../../test/fixtures/tokenizer_byte_bpe.json')))
+  const jsonTok = pg.Tokenizer.fromJSON(JSON.stringify(config))
+  try {
+    assertClose(jsonTok.encode('abc ab'), [97,257,32,256], 0)
+    assert(jsonTok.decode(jsonTok.encode('é e\u0301')) === 'é e\u0301', 'JSON byte roundtrip')
+    assert(jsonTok.bosId === -1 && jsonTok.eosId === -1, 'JSON must not guess special-token roles')
+  } finally {jsonTok.free()}
+  config.normalizer = {type:'NFC'}
+  let error
+  try { pg.Tokenizer.fromJSON(JSON.stringify(config)) } catch(e) { error = e }
+  assert(error && /NFC/.test(error.message), 'strict JSON import must reject NFC')
+  const warn = console.warn, warnings = []
+  console.warn = message => warnings.push(message)
+  try {
+    const approximate = pg.Tokenizer.fromJSON(JSON.stringify(config), {strict:false})
+    try {
+      assert(approximate.decode(approximate.encode('e\u0301')) === 'e\u0301', 'only NFC is skipped')
+      assert(warnings.length === 1 && /NFC normalization skipped/.test(warnings[0]), 'best effort must warn once')
+    } finally {approximate.free()}
+    config.model.type = 'WordPiece'
+    error = null
+    try { pg.Tokenizer.fromJSON(JSON.stringify(config), {strict:false}) } catch(e) { error = e }
+    assert(error && /BPE/.test(error.message), 'best effort must still reject other algorithms')
+    config.model.type = 'BPE'
+    config.added_tokens = ['ab', 'abc'].map((content, i) => ({
+      id:i ? 258 : 256, content, special:true, normalized:!!i,
+      single_word:false, lstrip:false, rstrip:false
+    }))
+    error = null
+    try { pg.Tokenizer.fromJSON(JSON.stringify(config), {strict:false}) } catch(e) { error = e }
+    assert(error && /matching phases/.test(error.message), 'mixed added-token matching phases must reject')
+  } finally {console.warn = warn}
 
   // Minimal metadata-only GGUF exercises the public loader without a checkpoint.
   const bytes = []
@@ -2160,7 +2193,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
-  await test('Tokenizer GGUF and JSON rejection', () => checkTokenizerJSON(pg))
+  await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))
@@ -2938,7 +2971,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
-  await test('Tokenizer GGUF and JSON rejection', () => checkTokenizerJSON(pg))
+  await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
   await test('Model bounded minibatches and Tensor datasets', () => checkModelBoundedMinibatches(pg))

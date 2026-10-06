@@ -2,6 +2,7 @@
 
 const { createBoundModelClass } = require('./model')
 const { createBoundJit } = require('./jit')
+const { createBoundFunction } = require('./function')
 const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
 const { createBoundOptim } = require('./nn/optim')
@@ -44,6 +45,7 @@ class PolyRuntime {
     this.uop = createBoundUopNamespace(this)
     this.Tensor = createBoundTensorClass(this)
     this.jit = createBoundJit(this)
+    this.function = createBoundFunction(this)
     this.compile = this.jit.compile
     this.jitAsync = this.jit.async
     this.compileAsync = this.jit.compileAsync

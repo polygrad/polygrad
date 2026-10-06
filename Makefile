@@ -86,6 +86,7 @@ SRC += src/kernels/portable.c src/kernels/webgpu.c src/kernels/segment.c
 FILC_SRC += src/kernels/portable.c src/kernels/webgpu.c src/kernels/segment.c
 WASM_SRC = $(filter-out src/runtime_cpu.c src/renderer/cuda.c src/runtime_cuda.c src/renderer/hip.c src/runtime_hip.c src/renderer/isa/x86.c,$(SRC)) $(CODEC_SRC)
 WASM_EXPORTS := $(shell $(PYTHON) scripts/wasm_exports.py js/src)
+WASM_EXPORT_INPUTS := scripts/wasm_exports.py js/src/extension_api.json $(shell find js/src -name '*.js')
 
 .PHONY: extension-bindings check-extension-bindings extension-fixture test-extension test-extension-python test-extension-native test-extension-wasm
 NODE_INCLUDE ?= /usr/local/include/node
@@ -814,13 +815,17 @@ test-onnx: verify-source-mirrors build/libpolygrad.so
 generate-onnx-fixtures:
 	DEV=CPU $(HF_PYTHON) test/generate_onnx_fixture.py --output test/fixtures/onnx.json
 
-.PHONY: test-tokenizer test-tokenizer-parity
+.PHONY: test-tokenizer test-tokenizer-parity test-tokenizer-hf
 test-tokenizer: build/polygrad_test build/libpolygrad.so
 	./build/polygrad_test tokenizer_json
 	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_tokenizer.py
 
 test-tokenizer-parity: build/libpolygrad.so
 	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) -m pytest -q test/external/test_tokenizer_tinygrad.py
+
+# Optional reference dependency: Python tokenizers and huggingface_hub.
+test-tokenizer-hf: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q test/external/test_tokenizer_hf.py
 
 onnx-coverage:
 	$(PARITY_PY) scripts/onnx_coverage.py
@@ -1041,7 +1046,7 @@ test-release-runner:
 
 wasm: build/polygrad.js build/polygrad.wasm
 
-build/polygrad.js build/polygrad.wasm: $(WASM_SRC) Makefile
+build/polygrad.js build/polygrad.wasm: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS)
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=PolygradModule \
@@ -1058,7 +1063,7 @@ wasm-pkg: build/core.async.js build/core.sync.js
 	cp build/core.async.js js/wasm/core.async.js
 	cp build/core.sync.js js/wasm/core.sync.js
 
-build/core.async.js: $(WASM_SRC) Makefile
+build/core.async.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS)
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=createPolygrad \
@@ -1073,7 +1078,7 @@ build/core.async.js: $(WASM_SRC) Makefile
 		-s ENVIRONMENT='web,node' \
 		-o build/core.async.js $(WASM_SRC)
 
-build/core.sync.js: $(WASM_SRC) Makefile js/scripts/wasm-sync-post.js
+build/core.sync.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS) js/scripts/wasm-sync-post.js
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 \

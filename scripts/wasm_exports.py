@@ -9,6 +9,8 @@ import json
 
 roots = [pathlib.Path(arg) for arg in sys.argv[1:]] or [pathlib.Path("js/src")]
 exports = {"malloc", "free"}
+# Keep the strict C entry point available alongside JS's diagnostic/options form.
+exports.add("poly_tokenizer_from_json")
 exports.update(json.loads((pathlib.Path(__file__).resolve().parents[1] / 'js/src/extension_api.json').read_text()))
 for root in roots:
   for path in root.rglob("*.js"):
