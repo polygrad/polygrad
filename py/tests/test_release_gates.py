@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize('failure', ['', 'missing-wheel', 'tampered'])
-def test_publish_python_uses_verified_staged_archives(tmp_path, failure):
+@pytest.mark.parametrize('relative', [False, True])
+def test_publish_python_uses_verified_staged_archives(tmp_path, failure, relative):
     import hashlib
     import re
 
@@ -28,7 +29,8 @@ def test_publish_python_uses_verified_staged_archives(tmp_path, failure):
     sdist.write_bytes(b'sdist')
     wheel = wheels / f'polygrad-{version}-cp39-cp39-manylinux_2_28_x86_64.whl'
     wheel.write_bytes(b'wheel')
-    (release / 'SHA256SUMS').write_text(f'{hashlib.sha256(sdist.read_bytes()).hexdigest()}  {sdist}\n')
+    checksum_path = sdist.name if relative else sdist
+    (release / 'SHA256SUMS').write_text(f'{hashlib.sha256(sdist.read_bytes()).hexdigest()}  {checksum_path}\n')
     (wheels / 'SHA256SUMS').write_text(f'{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n')
     if failure == 'missing-wheel':
         wheel.unlink()
@@ -53,7 +55,8 @@ def test_publish_python_uses_verified_staged_archives(tmp_path, failure):
 
 
 @pytest.mark.parametrize('failure', ['', 'build', 'missing-wheel'])
-def test_manylinux_stages_only_complete_matrix(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize('relative', [False, True])
+def test_manylinux_stages_only_complete_matrix(tmp_path, monkeypatch, failure, relative):
     import hashlib
     import re
 
@@ -63,7 +66,7 @@ def test_manylinux_stages_only_complete_matrix(tmp_path, monkeypatch, failure):
     sdist = release / f'polygrad-{version}.tar.gz'
     sdist.write_bytes(b'fixture archive; no real compilation in this harness test')
     checksum = hashlib.sha256(sdist.read_bytes()).hexdigest()
-    (release / 'SHA256SUMS').write_text(f'{checksum}  {sdist}\n')
+    (release / 'SHA256SUMS').write_text(f'{checksum}  {sdist.name if relative else sdist}\n')
     runner = tmp_path / 'apptainer'
     runner.write_text(f'#!{sys.executable}\n' + '''
 import os, pathlib, sys

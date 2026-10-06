@@ -49,7 +49,7 @@ version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' py/pyproject.toml)
 release=$(realpath -e "${1:-build/release/$version}")
 [[ ! -e $release/wheels ]] || fail "$release/wheels already exists; preserve or move it before rebuilding."
 test -f "$release/polygrad-$version.tar.gz"
-sha256sum -c "$release/SHA256SUMS"
+(cd "$release" && sha256sum -c SHA256SUMS)
 sdist_hash=$(sha256sum "$release/polygrad-$version.tar.gz")
 grep -q "^${sdist_hash%% *} " "$release/SHA256SUMS" || fail 'Staged sdist has no recorded checksum'
 command -v "$APPTAINER" >/dev/null || fail 'Apptainer is required on the host.'

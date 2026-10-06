@@ -1152,7 +1152,7 @@ PUBLISH_DIR ?= build/release/$(PUBLISH_VERSION)
 
 # Publish the tested artifacts; never rebuild them as a side effect of upload.
 publish-py:
-	sha256sum -c "$(PUBLISH_DIR)/SHA256SUMS"
+	cd "$(PUBLISH_DIR)" && sha256sum -c SHA256SUMS
 	cd "$(PUBLISH_DIR)/wheels" && sha256sum -c SHA256SUMS
 	$(TWINE) check "$(PUBLISH_DIR)/polygrad-$(PUBLISH_VERSION).tar.gz" "$(PUBLISH_DIR)"/wheels/*.whl
 	$(TWINE) upload "$(PUBLISH_DIR)/polygrad-$(PUBLISH_VERSION).tar.gz" "$(PUBLISH_DIR)"/wheels/*.whl
