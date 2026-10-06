@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-09-29",
-  "basis": "Complete CUDA-enabled/HIP-disabled Clang 14 scan of 92 translation units after the X86 shift fix and ONNX cleanup: 97 diagnostics. Rechecked affected existing warning invariants and reviewed 26 ONNX parser/operation paths plus graph-cache eviction ownership. Removed three genuine ONNX Constant dead assignments instead of approving them. Detailed ONNX traces show validation failures being treated as successful helper returns; graph-cache eviction has a checked allocation and callback count bound. All 70 prior warning identities remain, with 11 reviewed location moves. No checker suppression, scope reduction or source-hash-only approval. Evidence: temp/analyzer-review-20260929/review.md, onnx-traces.log, scan/report.json and verified/report.json. Earlier unchanged-site rationales are retained per diagnostic. September29 release-failure follow-up: temp/release-fixes-20260929/analyzer-scan/report.json rescans all 92 units with the same 97 diagnostics and locations. ctx.c changes only formatting; runtime_wasm.c/runtime_webgpu.c change unsigned JavaScript heap indexing, outside native analyzer preprocessing, covered by executable bridge regressions and the real Qwen WebGPU gate. No diagnostic dispositions changed.",
+  "reviewed_on": "2026-10-06",
+  "basis": "Reviewed the source-matching October6 release scan: 93 CUDA-enabled/HIP-disabled Clang14 translation units, 110 diagnostics. Exact prior matches43, location-shifted occurrences53, additional occurrences14 (12 Graph composition, 2 ONNX); one old ONNX diagnostic is absent. Examined fresh detailed traces for all24 compose and 27 ONNX diagnostics, with per-site guard/output-initialization and cJSON invariants. Rechecked changed compiler/schedule/renderer/Tensor warning sites against current source; retained applicable unchanged-site rationales. No confirmed production defect found in these paths; no source changes, checker suppression or scope reduction. New segment.c unit is included, not excluded. Evidence: temp/analyzer-review-20261006.md, temp/analyzer-review-20261006-paths.log and temp/release-20261006T084207Z-5e5cd15c/analyzer/report.json. Fresh verification: temp/analyzer-review-20261006-verified/report.json.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -31,6 +31,7 @@
       "src/kernels/gemm.c",
       "src/kernels/match.c",
       "src/kernels/portable.c",
+      "src/kernels/segment.c",
       "src/kernels/select.c",
       "src/kernels/webgpu.c",
       "src/loaders/bind.c",
@@ -117,7 +118,7 @@
       "src/bigint.h": "1eaf520fbafdbe147cbffef1cf10153e5add242fbdf001556809fcd2ca7b10da",
       "src/bundle.c": "379e78bb64a8ab34f22bb44dfc23ce0ad4762cd199cd9c6aff77ee82a8e5ead7",
       "src/bundle.h": "bf107c034b859853f306baf28d59c6bcfeff77841a9b8420b7f37c0242f7822a",
-      "src/codegen/codegen.c": "5c321ea00ebd67429d3afb770d02073eeb708cbcce7e3367752928c228bba8c2",
+      "src/codegen/codegen.c": "34ee55d31b3f79c522457987794cfb361e52c211b928187d3e188c6a6519c667",
       "src/codegen/codegen.h": "22502c76789bfb4cbfa96ccb7e8892ad2d56a6fdbefac714ff7d8af892a05164",
       "src/codegen/decomp/dtype.c": "f17f2874c216589501db747652fce76731f660dbb52d05a3879aeeac49f1e0f5",
       "src/codegen/decomp/dtype.h": "0819a4844cc2b3963dac3ebdf99b00dfe1cea634dd51e284590e0d98cf22359e",
@@ -126,27 +127,28 @@
       "src/codegen/late/coalesce.h": "c63ce3dea1003e7d277635fbf9dcfc7c4478d88a612e5280ca04718622d9e1ba",
       "src/codegen/late/gater.c": "024066b3e745b611eae7ecafedf09f379cbcdf612a856df5107cfabb45f2d98b",
       "src/codegen/late/gater.h": "e7a7a82f3c5d20f0337e41e71bb939392d99bae3e8a5501ba5255e7865f9ad55",
-      "src/codegen/late/linearizer.c": "d35e1831caa29a8604cfe32a5c46d7b19929affd523da7ce1ec9d1328b397dcc",
+      "src/codegen/late/linearizer.c": "48c72585bb63fd3a0cf566dfcf8878d6502021aaa84df6e9ca6e19e487761184",
       "src/codegen/late/linearizer.h": "c75aab299584f5f16a7990ada7e01ec8db8341554f2c3e0095d00d7bf01286f4",
       "src/codegen/opt/tc.c": "9b706234391856ac85afe68f6c87aaff3e10bd82bbb59be2ef895cf22858657d",
       "src/codegen/opt/tc.h": "cc48c1f6661a3a99b838bb0aa89981208095f4c1e7ad6e43d574f60a78f8bc44",
-      "src/codegen/simplify.c": "bc72c039ed06b1c8c1f5be1646904395fa8f79f60a7db8b90e282347eeebd60a",
-      "src/codegen/simplify.h": "3c5611fdf96a2ab7f8b9980038cc0158ae2c83dd8ded5633778ba70bd1892995",
-      "src/core.h": "5e009f59e1d4dcf737301c0134c910c870e4fb4ae543cc99ebdd43eb30cad691",
-      "src/ctx.c": "75e3f22bdf9bedb4e4cb033f4151d7c897e022dfda453d16b193ee5f9b30891a",
-      "src/ctx.h": "99215f58a085a6653dcb33408eea6c0c7616d3c9ed1acb180a3718f9d17423aa",
-      "src/device.c": "2b1b63f1b437d10a2d2e2185e1737aad2c50426a05818fd00105b22ba68ead24",
-      "src/device.h": "5e079afb10ae2df9fde9ed33ca09f2890ea49d8f394ecc49f45d7a2c4c45e25c",
+      "src/codegen/simplify.c": "fe5e85f1c560c2f3f0a51a2cbd0bff662ab0cb5b0a64fe081721c7fc417203b4",
+      "src/codegen/simplify.h": "2e39ad2012a1183ec310f8794b9183ed1d058792bf8aab7cdb0592acb2e178ac",
+      "src/core.h": "8064e45622b8b0cbb2e6c9fbf021c70a3783a5a510dae50af4425d7000052d66",
+      "src/ctx.c": "17334fba7038fab27c6e2465c8af5e54317cc9024486009d3ab11d5012f23794",
+      "src/ctx.h": "0e377cae1a1d700c8c14642aeefc87410e0f83707f03f8eaca2da67cdf032f68",
+      "src/device.c": "8abba530ae26b496eab708a715af2866ba83528189a21a64a1009e475358418d",
+      "src/device.h": "21f30b712e3e68680ccdffee419b35b73f4911ab3e111252f06afcd41302d8e3",
       "src/dtype.c": "a5a1b720adca3e0465b41416aff8e0fdc2c08d2cde14e73a9ccfbc67c378c383",
       "src/engine/capability.c": "0e1a3a77e2eaadae6124d908cbcdd203a0f0f325a4e6105e9ee5b3fc98e37e21",
       "src/engine/jit.c": "c950694c2158ced0ada38a96eb2c5b55ce400623efeb593ee8c5a9a9bfbfde90",
       "src/engine/jit.h": "2d425001350ea0faecd3b418887b381c5cfdc6ae6ad26e80b61525f05022f949",
-      "src/engine/realize.c": "00c0e0f1f10e5bc9aa5f69965d58f596b72c8deba3fabda5a0c4dc5278e8ee77",
+      "src/engine/realize.c": "14b8f5188a971b21e7f2081868f5535a62394c848a33607842b8bb7298698aa9",
       "src/engine/realize.h": "0efb03179b956db6da7005b5ef2094237cacd641837d2bf4b86a36d5e06366c1",
-      "src/engine/schedule.c": "514ad02d55aa3cfc7a6733b81c8173cc1f760dc74e7f51a24a3263cf179c2bd1",
-      "src/engine/schedule.h": "6fc75d871c96dbf7f4588ce9e7da10efdffd7a5836e26d1d8c3c199dc5ab66ba",
-      "src/frontend.c": "a1d7df7ca39f0ecb1ef4d6f3788edd364e9372d69b71142ff9c1a1a0ed96eb63",
-      "src/frontend.h": "8496c001835a8847f26d9394c91b4d1156e098d438dd073fc188d1649670c857",
+      "src/engine/schedule.c": "9827e3634274ea77c22cc7d9cb95d0fa02c656b4c46b65714be5b6a264a36917",
+      "src/engine/schedule.h": "793bdb6dd4ba63c6036436f578c8fa298725a7f5ad80bffa3d66be2941efe76d",
+      "src/frontend.c": "7a735a3911311da2784035c6f7d1596cab2475ef0f706a2dfa2737cc063890fb",
+      "src/frontend.h": "2d39835aecf178a381d1760bcb8ef5e630a3f112d9b2ad07beb99c6f12224a72",
+      "src/frontend_exports.h": "4e6228bc8c19e40bcdc2034debea5b5a04dc66d9f8a08c39bb21de8b316df9ad",
       "src/hashmap.c": "633d112cba4a866ea1f50ca67b62e343e1c1d52b122541fb24d388782f2808ed",
       "src/interp.c": "fc3b417f09a6b488fa1826115805665c091db20e65bc28d5af75ecf9b7ea036e",
       "src/interp.h": "3aa411e5b5fd8d7c8ea4fa98393b463c59dd1754072fd1768fe744c8d4bf1276",
@@ -154,10 +156,11 @@
       "src/ir.h": "9ad11bc435e7863254df65d84b06f0d4e27fbf060c28892bf893cefa9552234e",
       "src/kernels/cpu.c": "a6f5a8a96b9d2b72466942b5a039c2a3c07f6645d19e7fcaf1c48ae36300b6bf",
       "src/kernels/gemm.c": "90a3fa26872aa133f70f382da6a4ab3e75f5cadfbd473a347ba3f189dcaa1786",
-      "src/kernels/kernels.h": "fe2f1f526d2f128ea08734c2ccbe004a9cff69675d3feee286d3560e89080c2b",
+      "src/kernels/kernels.h": "fb79b87f98a9c6fe20f634d9d227793e844d8a8abed3b2087ee7a8c909f6ee9c",
       "src/kernels/match.c": "12e12ffbadc473ab457530b3d044e581e279588c8ea5d55794ebec576e1f12e4",
       "src/kernels/portable.c": "867b31e29cf14a6e2c312342c89f7b83fc3f2fc7c4de6602caa734cb6d8e4d42",
-      "src/kernels/select.c": "5f03dbbf06722e1713b0a57a7d728b2575d3d35d7dcb6817a079b91c904ab179",
+      "src/kernels/segment.c": "cf97a206187ecc7137791d5439d576d31f091af6338c948c8596e12719d9eb0d",
+      "src/kernels/select.c": "159a23796e6f6612baca571ccae070f0e941e7b18172ef487fe424c0cb9e6098",
       "src/kernels/webgpu.c": "247316047b8e6b8889b54239ddf069414d227f54afe83353809eb68e21194628",
       "src/loaders/bind.c": "299494e841263ce0ddf7af1a90bcb67be6c4b9374475867f0e65cd2ef0d28476",
       "src/loaders/bind.h": "c7953016ec7de27ada4174bdbd74e7a32c41218fd04248941428475fbbd68e26",
@@ -171,21 +174,21 @@
       "src/loaders/hf_decode.h": "f95ba0aad765058698ec31dfc26924826634a0e28cb4bd40fe7be4d46aa63ec8",
       "src/loaders/import_error.c": "605f94e230c281e1793df540fb4bb8d9cb99e8c2b7424f2cacacf6c4001eca80",
       "src/loaders/import_error.h": "223babc596de80f66bfd78cd24157b5ce7b3b4e3b9bc72ffa9483ac00d43de96",
-      "src/loaders/onnx_loader.c": "6b7d79c223773b4e9ba02dc6c8a770a5f9a2fabb373205407eab78ec9b5b423c",
+      "src/loaders/onnx_loader.c": "833ad19e61ac20881a5913732bd7d6b55b2a259a1c74ba678b92b48a8cfedc17",
       "src/loaders/onnx_loader.h": "4b14de3bf5e39740a4783ba65cd97e16bfce41a0fdd3548791a98bd13cdeb08a",
       "src/mixin/composite.h": "cc109277f1454b15dce73ae4d54e66dc7bbf6ef416930debce161f81f942d9ed",
       "src/mixin/creation.h": "299cd8b3afda624f0f2ca4903c9ab2dce44f4fccc82492f9a726b23241b10663",
-      "src/mixin/elementwise.c": "4b29b0074e837754fa72d8e67fe1dab4342cc46a2c40051f3405a5b4601cbf2b",
+      "src/mixin/elementwise.c": "5dff94e50df3aa984a776b7703d4b01cc13616762d4ef652c06ae66e1e8b1041",
       "src/mixin/elementwise.h": "be96832a589b4d1015b110102b37feba64a19b5132a1c339f444514296fef0b0",
       "src/mixin/gradient.c": "5740f6578a480062c5007aaa121c4cda23c9c6e5d7302302ddd99102f112cc4c",
       "src/mixin/gradient.h": "c3ac5cb6c89354f65926b962b1edd453a93e666384b75332557b183377f2b568",
       "src/mixin/movement.c": "09a469d27db9a02c3bae19d65d24e8ff2edb76c83a8ac7add8b6ac1b0958f289",
       "src/mixin/movement.h": "d7a7fa3901989530abb7750d9f6c78060679b0103383423ee29106846a54b4c8",
-      "src/model.c": "04de73506a9b616630e3776731f67f0cc17a124cef6538478a21fcee74b4bbf8",
-      "src/model.h": "177a6307ba1d56a08372bead53adc1400e11c19d35664605f6fb8605b82dfee2",
+      "src/model.c": "21d5af0fb57ede27e32de70bf3aeb27ab62d4abc19a81c0dd3b12710955c0271",
+      "src/model.h": "7953e82559055df5857744335edd00dbda20c687287e6da87cb795a6629d40c3",
       "src/models/clip.c": "f3a51c7887389365e3159265e3f4c2c1bb250cad52e9eefe48dfce47e063686f",
-      "src/models/compose.c": "43a77ca6848ba5f663f441df47151f2292a3ab0b483902965e494ddbfa2036de",
-      "src/models/dinov2.c": "0cce450116150929f0080dafd0c4568fcc2a6c69d2b68e33ba18867c731be132",
+      "src/models/compose.c": "0543d91d2394bd5676027a32e6ddaecae0cc0ccb9a6cd2defa7371a7f7b437f0",
+      "src/models/dinov2.c": "887b0281c2dce847e9f91a7c80f4439d2d02afbdc1d5232ccd5fd35c754abae4",
       "src/models/dinov3.c": "5b0748c51075cb4fa610fbc675269299ae20dcc3141ab83f2a5dc7ce9d278a0c",
       "src/models/distilgpt2.c": "7af6f7685dd5e516f25da26fd82934adab89dc0c2c02a1ecd41be872a96c1314",
       "src/models/factory.h": "fda7002911ba6a2c9e035a7ea012f67c95a7a663b78822e2ec4d04a51af5c778",
@@ -218,22 +221,22 @@
       "src/placer.c": "28dbb5f183e7b45911e713fb87ad8c19596bc5527c33ad31fe53ec8f6475deaf",
       "src/placer.h": "0373c9d5ab0d05e9ee8468f725e467773e421e6a3b9deea4d0a9070691bf72bf",
       "src/polygrad.h": "54e6533ac6a4a3e0ebf6c82bac2968d419ffaf7b18c8d3948fa223028cd0d864",
-      "src/renderer/cstyle.c": "7b7447ca9d54af2f91b4e7275c47e34b32a44036d31770e631e420e2de62a00d",
-      "src/renderer/cstyle.h": "7b23efa79276ed7009d9989dac2f8c9173221d382dfeadb3578a0885ca2e60ad",
-      "src/renderer/cuda.c": "36d31df51f9c0806b865f2ea9f0fe10c8072c9b92f6b64dcb69ed95cd5e18ceb",
-      "src/renderer/isa/x86.c": "be9afa38e1279f20775d877ec2113fc44e743cf7a1a9902a667cded24de17045",
+      "src/renderer/cstyle.c": "c1ab649bc2782cbeec7f1fb7eb65e6864ac4c64414232d05f3b72ca4d5554826",
+      "src/renderer/cstyle.h": "17982b0187c10bdc63c9f9d929422e2d9a37232a2466bdf750d870659b64b381",
+      "src/renderer/cuda.c": "d5de80f0b40f3c80ff83827cd9337bacde8e12b55d96a810223c4588447e6b21",
+      "src/renderer/isa/x86.c": "6636fab50a2f05f1c46feacc6e1d87efbdb6cda2cbf38da2d0dbdec70431783d",
       "src/renderer/isa/x86.h": "f3646cd4ea2863c2be47ade26428b58465a2a9cfbca70f09d41de846851a2436",
       "src/renderer/renderer.h": "bc7a9aa625889c7bf311e0e02684b118fe99fa5309ef9a41f8b518a56981209e",
       "src/renderer/wasm.c": "19fd7fe7a5586dfe3bd5f5cdcd50a2f0cb7b702535b56f2924bae7bb0d4dd9d5",
-      "src/renderer/wgsl.c": "1c56cdf1ebfff3ababb4e547367e859bac9919d00391476a367637645b0b179e",
+      "src/renderer/wgsl.c": "054ff28bb57d5105891364a66cc2ffc7d72ff32621c9dfec837d3d66fd105ce8",
       "src/runtime/graph/cuda.h": "86c4c21518996e21505c2e42c6e1e547a03c73958e6b4ec8298a4c6123b54020",
-      "src/runtime/support/memory.c": "0df50031857ee98177a7e9fa488fdf0db2dcb266c3fe96c91ce88b0c9f92b8d4",
+      "src/runtime/support/memory.c": "640fb8043a74a50bf4bbf0f815aa38779d655f8b0158f0bd17bf90cd5fbf79ba",
       "src/runtime/support/memory.h": "e38f9c0dfe8102ecf8e8e91e65b6cce7e9a713f2034b122e27b53816c6de3d9f",
       "src/runtime_cpu.c": "b74bffafd3feede3651e3820187e2d46226ad4c4c2696e44a6ce9fa4ddb4f0db",
       "src/runtime_cuda.c": "498292f3420d90757d15c23d291747a1939e334cd245bf3e4870156d8e92585f",
       "src/runtime_wasm.c": "d6f749336994ada090d85e1aef4b7ada63af3ec0c4f8c62092a1f8b06ef7354d",
       "src/runtime_wasm.h": "318f72d83264bf1050d8c5038b3fcfb4d67172093e1b34b7d636dd9153dfb465",
-      "src/runtime_webgpu.c": "20fc4076955f69e4a3237b1b16afdd3e68d914f35e45c3b04fcdcb65d8900853",
+      "src/runtime_webgpu.c": "68335ffac4698f4d997d3d9cdd178f3ab1f1e72a0214d05c321d3c53603a5dca",
       "src/runtime_webgpu.h": "d0eb570b077da7ec34e7698ae2245a2d1407d005b2804a17a04db4f1596c483a",
       "src/safetensors.c": "420718a2546712632a0f6dee12c9ea4b9883e0c51c2c8817efdc914728f40530",
       "src/safetensors.h": "ab94601e89561e631af974bc77dcf4f90c2ce2b76eb4283148fa3a29932c856a",
@@ -241,7 +244,7 @@
       "src/schedule/allreduce.h": "f29374967a00e9812742d9f780ed55b4c08ae5326e2ecd9bf843bf8584de5ee1",
       "src/schedule/indexing.c": "4343cf751778ee798ecbe204c808ca2fa85782c9df65f927244c24fe7f5f14d8",
       "src/schedule/indexing.h": "416890db9ac79047ca11904aa6fcb8e5cd3ea01dc9197f895130fd2f4c13a26c",
-      "src/schedule/memory.c": "35d679b372fea79aa080b50b6c2c22781cca92d1e0e2b7fa829160016e3d1a4a",
+      "src/schedule/memory.c": "641457fd7c58f7a34245a4b112245a2dc7bb4a59e8252bf5c90bb5ea37892ee4",
       "src/schedule/memory.h": "fd9779aa0caafa33b1d59e1dbd492d9568e6f9a8ff74fe99a9af768ce314e66f",
       "src/schedule/multi.c": "4d60221cf622bb6df8c9c0c3851b646e2c546032183c55b7581aabc24c5f9680",
       "src/schedule/multi.h": "a903365a97e9ef424ca693743ff7f75af75744a3bd6ddf30feafc0710f419990",
@@ -251,18 +254,19 @@
       "src/schedule/schedule.h": "6ceae7ada76713f3c9344e8b8a95b16d23aa703b8fc3a8439d1f886aa6033c91",
       "src/selftest.c": "960a68364b81f58911325c2321368b428c5d71daa472f3815f7cfdd1958d0121",
       "src/shape.c": "aa1752b5b48f5ee0a05aa2af56ffc6c5ffd432fdc7cf04b5dbf9cda5fbdc2c0a",
-      "src/tensor.c": "428b49b293fc558a05a5cc921aff0ab3c2208fc85fbcab9de9e53a9717cb7a1f",
-      "src/tensor.h": "280aad23b8bbf3f5b442232d56e65c0ce9b85a3f8769576dcb404b813e335d61",
-      "src/tokenizer.c": "626995c0acfac8d40db4a9d19116518b53562b4f0c907a23a3e9323dd6842825",
-      "src/tokenizer.h": "a412cbe136defdbfa4c07ab9e6d8747c6a066f9bb1d7928e8957305ed1b42e31",
+      "src/tensor.c": "2444bd1ce3eb0847af668a0bafa5eac99282f2d3761cfe7dea7de0dfdace51dd",
+      "src/tensor.h": "001220930f661816173a1830c35204c5a662d10af383af822533ff88c1e937a6",
+      "src/tokenizer.c": "2b18165506d890db7b165fd8dcfa886b18b15392ea18fd705149af6e07284a3e",
+      "src/tokenizer.h": "7ae11464cc9bc94b3b3c0387db7b376cfbaaa432f2cda475c53627211beee408",
+      "src/tokenizer_unicode.h": "85de7153a678ba06b70a1848a1a220269fae21e4b20360d0f732474fb37f10c5",
       "src/uop/key.c": "0f4f93cf6b4f5103aff46e44f146a0bef42275f8ce208ee80edbc0a9594264fd",
       "src/uop/movement.c": "69b66a67cb0f3e47813c4b99f4e9015c0d5211888674ec1169ffbdc968f80d35",
       "src/uop/movement.h": "77aaeaa2f2cded76e9df85dfb91e6dc78ca9a96d0de39fa289187cae979e22bf",
-      "src/uop/ops.c": "e589eeb2347b4ea838b16cb51a299e0b0cbc0a3a8173c8e96ed7ac37471ab4bf",
-      "src/uop/ops.h": "4e492ebf9ea527ece3745a5238a0eda766fbb0f9e9fd421dc361b356f0395b7b",
+      "src/uop/ops.c": "a82b9987635c13dae22aeeee437d0743a0a4076824fe12272f14ba146941ee98",
+      "src/uop/ops.h": "c97f4693f0177683fb2b5978c80911917b6d290919419797015dfd67ad17e8fc",
       "src/uop/spec.c": "f66ac640bf97bfd35fc893aa39337f6324b860fc362600cea34844df74f41af5",
       "src/uop/spec.h": "4e0dca455ae088d88eee951c4bc847f85ca1f690d9cd3ca6fbe072e30300f5bd",
-      "src/uop/symbolic.c": "8e39e358214ab2d1a767685692064b215fe659989d6175716f41642e957789e3",
+      "src/uop/symbolic.c": "4a5e0d32c9cdf4063a67d2e610bf181ba9f1f919ea3dcd853194448d82dad612",
       "src/uop/symbolic.h": "4892d316ec0618044fd341c86143013cccfb988dfb33c32f4986253d82f90b33",
       "src/uop/upat.c": "5e015a6c5074116683ecdc0ea0606890cb20a1a2911dbe6983cc7f30724b445e",
       "src/uop/upat.h": "3d85feb7c49d6894a59e4afff12248e765e01f45e35cf567ccfb3f7f0682d2ba",
@@ -379,7 +383,7 @@
     },
     {
       "path": "src/codegen/simplify.c",
-      "line": 1033,
+      "line": 1071,
       "column": 26,
       "message": "Array access (from variable 'from_arr') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -424,7 +428,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 818,
+      "line": 738,
       "column": 36,
       "message": "The left operand of '==' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -433,7 +437,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 850,
+      "line": 770,
       "column": 5,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -442,7 +446,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 1607,
+      "line": 1527,
       "column": 20,
       "message": "Array access (from variable 'keys') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -451,7 +455,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 4643,
+      "line": 4565,
       "column": 28,
       "message": "Array access (via field 'items') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -487,237 +491,246 @@
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 225,
+      "line": 226,
       "column": 7,
       "message": "Branch condition evaluates to a garbage value",
       "checker": "core.uninitialized.Branch",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. text() rejects oversize or embedded-NUL strings before returning false; every successful return copies the bytes and writes a terminator. The caller checks name_field()/text() before reading the array. The analyzer trace takes a text failure and then assumes the enclosing boolean call succeeded. The required initializer name is therefore initialized before name[0]."
+      "rationale": "text writes and NUL-terminates its output before returning true; name_field propagates field/text failures. Each caller checks success before reading name/domain bytes. The trace follows a missing/invalid string path through fail, then assumes helper success without a write. fail always returns false, including when an earlier error is preserved."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 473,
+      "line": 477,
+      "column": 24,
+      "message": "Access to field 'valuedouble' results in a dereference of a null pointer (loaded from variable 'x')",
+      "checker": "core.NullDereference",
+      "disposition": "false_positive",
+      "rationale": "value_info reads x->valuedouble only in the successful cJSON_IsNumber(x) branch. vendor/cjson/cJSON.c:cJSON_IsNumber explicitly returns false for NULL. The trace assumes x==NULL and a successful number check. Missing output dimensions may instead take the separately checked inferred-shape branch; missing input dimensions are rejected."
+    },
+    {
+      "path": "src/loaders/onnx_loader.c",
+      "line": 485,
       "column": 32,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 't')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. The trace reaches rank() through DFT with nin=0 despite its successful arity(2,2) guard."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 479,
+      "line": 491,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'a')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. The trace reaches same_dtype() through Clip with a missing first input despite its successful mandatory-input guard."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 897,
+      "line": 911,
       "column": 5,
       "message": "Array subscript is undefined",
       "checker": "core.uninitialized.ArraySubscript",
       "disposition": "false_positive",
-      "rationale": "onnx_resize validates each axis against rank and rejects duplicates. The permutation consists of all non-axis dimensions followed by the distinct axes, so it writes exactly nr entries, each in [0,nr). The inverse loop initializes all nr inverse entries. The analyzer loses the validated permutation coverage; failed axis validation cannot continue because fail() returns false."
+      "rationale": "Resize validates every axis within rank and rejects duplicate axes. The complement loop followed by the axis loop therefore fills exactly rank permutation entries before inverse is indexed. Rank is bounded by ONNX_RANK and inputs are immutable during the two loops. The trace assumes the count/fill loops cover fewer entries than the inverse loop."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 930,
-      "column": 21,
+      "line": 1261,
+      "column": 20,
+      "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
+      "checker": "core.NullDereference",
+      "disposition": "false_positive",
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
+    },
+    {
+      "path": "src/loaders/onnx_loader.c",
+      "line": 1286,
+      "column": 60,
       "message": "The left operand of '!=' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. onnx_floats() initializes count and every value on success; invalid dtype/rank/length, runtime data or nonfinite values return false, which stops Resize. The validated ns prefix is the only part read by the scale-equals-one check; the trace treats a failing onnx_floats call as successful."
+      "rationale": "onnx_ints/onnx_floats validate dtype, rank and bounded count before writing the entire output prefix and count on success. The caller short-circuits on failure. The trace returns through fail before count is written, then assumes success; fail is always false."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 932,
-      "column": 17,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. onnx_floats() initializes count and every value on success; invalid dtype/rank/length, runtime data or nonfinite values return false, which stops Resize. Resize requires spatial <= ns <= nr before the loop, so ns-spatial+i lies in the initialized prefix for every i < spatial. The trace treats a failing conversion as successful."
-    },
-    {
-      "path": "src/loaders/onnx_loader.c",
-      "line": 1294,
+      "line": 1301,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. RMSNormalization requires two inputs before reading x->dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1314,
+      "line": 1321,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. If requires one input before reading the condition dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1508,
+      "line": 1515,
       "column": 23,
       "message": "The right operand of '<' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. onnx_ints() rejects unsupported dtype/rank, excess length and runtime values before success; on success it writes count and every element of the initialized prefix. This caller exits on false. The trace follows a helper failure but assumes a successful return, leaving count spuriously uninitialized. ConstantOfShape reads nr only after the checked conversion."
+      "rationale": "onnx_ints/onnx_floats validate dtype, rank and bounded count before writing the entire output prefix and count on success. The caller short-circuits on failure. The trace returns through fail before count is written, then assumes success; fail is always false."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1560,
+      "line": 1567,
       "column": 64,
       "message": "The left operand of '!=' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. onnx_ints() rejects unsupported dtype/rank, excess length and runtime values before success; on success it writes count and every element of the initialized prefix. This caller exits on false. The trace follows a helper failure but assumes a successful return, leaving count spuriously uninitialized. The window operator reads count only after the checked conversion."
+      "rationale": "onnx_ints/onnx_floats validate dtype, rank and bounded count before writing the entire output prefix and count on success. The caller short-circuits on failure. The trace returns through fail before count is written, then assumes success; fail is always false."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1575,
+      "line": 1582,
       "column": 77,
       "message": "Access to field 'device' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. The window operator requires its size input before using x->device."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1588,
+      "line": 1595,
       "column": 70,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. QuantizeLinear/DequantizeLinear require x and scale before reading y->dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1625,
+      "line": 1632,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. DynamicQuantizeLinear requires x before reading its dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1664,
+      "line": 1671,
       "column": 28,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'a')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. MatMulInteger requires two inputs (QLinearMatMul eight) before reading a=x and b dtypes. The trace starts with nin=0 and incorrectly passes that guard."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1739,
+      "line": 1746,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. ScatterND requires three inputs before reading the indices dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 1806,
+      "line": 1813,
       "column": 28,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. Scatter/ScatterElements require three inputs before reading the indices dtype."
-    },
-    {
-      "path": "src/loaders/onnx_loader.c",
-      "line": 2009,
-      "column": 12,
-      "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
-      "checker": "core.NullDereference",
-      "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. CastLike requires two inputs before reading y->dtype; Cast does not evaluate that conditional arm."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
       "line": 2016,
+      "column": 12,
+      "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
+      "checker": "core.NullDereference",
+      "disposition": "false_positive",
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
+    },
+    {
+      "path": "src/loaders/onnx_loader.c",
+      "line": 2023,
       "column": 24,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. Where requires three inputs before reading the condition dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2046,
+      "line": 2053,
       "column": 28,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. Not requires one input before reading x->dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2047,
+      "line": 2054,
       "column": 30,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. BitwiseNot requires one input before reading x->dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2123,
+      "line": 2130,
       "column": 25,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'y')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. Gather/GatherElements require two inputs before reading the indices dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2241,
+      "line": 2248,
       "column": 61,
       "message": "The left operand of '!=' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. onnx_ints() rejects unsupported dtype/rank, excess length and runtime values before success; on success it writes count and every element of the initialized prefix. This caller exits on false. The trace follows a helper failure but assumes a successful return, leaving count spuriously uninitialized. TopK checks the converted count only after success."
+      "rationale": "onnx_ints/onnx_floats validate dtype, rank and bounded count before writing the entire output prefix and count on success. The caller short-circuits on failure. The trace returns through fail before count is written, then assumes success; fail is always false."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2348,
+      "line": 2355,
       "column": 32,
       "message": "Access to field 'uop_physical' results in a dereference of a null pointer (loaded from variable 'x')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. arity_outputs() rejects too few inputs and every missing mandatory Value before returning true; arity() delegates to it. Published Values have non-null tensors: initializer, graph-input and node-output construction each rejects failure before any subsequent node is imported. Pow requires two inputs before casting its result to x->dtype."
+      "rationale": "The operation branch checks arity/arity_outputs before consuming mandatory inputs. arity_outputs rejects both insufficient counts and absent mandatory Value entries; published Values have a nonnull Tensor because initializer/input/node construction checks construction success before publication. The trace selects a null input or nin=0, then assumes the rejecting arity helper succeeded. Its fail return is always false. Detailed current paths: temp/analyzer-review-20261006-paths.log."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2938,
+      "line": 2945,
       "column": 19,
       "message": "Branch condition evaluates to a garbage value",
       "checker": "core.uninitialized.Branch",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. text() rejects oversize or embedded-NUL strings before returning false; every successful return copies the bytes and writes a terminator. The caller checks name_field()/text() before reading the array. The analyzer trace takes a text failure and then assumes the enclosing boolean call succeeded. An absent optional node domain becomes an empty terminated string on success; invalid text cannot reach standard-domain dispatch."
+      "rationale": "text writes and NUL-terminates its output before returning true; name_field propagates field/text failures. Each caller checks success before reading name/domain bytes. The trace follows a missing/invalid string path through fail, then assumes helper success without a write. fail always returns false, including when an earlier error is preserved."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 2954,
+      "line": 2961,
       "column": 20,
       "message": "Branch condition evaluates to a garbage value",
       "checker": "core.uninitialized.Branch",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. text() rejects oversize or embedded-NUL strings before returning false; every successful return copies the bytes and writes a terminator. The caller checks name_field()/text() before reading the array. The analyzer trace takes a text failure and then assumes the enclosing boolean call succeeded. Each input name is read only after its successful text conversion."
+      "rationale": "text writes and NUL-terminates its output before returning true; name_field propagates field/text failures. Each caller checks success before reading name/domain bytes. The trace follows a missing/invalid string path through fail, then assumes helper success without a write. fail always returns false, including when an earlier error is preserved."
     },
     {
       "path": "src/loaders/onnx_loader.c",
-      "line": 3286,
+      "line": 3294,
       "column": 11,
       "message": "Branch condition evaluates to a garbage value",
       "checker": "core.uninitialized.Branch",
       "disposition": "false_positive",
-      "rationale": "fail() always returns false, including when an earlier error is already recorded. text() rejects oversize or embedded-NUL strings before returning false; every successful return copies the bytes and writes a terminator. The caller checks name_field()/text() before reading the array. The analyzer trace takes a text failure and then assumes the enclosing boolean call succeeded. The opset domain is read only after the checked name_field call."
+      "rationale": "text writes and NUL-terminates its output before returning true; name_field propagates field/text failures. Each caller checks success before reading name/domain bytes. The trace follows a missing/invalid string path through fail, then assumes helper success without a write. fail always returns false, including when an earlier error is preserved."
     },
     {
       "path": "src/mixin/gradient.c",
@@ -730,111 +743,219 @@
     },
     {
       "path": "src/models/compose.c",
-      "line": 151,
+      "line": 158,
       "column": 12,
       "message": "3rd function call argument is an uninitialized value",
       "checker": "core.CallAndMessage",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
     },
     {
       "path": "src/models/compose.c",
-      "line": 154,
+      "line": 161,
       "column": 91,
       "message": "The right operand of '!=' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
     },
     {
       "path": "src/models/compose.c",
-      "line": 159,
+      "line": 166,
       "column": 22,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
     },
     {
       "path": "src/models/compose.c",
-      "line": 170,
+      "line": 177,
       "column": 64,
       "message": "1st function call argument is an uninitialized value",
       "checker": "core.CallAndMessage",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
     },
     {
       "path": "src/models/compose.c",
-      "line": 214,
+      "line": 221,
       "column": 14,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "tensor_shape returns true only after validating rank 0..8, a nonnull shape for positive rank, and writing dims[0:rank]. publish_output checks its return. The trace takes the rank>8 error path through def_error, then assumes tensor_shape succeeded; def_error always returns false."
     },
     {
       "path": "src/models/compose.c",
-      "line": 376,
+      "line": 342,
+      "column": 60,
+      "message": "The left operand of '<=' is a garbage value",
+      "checker": "core.UndefinedBinaryOperatorResult",
+      "disposition": "false_positive",
+      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 342,
+      "column": 60,
+      "message": "The right operand of '<=' is a garbage value",
+      "checker": "core.UndefinedBinaryOperatorResult",
+      "disposition": "false_positive",
+      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 343,
+      "column": 23,
+      "message": "The right operand of '+' is a garbage value",
+      "checker": "core.UndefinedBinaryOperatorResult",
+      "disposition": "false_positive",
+      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 349,
+      "column": 9,
+      "message": "Passed-by-value struct argument contains uninitialized data (e.g., field: 'priority')",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "dtype returns true only after poly_dtype_by_id has written a concrete scalar PolyDType. Both arange and cast short-circuit on failure before passing the struct. The trace takes the non-string error path through def_error, then assumes dtype succeeded; def_error is always false."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 410,
       "column": 27,
       "message": "The right operand of '<' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
     },
     {
       "path": "src/models/compose.c",
-      "line": 493,
+      "line": 527,
       "column": 38,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
     },
     {
       "path": "src/models/compose.c",
-      "line": 572,
+      "line": 654,
       "column": 11,
       "message": "Array subscript is undefined",
       "checker": "core.uninitialized.ArraySubscript",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
     },
     {
       "path": "src/models/compose.c",
-      "line": 582,
+      "line": 664,
       "column": 11,
       "message": "Passed-by-value struct argument contains uninitialized data (e.g., field: 'priority')",
       "checker": "core.CallAndMessage",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "dtype returns true only after poly_dtype_by_id has written a concrete scalar PolyDType. Both arange and cast short-circuit on failure before passing the struct. The trace takes the non-string error path through def_error, then assumes dtype succeeded; def_error is always false."
     },
     {
       "path": "src/models/compose.c",
-      "line": 652,
+      "line": 738,
       "column": 21,
       "message": "The right operand of '<' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
     },
     {
       "path": "src/models/compose.c",
-      "line": 653,
+      "line": 739,
       "column": 14,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
     },
     {
       "path": "src/models/compose.c",
-      "line": 658,
-      "column": 20,
-      "message": "Passed-by-value struct argument contains uninitialized data (e.g., field: 'priority')",
+      "line": 781,
+      "column": 23,
+      "message": "The right operand of '<' is a garbage value",
+      "checker": "core.UndefinedBinaryOperatorResult",
+      "disposition": "false_positive",
+      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 782,
+      "column": 12,
+      "message": "Assigned value is garbage or undefined",
+      "checker": "core.uninitialized.Assign",
+      "disposition": "false_positive",
+      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 798,
+      "column": 10,
+      "message": "3rd function call argument is an uninitialized value",
       "checker": "core.CallAndMessage",
       "disposition": "false_positive",
-      "rationale": "integer, shape and dtype validators assign all outputs on success and return def_error on failure; def_error always returns false, including formatting failure and an already populated error. The text traces instead assume true after those failure returns and read the unwritten output. Successful bounded shapes fill each admitted dimension, and permutation axes are range-checked before indexing."
+      "rationale": "Control bounds are parsed by two short-circuited integer calls: min is written before it is used as the max lower bound, and max before variable construction. The trace assumes success after an integer error through def_error; both def_error return paths are false."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 801,
+      "column": 46,
+      "message": "1st function call argument is an uninitialized value",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "Control bounds are parsed by two short-circuited integer calls: min is written before it is used as the max lower bound, and max before variable construction. The trace assumes success after an integer error through def_error; both def_error return paths are false."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 834,
+      "column": 24,
+      "message": "2nd function call argument is an uninitialized value",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "entry_outputs receives outs/no from either the validated output-object child traversal or a successful names call. names uses cJSON_GetArraySize and walks the same immutable child list, filling exactly out[0:n]; any invalid/duplicate name returns false. The trace skips that fill yet admits positive no. cJSON_GetArraySize counts exactly that list; empty means zero."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 1027,
+      "column": 25,
+      "message": "The right operand of '<' is a garbage value",
+      "checker": "core.UndefinedBinaryOperatorResult",
+      "disposition": "false_positive",
+      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 1029,
+      "column": 37,
+      "message": "1st function call argument is an uninitialized value",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 1031,
+      "column": 40,
+      "message": "4th function call argument is an uninitialized value",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
+    },
+    {
+      "path": "src/models/compose.c",
+      "line": 1032,
+      "column": 13,
+      "message": "3rd function call argument is an uninitialized value",
+      "checker": "core.CallAndMessage",
+      "disposition": "false_positive",
+      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
     },
     {
       "path": "src/models/dinov3.c",
@@ -928,7 +1049,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1313,
+      "line": 1337,
       "column": 26,
       "message": "Access to field 'dtype' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -937,7 +1058,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1447,
+      "line": 1471,
       "column": 28,
       "message": "Access to field 'op' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -946,7 +1067,7 @@
     },
     {
       "path": "src/renderer/isa/x86.c",
-      "line": 5250,
+      "line": 5248,
       "column": 29,
       "message": "Dereference of null pointer",
       "checker": "core.NullDereference",
@@ -1054,7 +1175,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 8837,
+      "line": 9052,
       "column": 7,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1063,7 +1184,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 8926,
+      "line": 9141,
       "column": 16,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1072,7 +1193,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 9304,
+      "line": 9519,
       "column": 16,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1081,7 +1202,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 9536,
+      "line": 9751,
       "column": 22,
       "message": "The left operand of '>' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -1090,7 +1211,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 4676,
+      "line": 4674,
       "column": 38,
       "message": "Array access (from variable 'b_parts') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1099,7 +1220,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 4680,
+      "line": 4678,
       "column": 24,
       "message": "Array access (from variable 'b_parts') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1108,7 +1229,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 5524,
+      "line": 5522,
       "column": 19,
       "message": "Array access (from variable 'src') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1117,7 +1238,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 5526,
+      "line": 5524,
       "column": 17,
       "message": "Array access (from variable 'src') results in a null pointer dereference",
       "checker": "core.NullDereference",
