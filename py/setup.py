@@ -74,7 +74,7 @@ sources.append(os.path.join('polygrad', '_native.c'))
 
 # Platform-specific libraries
 compile_args = ['-std=c11', '-O2', '-D_GNU_SOURCE', '-DPOLY_HAS_CUDA=1']
-if platform.machine().lower() in ('x86_64', 'amd64'):
+if sys.platform in ('linux', 'darwin') and platform.machine().lower() in ('x86_64', 'amd64'):
     compile_args.append('-DPOLY_HAS_X86=1')
 
 libraries = ['m']

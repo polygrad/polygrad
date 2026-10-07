@@ -16,6 +16,10 @@
 
 #ifdef POLY_HAS_X86
 
+#if !defined(__x86_64__) || defined(_WIN32)
+#error "The X86 renderer and call bridge require the x86-64 SysV ABI"
+#endif
+
 #include <assert.h>
 #include <cpuid.h>
 #include <errno.h>
@@ -5430,23 +5434,90 @@ struct PolyX86Program {
   void *code;
   size_t code_size;
   void *entry;
+  void *bridge;
 };
+
+static void x86_bridge_reg(X86Buf *b, int opcode, int dst, int src) {
+  emit_rex(b, 1, src >> 3, 0, dst >> 3);
+  xb_byte(b, (uint8_t)opcode);
+  emit_modrm(b, 3, src, dst);
+}
+
+/* SysV void bridge(entry, six_register_words, stack_words, stack_count).
+ * Keep the convention paired with x86_abi_gpr_for_arg and FRAME_INDEX lowering.
+ * RBP is the only callee-saved register touched. Round the outgoing stack area
+ * to 16 bytes; the kernel sees its seventh argument just above its return PC.
+ * Tinygrad's 63 limit comes from its 64-word worker command (function + args),
+ * not the ABI. This launcher has no fixed command packet or arity switch. */
+static void x86_emit_call_bridge(X86Buf *b) {
+  xb_byte(b, 0x55); /* push rbp */
+  x86_bridge_reg(b, 0x89, X86_REG_RBP, X86_REG_RSP);
+  x86_bridge_reg(b, 0x89, X86_REG_R11, X86_REG_RDI);
+  x86_bridge_reg(b, 0x89, X86_REG_R10, X86_REG_RSI);
+  x86_bridge_reg(b, 0x89, X86_REG_RAX, X86_REG_RCX);
+  emit_rex(b, 1, 0, 0, 0);
+  xb_byte(b, 0xc1);
+  emit_modrm(b, 3, 4, X86_REG_RAX);
+  xb_byte(b, 3); /* shl rax,3 */
+  emit_rex(b, 1, 0, 0, 0);
+  xb_byte(b, 0x83);
+  emit_modrm(b, 3, 0, X86_REG_RAX);
+  xb_byte(b, 15);
+  emit_rex(b, 1, 0, 0, 0);
+  xb_byte(b, 0x83);
+  emit_modrm(b, 3, 4, X86_REG_RAX);
+  xb_byte(b, 0xf0);
+  x86_bridge_reg(b, 0x29, X86_REG_RSP, X86_REG_RAX);
+  x86_bridge_reg(b, 0x89, X86_REG_RDI, X86_REG_RSP);
+  x86_bridge_reg(b, 0x89, X86_REG_RSI, X86_REG_RDX);
+  xb_byte(b, 0xf3);
+  emit_rex(b, 1, 0, 0, 0);
+  xb_byte(b, 0xa5); /* rep movsq */
+  for (int i = 0; i < 6; i++) {
+    int reg = x86_abi_gpr_for_arg(i);
+    emit_rex(b, 1, reg >> 3, 0, 1);
+    xb_byte(b, 0x8b);
+    emit_modrm(b, 1, reg, X86_REG_R10);
+    xb_byte(b, (uint8_t)(i * 8));
+  }
+  emit_rex(b, 0, 0, 0, 1);
+  xb_byte(b, 0xff);
+  emit_modrm(b, 3, 2, X86_REG_R11); /* call r11 */
+  x86_bridge_reg(b, 0x89, X86_REG_RSP, X86_REG_RBP);
+  xb_byte(b, 0x5d);
+  xb_byte(b, 0xc3); /* pop rbp; ret */
+}
 
 #ifdef POLY_TESTING
 /* The test owns the mapping so it can put a guard page before the entry. */
 int poly_test_x86_program_call_entry(void *entry, void **args, int n_args) {
-  PolyX86Program prog = {.entry = entry};
-  return poly_x86_program_call(&prog, args, n_args);
+  const uint8_t ret = 0xc3;
+  PolyX86Program *prog = poly_compile_x86(&ret, 1);
+  if (!prog) return -1;
+  prog->entry = entry;
+  int result = poly_x86_program_call(prog, args, n_args);
+  poly_x86_program_destroy(prog);
+  return result;
 }
 #endif
 
 PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size) {
   if (!code || code_size <= 0) return NULL;
   long page_size = sysconf(_SC_PAGESIZE);
-  size_t alloc_size = ((size_t)code_size + (size_t)page_size - 1) & ~((size_t)page_size - 1);
+  if (page_size <= 0) return NULL;
+  X86Buf b = {0};
+  x86_emit_call_bridge(&b);
+  size_t bridge_offset = ((size_t)code_size + 15) & ~(size_t)15;
+  size_t alloc_size =
+      (bridge_offset + (size_t)b.len + (size_t)page_size - 1) & ~((size_t)page_size - 1);
   void *mem = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (mem == MAP_FAILED) return NULL;
+  if (mem == MAP_FAILED) {
+    free(b.data);
+    return NULL;
+  }
   memcpy(mem, code, (size_t)code_size);
+  memcpy((uint8_t *)mem + bridge_offset, b.data, (size_t)b.len);
+  free(b.data);
   if (mprotect(mem, alloc_size, PROT_READ | PROT_EXEC) != 0) {
     munmap(mem, alloc_size);
     return NULL;
@@ -5459,6 +5530,7 @@ PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size) {
   prog->code = mem;
   prog->code_size = alloc_size;
   prog->entry = mem;
+  prog->bridge = (uint8_t *)mem + bridge_offset;
   return prog;
 }
 
@@ -5512,148 +5584,16 @@ PolyX86Program *poly_compile_x86_source(const char *source, int *size_out, int *
 __attribute__((no_sanitize("function")))
 #endif
 int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args) {
-  if (!prog || !args || n_args < 0) return -1;
-  switch (n_args) {
-  case 0: {
-    typedef void (*Fn)(void);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn();
-    return 0;
-  }
-  case 1: {
-    typedef void (*Fn)(void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0]);
-    return 0;
-  }
-  case 2: {
-    typedef void (*Fn)(void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1]);
-    return 0;
-  }
-  case 3: {
-    typedef void (*Fn)(void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2]);
-    return 0;
-  }
-  case 4: {
-    typedef void (*Fn)(void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3]);
-    return 0;
-  }
-  case 5: {
-    typedef void (*Fn)(void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4]);
-    return 0;
-  }
-  case 6: {
-    typedef void (*Fn)(void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5]);
-    return 0;
-  }
-  case 7: {
-    typedef void (*Fn)(void *, void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-    return 0;
-  }
-  case 8: {
-    typedef void (*Fn)(void *, void *, void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
-    return 0;
-  }
-  case 9: {
-    typedef void (*Fn)(void *, void *, void *, void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
-    return 0;
-  }
-  case 10: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]);
-    return 0;
-  }
-  case 11: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10]);
-    return 0;
-  }
-  case 12: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *,
-      void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10], args[11]);
-    return 0;
-  }
-  case 13: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *,
-      void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10], args[11], args[12]);
-    return 0;
-  }
-  case 14: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *,
-      void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10], args[11], args[12], args[13]);
-    return 0;
-  }
-  case 15: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *,
-      void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10], args[11], args[12], args[13], args[14]);
-    return 0;
-  }
-  case 16: {
-    typedef void (*Fn
-    )(void *, void *, void *, void *, void *, void *, void *, void *, void *, void *, void *,
-      void *, void *, void *, void *, void *);
-    Fn fn;
-    memcpy(&fn, &prog->entry, sizeof(fn));
-    fn(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9],
-       args[10], args[11], args[12], args[13], args[14], args[15]);
-    return 0;
-  }
-  default:
-    return -1;
-  }
+  if (!prog || !prog->entry || !prog->bridge || n_args < 0 || (n_args && !args)) return -1;
+  void *register_args[6] = {0};
+  int n_register = n_args < 6 ? n_args : 6;
+  for (int i = 0; i < n_register; i++)
+    register_args[i] = args[i];
+  typedef void (*Fn)(void *, void **, void **, size_t);
+  Fn fn;
+  memcpy(&fn, &prog->bridge, sizeof(fn));
+  fn(prog->entry, register_args, n_args > 6 ? args + 6 : NULL, n_args > 6 ? (size_t)n_args - 6 : 0);
+  return 0;
 }
 
 int poly_x86_program_call_core(

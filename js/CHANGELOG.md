@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1 (unreleased)
+
+- Fix native direct-X86 execution of kernels with more than 16 arguments.
+  The CPU, Wasm and WebGPU calling paths are unchanged.
+
 ## 0.7.0 (2026-10-06)
 
 - Restore Tensor roots after failed realization, allowing compilation failures to be retried; reject reads after reported failures that may have partially written storage. Release cancelled JIT capture handles.

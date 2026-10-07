@@ -128,16 +128,199 @@ TEST_BACKEND(x86, program_call_without_compiler_type_prefix) {
     ok = mprotect(entry, (size_t)page, PROT_READ | PROT_EXEC) == 0;
   }
   int output = 0;
-  void *args[16] = {&output};
+  void *args[63] = {&output};
   if (ok) {
     ok &= poly_test_x86_program_call_entry(entry + 6, args, 0) == 0;
-    for (int n = 1; n <= 16; n++) {
+    for (int n = 1; n <= 63; n++) {
       output = 0;
       ok &= poly_test_x86_program_call_entry(entry, args, n) == 0 && output == 42;
     }
   }
   munmap(mapping, (size_t)page * 2);
   ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST_BACKEND(x86, program_call_stack_arguments) {
+  int counts[] = {6, 7, 16, 17, 21, 31, 63, 65};
+  for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+    int n = counts[c];
+    uint8_t code[1024] = {0x31, 0xc0}; /* xor eax,eax */
+    int pos = 2;
+    const uint8_t add_register[][3] = {
+        {0x48, 0x01, 0xf0},
+        {0x48, 0x01, 0xd0},
+        {0x48, 0x01, 0xc8},
+        {0x4c, 0x01, 0xc0},
+        {0x4c, 0x01, 0xc8}};
+    for (int i = 1; i < n; i++) {
+      if (i < 6) {
+        memcpy(code + pos, add_register[i - 1], 3);
+        pos += 3;
+      } else {
+        /* add rax,[rsp+disp32]: return address precedes the seventh arg. */
+        const uint8_t op[] = {0x48, 0x03, 0x84, 0x24};
+        int32_t offset = 8 * (i - 5);
+        memcpy(code + pos, op, 4);
+        memcpy(code + pos + 4, &offset, 4);
+        pos += 8;
+      }
+    }
+    /* Include entry RSP modulo 16: SysV requires eight after the return PC. */
+    const uint8_t alignment[] = {0x48, 0x89, 0xe2, 0x83, 0xe2, 0x0f, 0x48, 0x01, 0xd0};
+    memcpy(code + pos, alignment, sizeof(alignment));
+    pos += sizeof(alignment);
+    /* The last argument is core_id. Each worker writes a distinct result. */
+    if (n == 6) {
+      const uint8_t op[] = {0x4c, 0x89, 0xc9}; /* mov rcx,r9 */
+      memcpy(code + pos, op, 3);
+      pos += 3;
+    } else {
+      const uint8_t op[] = {0x48, 0x8b, 0x8c, 0x24};
+      int32_t offset = 8 * (n - 6);
+      memcpy(code + pos, op, 4);
+      memcpy(code + pos + 4, &offset, 4);
+      pos += 8;
+    }
+    const uint8_t store[] = {0x48, 0x89, 0x04, 0xcf, 0xc3}; /* [rdi+rcx*8]=rax; ret */
+    memcpy(code + pos, store, sizeof(store));
+    pos += sizeof(store);
+    PolyX86Program *prog = poly_compile_x86(code, pos);
+    ASSERT_TRUE(prog != NULL);
+    uint64_t output[8] = {0};
+    void *args[65] = {output};
+    for (int i = 1; i < n - 1; i++)
+      args[i] = (void *)(uintptr_t)i;
+    uint64_t expected = (uint64_t)(n - 1) * (n - 2) / 2 + 8;
+    bool ok = poly_x86_program_call(prog, args, n) == 0 && output[0] == expected;
+    ok &= poly_x86_program_call_core(prog, args, n, n - 1, 7) == 0 && output[7] == expected + 7 &&
+          args[n - 1] == NULL;
+    ok &= poly_x86_program_call_threaded(prog, args, n, n - 1, 5) == 0;
+    for (int i = 0; i < 5; i++)
+      ok &= output[i] == expected + (uint64_t)i;
+    poly_x86_program_destroy(prog);
+    ASSERT_TRUE(ok);
+  }
+  PASS();
+}
+
+static bool x86_call_preserves_registers(PolyX86Program *target, void **args, int n) {
+  /* A generated caller seeds all SysV callee-saved GPRs, calls the real C
+   * launcher, checks them, then restores its caller's original values. */
+  const int saved[] = {3, 5, 12, 13, 14, 15};
+  uint8_t code[256];
+  int pos = 0;
+  for (int i = 0; i < 6; i++) {
+    if (saved[i] >= 8) code[pos++] = 0x41;
+    code[pos++] = (uint8_t)(0x50 + (saved[i] & 7));
+  }
+  code[pos++] = 0x57; /* push result pointer; also aligns the outgoing call */
+  for (int i = 0; i < 6; i++) {
+    code[pos++] = saved[i] >= 8 ? 0x49 : 0x48;
+    code[pos++] = (uint8_t)(0xb8 + (saved[i] & 7));
+    uint64_t sentinel = UINT64_C(0x123456789abcdef0) + (uint64_t)i;
+    memcpy(code + pos, &sentinel, 8);
+    pos += 8;
+  }
+  /* r11=callback; (rdi,rsi,rdx)=(target,args,count); call r11. */
+  const uint8_t call[] = {0x49, 0x89, 0xf3, 0x48, 0x89, 0xd7, 0x48, 0x89, 0xce,
+                          0x4c, 0x89, 0xc2, 0x41, 0xff, 0xd3, 0x89, 0xc2};
+  memcpy(code + pos, call, sizeof(call));
+  pos += sizeof(call);
+  for (int i = 0; i < 6; i++) {
+    code[pos++] = 0x48;
+    code[pos++] = 0xb8;
+    uint64_t sentinel = UINT64_C(0x123456789abcdef0) + (uint64_t)i;
+    memcpy(code + pos, &sentinel, 8);
+    pos += 8;
+    code[pos++] = saved[i] >= 8 ? 0x4c : 0x48;
+    code[pos++] = 0x31;
+    code[pos++] = (uint8_t)(0xc0 | ((saved[i] & 7) << 3));
+    code[pos++] = 0x48;
+    code[pos++] = 0x09;
+    code[pos++] = 0xc2; /* or rdx,rax */
+  }
+  const uint8_t store[] = {0x5f, 0x48, 0x89, 0x17}; /* pop rdi; [rdi]=rdx */
+  memcpy(code + pos, store, sizeof(store));
+  pos += sizeof(store);
+  for (int i = 5; i >= 0; i--) {
+    if (saved[i] >= 8) code[pos++] = 0x41;
+    code[pos++] = (uint8_t)(0x58 + (saved[i] & 7));
+  }
+  code[pos++] = 0xc3;
+  PolyX86Program *probe = poly_compile_x86(code, pos);
+  if (!probe) return false;
+  int (*call_fn)(PolyX86Program *, void **, int) = poly_x86_program_call;
+  void *callback;
+  memcpy(&callback, &call_fn, sizeof(callback));
+  uint64_t status = UINT64_MAX;
+  void *probe_args[] = {&status, callback, target, args, (void *)(uintptr_t)n};
+  bool ok = poly_x86_program_call(probe, probe_args, 5) == 0 && status == 0;
+  poly_x86_program_destroy(probe);
+  return ok;
+}
+
+TEST_BACKEND(x86, generated_kernel_many_arguments) {
+  /* Exercise real argument lowering, spills and the kernel's own prologue,
+   * not only a hand-written callee. The last stack slot is a scalar control. */
+  int counts[] = {17, 21, 31, 63, 65};
+  for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+    int n = counts[c];
+    PolyCtx *ctx = poly_ctx_new();
+    PolyParamArg param = {
+        .slot = n - 1, .dtype = POLY_INT32, .addrspace = POLY_ADDR_ALU, .name = "core_id"};
+    PolyUOp *scalar_shape = poly_uop0(ctx, POLY_OP_STACK, POLY_VOID, poly_arg_none());
+    PolyUOp *index =
+        poly_uop1(ctx, POLY_OP_PARAM, POLY_INT32, scalar_shape, poly_arg_param(&param));
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0), *sum = NULL;
+    float input[63][8], output[8] = {0}, expected[8] = {0};
+    void *args[65] = {output};
+    for (int i = 1; i < n - 1; i++) {
+      PolyUOp *p = poly_test_program_param(ctx, POLY_FLOAT32, 8, i);
+      PolyUOp *value = poly_uop1(
+          ctx, POLY_OP_LOAD, POLY_FLOAT32,
+          poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p, index, poly_arg_none()), poly_arg_none()
+      );
+      PolyUOp *weight = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(i));
+      value = poly_uop_alu2(ctx, POLY_OP_MUL, value, weight);
+      sum = sum ? poly_uop_alu2(ctx, POLY_OP_ADD, sum, value) : value;
+      args[i] = input[i - 1];
+      for (int j = 0; j < 8; j++) {
+        input[i - 1][j] = (float)(i * 8 + j);
+        expected[j] += input[i - 1][j] * i;
+      }
+    }
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID,
+        poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, index, poly_arg_none()), sum,
+        poly_arg_none()
+    );
+    int n_linear = 0, n_code = 0;
+    PolyUOp **linear =
+        poly_linearize_x86(ctx, poly_test_kernel_sink(ctx, &store, 1, "many_args"), &n_linear);
+    ASSERT_NOT_NULL(linear);
+    uint8_t *code = poly_render_x86(linear, n_linear, &n_code);
+    ASSERT_NOT_NULL(code);
+    PolyX86Program *prog = poly_compile_x86(code, n_code);
+    ASSERT_NOT_NULL(prog);
+    bool ok = x86_call_preserves_registers(prog, args, n);
+    for (int i = 0; i < 8; i++)
+      ok &= poly_x86_program_call_core(prog, args, n, n - 1, i) == 0 && output[i] == expected[i];
+    memset(output, 0, sizeof(output));
+    ok &= poly_x86_program_call_threaded(prog, args, n, n - 1, 8) == 0;
+    for (int i = 0; i < 8; i++)
+      ok &= output[i] == expected[i];
+    if (!ok)
+      fprintf(
+          stderr, "generated args=%d: got %g,%g expected %g,%g\n", n, output[0], output[7],
+          expected[0], expected[7]
+      );
+    poly_x86_program_destroy(prog);
+    free(code);
+    free(linear);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(ok);
+  }
   PASS();
 }
 

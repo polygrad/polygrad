@@ -102,7 +102,7 @@
           },
           "libraries": ["-ldl", "-lm"]
         }],
-        ["target_arch=='x64'", {
+        ["target_arch=='x64' and (OS=='linux' or OS=='mac')", {
           "sources": ["csrc/src/renderer/isa/x86.c"],
           "defines": ["POLY_HAS_X86=1"]
         }],

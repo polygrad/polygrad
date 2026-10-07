@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 (unreleased)
+
+- Remove the direct-X86 launcher's 16-argument ceiling. Generate one SysV call
+  bridge beside each kernel, using registers and stack arguments for both
+  serial and threaded execution. No dependency, public ABI or graph change.
+
 ## 0.7.0 (2026-10-06)
 
 - Restore Tensor roots after failed realization so compilation failures can be retried without reading unwritten storage. Reject reads of storage whose writes were attempted before a reported execution failure (PG-DIV-017).
