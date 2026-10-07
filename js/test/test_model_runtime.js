@@ -1,6 +1,78 @@
 'use strict'
 
 const onnxFixture = require('../../test/fixtures/onnx.json')
+const embeddingGemma2Fixture = require('../../test/fixtures/embeddinggemma2.json')
+const embeddingGemma2ImageFixture = require('../../test/fixtures/embeddinggemma2_image.json')
+const embeddingGemma2AudioFixture = require('../../test/fixtures/embeddinggemma2_audio.json')
+
+async function checkEmbeddingGemma2(pg) {
+  for (const f of [embeddingGemma2Fixture, embeddingGemma2ImageFixture, embeddingGemma2AudioFixture]) {
+    const weights = Uint8Array.from(atob(f.weights), c => c.charCodeAt(0))
+    const m = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(f.config)), [weights], {maxBatch: 2, maxSeqLen: f.config.max_seq_len || 6})
+    let restored
+    try {
+      restored = pg.Model.load(await m.saveAsync())
+      for (const c of f.cases) {
+        const raw = c.inputs || {input_ids:c.input_ids, attention_mask:c.attention_mask}
+        const inputs = Object.fromEntries(Object.entries(raw).map(([k,v]) =>
+          [k, ['pixel_values','input_features'].includes(k) ? Float32Array.from(v.flat(Infinity)) : Int32Array.from(v.flat(Infinity))]))
+        for (const model of [m, restored]) {
+          const result = await model.forwardAsync(inputs)
+          assertClose(result.last_hidden_state, c.last_hidden_state.flat(2), 2e-5)
+          assertClose(result.sentence_embedding, c.sentence_embedding.flat(), 2e-5)
+          if (c.image_hidden_states) {
+            const width=f.config.text_config.hidden_size, selected=[]
+            for (let i=0;i<result.image_attention_mask.length;i++) {
+              if(result.image_attention_mask[i]) selected.push(...result.image_hidden_states.slice(i*width,(i+1)*width))
+            }
+            assertClose(selected,c.image_hidden_states.flat(),2e-5)
+          }
+          if (c.audio_hidden_states) {
+            const width=f.config.text_config.hidden_size, selected=[]
+            for (let i=0;i<result.audio_attention_mask.length;i++) {
+              if(result.audio_attention_mask[i]) selected.push(...result.audio_hidden_states.slice(i*width,(i+1)*width))
+            }
+            assertClose(selected,c.audio_hidden_states.flat(),2e-5)
+          }
+          for (const [label, token] of [['image', f.config.image_token_id], ['audio', f.config.audio_token_id]]) {
+            if (!Number.isInteger(token) || !f.config[label === 'image' ? 'vision_config' : 'audio_config']) continue;
+            for (const delta of [-1, 1]) {
+              const bad = {...inputs, input_ids: inputs.input_ids.slice()}
+              const at = bad.input_ids.findIndex(v => delta < 0 ? v === token : v !== token)
+              bad.input_ids[at] = delta < 0 ? 1 : token
+              let error
+              try { await model.forwardAsync(bad) } catch (e) { error = e }
+              assert(error && error.message.includes(label + ' features and token slots do not match'),
+                     'invalid ' + label + ' slot count must reject: ' + error)
+              assertClose(await model.readBufferAsync('input_ids'), inputs.input_ids, 0)
+              assertClose((await model.forwardAsync(inputs)).sentence_embedding, result.sentence_embedding, 0)
+            }
+          }
+        }
+      }
+    } finally {
+      if (restored) await restored.dispose()
+      await m.dispose()
+    }
+  }
+  const config = {...embeddingGemma2AudioFixture.config, modalities: ['text']}
+  delete config.audio_seq_len
+  const weights = Uint8Array.from(atob(embeddingGemma2AudioFixture.weights), c => c.charCodeAt(0))
+  const text = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(config)), [weights],
+                             {maxBatch: 2, maxSeqLen: config.max_seq_len})
+  let restored
+  try {
+    restored = pg.Model.load(await text.saveAsync())
+    const ones = new Int32Array(2 * config.max_seq_len).fill(1)
+    const inputs = {input_ids: ones, attention_mask: ones}
+    const expected = await text.forwardAsync(inputs)
+    assert(!('audio_hidden_states' in expected), 'text selection must omit the audio tower')
+    assertClose((await restored.forwardAsync(inputs)).sentence_embedding, expected.sentence_embedding, 0)
+  } finally {
+    if (restored) await restored.dispose()
+    await text.dispose()
+  }
+}
 
 async function checkIntervalSum(createRuntime) {
   for (const kernels of [false,true]) {
@@ -2198,6 +2270,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
+  await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
@@ -2977,6 +3050,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
+  await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))

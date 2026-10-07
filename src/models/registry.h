@@ -59,6 +59,8 @@ model_gpt2_from_gguf_decoded(const PolyGgufDecoded *, const PolyGenericImportOpt
 MODEL_IMPORT_INTERNAL PolyModel *
 model_llama_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
 MODEL_IMPORT_INTERNAL PolyModel *
+model_embeddinggemma2_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
 model_qwen3_from_gguf_decoded(const PolyGgufDecoded *, const PolyGenericImportOpts *);
 MODEL_IMPORT_INTERNAL PolyModel *
 model_clip_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);

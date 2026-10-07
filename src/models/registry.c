@@ -174,6 +174,10 @@ bool model_config_training(const cJSON *root, PolyModelError *err) {
 }
 
 static const PolyModelType model_types[] = {
+    {"EmbeddingGemma2", "embedding_gemma2", model_embeddinggemma2_from_config,
+     model_embeddinggemma2_from_hf_decoded, NULL},
+    {"EmbeddingGemma2Text", "embedding_gemma2_text", model_embeddinggemma2_from_config,
+     model_embeddinggemma2_from_hf_decoded, NULL},
     {"CLIP", "clip", model_clip_from_config, model_clip_from_hf_decoded, NULL},
     {"ViT", "vit", model_vit_from_config, model_vit_from_hf_decoded, NULL},
     {"DINOv2", "dinov2", model_dinov2_from_config, model_dinov2_from_hf_decoded, NULL},

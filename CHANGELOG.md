@@ -2,6 +2,16 @@
 
 ## 0.7.1 (unreleased)
 
+- Add EmbeddingGemma 2 text, image and audio graph builders and HF weight import.
+  Return token features and normalized sentence embeddings; select towers with
+  `modalities` in the import config. Tokenization and preprocessing stay external.
+  Reject mismatched image/audio token counts before inference; validation is
+  preserved in portable models. Checked processor metadata must be host arrays.
+- Add input-only Model requirements, evaluated with the existing host backend
+  before parent input/state writes. PGIR23 preserves requirements and reads
+  PGIR19/22; the expanded C IR structure requires ABI109. Bound-program export
+  and graph inlining reject checked Models rather than dropping their checks.
+
 - Use the shared guarded L2 normalization in CLIP. Zero projections now produce
   finite zero embeddings and logits instead of NaNs; norms below 1e-12 are clamped.
 

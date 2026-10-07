@@ -42,6 +42,7 @@ FILC_SRC += src/uop/key.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/distilgpt2.c src/models/qwen3.c src/models/llama.c src/models/transformer.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_placement.c test/test_realize.c test/test_threading.c
 TEST_SRC += test/test_llama.c
+CODEC_SRC += src/models/embeddinggemma2.c src/models/gemma.c src/models/gemma4_vision.c src/models/gemma4_audio.c
 TEST_SRC += test/test_onnx.c
 
 PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
@@ -297,6 +298,21 @@ test-vision: build/polygrad_test build/libpolygrad.so
 	POLY_TEST_FILTER=Vision $(MAKE) test-js-native test-js-wasm
 
 .PHONY: test-vision-interpolate
+.PHONY: test-embeddinggemma2
+test-embeddinggemma2: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) -m pytest -q test/external/test_embeddinggemma2_hf.py
+
+EMBEDDINGGEMMA2_CHECKPOINT ?= models/embeddinggemma-2
+.PHONY: test-embeddinggemma2-pretrained
+test-embeddinggemma2-pretrained: build/libpolygrad.so
+	@test -s '$(EMBEDDINGGEMMA2_CHECKPOINT)/model.safetensors' || { echo 'Set EMBEDDINGGEMMA2_CHECKPOINT to the downloaded checkpoint directory'; exit 1; }
+	$(HF_PYTHON) test/external/check_embeddinggemma2_pretrained.py reference --device CPU --checkpoint '$(EMBEDDINGGEMMA2_CHECKPOINT)'
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) test/external/check_embeddinggemma2_pretrained.py polygrad --checkpoint '$(EMBEDDINGGEMMA2_CHECKPOINT)'
+	@set -e; for photo in flower.jpg china.jpg; do \
+	  $(HF_PYTHON) test/external/check_embeddinggemma2_pretrained.py reference --device CPU --image --photo $$photo --checkpoint '$(EMBEDDINGGEMMA2_CHECKPOINT)'; \
+	  POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) test/external/check_embeddinggemma2_pretrained.py polygrad --image --photo $$photo --checkpoint '$(EMBEDDINGGEMMA2_CHECKPOINT)'; \
+	done
+
 test-vision-interpolate: build/libpolygrad.so
 	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) -m pytest -q test/external/test_vision_interpolate.py
 

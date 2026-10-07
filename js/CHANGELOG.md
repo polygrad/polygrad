@@ -2,6 +2,10 @@
 
 ## 0.7.1 (unreleased)
 
+- Add EmbeddingGemma 2 builders and HF import for text, image and audio embeddings,
+  with config-based modality selection and portable Model bundles. Mismatched
+  image/audio token counts are rejected before inference and after reload.
+
 - CLIP zero projections now return finite zero embeddings and logits instead
   of NaNs, using the shared Tensor normalization with epsilon 1e-12.
 

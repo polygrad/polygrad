@@ -191,6 +191,7 @@ troubleshooting sections for installation and runtime errors.
 | Llama | Yes | Yes | No | C-backed Transformer in Python/JS |
 | Qwen3 | No | No | Yes | C-backed Transformer in Python/JS |
 | CLIP, ViT, DINOv2, DINOv3 | Yes | Yes | No | No |
+| EmbeddingGemma2 (text/image/audio), EmbeddingGemma2Text | Yes | Yes | No | No |
 
 Checkpoint-required types must have all weights loaded before execution or
 export. `models.list()` reports construction/import capabilities. Cached generation
@@ -204,6 +205,42 @@ reject. Explicit Python `strict=False` / JS `{strict:false}` (C:
 `poly_tokenizer_from_json_ex`) can skip NFC with a warning, at the cost of
 potentially different token IDs. Both frontends also expose GGUF tokenization.
 See [tokenizer support](js/README.md#pretrained-and-configured-models).
+
+EmbeddingGemma 2 text inference accepts fixed-shape int32 `input_ids` and
+`attention_mask` (1 for a token, 0 for padding). `forward` returns projected
+`last_hidden_state` and an L2-normalized, masked-mean `sentence_embedding`.
+It uses FP32 computation. For text-only inference with the full HF checkpoint,
+set `modalities: ["text"]` in the config passed to the importer. The original
+tower configs can stay intact; unused tower weights are ignored. Omit
+`modalities` to include every configured tower.
+A text-only checkpoint uses `embedding_gemma2_text` and
+unprefixed weights. Tokenization and task prefixes stay outside the model;
+use the official Hugging Face tokenizer, not Polygrad's byte-BPE tokenizer.
+Truncate embeddings only with subsequent L2 renormalization. The model has no
+KV cache or generation path.
+
+For images, select `modalities: ["text", "image"]` and set
+`image_num_patches` to the processor's fixed patch capacity. Additional inputs
+are float32 `pixel_values` `[batch, patches, 3*patch_size*patch_size]` and int32
+`image_position_ids` `[batch, patches, 2]`. Use the official HF processor;
+these are flattened, unnormalized patches with `(x,y)` positions, not NCHW
+images. Padding positions are `(-1,-1)`. This path accepts one nonempty image
+per batch item; the processor must supply the matching image-token slots in
+`input_ids`. Mismatched slot counts are rejected before inference, including
+after saving and loading the model. Pass token IDs and patch positions as host
+arrays, not device Tensor bindings, so checking them needs no GPU readback.
+`image_hidden_states` and `image_attention_mask` expose padded projected image
+features; the final sentence embedding includes both image and text tokens.
+For audio, select `modalities: ["text", "audio"]` and set `audio_seq_len` to the processor's
+feature-frame capacity. Pass float32 `input_features` `[batch, frames, features]`
+and a 0/1 `input_features_mask` `[batch, frames]`, with matching audio-token slots
+in `input_ids`. Token IDs and the feature mask must be host arrays; mismatched
+slot counts are rejected before inference. Outputs include padded `audio_hidden_states` and
+`audio_attention_mask`. Audio preprocessing and tokenization remain external.
+Video and clipped vision projections are not supported.
+`output_hidden_states: true` additionally returns `hidden_states.N` and, when
+enabled, `vision_hidden_states.N` and `audio_hidden_states.N` (tower input
+projection at N=0, then each layer).
 
 ### Configuration-driven Models
 

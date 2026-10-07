@@ -392,6 +392,8 @@ layout. Use the checkpoint's image processor; the Model does not decode, resize
 or normalize images. CLIP additionally takes int32, right-padded token IDs with
 an EOS token. Its `encode_image` and `encode_text` entrypoints accept one modality
 and return normalized embeddings. Both modalities use the configured batch size.
+Normalization clamps the L2 norm to at least `1e-12`; zero projections return
+zero embeddings rather than NaNs.
 
 This implementation is fixed-square-resolution, unmasked inference. It supports
 HF `CLIPModel`, `ViTModel`, `Dinov2Model` and `DINOv3ViTModel` weights, not
@@ -406,10 +408,45 @@ SwiGLU and DINOv3 gated MLP configurations are supported. JSON type tags are
 For C-built model types and JSON-based `models.Sequential` / `models.Graph`, see
 [shared JSON reference](https://github.com/polygrad/polygrad#configuration-driven-models).
 These return the same Model type and use the same training and export APIs.
-Their configurations support typed inputs, one bounded leading batch dimension,
-and shared embedding, normalization, RoPE and attention components. For example,
-`{"dtype":"int32","shape":[{"name":"batch","min":1,"max":32},16]}`
+Sequential/Graph configurations support typed inputs, one bounded leading batch
+dimension, and shared embedding, normalization, RoPE and attention components.
+For example, `{"dtype":"int32","shape":[{"name":"batch","min":1,"max":32},16]}`
 declares token batches of 1 to 32 rows without rebuilding the model.
+
+### EmbeddingGemma 2
+
+`models.EmbeddingGemma2Text` constructs the text backbone from a resolved HF
+text config. Load its weights with `Model.from_hf`; the full `embedding_gemma2`
+checkpoint accepts `"modalities": ["text"]` in the config passed to
+`config_json` for text-only inference, without removing the tower configs.
+Omitting `modalities` includes every configured tower.
+Computation and imported parameters use float32.
+
+Pass fixed-shape int32 `input_ids` and binary `attention_mask` to `forward`.
+Outputs are projected `last_hidden_state` and normalized `sentence_embedding`.
+Both left and right padding are supported; masked tokens are excluded from
+pooling. Tokenization and task prompts use the official HF tokenizer outside
+Polygrad. Shortening an embedding requires L2 normalization after slicing.
+
+For image inference, select `"modalities": ["text", "image"]`.
+Set `image_num_patches` to the HF processor's patch capacity, then
+pass its float32 `pixel_values` `[batch, patches, 3*patch_size*patch_size]`
+and int32 `image_position_ids` `[batch, patches, 2]` alongside tokens and mask.
+Use one nonempty image per batch item and processor-generated matching image
+token slots; mismatches are rejected before inference, including after Model
+save/load. Token IDs and patch positions must be host arrays, not Tensors.
+Padding positions are
+`(-1,-1)`. Outputs also include padded `image_hidden_states` and their boolean
+`image_attention_mask`.
+
+For audio, select `"modalities": ["text", "audio"]`, set `audio_seq_len` to the processor's feature
+frame count, and pass float32 `input_features` `[batch, frames, features]` plus
+an int32 0/1 `input_features_mask` `[batch, frames]`. Supply matching audio-token
+slots in `input_ids`; mismatches are rejected before inference. Token IDs and
+feature masks must be host arrays, not Tensors. Outputs include
+padded `audio_hidden_states` and `audio_attention_mask`.
+Video and clipped vision projections are not implemented. Tokenization and preprocessing remain
+external; no Hugging Face packages are required by Polygrad itself.
 
 ## Devices And Runtimes
 

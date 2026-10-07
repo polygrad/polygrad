@@ -25,6 +25,57 @@
 
 /* Safetensors multi-dtype */
 
+TEST(hf, embeddinggemma2_config_ownership) {
+  const char *config =
+      "{\"hidden_size\":8,\"intermediate_size\":16,\"hidden_size_per_layer_input\":4,"
+      "\"embedding_dim\":6,\"vocab_size\":31,\"num_hidden_layers\":2,"
+      "\"num_attention_heads\":2,\"num_key_value_heads\":1,\"head_dim\":4,"
+      "\"max_seq_len\":6,\"sliding_window\":2,"
+      "\"layer_types\":[\"sliding_attention\",\"full_attention\"],"
+      "\"per_layer_config\":{\"1\":{\"head_dim\":8}}}";
+  PolyCtx *ctx = poly_ctx_new();
+  for (int repeat = 0; repeat < 6; repeat++) {
+    bool image = repeat % 3 == 1, audio = repeat % 3 == 2;
+    char composite[2048];
+    snprintf(
+        composite, sizeof(composite),
+        "{\"text_config\":%s,\"max_seq_len\":6,\"image_num_patches\":16,\"image_token_id\":30,"
+        "\"vision_config\":{\"hidden_size\":8,\"intermediate_size\":16,\"head_dim\":4,"
+        "\"num_attention_heads\":2,\"num_key_value_heads\":1,\"num_hidden_layers\":2,"
+        "\"patch_size\":2,\"pooling_kernel_size\":2,\"position_embedding_size\":32}}",
+        config
+    );
+    if (audio)
+      snprintf(
+          composite, sizeof(composite),
+          "{\"text_config\":%s,\"max_seq_len\":6,\"audio_seq_len\":17,\"audio_token_id\":28,"
+          "\"audio_config\":{\"hidden_size\":8,\"num_attention_heads\":2,\"num_hidden_layers\":2,"
+          "\"subsampling_conv_channels\":[8,2],\"output_proj_dims\":6,\"attention_chunk_size\":2,"
+          "\"attention_context_left\":3,\"attention_context_right\":2,\"conv_kernel_size\":3}}",
+          config
+      );
+    const char *spec = image || audio ? composite : config;
+    PolyModelError err = {0};
+    PolyModel *m = poly_model_from_config(
+        ctx, image || audio ? "EmbeddingGemma2" : "EmbeddingGemma2Text", spec, (int)strlen(spec),
+        POLY_DEVICE_INTERP, &err
+    );
+    ASSERT_NOT_NULL(m);
+    ASSERT_TRUE(poly_model_ctx(m) == ctx);
+    ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "forward"), image || audio ? 4 : 2);
+    ASSERT_INT_EQ(ctx->n_tensors, 0);
+    ASSERT_TRUE(poly_model_param_count(m) > 30);
+    int size = 0;
+    uint8_t *bundle = poly_model_save_bundle(m, &size);
+    ASSERT_TRUE(bundle == NULL);
+    ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not initialized") != NULL);
+    free(bundle);
+    poly_model_free(m);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(hf, vision_config_factories_require_weights) {
   const char *types[] = {"ViT", "DINOv2", "DINOv3", "CLIP"};
   const char *encoder = "{\"hidden_size\":16,\"num_attention_heads\":2,\"num_hidden_layers\":1,"
