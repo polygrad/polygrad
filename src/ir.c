@@ -663,6 +663,12 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
     return NULL;
   }
   if (spec->n_controls < 0 || (spec->n_controls && (!spec->controls || executable))) return NULL;
+  if (spec->n_requirements < 0 || (spec->n_requirements && (!spec->requirements || executable)))
+    return NULL;
+  for (int i = 0; i < spec->n_requirements; i++) {
+    const PolyIrRequirement *r = &spec->requirements[i];
+    if (!r->entrypoint || !r->message || !r->ir || r->ir_len <= 0) return NULL;
+  }
   for (int i = 0; i < spec->n_controls; i++) {
     const PolyIrControl *c = &spec->controls[i];
     if (!c->entrypoint || !c->name || !poly_ctx_owns_ptr(spec->ctx, c->variable) ||
@@ -945,6 +951,10 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   }
 
   /* Compute flags */
+  for (int i = 0; i < spec->n_requirements; i++) {
+    st_add(&strings, spec->requirements[i].entrypoint);
+    st_add(&strings, spec->requirements[i].message);
+  }
   uint32_t flags = 0;
   for (int i = 0; i < spec->n_entrypoints; i++) {
     if (strcmp(spec->entrypoints[i].name, "loss") == 0) flags |= 1; /* has_loss */
@@ -1272,6 +1282,14 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
       bb_u32(&buf, st_add(&strings, spec->controls[i].name));
       bb_u32(&buf, FIND_IDX(spec->controls[i].variable));
     }
+    bb_u32(&buf, (uint32_t)spec->n_requirements);
+    for (int i = 0; i < spec->n_requirements; i++) {
+      const PolyIrRequirement *r = &spec->requirements[i];
+      bb_u32(&buf, st_add(&strings, r->entrypoint));
+      bb_u32(&buf, st_add(&strings, r->message));
+      bb_u32(&buf, (uint32_t)r->ir_len);
+      bb_bytes(&buf, r->ir, r->ir_len);
+    }
   }
 #undef FIND_IDX
 
@@ -1377,7 +1395,8 @@ static int poly_graph_import(
     return -1;
   }
   uint32_t version = br_u32(&r);
-  if (executable ? version != POLY_PROGRAM_VERSION : version != POLY_IR_VERSION && version != 19) {
+  if (executable ? version != POLY_PROGRAM_VERSION
+                 : version != POLY_IR_VERSION && version != 22 && version != 19) {
     fprintf(
         stderr, "%s: unsupported version %u\n",
         executable ? "poly_program_import" : "poly_ir_import", version
@@ -2255,6 +2274,27 @@ static int poly_graph_import(
       if (!out->controls[i].entrypoint || !out->controls[i].name) goto fail_modules;
     }
   }
+  if (!executable && version >= 23) {
+    if (br_remaining(&r) < 4) goto fail_modules;
+    uint32_t count = br_u32(&r);
+    if (count > INT_MAX || count > (uint32_t)br_remaining(&r) / 12) goto fail_modules;
+    out->requirements = count ? calloc(count, sizeof(*out->requirements)) : NULL;
+    if (count && !out->requirements) goto fail_modules;
+    out->n_requirements = (int)count;
+    for (uint32_t i = 0; i < count; i++) {
+      uint32_t ep = br_u32(&r), message = br_u32(&r), len = br_u32(&r);
+      if (ep >= n_strings || message >= n_strings || !len || len > INT_MAX ||
+          len > (uint32_t)br_remaining(&r))
+        goto fail_modules;
+      uint8_t *bytes = malloc(len);
+      out->requirements[i] =
+          (PolyIrRequirement){strdup(strings[ep]), strdup(strings[message]), bytes, (int)len};
+      if (!bytes || !out->requirements[i].entrypoint || !out->requirements[i].message)
+        goto fail_modules;
+      memcpy(bytes, r.data + r.pos, len);
+      r.pos += (int)len;
+    }
+  }
   if (r.pos != r.len) {
     fprintf(stderr, "%s: trailing bytes\n", executable ? "poly_program_import" : "poly_ir_import");
     goto fail_modules;
@@ -2275,6 +2315,12 @@ static int poly_graph_import(
   return 0;
 
 fail_modules:
+  for (int i = 0; i < out->n_requirements; i++) {
+    free((void *)out->requirements[i].entrypoint);
+    free((void *)out->requirements[i].message);
+    free((void *)out->requirements[i].ir);
+  }
+  free(out->requirements);
   for (int i = 0; i < out->n_controls; i++) {
     free((char *)out->controls[i].entrypoint);
     free((char *)out->controls[i].name);
@@ -2322,6 +2368,14 @@ int poly_program_graph_import(const uint8_t *data, int len, PolyIrSpec *out) {
 
 void poly_ir_spec_free(PolyIrSpec *spec) {
   if (!spec) return;
+  for (int i = 0; i < spec->n_requirements; i++) {
+    free((void *)spec->requirements[i].entrypoint);
+    free((void *)spec->requirements[i].message);
+    free((void *)spec->requirements[i].ir);
+  }
+  free(spec->requirements);
+  spec->requirements = NULL;
+  spec->n_requirements = 0;
   for (int i = 0; i < spec->n_controls; i++) {
     free((char *)spec->controls[i].entrypoint);
     free((char *)spec->controls[i].name);

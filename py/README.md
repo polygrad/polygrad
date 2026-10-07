@@ -611,7 +611,7 @@ def normalize(x: Tensor) -> Tensor:
 This keeps execution in the caller's Polygrad context and avoids unnecessary
 NumPy readback.
 
-### C-authored graphs (ABI108)
+### C-authored graphs
 
 `rt.load_extension(path)` attaches a separately built C author to this runtime's
 existing core. The author calls existing `poly_tensor_*` functions; it does not

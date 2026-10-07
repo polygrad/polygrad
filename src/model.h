@@ -212,6 +212,19 @@ PolyStatus poly_model_entrypoint(
 );
 PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err);
 
+/* Attach an independent copy of an input-only predicate Model to a built
+ * entrypoint. Predicate inputs must match a fixed-shape subset of its inputs;
+ * its sole entrypoint/output must be a scalar bool, with no state or controls.
+ * Checked inputs must be supplied as host data (not Tensor bindings). Checks
+ * run before any parent input/state write and survive IR and bundle round trips.
+ * Compiled-program export and graph inlining reject Models with requirements. */
+PolyStatus poly_model_require(
+    PolyModel *inst,
+    const char *entrypoint,
+    const char *message,
+    PolyModel *predicate
+);
+
 /* Retain explicit module boundaries on an already built Model.  This does
  * not alter its current physical roots.  Definition is aggregate and atomic. */
 int poly_model_define_modules(PolyModel *inst, const PolyModelModuleSpec *modules, int n_modules);

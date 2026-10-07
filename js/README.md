@@ -771,7 +771,7 @@ function create({ polygrad: pg }) {
 | Compilation | `jit`, `jitAsync`, `compile`, `compileAsync`, `Tensor.customKernel` |
 | Neural nets | `nn.Linear`, `nn.SGD`, `nn.Adam`, `nn.AdamW`, `nn.getParameters`, `nn.getStateDict` |
 
-## C-authored graphs (ABI108)
+## C-authored graphs
 
 `pg.loadExtension(source)` attaches a construction-only C author to the current
 runtime: pass a generated Node addon in native mode, or Wasm bytes/a compiled

@@ -29,6 +29,88 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, input_requirements_reject_before_writes_and_survive_ir) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *m = poly_model_new(ctx, NULL);
+  PolyTensor *x = poly_model_input(m, "x", POLY_FLOAT32, (int64_t[]){2}, 1);
+  PolyTensor *sum = poly_tensor_sum(ctx, x, (int64_t[]){0}, 1, false);
+  PolyTensor *zero = poly_tensor_const_like_float(ctx, sum, 0);
+  PolyTensor *ok = poly_tensor_alu2(ctx, POLY_OP_CMPLT, zero, sum);
+  const char *inputs[] = {"x"}, *outputs[] = {"result"};
+  ASSERT_EQ(poly_model_output(m, "result", sum), POLY_STATUS_OK);
+  ASSERT_EQ(poly_model_entrypoint(m, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK);
+  ASSERT_EQ(poly_model_build(m, NULL), POLY_STATUS_OK);
+  PolyBindingSpec bindings[] = {{"x", POLY_ROLE_INPUT, x, 0}, {"result", POLY_ROLE_OUTPUT, ok, 0}};
+  PolyEntrypointSpec ep = {
+      .name = "check", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1};
+  PolyModel *check = poly_model_from_bindings(ctx, bindings, 2, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(check);
+  /* PGIR22 ends at the controls table. A requirement-free v23 stream differs
+   * only in its version and trailing zero requirement count. */
+  int old_len = 0;
+  uint8_t *old_ir = poly_model_export_ir(check, &old_len);
+  ASSERT_NOT_NULL(old_ir);
+  old_ir[4] = 22;
+  PolyModel *old = poly_model_from_ir_into(ctx, old_ir, old_len - 4, NULL, 0, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(old);
+  poly_model_free(old);
+  free(old_ir);
+  ASSERT_EQ(poly_model_require(m, "missing", "positive sum required", check), POLY_STATUS_INVALID);
+  ASSERT_EQ(poly_model_require(m, "forward", "positive sum required", m), POLY_STATUS_INVALID);
+  ASSERT_EQ(poly_model_require(m, "forward", "positive sum required", check), POLY_STATUS_OK);
+  ASSERT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_INTERP);
+  poly_model_free(check); /* Parent owns an independent copy. */
+  int len = 0;
+  uint8_t *ir = poly_model_export_ir(m, &len);
+  ASSERT_NOT_NULL(ir);
+  PolyModel *loaded = poly_model_from_ir_into(ctx, ir, len, NULL, 0, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(loaded);
+  PolyIrSpec spec = {0};
+  ASSERT_EQ(poly_ir_import_into(ctx, ir, len, &spec), 0);
+  ASSERT_EQ(spec.n_requirements, 1);
+  PolyIrRequirement original = spec.requirements[0];
+  spec.requirements[0].ir = ir;
+  spec.requirements[0].ir_len = len;
+  int nested_len = 0;
+  uint8_t *nested = poly_ir_export(&spec, &nested_len);
+  ASSERT_NOT_NULL(nested);
+  spec.requirements[0] = original;
+  poly_ir_spec_free(&spec);
+  ASSERT_TRUE(
+      poly_model_from_ir_into(ctx, nested, nested_len, NULL, 0, POLY_DEVICE_INTERP) == NULL
+  );
+  free(nested);
+  ASSERT_TRUE(poly_model_from_ir_into(ctx, ir, len - 1, NULL, 0, POLY_DEVICE_INTERP) == NULL);
+  free(ir);
+  for (int pass = 0; pass < 2; pass++) {
+    PolyModel *p = pass ? loaded : m;
+    float good[] = {2, 3}, bad[] = {-5, -2}, actual[2] = {0};
+    PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", good, POLY_FLOAT32);
+    ASSERT_EQ(poly_model_call(p, "forward", &io, 1), 0);
+    io.data = bad;
+    ASSERT_TRUE(poly_model_call(p, "forward", &io, 1) != 0);
+    ASSERT_TRUE(strstr(poly_model_last_error(p)->message, "positive sum required") != NULL);
+    ASSERT_EQ(poly_model_read_buf(p, test_find_model_buf(p, "x"), actual, sizeof(actual)), 0);
+    ASSERT_TRUE(!memcmp(actual, good, sizeof(actual)));
+    io.data = good;
+    ASSERT_EQ(poly_model_call(p, "forward", &io, 1), 0);
+    poly_ctx_collect(ctx);
+    ASSERT_EQ(poly_model_call(p, "forward", &io, 1), 0);
+    int program_len = 99;
+    ASSERT_TRUE(poly_model_export_program(p, &program_len) == NULL);
+    ASSERT_EQ(program_len, 0);
+  }
+  poly_model_free(loaded);
+  poly_model_free(m);
+  poly_tensor_release(ok);
+  poly_tensor_release(zero);
+  poly_tensor_release(sum);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, imported_store_bounds_preserve_cache_bytes) {
   const char *json =
       "{\"hidden_size\":4,\"intermediate_size\":8,\"num_attention_heads\":1,"

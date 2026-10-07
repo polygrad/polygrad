@@ -335,6 +335,9 @@ struct PolyModel {
   PolyLinearEntry *entry_executables; /* lazy compiled LINEAR per entrypoint */
   PolyIrControl *controls;
   int n_controls;
+  PolyIrRequirement *requirements;
+  PolyModel **predicates; /* Independent host-placed Models, borrowing this ctx. */
+  int n_requirements;
 
   PolyModelStateVersion version;
   char *metadata;
@@ -617,6 +620,8 @@ static PolyModel *model_from_spec(
     bool free_spec
 );
 static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device);
+
+static int model_add_requirement(PolyModel *inst, const PolyIrRequirement *requirement);
 
 static const char *model_stage_name(PolyModelStage stage) {
   switch (stage) {
@@ -2662,6 +2667,9 @@ static PolyModel *model_from_spec(
   }
   if (model_classify_effects(inst) != 0) goto fail;
 
+  for (int i = 0; i < spec->n_requirements; i++)
+    if (model_add_requirement(inst, &spec->requirements[i]) != 0) goto fail;
+
   /* Default optimizer: none */
   inst->training.optim.kind = POLY_OPTIM_NONE;
 
@@ -3030,6 +3038,14 @@ static void runtime_modules_free(RuntimeModule *modules, int n_modules) {
 
 void poly_model_free(PolyModel *inst) {
   if (!inst) return;
+  for (int i = 0; i < inst->n_requirements; i++) {
+    poly_model_free(inst->predicates[i]);
+    free((void *)inst->requirements[i].entrypoint);
+    free((void *)inst->requirements[i].message);
+    free((void *)inst->requirements[i].ir);
+  }
+  free(inst->predicates);
+  free(inst->requirements);
   free(inst->metadata);
 
   for (int i = 0; i < inst->n_residency_roots; i++)
@@ -3688,6 +3704,101 @@ int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
 
 /* IR Export */
 
+static int model_add_requirement(PolyModel *inst, const PolyIrRequirement *r) {
+  if (!inst || !r || !r->entrypoint || !r->message || !r->message[0] || !r->ir || r->ir_len <= 0)
+    return -1;
+  int ep = find_entrypoint(inst, r->entrypoint);
+  if (ep < 0) return -1;
+  PolyIrSpec spec = {0};
+  if (poly_ir_import_into(inst->ctx, r->ir, r->ir_len, &spec) != 0) return -1;
+  /* Reject nesting before constructing anything: untrusted IR must not cause
+   * recursive Model imports. Predicates have only copied inputs and one bool. */
+  bool valid = spec.n_requirements == 0 && spec.n_controls == 0 && spec.n_entrypoints == 1 &&
+               spec.entrypoints[0].n_outputs == 1 && !spec.entrypoints[0].objective;
+  for (int i = 0; valid && i < spec.n_bufs; i++)
+    valid = spec.bufs[i].role == POLY_ROLE_INPUT || spec.bufs[i].role == POLY_ROLE_OUTPUT;
+  if (!valid) {
+    poly_ir_spec_free(&spec);
+    return -1;
+  }
+#ifdef __EMSCRIPTEN__
+  PolyDevice host = POLY_DEVICE_WASM;
+#else
+  PolyDevice host = POLY_DEVICE_CPU;
+#endif
+  PolyModel *check = model_from_spec(&spec, NULL, NULL, host, false, true);
+  if (!check) return -1;
+  RuntimeEntrypoint *ce = &check->entrypoints[0];
+  int out = find_buf_by_name(check, ce->outputs[0]);
+  valid = out >= 0 && check->bufs[out].ndim == 0 &&
+          poly_dtype_eq(check->bufs[out].buffer->dtype, POLY_BOOL);
+  for (int i = 0; valid && i < ce->n_inputs; i++) {
+    const char *name = ce->inputs[i];
+    int a = find_buf_by_name(inst, name), b = find_buf_by_name(check, name);
+    bool admitted = false;
+    for (int j = 0; j < inst->entrypoints[ep].n_inputs; j++)
+      if (!strcmp(name, inst->entrypoints[ep].inputs[j])) admitted = true;
+    valid =
+        admitted && a >= 0 && b >= 0 && !inst->bufs[a].dynamic && !check->bufs[b].dynamic &&
+        inst->bufs[a].ndim == check->bufs[b].ndim &&
+        poly_dtype_eq(inst->bufs[a].buffer->dtype, check->bufs[b].buffer->dtype) &&
+        !memcmp(
+            inst->bufs[a].shape, check->bufs[b].shape, (size_t)inst->bufs[a].ndim * sizeof(int64_t)
+        );
+  }
+  /* A private host check must not change the caller's default Tensor device. */
+  if (!valid || model_place_uniform_device(check, poly_device_uop(inst->ctx, host), false) != 0) {
+    poly_model_free(check);
+    return -1;
+  }
+  int n = inst->n_requirements;
+  PolyIrRequirement *rows = calloc((size_t)n + 1, sizeof(*rows));
+  PolyModel **checks = calloc((size_t)n + 1, sizeof(*checks));
+  uint8_t *bytes = malloc((size_t)r->ir_len);
+  char *entry = dup_cstr(r->entrypoint), *message = dup_cstr(r->message);
+  if (!rows || !checks || !bytes || !entry || !message) {
+    free(rows);
+    free(checks);
+    free(bytes);
+    free(entry);
+    free(message);
+    poly_model_free(check);
+    return -1;
+  }
+  memcpy(bytes, r->ir, (size_t)r->ir_len);
+  if (n) {
+    memcpy(rows, inst->requirements, (size_t)n * sizeof(*rows));
+    memcpy(checks, inst->predicates, (size_t)n * sizeof(*checks));
+  }
+  rows[n] = (PolyIrRequirement){entry, message, bytes, r->ir_len};
+  checks[n] = check;
+  free(inst->requirements);
+  free(inst->predicates);
+  inst->requirements = rows;
+  inst->predicates = checks;
+  inst->n_requirements++;
+  return 0;
+}
+
+PolyStatus poly_model_require(
+    PolyModel *inst,
+    const char *entrypoint,
+    const char *message,
+    PolyModel *predicate
+) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || !predicate || predicate == inst ||
+      predicate->n_requirements)
+    return POLY_STATUS_INVALID;
+  int len = 0;
+  uint8_t *ir = poly_model_export_ir(predicate, &len);
+  PolyIrRequirement row = {entrypoint, message, ir, len};
+  int rc = ir ? model_add_requirement(inst, &row) : -1;
+  free(ir);
+  if (rc)
+    poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid input predicate Model");
+  return rc ? POLY_STATUS_INVALID : POLY_STATUS_OK;
+}
+
 uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
   poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!out_len) return NULL;
@@ -3747,6 +3858,8 @@ uint8_t *poly_model_export_ir(PolyModel *inst, int *out_len) {
       .n_modules = inst->n_modules,
       .controls = inst->controls,
       .n_controls = inst->n_controls,
+      .requirements = inst->requirements,
+      .n_requirements = inst->n_requirements,
   };
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   free(bufs);
@@ -3838,9 +3951,10 @@ static PolyLinearEntry *model_ensure_entry_executable(PolyModel *inst, int entry
 uint8_t *poly_model_export_program(PolyModel *inst, int *out_len) {
   if (!out_len) return NULL;
   *out_len = 0;
-  if (inst && inst->n_controls) {
+  if (inst && (inst->n_controls || inst->n_requirements)) {
     poly_model_set_error(
-        inst, POLY_STATUS_INVALID, __func__, "bound-program export does not support controls"
+        inst, POLY_STATUS_INVALID, __func__,
+        "bound-program export does not support controls or input requirements"
     );
     return NULL;
   }
@@ -4579,6 +4693,50 @@ static const char *model_dtype_name(PolyDType dtype, char *name) {
   return name;
 }
 
+static int model_check_requirements(
+    PolyModel *inst,
+    const RuntimeEntrypoint *entry,
+    PolyIOBinding *io,
+    int n_io
+) {
+  for (int i = 0; i < inst->n_requirements; i++) {
+    if (strcmp(entry->name, inst->requirements[i].entrypoint)) continue;
+    PolyModel *check = inst->predicates[i];
+    RuntimeEntrypoint *ce = &check->entrypoints[0];
+    PolyIOBinding *inputs = calloc((size_t)(ce->n_inputs ? ce->n_inputs : 1), sizeof(*inputs));
+    if (!inputs) return -1;
+    for (int j = 0; j < ce->n_inputs; j++) {
+      for (int k = 0; k < n_io; k++)
+        if (!strcmp(ce->inputs[j], io[k].name)) inputs[j] = io[k];
+      /* Processor metadata is already on the host. Do not silently add a GPU
+       * readback to the admission path for a device-resident Tensor binding. */
+      if (!inputs[j].data || inputs[j].tensor) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "checked input '%s' requires host data, not a Tensor binding", ce->inputs[j]
+        );
+        free(inputs);
+        return -1;
+      }
+    }
+    int rc = poly_model_call(check, ce->name, inputs, ce->n_inputs);
+    free(inputs);
+    bool accepted = false;
+    if (!rc)
+      rc = poly_model_read_buf(
+          check, find_buf_by_name(check, ce->outputs[0]), &accepted, sizeof(accepted)
+      );
+    if (rc || !accepted) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "%s%s", inst->requirements[i].message,
+          rc ? " (input check execution failed)" : ""
+      );
+      return -1;
+    }
+  }
+  return 0;
+}
+
 static int bind_model_io(
     PolyModel *inst,
     const RuntimeEntrypoint *entry,
@@ -4867,7 +5025,7 @@ static int bind_model_io(
         return -1;
     }
   }
-  return 0;
+  return model_check_requirements(inst, entry, io, n_io);
 }
 
 static int prepare_model_io(
@@ -6228,6 +6386,12 @@ int poly_model_inline_entrypoint(
   if (!parent || parent->stage != POLY_MODEL_BUILDING || !parent->ctx || !child || !entrypoint ||
       !outputs || max_outputs < 0)
     return -1;
+  if (child->n_requirements) {
+    poly_model_set_error(
+        parent, POLY_STATUS_INVALID, __func__, "cannot inline a Model with input requirements"
+    );
+    return -1;
+  }
   PolyCtx *dst_ctx = parent->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
   if (ep_idx < 0) return -1;
