@@ -2,6 +2,9 @@
 
 ## 0.7.1 (unreleased)
 
+- Use the shared guarded L2 normalization in CLIP. Zero projections now produce
+  finite zero embeddings and logits instead of NaNs; norms below 1e-12 are clamped.
+
 - Fix `tanh` cancellation near zero in the shared Tensor composition, including
   Python, JavaScript and derivatives. Values and graphs intentionally differ
   from pinned Tinygrad (PG-DIV-018); no new operation or dependency.

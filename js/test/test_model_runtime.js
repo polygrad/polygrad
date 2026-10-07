@@ -667,6 +667,13 @@ async function checkVisionModels(pg) {
       if (item.name === 'CLIP') {
         assertClose((await model.callAsync('encode_image', {pixel_values:inputs.pixel_values})).image_embeds, outputs.image_embeds, 1e-5)
         assertClose((await model.callAsync('encode_text', {input_ids:inputs.input_ids})).text_embeds, outputs.text_embeds, 1e-5)
+        for (const name of ['visual_projection.weight', 'text_projection.weight']) {
+          const values = await model.readBufferAsync(name)
+          await model.writeBufferAsync(name, new Float32Array(values.length))
+        }
+        for (const values of Object.values(await model.forwardAsync(inputs))) {
+          assert(Array.from(values).every(v => v === 0), 'CLIP zero projection must normalize to finite zeros')
+        }
       }
     } finally {
       if (restored) await restored.dispose()

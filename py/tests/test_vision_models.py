@@ -14,6 +14,26 @@ from vision_fixture import load_vision_cases
 CASES = load_vision_cases()
 
 
+def test_clip_zero_projection_normalizes_to_zero():
+    case = next(c for c in CASES if c['name'] == 'CLIP')
+    weights = base64.b64decode(case['weights'])
+    header_size = struct.unpack('<Q', weights[:8])[0]
+    header = json.loads(weights[8:8 + header_size])
+    for name in ('visual_projection.weight', 'text_projection.weight'):
+        shape = header[name]['shape']
+        weights = _replace_weight(weights, name, shape, np.zeros(shape, np.float32))
+    with pg.create(device='CPU') as rt:
+        model = pg.Model.from_hf(config_json=json.dumps(case['config']),
+                                weight_bytes_list=[weights], max_batch=2, runtime=rt)
+        try:
+            inputs = {k: np.array(v, dtype=np.int32 if k == 'input_ids' else np.float32)
+                      for k, v in case['inputs'].items()}
+            for output in model.forward(**inputs).values():
+                np.testing.assert_array_equal(output, np.zeros_like(output))
+        finally:
+            model.dispose()
+
+
 def test_dinov2_resolution_keeps_checkpoint_storage():
     case = next(c for c in CASES if c['name'] == 'DINOv2')
     config = {**case['config'], 'input_image_size': 4}

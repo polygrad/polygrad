@@ -46,6 +46,9 @@ TEST(hf, vision_config_factories_require_weights) {
     );
     ASSERT_NOT_NULL(m);
     ASSERT_TRUE(poly_model_ctx(m) == ctx);
+    /* Config factories publish UOps, not handles: intermediate Tensor wrappers
+     * (including normalization temporaries) must leave the construction scope. */
+    ASSERT_INT_EQ(ctx->n_tensors, 0);
     ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "forward"), i == 3 ? 2 : 1);
     int size = 0;
     uint8_t *data = poly_model_save_bundle(m, &size);

@@ -2,6 +2,9 @@
 
 ## 0.7.1 (unreleased)
 
+- CLIP zero projections now return finite zero embeddings and logits instead
+  of NaNs, using the shared Tensor normalization with epsilon 1e-12.
+
 - Fix `Tensor.tanh()` accuracy near zero through the shared C implementation
   on native and Wasm backends, including its gradients.
 

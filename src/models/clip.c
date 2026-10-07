@@ -40,11 +40,6 @@ static PolyTensor *clip_encoder(
   }
   return h;
 }
-static PolyTensor *clip_normalize(PolyCtx *ctx, PolyTensor *x) {
-  PolyTensor *norm =
-      poly_tensor_sum(ctx, poly_tensor_alu2(ctx, POLY_OP_MUL, x, x), (int64_t[]){1}, 1, true);
-  return poly_tensor_div(ctx, x, poly_tensor_alu1(ctx, POLY_OP_SQRT, norm), 0);
-}
 PolyModel *model_clip_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
   ModelVisionConfig v, t;
   const cJSON *vj = cJSON_GetObjectItemCaseSensitive(root, "vision_config");
@@ -115,8 +110,9 @@ PolyModel *model_clip_from_config(PolyCtx *ctx, const cJSON *root, PolyModelErro
   text = poly_tensor_gather_dim(ctx, text, 1, pool_ids);
   text = poly_tensor_reshape(ctx, text, (int64_t[]){batch, t.dim}, 2);
   text = poly_model_linear(m, "text_projection", text, t.dim, projection, false);
-  image = clip_normalize(ctx, image);
-  text = clip_normalize(ctx, text);
+  /* Use Tensor's guarded norm, including finite zeros for a zero projection. */
+  image = poly_tensor_normalize(ctx, image, 2.0, 1, 1e-12);
+  text = poly_tensor_normalize(ctx, text, 2.0, 1, 1e-12);
   PolyTensor *scale =
       poly_tensor_exp(ctx, poly_model_param(m, "logit_scale", POLY_FLOAT32, NULL, 0));
   PolyTensor *scores =
