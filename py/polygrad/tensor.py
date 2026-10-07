@@ -2227,8 +2227,8 @@ class Tensor:
         return (1 + (self * (-1 / math.log(2))).exp2()).reciprocal()
 
     def tanh(self):
-        # Pinned mixin/elementwise.py:739-749.
-        return 2.0 * (2.0 * self).sigmoid() - 1.0
+        core = _ffi._lib.poly_tensor_tanh(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
 
     def abs(self):
         # Pinned mixin/elementwise.py:892-900.

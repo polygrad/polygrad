@@ -2,6 +2,10 @@
 
 ## 0.7.1 (unreleased)
 
+- Fix `tanh` cancellation near zero in the shared Tensor composition, including
+  Python, JavaScript and derivatives. Values and graphs intentionally differ
+  from pinned Tinygrad (PG-DIV-018); no new operation or dependency.
+
 - Remove the direct-X86 launcher's 16-argument ceiling. Generate one SysV call
   bridge beside each kernel, using registers and stack arguments for both
   serial and threaded execution. No dependency, public ABI or graph change.

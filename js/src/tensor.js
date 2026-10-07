@@ -2109,8 +2109,8 @@ function createBoundTensorClass(runtime) {
     }
 
     tanh() {
-      // Pinned mixin/elementwise.py:739-749.
-      return this.mul(2, true).sigmoid().mul(2, true).sub(1)
+      const core = this._rt._core.ffi.poly_tensor_tanh(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
     }
 
     abs() {

@@ -692,18 +692,70 @@ PolyUOp *poly_uop_sigmoid(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_tanh(PolyCtx *ctx, PolyUOp *x) {
-  /* Pinned tanh(x) = 2.0 * sigmoid(2.0 * x) - 1.0
-   * (mixin/elementwise.py:739-749). */
   if (!ctx || !x) return NULL;
-  PolyUOp *two_x = poly_uop_elementwise_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, 2.0, true);
-  PolyUOp *sigmoid = two_x ? poly_uop_sigmoid(ctx, two_x) : NULL;
-  PolyUOp *twice =
-      sigmoid
-          ? poly_uop_elementwise_scalar_binop(ctx, POLY_OP_MUL, sigmoid, POLY_FLOAT32, 2.0, true)
-          : NULL;
-  return twice
-             ? poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, twice, POLY_FLOAT32, 1.0, false)
-             : NULL;
+  PolyDType result_dt, dt;
+  if (!poly_dtype_least_upper_float(x->dtype, &result_dt) ||
+      !poly_dtype_least_upper(result_dt, POLY_FLOAT32, &dt))
+    return NULL;
+  x = poly_dtype_eq(x->dtype, dt) ? x : poly_uop_cast(ctx, x, dt);
+  if (!x) return NULL;
+  PolyUOp *zero = cdt(ctx, dt, 0), *one = cdt(ctx, dt, 1);
+  PolyUOp *negative = poly_uop_alu2(ctx, POLY_OP_CMPLT, x, zero);
+  PolyUOp *a = poly_uop_where(ctx, negative, poly_uop_elementwise_neg(ctx, x), x);
+  PolyUOp *small = poly_uop_alu2(ctx, POLY_OP_CMPLT, a, cdt(ctx, dt, 0.25));
+
+  /* PG-DIV-018: 2*sigmoid(2*x)-1 cancels near zero. The odd Taylor
+   * polynomial has truncation error <2.2e-9 (f32) / <5.9e-19 (f64)
+   * on |x|<1/4. Coefficients follow y'=1-y*y, y(0)=0. Multiply by x
+   * last to preserve relative accuracy, including subnormals and -0. */
+  static const double coefficients[] = {
+      -1.0 / 3,
+      2.0 / 15,
+      -17.0 / 315,
+      62.0 / 2835,
+      -1382.0 / 155925,
+      21844.0 / 6081075,
+      -929569.0 / 638512875,
+      6404582.0 / 10854718875,
+      -443861162.0 / 1856156927625,
+      18888466084.0 / 194896477400625};
+  int n = poly_dtype_eq(dt, POLY_FLOAT64) ? 10 : 4;
+  /* WHERE is eager on some backends: bound both branches before arithmetic
+   * so unselected infinities cannot overflow or contaminate gradients. */
+  PolyUOp *s = poly_uop_where(ctx, small, x, zero);
+  PolyUOp *z = poly_uop_mul(ctx, s, s), *p = cdt(ctx, dt, coefficients[n - 1]);
+  for (int i = n - 2; i >= 0; i--)
+    p = poly_uop_add(ctx, cdt(ctx, dt, coefficients[i]), poly_uop_mul(ctx, z, p));
+  PolyUOp *near = poly_uop_mul(ctx, s, poly_uop_add(ctx, one, poly_uop_mul(ctx, z, p)));
+
+  /* tanh(20) rounds to 1 even in f64. A negative exponential never
+   * overflows; away from zero the subtraction is well conditioned. Select
+   * the limit only above 20, so NaN still reaches the arithmetic branch. */
+  PolyUOp *bounded = poly_uop_where(
+      ctx, poly_uop_alu2(ctx, POLY_OP_CMPLT, cdt(ctx, dt, 20), a), cdt(ctx, dt, 20), a
+  );
+  PolyUOp *e = poly_uop_exp(ctx, poly_uop_mul(ctx, cdt(ctx, dt, -2), bounded));
+  PolyUOp *far = poly_uop_div(ctx, poly_uop_sub(ctx, one, e), poly_uop_add(ctx, one, e));
+  far = poly_uop_where(ctx, negative, poly_uop_elementwise_neg(ctx, far), far);
+  PolyUOp *out = poly_uop_where(ctx, small, near, far);
+  /* Shader compilers may fold x!=x under finite-math assumptions. Classify
+   * the IEEE bits so saturation cannot silently turn an input NaN into 1. */
+  bool f64 = poly_dtype_eq(dt, POLY_FLOAT64);
+  PolyDType bits_dt = f64 ? POLY_UINT64 : POLY_UINT32;
+  PolyUOp *bits = poly_uop_bitcast(ctx, x, bits_dt);
+  PolyUOp *magnitude = poly_uop_alu2(
+      ctx, POLY_OP_AND, bits,
+      poly_uop_const(ctx, poly_arg_int(f64 ? INT64_MAX : INT32_MAX), bits_dt)
+  );
+  PolyUOp *nan = poly_uop_alu2(
+      ctx, POLY_OP_CMPLT,
+      poly_uop_const(
+          ctx, poly_arg_int(f64 ? INT64_C(0x7ff0000000000000) : INT64_C(0x7f800000)), bits_dt
+      ),
+      magnitude
+  );
+  out = poly_uop_where(ctx, nan, x, out);
+  return poly_dtype_eq(dt, result_dt) ? out : poly_uop_cast(ctx, out, result_dt);
 }
 
 PolyUOp *poly_uop_abs(PolyCtx *ctx, PolyUOp *x) {

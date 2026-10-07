@@ -2,6 +2,9 @@
 
 ## 0.7.1 (unreleased)
 
+- Fix `Tensor.tanh()` accuracy near zero through the shared C implementation
+  on native and Wasm backends, including its gradients.
+
 - Fix native direct-X86 execution of kernels with more than 16 arguments.
   The CPU, Wasm and WebGPU calling paths are unchanged.
 

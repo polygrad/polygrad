@@ -2022,6 +2022,15 @@ static napi_value napi_poly_tensor_tan(napi_env env, napi_callback_info info) {
   );
 }
 
+static napi_value napi_poly_tensor_tanh(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  return make_external(
+      env, poly_tensor_tanh(get_external(env, argv[0]), get_external(env, argv[1]))
+  );
+}
+
 static napi_value napi_poly_tensor_log10(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -7532,6 +7541,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_log", napi_poly_tensor_log),
       DECLARE_NAPI_METHOD("poly_tensor_cos", napi_poly_tensor_cos),
       DECLARE_NAPI_METHOD("poly_tensor_tan", napi_poly_tensor_tan),
+      DECLARE_NAPI_METHOD("poly_tensor_tanh", napi_poly_tensor_tanh),
       DECLARE_NAPI_METHOD("poly_tensor_log1p", napi_poly_tensor_log1p),
       DECLARE_NAPI_METHOD("poly_tensor_log10", napi_poly_tensor_log10),
       DECLARE_NAPI_METHOD("poly_tensor_atanh", napi_poly_tensor_atanh),

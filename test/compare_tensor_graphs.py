@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -15,6 +16,21 @@ def load(path):
 
 def node_label(node):
     return node["op"], node["dtype"], node["arg"]
+
+
+def graph_digest(graph):
+    return hashlib.sha256(json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def reviewed_graph_pair(entries, case, stage, tg_graph, pg_graph):
+    # A case-name waiver would hide unrelated regressions. Both complete,
+    # identity-preserving graphs must match an explicitly reviewed pair.
+    pair = {"tinygrad": graph_digest(tg_graph), "polygrad": graph_digest(pg_graph)}
+    for entry in entries.values():
+        if (entry["status"] == "approved" and stage in entry["stages"] and
+                entry.get("graph_pairs", {}).get(case) == pair):
+            return entry["id"]
+    return None
 
 
 def compare_graph(case, tg_graph, pg_graph):
@@ -135,6 +151,11 @@ def main():
         findings = compare_graph(
             case, tg_case["roots"]["physical"], pg_case["roots"]["physical"],
         )
+        reviewed = reviewed_graph_pair(entries, case, stage,
+                                      tg_case["roots"]["physical"], pg_case["roots"]["physical"])
+        if reviewed:
+            for finding in findings:
+                finding["id"] = reviewed
         for finding in findings:
             finding_id = finding["id"]
             entry = entries.get(finding_id)

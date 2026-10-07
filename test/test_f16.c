@@ -739,30 +739,32 @@ TEST(f16, bf16_chain_matches_native_or_emulated_renderer_rounding) {
   PASS();
 }
 
-TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
+TEST(f16, saturated_gelu_family_backward) {
   /* Exact final-f16-STORE references are recorded by the backend probes.
    * Tensor.tolist() instead inserts CAST(f32) before realization and therefore
    * has a distinct, also pinned, observation boundary. Shared symbolic
    * stabilization is symbolic.py:478-480; renderer-supported ops and dtype
-   * legalization then intentionally produce backend-specific stored bits. */
+   * legalization then intentionally produce backend-specific stored bits.
+   * PG-DIV-018: GELU references use the approved tanh composition on the
+   * pinned backends; quick-GELU remains unmodified pinned behavior. */
   uint16_t input_data[5] = {
       f32_to_f16_bits(-10.0f), f32_to_f16_bits(-8.0f), f32_to_f16_bits(-7.0f),
       f32_to_f16_bits(-6.0f),  f32_to_f16_bits(-5.0f),
   };
   uint16_t expected_cpu[2][5] = {
-      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x801cu},
       {0x0000u, 0x0000u, 0x0000u, 0x8d8au, 0x9636u},
   };
   uint16_t expected_x86[2][5] = {
-      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x801bu},
       {0x0000u, 0x0000u, 0x0000u, 0x8d89u, 0x9637u},
   };
   uint16_t expected_cuda[2][5] = {
-      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x801bu},
       {0x0000u, 0x0000u, 0x0000u, 0x8d88u, 0x9636u},
   };
   uint16_t expected_interp[2][5] = {
-      {0x8000u, 0x8000u, 0x8000u, 0x8000u, 0x8000u},
+      {0x0000u, 0x0000u, 0x8000u, 0x8000u, 0x8000u},
       {0x8000u, 0x8000u, 0x84ccu, 0x8d8du, 0x9634u},
   };
   PolyDevice device = poly_device_default();

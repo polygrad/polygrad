@@ -2,6 +2,9 @@
 
 ## 0.7.1 (unreleased)
 
+- Fix `Tensor.tanh()` accuracy near zero through the shared C implementation;
+  preserve signed zero and finite gradients for large finite inputs.
+
 - Fix direct-X86 execution of kernels with more than 16 arguments, including
   larger PCA and neighbour-search graphs; preserve the existing C ABI.
 

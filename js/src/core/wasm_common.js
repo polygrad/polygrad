@@ -1228,6 +1228,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_cos(ctx, src),
     poly_tensor_tan: (ctx, src) =>
       Module._poly_tensor_tan(ctx, src),
+    poly_tensor_tanh: (ctx, src) =>
+      Module._poly_tensor_tanh(ctx, src),
     poly_tensor_log10: (ctx, x) =>
       Module._poly_tensor_log10(ctx, x),
     poly_tensor_atanh: (ctx, x) =>

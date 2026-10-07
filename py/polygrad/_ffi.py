@@ -895,6 +895,8 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_tan.restype = _ptr
     lib.poly_tensor_tan.argtypes = [_ptr, _ptr]
+    lib.poly_tensor_tanh.restype = _ptr
+    lib.poly_tensor_tanh.argtypes = [_ptr, _ptr]
 
     lib.poly_tensor_log1p.restype = _ptr
     lib.poly_tensor_log1p.argtypes = [_ptr, _ptr]

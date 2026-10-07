@@ -135,6 +135,39 @@ async function runTensorTests(pg, createRuntime) {
     }
   }))
 
+  for (const dtype of ['float32', 'float64']) {
+    await testIf(dtype !== 'float64' || supportsF64, `${dtype} tanh accuracy and gradients`, async () => {
+      const values = [-1000, -20, -1, -.25, -.249999, -1e-7, -1e-30, -0,
+        0, 1e-30, 1e-7, .249999, .25, 1, 20, 1000]
+        .map(v => dtype === 'float32' ? Math.fround(v) : v)
+      const x = new Tensor(values, { dtype })
+      const y = x.tanh()
+      const loss = y.sum()
+      const special = new Tensor([-Infinity, Infinity, NaN], { dtype })
+      const specialResult = special.tanh()
+      try {
+        await loss.backward()
+        const actual = await y.toArray()
+        const tolerance = dtype === 'float32' ? 3e-7 : 3e-15
+        for (let i = 0; i < values.length; i++) {
+          const expected = Math.tanh(values[i])
+          assert(Math.abs(actual[i] - expected) <= tolerance * Math.abs(expected),
+            `tanh(${values[i]}) = ${actual[i]}, expected ${expected}`)
+        }
+        assert(Object.is(actual[7], -0) && Object.is(actual[8], 0), 'tanh preserves signed zero')
+        const gradient = await x.grad.toArray()
+        assert(gradient.every(Number.isFinite), 'unselected branches must not poison gradients')
+        assertClose(gradient, values.map(v => 1 - Math.tanh(v) ** 2), tolerance * 4)
+        const limits = await specialResult.toArray()
+        assert(limits[0] === -1 && limits[1] === 1 && Number.isNaN(limits[2]),
+          `tanh limits: ${limits.map(String).join(', ')}`)
+      } finally {
+        if (x.grad) x.grad.dispose()
+        for (const tensor of [loss, y, x, specialResult, special]) tensor.dispose()
+      }
+    })
+  }
+
   await testIf(supportsF64, 'float64 sine full range reduction', async () => {
     const values = [0, -0, 29.999999, 30, 30.000001, 31.2, 1000.1, -1780566.693,
       1e15, -1e25, 1e30, -1e100, Number.MAX_VALUE, Infinity, -Infinity, NaN]

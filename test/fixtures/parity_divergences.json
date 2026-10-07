@@ -263,6 +263,30 @@
       "close_when": "Pinned tinygrad provides equivalent failure recovery."
     },
     {
+      "id": "PG-DIV-018",
+      "status": "approved",
+      "stages": ["tensor", "graph", "autograd", "value"],
+      "area": "Cancellation-free tanh composition",
+      "graph_pairs": {
+        "gelu_bool": {"tinygrad": "e0f021d1a0f9798513eab554ac5b62a8fee50ad7352e4e60ef40dc138d03df76", "polygrad": "dbca8032e16f9f9e3253dbf0ef3e6fdde53d36dca7be871c19bd9fa98701c9a6"},
+        "gelu_float16": {"tinygrad": "93954fad2e2511e8c03a779e9b47b59d12d7023d7d6d3be059c9c1da368aef77", "polygrad": "199cae22764ea3bc8ce5712a44d9f6518be6f717e7abef3d0625ddd00c62f6fa"},
+        "gelu_float64": {"tinygrad": "cb52385cec45cb546a92d4fe9f00dfec96cf6ef5191df39166c956f49b347358", "polygrad": "b4fdf89951c93d24d3bceed74be94dff5a37c135764f8f8e7b685ab4567a0e95"},
+        "gelu_int32": {"tinygrad": "beffe6f4fa9b4b6bdaaa324f3f4011e7bcee87c2c188ded0773ed4d48153e84d", "polygrad": "da479acd66d4818e7021b2207bc6db125ced2fdf4641c7bbd8686a951a1c8c71"},
+        "gelu_occurrence": {"tinygrad": "01dcb0465b024fd3e3b9e8d017d87c4a64cf781e334779f41a3228abd481a4fc", "polygrad": "d3e5a44d2ce07ba7445babe118b316bab2eb0b46a3284b0d578d27bb88ac07de"},
+        "grad_gelu": {"tinygrad": "7d8fe96684f083671d6ec072f095c187985e4200125893da20afe6ecf3dceba5", "polygrad": "d2b388097701d60fdf75256c5f2312d2574b20d216be17375d4c1a14928516ea"},
+        "grad_tanh": {"tinygrad": "f5554517891f8d92a524aadfad8d639a9a379423e5a31fc6a969027d814c7efe", "polygrad": "0d874d44066412827bbfea6ff932441ebdca54e522e5448989b1e2f857eac7cf"},
+        "mish_occurrence": {"tinygrad": "05107de4063f598afd2b3d083060219552ac40034fa0573b6f9fb4f9430f392c", "polygrad": "60290a72fc60127237338b087f7be82acd12b2ba22a73dcca909636b25c60419"},
+        "tanh_float16": {"tinygrad": "9acd66c3722b43f1e4cd1bbde813a9ae694fbd753f9d006c2da5309aa73b55f7", "polygrad": "a00cd118cbcf2cbd796d6103cbf4a629ab81e0500fec3cf0c41c8b351006ceff"},
+        "tanh_occurrence": {"tinygrad": "f4100427ec262df77e2ad0730d2f617713d62c6a6704191224281e0722d7c3f4", "polygrad": "778a498c79b13c26295b0d3230357de1153352dc33ad9c0346cb6dd3751ea897"}
+      },
+      "tinygrad": "Pinned tanh is 2*sigmoid(2*x)-1, which loses relative accuracy near zero and rounds sufficiently small nonzero inputs to zero.",
+      "polygrad": "Use an odd polynomial for |x|<1/4 and (1-exp(-2*abs(x)))/(1+exp(-2*abs(x))) elsewhere, with bounded intermediates. Compute low-precision inputs in float32. This changes tanh graphs, their derivatives and composites using tanh (including GELU and recurrent layers), without adding an IR operation or backend-specific implementation.",
+      "rationale": "Audio attention softcapping exposes cancellation in small logits. Fix the shared Tensor operation rather than changing model math or loosening reference checks.",
+      "approval": "User 2026-10-07: Fix shared tanh now, in response to an explicit request for regression tests and a documented tinygrad divergence.",
+      "evidence": ["src/mixin/elementwise.c:poly_uop_tanh", "py/tests/test_tensor.py:test_tanh_accuracy_and_finite_gradients", "temp/embeddinggemma2-20261007/audio-tanh-parity.log", "temp/embeddinggemma2-20261007/tanh-before.log"],
+      "close_when": "Pinned tinygrad supplies a cancellation-free tanh with equivalent numerical coverage."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

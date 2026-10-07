@@ -216,6 +216,56 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
 
 static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n);
 
+TEST(tensor, tanh_accuracy_and_portable_composition) {
+  double values[] = {-INFINITY, -1000, -20,     -1,  -.25, -.249999, -1e-7, -1e-30,   -0.0, 0.0,
+                     1e-30,     1e-7,  .249999, .25, 1,    20,       1000,  INFINITY, NAN};
+  int64_t shape[] = {sizeof(values) / sizeof(values[0])};
+  PolyDevice devices[] = {POLY_DEVICE_CPU, POLY_DEVICE_INTERP};
+  for (int device = 0; device < 2; device++) {
+    for (int f64 = 0; f64 < 2; f64++) {
+      PolyCtx *ctx = poly_ctx_new();
+      poly_ctx_set_preferred_device(ctx, devices[device]);
+      poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+      float input[19], result[19];
+      double result64[19];
+      for (int i = 0; i < shape[0]; i++)
+        input[i] = (float)values[i];
+      PolyTensor *x = poly_tensor_from_host(
+          ctx, f64 ? (void *)values : (void *)input, f64 ? sizeof(values) : sizeof(input),
+          f64 ? POLY_FLOAT64 : POLY_FLOAT32, shape, 1
+      );
+      PolyTensor *out = poly_tensor_tanh(ctx, x);
+      ASSERT_NOT_NULL(out);
+      /* The same bounded composition must exist in executable and portable
+       * graphs; no host tanh call or sigmoid cancellation is hidden by capture. */
+      ASSERT_TRUE(count_op_in_root(ctx, out->uop_physical, POLY_OP_WHERE) >= 4);
+      ASSERT_EQ(count_op_in_root(ctx, out->uop_physical, POLY_OP_EXP2), 1);
+      ASSERT_EQ(count_op_in_root(ctx, out->uop_logical, POLY_OP_EXP2), 1);
+      ASSERT_EQ(
+          read_tensor_bytes(
+              ctx, out, f64 ? (void *)result64 : (void *)result,
+              f64 ? sizeof(result64) : sizeof(result)
+          ),
+          0
+      );
+      for (int i = 0; i < shape[0]; i++) {
+        double actual = f64 ? result64[i] : result[i];
+        double expected = tanh(f64 ? values[i] : input[i]);
+        if (isnan(expected))
+          ASSERT_TRUE(isnan(actual));
+        else {
+          ASSERT_TRUE(fabs(actual - expected) <= (f64 ? 3e-15 : 3e-7) * fabs(expected));
+          if (expected == 0) ASSERT_EQ(!!signbit(actual), !!signbit(expected));
+        }
+      }
+      poly_tensor_release(out);
+      poly_tensor_release(x);
+      poly_ctx_destroy(ctx);
+    }
+  }
+  PASS();
+}
+
 TEST(tensor, round_half_ties_match_pinned_even_parity) {
   float values[] = {-9.5f, -8.5f, -3.5f, -2.5f, -1.5f, -.5f, .5f, 1.5f, 2.5f, 3.5f, 8.5f, 9.5f};
   float expected[] = {-10, -8, -4, -2, -2, 0, 0, 2, 2, 4, 8, 10}, got[12];

@@ -15,6 +15,27 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_graph_divergence_requires_both_exact_reviewed_graphs():
+    import copy
+    checker = runpy.run_path(str(ROOT / 'test/compare_tensor_graphs.py'))
+    digest, reviewed = checker['graph_digest'], checker['reviewed_graph_pair']
+    tg = {'root': 0, 'nodes': [{'op': 'ADD', 'dtype': 'float32', 'arg': None, 'src': []}]}
+    pg = {'root': 0, 'nodes': [{'op': 'WHERE', 'dtype': 'float32', 'arg': None, 'src': []}]}
+    entry = {'id': 'test-only', 'status': 'approved', 'stages': ['tensor'],
+             'graph_pairs': {'case': {'tinygrad': digest(tg), 'polygrad': digest(pg)}}}
+    entries = {entry['id']: entry}
+    assert reviewed(entries, 'case', 'tensor', tg, pg) == 'test-only'
+    assert reviewed(entries, 'other', 'tensor', tg, pg) is None
+    assert reviewed(entries, 'case', 'runtime', tg, pg) is None
+    for side in (0, 1):
+        for field, value in [('op', 'SUB'), ('dtype', 'float64'), ('arg', 1), ('src', [0])]:
+            graphs = copy.deepcopy([tg, pg])
+            graphs[side]['nodes'][0][field] = value
+            assert reviewed(entries, 'case', 'tensor', *graphs) is None
+    entry['status'] = 'open_debt'
+    assert reviewed(entries, 'case', 'tensor', tg, pg) is None
+
+
 @pytest.mark.parametrize('failure', ['', 'missing-wheel', 'tampered'])
 @pytest.mark.parametrize('relative', [False, True])
 def test_publish_python_uses_verified_staged_archives(tmp_path, failure, relative):

@@ -16,6 +16,32 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('dtype', ['float32', 'float64'])
+def test_tanh_accuracy_and_finite_gradients(dtype):
+    npdtype = np.dtype(dtype)
+    boundary = np.array([.25, 20], dtype=npdtype)
+    positive = np.concatenate([np.geomspace(1e-30, .25, 150), np.linspace(.25, 20, 150),
+                               np.nextafter(boundary, npdtype.type(0)), boundary,
+                               np.nextafter(boundary, npdtype.type(np.inf))])
+    data = np.concatenate([-positive, positive, [-0., 0., -1000., 1000.]]).astype(npdtype)
+    device = os.environ.get('POLY_DEV', 'CPU')
+    with Runtime(device=device) as rt:
+        x = rt.Tensor(data, dtype=dtype)
+        y = x.tanh()
+        y.sum().backward()
+        expected = np.tanh(data.astype(np.float64)).astype(npdtype)
+        tolerance = 3e-7 if dtype == 'float32' else 3e-15
+        np.testing.assert_allclose(y.numpy(), expected, atol=0, rtol=tolerance)
+        np.testing.assert_array_equal(np.signbit(y.numpy()[-4:-2]), [True, False])
+        grad = x.grad.numpy()
+        assert np.isfinite(grad).all()
+        np.testing.assert_allclose(grad, 1-np.tanh(data.astype(np.float64))**2,
+                                   atol=tolerance*4, rtol=tolerance*4)
+        special = rt.Tensor(np.array([-np.inf, np.inf, np.nan], npdtype), dtype=dtype).tanh().numpy()
+        np.testing.assert_array_equal(special[:2], [-1, 1])
+        assert np.isnan(special[2])
+
+
 @pytest.mark.parametrize('assignment', [False, True])
 def test_failed_compilation_restores_roots_and_aliases(monkeypatch, assignment):
     with Runtime(device='cpu') as rt:
@@ -5720,7 +5746,7 @@ class TestMaterializationParity:
             getattr(grad_input, method)().sum().backward()
             np.testing.assert_array_equal(grad_input.grad.numpy(), np.zeros_like(values))
 
-    def test_saturated_float16_gelu_family_backward_matches_pinned_backend(self):
+    def test_saturated_float16_gelu_family_backward(self):
         # Pinned mixin/elementwise.py:751-759 constructs these composites;
         # symbolic.py:478-480 stabilizes the reciprocal products, and
         # cstyle.py:40-43,62-63,194,232-237 defines the exact half rendering.
@@ -5748,11 +5774,36 @@ class TestMaterializationParity:
                 # Pinned X86 legalizes half ALUs separately from cstyle rendering.
                 wanted = np.array([0, 0, 0, 0x8D89, 0x9637], dtype=np.uint16)
                 wanted_list = [-0.0, -0.0, -0.0, -0.0002200603485107422, -0.0010099411010742188]
+            elif x.device == 'CUDA' and method == 'quick_gelu':
+                wanted = np.array([0, 0, 0, 0x8D88, 0x9636], dtype=np.uint16)
+                wanted_list = [-0., -0., -0., -0.0002199411392211914, -0.0010099411010742188]
+            elif x.device == 'INTERP' and method == 'quick_gelu':
+                wanted = np.array([0x8000, 0x8000, 0x84CC, 0x8D8D, 0x9634], dtype=np.uint16)
+                wanted_list = [-4.068913028731913e-07, -9.787509043235332e-06, -4.696020914707333e-05,
+                               -0.00022071014973334968, -0.0010083739180117846]
+            elif x.device == 'INTERP' and method == 'gelu':
+                wanted_list = [-0., -0., -0., -0., -1.4901161193847656e-07]
             activated = getattr(x, method)()
             activated.sum().backward()
             gradient = np.asarray(x.grad.numpy(), dtype=np.float16)
             assert np.isfinite(gradient).all()
-            np.testing.assert_array_equal(gradient.view(np.uint16), wanted)
+            if method == 'gelu' and x.device == 'INTERP':
+                # Tinygrad's Python renderer also rounds the partial half
+                # gradients to zero for the approved tanh composition.
+                np.testing.assert_array_equal(gradient.view(np.uint16), [0, 0, 0x8000, 0x8000, 0x8000])
+            elif method == 'gelu':
+                # PG-DIV-018 changes the tanh derivative: a small nonzero
+                # gradient must survive even when the half forward rounds to
+                # zero. Compare the analytic tanh-GELU derivative, allowing
+                # three half subnormal units for rounded intermediate ALUs.
+                values = np.asarray(inputs, dtype=np.float64)
+                scale = np.sqrt(2/np.pi)
+                u = scale * (values + .044715*values**3)
+                analytic = .5*(1+np.tanh(u)) + .5*values*(1-np.tanh(u)**2)*scale*(1+3*.044715*values**2)
+                np.testing.assert_allclose(gradient.astype(np.float64), analytic,
+                                           rtol=0, atol=3*2**-24)
+            else:
+                np.testing.assert_array_equal(gradient.view(np.uint16), wanted)
             assert activated.tolist() == wanted_list
 
     def test_round_and_isinf_match_pinned_compositions(self):

@@ -8052,7 +8052,7 @@ PolyTensor *poly_tensor_tanh(PolyCtx *ctx, PolyTensor *src) {
   if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
   int build_logical = tensor_unary_builds_logical(ctx, src);
   if (build_logical < 0) return NULL;
-  /* Pinned tanh is 2*sigmoid(2*x)-1 (mixin/elementwise.py:739-748). */
+  /* Shared cancellation-free composition (PG-DIV-018). */
   return tensor_unary_result(
       ctx, src, build_logical ? poly_uop_tanh(ctx, src->uop_logical) : NULL,
       poly_uop_tanh(ctx, src->uop_physical)
