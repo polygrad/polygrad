@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-10-06",
-  "basis": "Reviewed the source-matching October6 release scan: 93 CUDA-enabled/HIP-disabled Clang14 translation units, 110 diagnostics. Exact prior matches43, location-shifted occurrences53, additional occurrences14 (12 Graph composition, 2 ONNX); one old ONNX diagnostic is absent. Examined fresh detailed traces for all24 compose and 27 ONNX diagnostics, with per-site guard/output-initialization and cJSON invariants. Rechecked changed compiler/schedule/renderer/Tensor warning sites against current source; retained applicable unchanged-site rationales. No confirmed production defect found in these paths; no source changes, checker suppression or scope reduction. New segment.c unit is included, not excluded. Evidence: temp/analyzer-review-20261006.md, temp/analyzer-review-20261006-paths.log and temp/release-20261006T084207Z-5e5cd15c/analyzer/report.json. Fresh verification: temp/analyzer-review-20261006-verified/report.json.",
+  "reviewed_on": "2026-10-07",
+  "basis": "October7 full Clang14 scan: 93 translation units, 110 diagnostics. Only x86.c changed since the October6 review; 109 diagnostics match exactly and its existing label-lookup warning moved four lines. Rechecked allocation/lookup guards at that site and retained all unchanged-source rationales. No new warning, suppression or scope reduction. Evidence: temp/release-prep-20261007/analyzer/report.json and verified.json. Prior detailed review: temp/analyzer-review-20261006.md and temp/analyzer-review-20261006-paths.log.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -224,7 +224,7 @@
       "src/renderer/cstyle.c": "c1ab649bc2782cbeec7f1fb7eb65e6864ac4c64414232d05f3b72ca4d5554826",
       "src/renderer/cstyle.h": "17982b0187c10bdc63c9f9d929422e2d9a37232a2466bdf750d870659b64b381",
       "src/renderer/cuda.c": "d5de80f0b40f3c80ff83827cd9337bacde8e12b55d96a810223c4588447e6b21",
-      "src/renderer/isa/x86.c": "6636fab50a2f05f1c46feacc6e1d87efbdb6cda2cbf38da2d0dbdec70431783d",
+      "src/renderer/isa/x86.c": "06b5fc22e52be99ff70643926d4b6a60bb070870c85efeb2f14f647ec4af9199",
       "src/renderer/isa/x86.h": "f3646cd4ea2863c2be47ade26428b58465a2a9cfbca70f09d41de846851a2436",
       "src/renderer/renderer.h": "bc7a9aa625889c7bf311e0e02684b118fe99fa5309ef9a41f8b518a56981209e",
       "src/renderer/wasm.c": "19fd7fe7a5586dfe3bd5f5cdcd50a2f0cb7b702535b56f2924bae7bb0d4dd9d5",
@@ -1067,12 +1067,12 @@
     },
     {
       "path": "src/renderer/isa/x86.c",
-      "line": 5248,
+      "line": 5252,
       "column": 29,
       "message": "Dereference of null pointer",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
-      "rationale": "NULL/empty label table cannot yield a successful label lookup. Recent encoding changes do not change this contract."
+      "rationale": "NULL/empty label table cannot yield a successful label lookup: label_pos_add increments n only after allocation succeeds, and label_pos_find returns -1 for n=0. The caller rejects li<0 before indexing. October7 full scan has the same diagnostic shifted four lines by the SysV compile guard; the new call bridge emits no diagnostics. All other source inputs and 109 diagnostics match the October6 review. Evidence: temp/release-prep-20261007/analyzer/report.json."
     },
     {
       "path": "src/schedule/indexing.c",

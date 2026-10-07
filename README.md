@@ -715,6 +715,15 @@ collection boundaries with `poly_uop_retain()`, and release them with
 
 </details>
 
+## Versioning
+
+Python and JavaScript share the same major/minor core release line. ABI-compatible
+core bug fixes ship as a patch in both packages; wrapper-only fixes may increment
+only the affected package. New public features, ABI changes and intentional
+incompatible behaviour changes require a minor or major release. Correcting a
+backend to execute already-supported graphs is a bug fix, not a new feature.
+Binary extension compatibility is checked separately from package versions.
+
 ## Building From Source
 
 ```bash
