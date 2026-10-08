@@ -27,6 +27,13 @@ def blocks():
 BLOCKS = list(blocks())
 
 
+@pytest.mark.parametrize('dtype', ['float16', 'float32', 'float64'])
+def test_readme_normalize_constant_input(tmp_path, dtype):
+    code = next(code for path, _, lang, code, _ in BLOCKS
+                if path == 'py/README.md' and lang == 'python' and 'normalize(x: Tensor)' in code)
+    run_example('python', code + f'\nassert normalize(Tensor([2., 2., 2.], dtype="{dtype}")).numpy().tolist() == [0., 0., 0.]\n', tmp_path)
+
+
 def run_example(lang, code, work):
     env = dict(os.environ, POLY_LIB=str(Path(_ffi._lib._name).resolve()), PYTHONPATH=str(ROOT / 'py'),
                POLY_DEV='CPU', DEV='CPU', POLY_DEBUG='0')

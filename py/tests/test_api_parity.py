@@ -933,10 +933,10 @@ def test_readme_javascript_package_example():
     section = text.split('JavaScript package pattern:', 1)[1]
     consumer, implementation = re.findall(r'```js\n(.*?)\n```', section, re.S)[:2]
     consumer = consumer.replace("require('polygrad')", "require('./')")
-    consumer = consumer.replace('pg.dispose()', '''
+    consumer = consumer.replace('model.dispose()', '''
 if (y.shape.join(',') !== '1,2' || !Array.from(y.toArray()).every(Number.isFinite))
   throw new Error('invalid package prediction')
-pg.dispose()''')
+model.dispose()''')
     script = implementation + '\nconst SomePackage = { create };\n' + consumer
     result = subprocess.run([node, '-e', script], cwd=root / 'js', capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.7.1 (unreleased)
+## 0.7.1 (2026-10-08)
+
+- Models saved with 0.7.1 cannot be loaded by 0.7.0. Loading models saved by
+  0.7.0 remains supported; existing graph-author extensions remain compatible.
 
 - Add EmbeddingGemma 2 builders and HF import for text, image and audio embeddings,
   with config-based modality selection and portable Model bundles. Mismatched

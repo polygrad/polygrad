@@ -148,7 +148,7 @@ Python Tensor API       JavaScript Tensor API       C / native package
 | Package integration | create one runtime and pass it into the package |
 
 Browser WebGPU execution and readback require async methods. HIP is implemented
-but excluded from the 0.5.2 release-validation matrix.
+but excluded from the release-validation matrix.
 
 Choose a device through Tensor/Runtime options or, in native applications,
 `POLY_DEV` / `DEV`. Use the default runtime for ordinary programs; create an
@@ -206,41 +206,9 @@ reject. Explicit Python `strict=False` / JS `{strict:false}` (C:
 potentially different token IDs. Both frontends also expose GGUF tokenization.
 See [tokenizer support](js/README.md#pretrained-and-configured-models).
 
-EmbeddingGemma 2 text inference accepts fixed-shape int32 `input_ids` and
-`attention_mask` (1 for a token, 0 for padding). `forward` returns projected
-`last_hidden_state` and an L2-normalized, masked-mean `sentence_embedding`.
-It uses FP32 computation. For text-only inference with the full HF checkpoint,
-set `modalities: ["text"]` in the config passed to the importer. The original
-tower configs can stay intact; unused tower weights are ignored. Omit
-`modalities` to include every configured tower.
-A text-only checkpoint uses `embedding_gemma2_text` and
-unprefixed weights. Tokenization and task prefixes stay outside the model;
-use the official Hugging Face tokenizer, not Polygrad's byte-BPE tokenizer.
-Truncate embeddings only with subsequent L2 renormalization. The model has no
-KV cache or generation path.
-
-For images, select `modalities: ["text", "image"]` and set
-`image_num_patches` to the processor's fixed patch capacity. Additional inputs
-are float32 `pixel_values` `[batch, patches, 3*patch_size*patch_size]` and int32
-`image_position_ids` `[batch, patches, 2]`. Use the official HF processor;
-these are flattened, unnormalized patches with `(x,y)` positions, not NCHW
-images. Padding positions are `(-1,-1)`. This path accepts one nonempty image
-per batch item; the processor must supply the matching image-token slots in
-`input_ids`. Mismatched slot counts are rejected before inference, including
-after saving and loading the model. Pass token IDs and patch positions as host
-arrays, not device Tensor bindings, so checking them needs no GPU readback.
-`image_hidden_states` and `image_attention_mask` expose padded projected image
-features; the final sentence embedding includes both image and text tokens.
-For audio, select `modalities: ["text", "audio"]` and set `audio_seq_len` to the processor's
-feature-frame capacity. Pass float32 `input_features` `[batch, frames, features]`
-and a 0/1 `input_features_mask` `[batch, frames]`, with matching audio-token slots
-in `input_ids`. Token IDs and the feature mask must be host arrays; mismatched
-slot counts are rejected before inference. Outputs include padded `audio_hidden_states` and
-`audio_attention_mask`. Audio preprocessing and tokenization remain external.
-Video and clipped vision projections are not supported.
-`output_hidden_states: true` additionally returns `hidden_states.N` and, when
-enabled, `vision_hidden_states.N` and `audio_hidden_states.N` (tower input
-projection at N=0, then each layer).
+EmbeddingGemma 2 produces text, image and audio embeddings using external
+Hugging Face preprocessing; see the [Python](py/README.md#embeddinggemma-2) and
+[JavaScript](js/README.md#embeddinggemma-2) guides for inputs and modality selection.
 
 ### Configuration-driven Models
 
@@ -395,18 +363,18 @@ inference-only; unsupported operators and shapes produce an import error.
 ### Export Products
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.
-Polygrad 0.7.1 loads portable models saved by 0.7.0. Models saved by 0.7.1
-use an updated format that preserves input checks and require 0.7.1 or newer.
-Existing graph-author extensions built for 0.7.0 remain compatible.
+Newer releases load older portable models; a model saved by a newer release
+may require that release or later. Check the release notes before exchanging
+models between different package versions.
 Cached models save their program and weights, not conversation history.
 
 For separate artifacts:
 
-- `export_ir()` / `exportIR()` returns portable logical PGIR. Import it with a
+- `export_ir()` / `exportIR()` returns the portable model graph. Import it with a
   new placement policy when the target device layout may change.
 - `export_program()` / `exportProgram()` returns the currently compiled,
-  device-bound PROGRAM/LINEAR artifact. It starts without rebuilding the model
-  graph, but requires the same Polygrad ABI and a compatible backend/device.
+  device-bound program. It starts without rebuilding the model graph, but
+  requires a compatible Polygrad binary interface and backend/device.
 - `export_weights()` / `exportWeights()` returns named safetensors state. Pass
   it separately to either import path when the model has parameters/state.
 
@@ -433,8 +401,8 @@ const result = fastModel.call('forward', { x: inputArray })
 WebGPU startup is asynchronous, so use `await model.exportProgramAsync()` and
 `await Model.fromProgramAsync(program, weights)`. A bound-program Model
 is inference/call-only: it has no portable logical graph and cannot be
-re-placed, trained, differentiated, or exported as PGIR. The existing bundle
-format remains the portable PGIR-plus-weights product.
+placed on another device, trained, differentiated, or exported as a portable
+graph. Use a regular Model bundle when portability is needed.
 
 
 ### Settings
@@ -535,8 +503,8 @@ Explicit device choices override `POLY_DEV`, which overrides Tinygrad's `DEV`.
 Both environment names accept case-insensitive single backend names and
 `CPU:X86`. Unsupported renderer, architecture, interface, ordinal-like and
 multi-target forms fail rather than silently selecting another backend.
-Full Target-selection vocabulary remains open debt PG-PARITY-037, separate
-from multi-GPU execution support.
+Not all Tinygrad target-selection forms are supported; multi-GPU execution
+is also unsupported.
 `DEV=CUDA:1` is a renderer request in Tinygrad's target grammar, not GPU1.
 Device strings passed directly to Tensor/Runtime retain their existing rules.
 
@@ -635,12 +603,12 @@ expressions. Preparation failures before any dispatch leave existing values
 intact and allow retry. After partial execution, storage written by attempted
 calls is unusable; reads and reuse fail rather than return partial results.
 Recreate affected state from a checkpoint. This does not roll back writes or
-recover a lost GPU device (PG-DIV-017).
+recover a lost GPU device.
 
 The schedule cache has no automatic eviction or size cap. Every distinct
-cached graph keeps its schedule and, unlike Tinygrad's byte keys, its source
-graph (`PG-PARITY-032`). Long-lived runtimes producing many distinct graphs can
-therefore accumulate memory; `collect()` alone does not evict this cache.
+cached graph keeps its schedule and source graph. Long-lived runtimes producing
+many distinct graphs can therefore accumulate memory; `collect()` alone does
+not evict this cache.
 Symbolic bindings that reuse a schedule do not necessarily add cache entries.
 
 At an idle boundary, use Python `pg.clear_schedule_cache()` or
@@ -680,20 +648,8 @@ the reviewed [Tensor](test/fixtures/tinygrad_upstream_014_baseline.json),
 keep nonpassing cases explicit, including unsupported Python compiler-private
 helpers.
 
-One remaining core limit is shape rank: Tensor/intermediate STAGE shapes
-support at most 16 axes (`PG-PARITY-031`). Active loop dependencies are not
-rank-limited: materialization preserves every RANGE, while buffer-limit
-splitting rejects an intermediate shape it cannot represent. This is an open
-parity limitation, not a claim of complete Tinygrad compatibility.
-
-C-style and WGSL parameter names omit Tinygrad's shape suffix
-(`PG-PARITY-038`). This source-text parity debt does not permit differences in
-argument slots, graph topology or computed values.
-
-The padded-coordinate guard is an intentional divergence (PG-DIV-010);
-valid-coordinate division by zero remains subject to [Current Limits](#current-limits).
-The strict fixed-width symbolic oracle still fails `uint8_add_wrap_cmp` in both
-Polygrad and pinned Tinygrad; see [Tests](#tests).
+Tensor shapes support at most 64 dimensions. Portable Model inputs and outputs
+support at most 8 dimensions.
 
 WebGPU does not guarantee NaN truthiness or preservation through clipping under
 WGSL finite-math rules. Unsupported features and reviewed divergences are listed
@@ -706,10 +662,10 @@ The main intentional differences are:
 | Core runtime | Compiler state, buffers, caches, and backend runners live in `PolyCtx` inside a C library |
 | Frontends | Python and JavaScript are wrappers over the same C core rather than separate runtimes |
 | WASM/browser | Browser execution uses the unified C/WASM runtime path, with WebGPU orchestrated from the C backend |
-| Model tooling | `PolyModel` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
+| Model tooling | Models provide named inputs, outputs and state, training helpers, and portable save/load |
 | Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
 | WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
-| WebGPU narrow integers | `PG-DIV-008`: truncate 8/16-bit integer casts and arithmetic results before widening, correcting the pinned WGSL renderer's lost narrowing; Tensor graphs remain unchanged |
+| WebGPU narrow integers | Preserve 8/16-bit integer overflow and cast behavior, correcting lost narrowing in the pinned WGSL renderer |
 
 </details>
 
@@ -811,7 +767,7 @@ make test-parity
 make test-py
 make test-js-native
 TMPDIR=$PWD/temp/cc_tmp EM_CACHE=$PWD/temp/emscripten-cache make test-js-wasm
-DISPLAY=:1 make test-browser
+make test-browser  # use an existing working DISPLAY
 make test-browser-matrix
 ```
 
@@ -857,6 +813,9 @@ Required setup:
   `ANALYZER_CC=clang-14` at the exact reviewed version.
 - `build` in `PYTHON`, `z3` in `PARITY_PY`, writable caches, a browser display
   and the required model fixtures. Override `QWEN3_GGUF` for its local path.
+- `BROWSER_TMPDIR`: a short writable path with at least 2 GiB free for Chromium
+  profiles and model-transfer files (default `/tmp`). It is separate from
+  compiler scratch space selected by `TMPDIR` / `POLY_TMPDIR`.
 
 Preflight stops on missing prerequisites. The runner does not download model
 fixtures, update baselines or approve debts. Individual package checks can use
@@ -926,7 +885,7 @@ make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-002 \
   UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json'
 # NN and optimizer files, with source-locked CPU helper adaptation:
 make test-compat-tinygrad-nn UPSTREAM_COMPAT_DIR=temp/upstream-nn-001
-# Diagnostic refresh of all674 selected cases per engine, in three serial lanes:
+# Diagnostic refresh of all selected cases per engine, in three serial lanes:
 make test-compat-tinygrad-suite UPSTREAM_COMPAT_DIR=temp/upstream-suite-001
 ```
 

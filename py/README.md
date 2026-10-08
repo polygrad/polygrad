@@ -41,7 +41,8 @@ Other Linux configurations build from source and require a C compiler and Python
 development headers. Wheels do not remove the CPU backend's runtime compiler
 requirement; use `DEV=X86` (x86_64) or `DEV=INTERP` to run without one.
 
-Optional model-loading dependency:
+Optional dependency for downloading Hugging Face checkpoints (loading local
+config and weight files does not need it):
 
 ```bash
 pip install huggingface_hub
@@ -285,6 +286,8 @@ CPU identities. Unsupported accelerator ordinals reject without changing the Mod
 `Model.load(bytes_or_path)` uses the default runtime, or pass `runtime=rt`.
 Each load owns independent state, while tied weights within a Model stay tied.
 Disposing a Model does not dispose its runtime.
+Newer releases load older portable models; files saved by a newer release may
+require that release or later. Check the changelog when exchanging models.
 
 Bundles preserve auxiliary/RNG and optional optimizer state.
 `include_optimizer=False` omits optimizer state, not training entrypoints.
@@ -302,7 +305,8 @@ their ONNX names. The imported Model supports placement and bundle save/load.
 For external weights, pass `external_data={'weights.bin': weight_bytes}`;
 locations are exact keys, not files fetched by the loader. Initializers are
 copied into frozen state; this import does not create a training objective or
-Transformer generation methods. See the [supported ONNX subset](https://github.com/polygrad/polygrad#onnx-import).
+Transformer generation methods. Unsupported operators and shapes raise an
+import error; see [ONNX import](https://github.com/polygrad/polygrad#onnx-import).
 
 ### Pretrained models
 
@@ -321,8 +325,9 @@ finally:
     model.dispose()
 ```
 
-`load_hf` supports GPT-2 and Llama configurations with F32/F16/BF16
-safetensors. The `generate` helper above expects GPT-2 input/output names;
+`load_hf` uses the same checkpoint importer as `Model.from_hf`, including the
+vision and embedding models below, with F32/F16/BF16 safetensors.
+The `generate` helper above expects GPT-2 input/output names;
 it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
 
 `models.GPT2(config)` and `models.Llama(config)` build topology without pretrained
@@ -340,7 +345,7 @@ cache_capacity=4096, prefill_chunk_size=64)`, or the runtime-bound
 `rt.models.Transformer.from_gguf(...)`. The loader validates the generation
 contract; `Model.from_gguf` accepts the same cache options but stays generic.
 
-New Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
+Qwen3 GGUF imports accept only int32 token input `x` and return `output`:
 `model.forward(x=token_ids)['output']`. Rotary tables are Model-owned state,
 included in saved bundles. Older bundles retain their original signatures;
 use `model.entrypoints()` to inspect them.
@@ -416,13 +421,18 @@ declares token batches of 1 to 32 rows without rebuilding the model.
 ### EmbeddingGemma 2
 
 `models.EmbeddingGemma2Text` constructs the text backbone from a resolved HF
-text config. Load its weights with `Model.from_hf`; the full `embedding_gemma2`
-checkpoint accepts `"modalities": ["text"]` in the config passed to
-`config_json` for text-only inference, without removing the tower configs.
+text config. For a full `embedding_gemma2` checkpoint, set
+`"modalities": ["text"]` in its parsed configuration for text-only inference;
+there is no need to remove the image/audio configuration. Pass the serialized
+config and a list of safetensors file contents together as
+`Model.from_hf(config_json=config_text, weight_bytes_list=weight_files)`.
+These are bytes/text, not filenames; use `Model.from_hf(directory)` when the
+checkpoint config needs no changes.
 Omitting `modalities` includes every configured tower.
 Computation and imported parameters use float32.
 
-Pass fixed-shape int32 `input_ids` and binary `attention_mask` to `forward`.
+Pass fixed-shape int32 `input_ids` and int32 `attention_mask` (1 for tokens,
+0 for padding) to `forward`.
 Outputs are projected `last_hidden_state` and normalized `sentence_embedding`.
 Both left and right padding are supported; masked tokens are excluded from
 pooling. Tokenization and task prompts use the official HF tokenizer outside
@@ -435,7 +445,8 @@ and int32 `image_position_ids` `[batch, patches, 2]` alongside tokens and mask.
 Use one nonempty image per batch item and processor-generated matching image
 token slots; mismatches are rejected before inference, including after Model
 save/load. Token IDs and patch positions must be host arrays, not Tensors.
-Padding positions are
+These are flattened, unnormalized patches with `(x,y)` positions, not the
+normalized NCHW images used by the vision models above. Padding positions are
 `(-1,-1)`. Outputs also include padded `image_hidden_states` and their boolean
 `image_attention_mask`.
 
@@ -447,6 +458,8 @@ feature masks must be host arrays, not Tensors. Outputs include
 padded `audio_hidden_states` and `audio_attention_mask`.
 Video and clipped vision projections are not implemented. Tokenization and preprocessing remain
 external; no Hugging Face packages are required by Polygrad itself.
+This is an embedding model, not a text generator. Set `output_hidden_states`
+to `true` in the config to expose per-layer text/image/audio hidden states.
 
 ## Devices And Runtimes
 
@@ -455,12 +468,9 @@ Choose a device explicitly or through the environment:
 ```python
 from polygrad import Device, Tensor
 
-x = Tensor.rand(4)
-
-if Device.cuda_available():
-    y = (x * 2).to("cuda")
-else:
-    y = (x * 2).to("cpu")
+device = "cuda" if Device.cuda_available() else "cpu"
+x = Tensor.rand(4, device=device)
+y = x * 2
 
 print(y.numpy())
 ```
@@ -642,11 +652,11 @@ from polygrad import Tensor
 def normalize(x: Tensor) -> Tensor:
     mean = x.mean(axis=-1, keepdim=True)
     scale = (x - mean).square().mean(axis=-1, keepdim=True).sqrt()
-    return (x - mean) / scale
+    return (x - mean) / scale.maximum(1e-6)
 ```
 
 This keeps execution in the caller's Polygrad context and avoids unnecessary
-NumPy readback.
+NumPy readback. The denominator guard returns zeros for constant inputs.
 
 ### C-authored graphs
 
@@ -722,7 +732,8 @@ Use Hugging Face tokenizers for other pipelines. No Unicode dependency is added.
   Install it and select `CC=clang`; check that `CC` is not forcing GCC.
 - **`args mismatch in jit`:** the call must match the traced input shapes,
   dtypes and devices. An `int32` input cannot replace a `float32` sample.
-- **Bundle ABI/format mismatch:** use matching producer/consumer Polygrad versions.
+- **Model format mismatch:** upgrade the reader to the version that saved the
+  model or a newer release.
   See [bundle compatibility](https://github.com/polygrad/polygrad#export-products);
   do not edit artifact version fields to bypass validation.
 - **CPU compilation cannot find a compiler:** install clang (recommended) or GCC,

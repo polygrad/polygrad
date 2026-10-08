@@ -1,30 +1,27 @@
 # Changelog
 
-## 0.7.1 (unreleased)
+## 0.7.1 (2026-10-08)
 
-- Add EmbeddingGemma 2 text, image and audio graph builders and HF weight import.
-  Return token features and normalized sentence embeddings; select towers with
-  `modalities` in the import config. Tokenization and preprocessing stay external.
-  Reject mismatched image/audio token counts before inference; validation is
-  preserved in portable models. Checked processor metadata must be host arrays.
-- Add input-only Model requirements, evaluated with the compiler-free interpreter
-  before parent input/state writes. PGIR23 preserves requirements and reads
-  PGIR19/22. Frontend and graph-author extension compatibility remains ABI108.
-  Direct C codec users must rebuild for the expanded `PolyIrSpec` structure.
-  Bound-program export
-  and graph inlining reject checked Models rather than dropping their checks.
-  Report check execution failures separately from rejected input values.
+- Add EmbeddingGemma 2 builders and Hugging Face import for text, image and audio
+  embeddings, with config-based modality selection and portable Model bundles.
+  Mismatched image/audio token counts are rejected before inference and after
+  reload. Tokenization and preprocessing stay external.
+- Add Model input validation that runs without a C compiler, before changing
+  inputs or state. Models with input checks cannot be exported as compiled
+  programs or inlined into other graphs; use portable bundles instead.
+- Models saved with 0.7.1 cannot be loaded by 0.7.0. Loading models saved by
+  0.7.0 remains supported, as do existing frontend and graph-author extensions.
+  C applications using the low-level model-file API must rebuild for its updated
+  structure layout.
 
-- Use the shared guarded L2 normalization in CLIP. Zero projections now produce
-  finite zero embeddings and logits instead of NaNs; norms below 1e-12 are clamped.
+- CLIP zero projections now return finite zero embeddings and logits instead
+  of NaNs, using the shared Tensor normalization with epsilon 1e-12.
 
-- Fix `tanh` cancellation near zero in the shared Tensor composition, including
-  Python, JavaScript and derivatives. Values and graphs intentionally differ
-  from pinned Tinygrad (PG-DIV-018); no new operation or dependency.
+- Fix `Tensor.tanh()` accuracy near zero in Python and JavaScript, including
+  its gradients. Results can differ from the pinned Tinygrad implementation.
 
-- Remove the direct-X86 launcher's 16-argument ceiling. Generate one SysV call
-  bridge beside each kernel, using registers and stack arguments for both
-  serial and threaded execution. No dependency, public ABI or graph change.
+- Fix direct-X86 execution of kernels with more than 16 arguments, including
+  larger PCA and neighbour-search graphs. Other execution backends are unchanged.
 
 ## 0.7.0 (2026-10-06)
 
