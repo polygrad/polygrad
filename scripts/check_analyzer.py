@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,14 +68,18 @@ def evaluate(log, raw_exit_code, current, review):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--review', default='test/fixtures/analyzer_reviews.json')
-    parser.add_argument('--output', required=True)
+    parser.add_argument('--output', help='fresh evidence directory; default: unique directory under temp/')
     parser.add_argument('--make', default='make')
     parser.add_argument('--clang', default='clang-14')
     parser.add_argument('--sources', required=True)
     parser.add_argument('--flags', required=True)
     args = parser.parse_args()
-    output = Path(args.output).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    if args.output:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=False)
+    else:
+        (ROOT / 'temp').mkdir(exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix='analyzer-reviewed-', dir=ROOT / 'temp'))
     sources, flags = shlex.split(args.sources), shlex.split(args.flags)
     clang = subprocess.run(shlex.split(args.clang) + ['--version'], check=True,
                            encoding='utf-8', capture_output=True).stdout

@@ -1,13 +1,22 @@
 """Reviewed diagnostics do not permit new warnings, stale proofs or incomplete runs."""
 
 import copy
+import json
 import runpy
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_verify_uses_reviewed_analysis():
+    rule = next(line for line in (ROOT / 'Makefile').read_text().splitlines() if line.startswith('verify:'))
+    assert 'test-analyze-reviewed' in rule.split()
+    assert 'analyze' not in rule.split()
 
 
 @pytest.fixture
@@ -72,3 +81,35 @@ def test_clean_raw_run_needs_no_warning_allowances(case):
 def test_warning_without_nonzero_raw_gate_is_inconsistent(case):
     check, context, review, log = case
     assert check['evaluate'](log, 0, context, review)['status'] == 'failed'
+
+
+def test_default_output_preserves_repeated_runs(case, tmp_path, monkeypatch):
+    check, _, _, _ = case
+    main = check['main']
+    monkeypatch.setitem(main.__globals__, 'ROOT', tmp_path)
+    (tmp_path / 'owner.c').write_text('/* analyzer fixture */\n')
+    current = check['context'](tmp_path, ['owner.c'], [], 'test clang\n')
+    review = tmp_path / 'review.json'
+    review.write_text(json.dumps(dict(schema_version=1, context=current, diagnostics=[])))
+
+    def run(command, **kwargs):
+        if '--version' in command:
+            return SimpleNamespace(stdout='test clang\n', returncode=0)
+        kwargs['stdout'].write('analyzer-exit: owner.c 0\n')
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(main.__globals__['subprocess'], 'run', run)
+    monkeypatch.setattr(sys, 'argv', ['check_analyzer.py', '--review', str(review),
+                                    '--sources', 'owner.c', '--flags', ''])
+    assert main() == 0
+    first = list((tmp_path / 'temp').glob('analyzer-reviewed-*/report.json'))
+    assert len(first) == 1
+    saved = first[0].read_bytes()
+    assert main() == 0
+    assert len(list((tmp_path / 'temp').glob('analyzer-reviewed-*/report.json'))) == 2
+    assert first[0].read_bytes() == saved
+    # Explicit release evidence paths remain immutable, not silently replaced.
+    sys.argv.extend(['--output', str(first[0].parent)])
+    with pytest.raises(FileExistsError):
+        main()
+    assert first[0].read_bytes() == saved

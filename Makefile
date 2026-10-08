@@ -1223,7 +1223,7 @@ clean:
 # ── Safety tooling ──────────────────────────────────────────────────
 
 # Clang Static Analyzer (requires clang)
-ANALYZER_REVIEW_DIR ?= temp/analyzer-reviewed
+ANALYZER_REVIEW_DIR ?=
 .PHONY: test-analyze-reviewed test-analyzer-review
 test-analyze-reviewed:
 	@$(PARITY_PY) scripts/check_analyzer.py --make '$(RELEASE_MAKE)' \
@@ -1283,5 +1283,5 @@ build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 # ── Full verification ──────────────────────────────────────────────────
 
-verify: test test-harness-skip-accounting test-parity format-check analyze fuzz-smoke test-extension
+verify: test test-harness-skip-accounting test-parity format-check test-analyze-reviewed fuzz-smoke test-extension
 	@echo "All verification checks passed."
