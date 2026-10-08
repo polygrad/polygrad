@@ -1,0 +1,14 @@
+{
+  "artifact": "pgir19-main.bin",
+  "source_commit": "0664ccebee4577d2c2b1b887de6936b13ae6ec3c",
+  "format": "PGIR19",
+  "size": 202,
+  "sha256": "5a5540c6687e5490ffee6f59853cab96a950b13aac54d86249be6afd016d0024",
+  "export": {
+    "entrypoint": "legacy",
+    "variable": {"name": "legacy_extent", "min": 1, "max": 8, "dtype": "weakint"},
+    "sink": "legacy_extent + 3",
+    "buffers": [],
+    "modules": []
+  }
+}

@@ -16,6 +16,31 @@
 extern void poly_test_ir_topo_fail_after(int count);
 extern void poly_test_ir_import_fail_after(int count);
 
+TEST(ir, reads_unmodified_main_pgir19_artifact) {
+  /* Exported by main@0664ccebee4577d2c2b1b887de6936b13ae6ec3c, not a
+   * current-format artifact with its version byte changed. */
+  FILE *file = fopen("test/fixtures/pgir19-main.bin", "rb");
+  ASSERT_NOT_NULL(file);
+  uint8_t bytes[202];
+  size_t count = fread(bytes, 1, sizeof(bytes), file);
+  int extra = fgetc(file);
+  fclose(file);
+  ASSERT_EQ(count, sizeof(bytes));
+  ASSERT_EQ(extra, EOF);
+  ASSERT_EQ(bytes[4], 19);
+  PolyIrSpec imported = {0};
+  ASSERT_EQ(poly_ir_import(bytes, (int)sizeof(bytes), &imported), 0);
+  ASSERT_EQ(imported.n_entrypoints, 1);
+  ASSERT_EQ(imported.n_controls, 0);
+  ASSERT_STR_EQ(imported.entrypoints[0].name, "legacy");
+  PolyUOp *value = imported.entrypoints[0].sink->src[0];
+  ASSERT_EQ(value->op, POLY_OP_ADD);
+  PolyCtx *ctx = imported.ctx;
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(ir, partial_entrypoint_cleanup_after_allocation_failure) {
   PolyIrSpec spec = {0};
   spec.entrypoints = calloc(1, sizeof(*spec.entrypoints));
