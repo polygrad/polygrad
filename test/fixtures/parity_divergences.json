@@ -961,12 +961,12 @@
       "stages": ["schedule", "shape"],
       "area": "rank-bounded Tensor and intermediate STAGE shapes",
       "tinygrad": "Shapes and _limit_bufs STAGE axes use Python tuples without Polygrad's fixed rank ceiling; the pinned probe constructs a twenty-axis STAGE.",
-      "polygrad": "POLY_MAX_DIMS is16. Buffer-limit splitting rejects a replacement needing more than16 STAGE axes. This is distinct from active RANGE count: one flattened coordinate and its materialized END can retain more than16 ranges without truncation.",
+      "polygrad": "POLY_MAX_DIMS is 64. Buffer-limit splitting rejects a replacement needing more than 64 STAGE axes. This is distinct from active RANGE count: flattened coordinates and materialized END nodes retain active dependencies independently of shape rank.",
       "rationale": "Preserving complete dependencies does not remove the existing shape representation limit. Explicit rejection is not full parity or an approved release exclusion.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/schedule/rangeify.py:_limit_bufs",
-        "src/polygrad.h:POLY_MAX_DIMS",
+        "src/uop/ops.h:POLY_MAX_DIMS",
         "src/schedule/rangeify.c:poly_limit_bufs",
         "test/test_uop.c:range_capacity_limit_buffers_rejects_unrepresentable_stage_rank",
         "temp/materialization-20260912.jZCnJE/probe.py"
