@@ -44,6 +44,26 @@ def compare_values(name, tinygrad, polygrad, findings):
         )
 
 
+def compare_case(name, tc, pc, entries):
+    findings = []
+    for field in ("surface", "state_names", "state_shapes", "jit_count"):
+        if tc[field] != pc[field]:
+            findings.append(f"{field}: differs")
+    graph_findings = graph_compare.compare_graph(name, tc["forward_graph"], pc["forward_graph"])
+    reviewed = graph_compare.reviewed_graph_pair(
+        entries, name, "graph", tc["forward_graph"], pc["forward_graph"]
+    )
+    # Only the exact reviewed topology pair is allowed; values remain checked.
+    if not reviewed:
+        findings.extend(f"forward_graph:{row['kind']}:{row['path']}" for row in graph_findings)
+    for field in ("forward", "loss", "grads", "updated", "jit"):
+        compare_values(field, tc[field], pc[field], findings)
+    result = {"passed": not findings, "findings": findings}
+    if graph_findings and reviewed:
+        result["graph_divergence"] = reviewed
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("tinygrad")
@@ -62,26 +82,17 @@ def main():
         raise RuntimeError("unsupported compatibility artifact schema")
     if set(tg["cases"]) != set(pg["cases"]):
         raise RuntimeError("compatibility case sets differ")
+    entries = graph_compare.validate_register(
+        graph_compare.load(ROOT / "test/fixtures/parity_divergences.json"),
+        ROOT / "references/tinygrad_latest",
+    )
 
     report = {"schema_version": 1, "reference_commit": commit, "cases": {},
               "summary": {"pass": 0, "fail": 0}}
     for name in sorted(tg["cases"]):
-        tc, pc = tg["cases"][name], pg["cases"][name]
-        findings = []
-        for field in ("surface", "state_names", "state_shapes", "jit_count"):
-            if tc[field] != pc[field]:
-                findings.append(f"{field}: differs")
-        graph_findings = graph_compare.compare_graph(
-            name, tc["forward_graph"], pc["forward_graph"]
-        )
-        findings.extend(
-            f"forward_graph:{row['kind']}:{row['path']}" for row in graph_findings
-        )
-        for field in ("forward", "loss", "grads", "updated", "jit"):
-            compare_values(field, tc[field], pc[field], findings)
-        passed = not findings
-        report["cases"][name] = {"passed": passed, "findings": findings}
-        report["summary"]["pass" if passed else "fail"] += 1
+        result = compare_case(name, tg["cases"][name], pg["cases"][name], entries)
+        report["cases"][name] = result
+        report["summary"]["pass" if result["passed"] else "fail"] += 1
 
     Path(args.output).write_text(json.dumps(report, sort_keys=True) + "\n")
     print(f"tinygrad compatibility: {report['summary']['pass']} pass, "

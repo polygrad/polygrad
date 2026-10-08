@@ -889,11 +889,11 @@ test-onnx-encoder: test-onnx-encoder-python js/build/Release/polygrad_napi.node 
 	$(NODE) js/test/test_onnx_encoder.js wasm '$(ONNX_ENCODER_DIR)'
 	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-browser
 
-test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node
+test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node wasm-pkg
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
 .PHONY: test-readme
-test-readme: verify-source-mirrors build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node
+test-readme: verify-source-mirrors build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node wasm-pkg
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_api_parity.py py/tests/test_readme.py -k readme
 
 # Supply an isolated interpreter with the published baseline installed. Run on
@@ -979,8 +979,10 @@ test-browser-runner:
 	$(NODE) js/test/test_browser_runner.js
 	$(NODE) js/test/test_wasm_addresses.js
 
+# Chromium profile/socket paths must stay short in deeply nested worktrees.
+BROWSER_TMPDIR ?= /tmp
 test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg build/extension/author.wasm
-	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js
+	cd js && bash scripts/build-browser.sh && TMPDIR=$(BROWSER_TMPDIR) $(NODE) test/browser/run.js
 
 test-browser-matrix: test-js-browser-matrix
 
@@ -989,13 +991,11 @@ test-js-browser-matrix: verify-source-mirrors wasm-pkg
 		POLY_BROWSER_BROWSERS="$(BROWSER_MATRIX)" \
 		POLY_BROWSER_DEVICES="$(BROWSER_MATRIX_DEVICES)" \
 		POLY_BROWSER_SKIP_UNAVAILABLE=1 \
-		$(NODE) test/browser/run.js
+		TMPDIR=$(BROWSER_TMPDIR) $(NODE) test/browser/run.js
 
 test-browser-qwen3: verify-source-mirrors wasm-pkg require-qwen3-gguf
-	@mkdir -p temp/chrome_tmp
 	cd js && bash scripts/build-browser.sh
-	TMPDIR=$(abspath temp/chrome_tmp) POLY_QWEN3_GGUF="$(abspath $(QWEN3_GGUF))" \
-		$(NODE) js/test/browser/qwen_webgpu.js
+	TMPDIR=$(BROWSER_TMPDIR) POLY_QWEN3_GGUF="$(abspath $(QWEN3_GGUF))" $(NODE) js/test/browser/qwen_webgpu.js
 
 test-js-legacy: build/libpolygrad.so
 	$(NODE) js_legacy/test/test_tensor.js
@@ -1039,7 +1039,7 @@ RELEASE_MAKE := $(MAKE)
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
 RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
-                   QWEN3_GGUF LLAMA_CHECKPOINT ONNX_ENCODER_DIR BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST
+                   QWEN3_GGUF LLAMA_CHECKPOINT ONNX_ENCODER_DIR BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST BROWSER_TMPDIR
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
 	@$(PARITY_PY) scripts/test_release.py --make '$(RELEASE_MAKE)' --output '$(RELEASE_DIR)' \
@@ -1053,6 +1053,7 @@ test-release-preflight:
 		--make-var 'HF_PYTHON=$(HF_PYTHON)' --make-var 'LLAMA_CHECKPOINT=$(LLAMA_CHECKPOINT)' \
 		--make-var 'ONNX_ENCODER_DIR=$(ONNX_ENCODER_DIR)' \
 		--make-var 'CLANG_FORMAT=$(CLANG_FORMAT)' --make-var 'ANALYZER_CC=$(ANALYZER_CC)'
+	TMPDIR=$(BROWSER_TMPDIR) $(NODE) js/test/browser/run.js --preflight
 
 test-release-list:
 	@$(PARITY_PY) scripts/test_release.py --list

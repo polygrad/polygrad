@@ -12,6 +12,19 @@ import pytest
 from scripts import reference_migration as migration
 
 
+def test_required_matcher_tests_are_committed():
+    manifest = json.loads((migration.ROOT / 'scripts/reference_migration_waves.json').read_text())
+    tracked = set(subprocess.check_output(['git', 'ls-files'], cwd=migration.ROOT, text=True).splitlines())
+    def visit(value):
+        if isinstance(value, dict):
+            for test in value.get('tests', []):
+                assert test in tracked, f'required acceptance test is not committed: {test}'
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+    visit(manifest)
 @pytest.mark.parametrize("override", [None, "/opt/custom tools/archbird"])
 def test_report_uses_configurable_archbird(override):
     command = ["make", "-n", "-o", "parity-graph-report", "reference-migration-report"]

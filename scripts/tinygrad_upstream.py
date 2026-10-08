@@ -288,7 +288,11 @@ class Results:
             text = f"{crash.path}:{crash.lineno}: {crash.message}" if crash else str(report.longrepr)
             if self.adapted:
                 text = text.replace(str(self.adapted), '<adapted>')
-            for path, label in ((self.reference, "<reference>"), (ROOT, "<polygrad>")):
+            # Worktrees may share the reference interpreter through a symlink.
+            # Normalize its actual location too, without changing error content.
+            for path, label in ((self.reference, "<reference>"),
+                                ((ROOT / 'references').resolve(), '<polygrad>/references'),
+                                (ROOT, "<polygrad>")):
                 text = text.replace(str(path), label)
             row["detail"] = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", text)
         self.tests.setdefault(report.nodeid, {})[report.when] = row

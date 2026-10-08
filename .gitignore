@@ -16,9 +16,9 @@ notebooks/
 *.jpg
 __pycache__/
 */__pycache__/
-node_modules/
-*/node_modules/
-references/
+# Dependency locations may be directories or worktree-shared symlinks.
+node_modules
+/references
 oracle/
 temp/
 *.md

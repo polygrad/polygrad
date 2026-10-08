@@ -15,6 +15,11 @@ const jsDir = path.resolve(__dirname, '..', '..')
 
 const server = http.createServer((req, res) => {
   const url = (req.url || '/').split('?')[0]
+  if (url === '/preflight') {
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    res.end('<!doctype html><title>Browser preflight</title>')
+    return
+  }
   const encoderFiles = ['/onnx-encoder/onnx/model.onnx', '/onnx-encoder/model.pgb', '/onnx-encoder/oracle.json']
   if (process.env.POLY_ONNX_ENCODER_DIR && encoderFiles.includes(url)) {
     const file = path.join(process.env.POLY_ONNX_ENCODER_DIR, url.slice('/onnx-encoder/'.length))
@@ -204,10 +209,42 @@ async function runForDevice(browser, port, device, spec) {
   return results
 }
 
+async function probeDevice(browser, port, device) {
+  const page = await browser.newPage()
+  try {
+    await page.goto(`http://127.0.0.1:${port}/preflight`)
+    const error = await page.evaluate(async device => {
+      if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))) return 'Wasm unavailable'
+      if (device === 'webgpu') {
+        if (!navigator.gpu) return 'navigator.gpu missing'
+        const adapter = await navigator.gpu.requestAdapter()
+        if (!adapter) return 'requestAdapter returned null'
+        const gpu = await adapter.requestDevice()
+        gpu.destroy()
+      }
+      return null
+    }, device)
+    if (error) throw new Error(error)
+    return { passed: 1, failed: 0 }
+  } finally { await page.close() }
+}
+
+function checkTemporarySpace(directory, stats = fs.statfsSync(directory)) {
+  // Chromium places shared transfer files here with --disable-dev-shm-usage.
+  // Reserve headroom for the full-checkpoint gate, not just the tiny fixtures.
+  const required = 2 * 1024 ** 3
+  const available = Number(stats.bavail) * Number(stats.bsize)
+  if (available < required) throw new Error(
+    `Browser temporary directory ${directory} has ${available} bytes free; need at least ${required}. ` +
+    'Set BROWSER_TMPDIR to a short path with enough space.')
+}
+
 async function main() {
+  const preflight = process.argv.includes('--preflight')
+  if (preflight) checkTemporarySpace(require('os').tmpdir())
   // Build browser test bundle from test_tensor.js + test_model_runtime.js
   const { execSync } = require('child_process')
-  execSync('npx esbuild test/browser/test_browser_entry.js --bundle --format=iife --platform=browser --outfile=test/browser/tests.js', {
+  if (!preflight) execSync('npx esbuild test/browser/test_browser_entry.js --bundle --format=iife --platform=browser --outfile=test/browser/tests.js', {
     cwd: path.resolve(__dirname, '..', '..'),
     stdio: 'inherit'
   })
@@ -232,20 +269,23 @@ async function main() {
       try {
         launched = await launchForDevice(playwright, spec, device)
       } catch (e) {
-        if (skipUnavailable) {
+        if (skipUnavailable && !preflight) {
           console.log(`\n[${spec.label}/${device}] skipped: ${e.message}`)
           continue
         }
         throw e
       }
       if (launched.skip) {
+        if (preflight) throw new Error(launched.skip)
         console.log(`\n[${spec.label}/${device}] skipped: ${launched.skip}`)
         continue
       }
 
       const browser = launched.browser
-      const r = await runForDevice(browser, port, device, spec)
-      await browser.close()
+      let r
+      try {
+        r = preflight ? await probeDevice(browser, port, device) : await runForDevice(browser, port, device, spec)
+      } finally { await browser.close() }
 
       if (r.error) {
         console.error(`\n[${spec.label}/${device}] ERROR: ${r.error}`)
@@ -266,7 +306,7 @@ async function main() {
   process.exit(totalFailed > 0 ? 1 : 0)
 }
 
-module.exports = { runForDevice, launchOptionsFor }
+module.exports = { runForDevice, launchOptionsFor, probeDevice, checkTemporarySpace }
 
 if (require.main === module) main().catch(e => {
   console.error(e)

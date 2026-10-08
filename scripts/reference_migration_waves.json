@@ -461,7 +461,9 @@
       ],
       "tests": [
         "test/test_f16.c",
-        "test/test_codegen.c",
+        "test/test_codegen.c"
+      ],
+      "historical_evidence": [
         "temp/reference_upgrade_20260828_tg_python_f16_probe.py",
         "temp/reference_upgrade_20260829_float_decomp_correspondence.md"
       ]
@@ -498,6 +500,9 @@
       ],
       "tests": [
         "test/test_codegen.c",
+        "test/test_bigint.c"
+      ],
+      "historical_evidence": [
         "temp/tg_long_decomp_rows_probe_20260829.py",
         "temp/pg_long_decomp_rows_probe_20260829.c",
         "temp/reference_upgrade_20260829_long_decomp_correspondence.md"

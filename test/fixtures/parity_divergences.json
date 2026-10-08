@@ -268,6 +268,7 @@
       "stages": ["tensor", "graph", "autograd", "value"],
       "area": "Cancellation-free tanh composition",
       "graph_pairs": {
+        "convnext": {"tinygrad": "aea1cf971c6b5fd9325c31109aed26f2faf47af071b3758aed0676659752c882", "polygrad": "0fc815ab99338176d9c6444f00eaba78900727c8ad8c5d24af00882fb5af3b7a"},
         "gelu_bool": {"tinygrad": "e0f021d1a0f9798513eab554ac5b62a8fee50ad7352e4e60ef40dc138d03df76", "polygrad": "dbca8032e16f9f9e3253dbf0ef3e6fdde53d36dca7be871c19bd9fa98701c9a6"},
         "gelu_float16": {"tinygrad": "93954fad2e2511e8c03a779e9b47b59d12d7023d7d6d3be059c9c1da368aef77", "polygrad": "199cae22764ea3bc8ce5712a44d9f6518be6f717e7abef3d0625ddd00c62f6fa"},
         "gelu_float64": {"tinygrad": "cb52385cec45cb546a92d4fe9f00dfec96cf6ef5191df39166c956f49b347358", "polygrad": "b4fdf89951c93d24d3bceed74be94dff5a37c135764f8f8e7b685ab4567a0e95"},
@@ -283,7 +284,7 @@
       "polygrad": "Use an odd polynomial for |x|<1/4 and (1-exp(-2*abs(x)))/(1+exp(-2*abs(x))) elsewhere, with bounded intermediates. Compute low-precision inputs in float32. This changes tanh graphs, their derivatives and composites using tanh (including GELU and recurrent layers), without adding an IR operation or backend-specific implementation.",
       "rationale": "Audio attention softcapping exposes cancellation in small logits. Fix the shared Tensor operation rather than changing model math or loosening reference checks.",
       "approval": "User 2026-10-07: Fix shared tanh now, in response to an explicit request for regression tests and a documented tinygrad divergence.",
-      "evidence": ["src/mixin/elementwise.c:poly_uop_tanh", "py/tests/test_tensor.py:test_tanh_accuracy_and_finite_gradients", "temp/embeddinggemma2-20261007/audio-tanh-parity.log", "temp/embeddinggemma2-20261007/tanh-before.log"],
+      "evidence": ["src/mixin/elementwise.c:poly_uop_tanh", "py/tests/test_tensor.py:test_tanh_accuracy_and_finite_gradients", "temp/embeddinggemma2-20261007/audio-tanh-parity.log", "temp/embeddinggemma2-20261007/tanh-before.log", "temp/release-fixes-20261008/convnext-pinned-tanh-comparison.json"],
       "close_when": "Pinned tinygrad supplies a cancellation-free tanh with equivalent numerical coverage."
     },
     {

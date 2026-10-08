@@ -39,7 +39,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "ebd7fac0730f4ba759f7c8ddac55deab80f534ca5f45ea278606db24662b53c7",
+    "runner_sha256": "cfc6369951408146394ff46d1fc51d5f8e3b6727bf04058c7ef043e56f2bcf01",
     "test_sha256": {
       "test/backend/test_setitem.py": "bfa540e93690962ef332f5a5e8c6e6913f6fd6a219111da20dd8d596c5547e74",
       "test/backend/test_tensor.py": "5f98a533f473dd819728e208b5ced15b04acf63a3944fee4f9d957b55954ee59",

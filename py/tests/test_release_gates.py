@@ -15,6 +15,67 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('target', ['test-py', 'test-readme'])
+def test_python_docs_build_wasm(target):
+    rule = next(line for line in (ROOT / 'Makefile').read_text().splitlines()
+                if line.startswith(target + ':'))
+    assert 'wasm-pkg' in rule.split()
+
+
+def test_browser_targets_use_short_temporary_directory():
+    result = subprocess.run(['make', '-n', 'test-browser', 'test-browser-qwen3', 'test-release-preflight'],
+                            cwd=ROOT, capture_output=True, text=True,
+                            env={**os.environ, 'TMPDIR': '/deep/' + 'nested/' * 30})
+    assert result.returncode == 0, result.stderr
+    assert 'js/test/browser/run.js --preflight' in result.stdout
+    for line in result.stdout.splitlines():
+        if 'test/browser/run.js' in line or 'js/test/browser/qwen_webgpu.js' in line:
+            assert 'TMPDIR=/tmp ' in line
+
+
+@pytest.mark.parametrize('path', ['js/node_modules', 'references'])
+def test_external_dependency_symlinks_are_ignored(tmp_path, path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    (tmp_path / '.gitignore').write_text((ROOT / '.gitignore').read_text())
+    dependency = tmp_path / path
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dependency.symlink_to('/external/dependency', target_is_directory=True)
+    result = subprocess.run(['git', 'check-ignore', path], cwd=tmp_path, capture_output=True)
+    assert result.returncode == 0
+
+
+def test_compat_graph_allowance_does_not_hide_other_changes():
+    import copy
+    checker = runpy.run_path(str(ROOT / 'test/compare_tinygrad_compat.py'))
+    compare = checker['compare_case']
+    digest = checker['graph_compare'].graph_digest
+    tg = dict(surface='tensor', state_names=[], state_shapes=[], jit_count=1,
+              forward=[1.0], loss=[1.0], grads={}, updated={}, jit=[1.0],
+              forward_graph={'root': 0, 'nodes': [
+                  {'op': 'ADD', 'dtype': 'float32', 'arg': None, 'src': []}]})
+    pg = copy.deepcopy(tg)
+    pg['forward_graph']['nodes'][0]['op'] = 'WHERE'
+    entry = {'id': 'test-only', 'status': 'approved', 'stages': ['graph'],
+             'graph_pairs': {'case': {'tinygrad': digest(tg['forward_graph']),
+                                     'polygrad': digest(pg['forward_graph'])}}}
+    entries = {entry['id']: entry}
+    assert not compare('case', tg, pg, {})['passed']
+    result = compare('case', tg, pg, entries)
+    assert result['passed'] and result['graph_divergence'] == 'test-only'
+    for side in (0, 1):
+        cases = copy.deepcopy([tg, pg])
+        cases[side]['forward_graph']['nodes'][0]['arg'] = 1
+        assert not compare('case', *cases, entries)['passed']
+    for field in ('forward', 'loss', 'grads', 'updated', 'jit', 'jit_count'):
+        changed = copy.deepcopy(pg)
+        changed[field] = {'x': [2.0]} if field in ('grads', 'updated') else [2.0]
+        assert not compare('case', tg, changed, entries)['passed']
+    entry['stages'] = ['value']
+    assert not compare('case', tg, pg, entries)['passed']
+    entry['stages'], entry['status'] = ['graph'], 'open_debt'
+    assert not compare('case', tg, pg, entries)['passed']
+
+
 def test_graph_divergence_requires_both_exact_reviewed_graphs():
     import copy
     checker = runpy.run_path(str(ROOT / 'test/compare_tensor_graphs.py'))

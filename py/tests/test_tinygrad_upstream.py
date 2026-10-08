@@ -5,11 +5,41 @@ import json
 import subprocess
 import sys
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+
+@pytest.mark.parametrize('name', ['tinygrad_upstream_014_baseline.json',
+                                'tinygrad_upstream_ops_cpu_014_baseline.json',
+                                'tinygrad_upstream_nn_cpu_014_baseline.json'])
+def test_baseline_runner_fingerprint_is_current(name):
+    import hashlib
+    root = Path(__file__).resolve().parents[2]
+    baseline = json.loads((root / 'test/fixtures' / name).read_text())
+    assert baseline['contract']['runner_sha256'] == hashlib.sha256(
+        (root / 'scripts/tinygrad_upstream.py').read_bytes()).hexdigest()
+
 from scripts import tinygrad_upstream as upstream
+
+
+def test_failure_paths_follow_shared_reference_directory(tmp_path, monkeypatch):
+    checkout = tmp_path / 'checkout'
+    shared = tmp_path / 'shared'
+    checkout.mkdir()
+    shared.mkdir()
+    (checkout / 'references').symlink_to(shared, target_is_directory=True)
+    monkeypatch.setattr(upstream, 'ROOT', checkout)
+    plugin = upstream.Results(io.StringIO(), shared / 'tinygrad')
+    report = SimpleNamespace(outcome='failed', nodeid='example', when='call',
+        longrepr=SimpleNamespace(reprcrash=SimpleNamespace(
+            path=str(shared / '.uv-python/lib/unittest/case.py'), lineno=703,
+            message='AssertionError: 51 not less than or equal to 0')))
+    plugin.pytest_runtest_logreport(report)
+    assert plugin.tests['example']['call']['detail'] == (
+        '<polygrad>/references/.uv-python/lib/unittest/case.py:703: '
+        'AssertionError: 51 not less than or equal to 0')
 
 
 @pytest.mark.parametrize('seed', [None, 0])
