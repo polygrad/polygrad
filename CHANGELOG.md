@@ -7,10 +7,13 @@
   `modalities` in the import config. Tokenization and preprocessing stay external.
   Reject mismatched image/audio token counts before inference; validation is
   preserved in portable models. Checked processor metadata must be host arrays.
-- Add input-only Model requirements, evaluated with the existing host backend
+- Add input-only Model requirements, evaluated with the compiler-free interpreter
   before parent input/state writes. PGIR23 preserves requirements and reads
-  PGIR19/22; the expanded C IR structure requires ABI109. Bound-program export
+  PGIR19/22. Frontend and graph-author extension compatibility remains ABI108.
+  Direct C codec users must rebuild for the expanded `PolyIrSpec` structure.
+  Bound-program export
   and graph inlining reject checked Models rather than dropping their checks.
+  Report check execution failures separately from rejected input values.
 
 - Use the shared guarded L2 normalization in CLIP. Zero projections now produce
   finite zero embeddings and logits instead of NaNs; norms below 1e-12 are clamped.

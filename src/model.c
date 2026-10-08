@@ -3721,11 +3721,9 @@ static int model_add_requirement(PolyModel *inst, const PolyIrRequirement *r) {
     poly_ir_spec_free(&spec);
     return -1;
   }
-#ifdef __EMSCRIPTEN__
-  PolyDevice host = POLY_DEVICE_WASM;
-#else
-  PolyDevice host = POLY_DEVICE_CPU;
-#endif
+  /* Admission must not require a C compiler or a browser kernel compiler,
+   * regardless of the parent's execution device. */
+  PolyDevice host = POLY_DEVICE_INTERP;
   PolyModel *check = model_from_spec(&spec, NULL, NULL, host, false, true);
   if (!check) return -1;
   RuntimeEntrypoint *ce = &check->entrypoints[0];
@@ -4722,14 +4720,24 @@ static int model_check_requirements(
     int rc = poly_model_call(check, ce->name, inputs, ce->n_inputs);
     free(inputs);
     bool accepted = false;
-    if (!rc)
+    const char *operation = "predicate call failed";
+    if (!rc) {
+      operation = "predicate output readback failed";
       rc = poly_model_read_buf(
           check, find_buf_by_name(check, ce->outputs[0]), &accepted, sizeof(accepted)
       );
-    if (rc || !accepted) {
+    }
+    if (rc) {
+      const PolyModelError *error = poly_model_last_error(check);
       poly_model_set_error(
-          inst, POLY_STATUS_INVALID, __func__, "%s%s", inst->requirements[i].message,
-          rc ? " (input check execution failed)" : ""
+          inst, POLY_STATUS_ERROR, __func__, "input check execution failed for '%s': %s",
+          entry->name, error->message[0] ? error->message : operation
+      );
+      return -1;
+    }
+    if (!accepted) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "%s", inst->requirements[i].message
       );
       return -1;
     }

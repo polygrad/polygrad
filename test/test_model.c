@@ -87,6 +87,18 @@ TEST(model, input_requirements_reject_before_writes_and_survive_ir) {
     PolyModel *p = pass ? loaded : m;
     float good[] = {2, 3}, bad[] = {-5, -2}, actual[2] = {0};
     PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", good, POLY_FLOAT32);
+    /* Fail the predicate's executable publication, not its boolean result. */
+    ASSERT_EQ(poly_model_write_buf(p, test_find_model_buf(p, "x"), bad, sizeof(bad)), 0);
+    poly_model_test_fail_residency_roots_after(0);
+    ASSERT_TRUE(poly_model_call(p, "forward", &io, 1) != 0);
+    ASSERT_EQ(poly_model_last_error(p)->code, POLY_STATUS_ERROR);
+    ASSERT_TRUE(strstr(poly_model_last_error(p)->message, "input check execution failed") != NULL);
+    ASSERT_TRUE(strstr(poly_model_last_error(p)->message, "positive sum required") == NULL);
+    ASSERT_TRUE(
+        strstr(poly_model_last_error(p)->message, "entrypoint 'check' execution failed") != NULL
+    );
+    ASSERT_EQ(poly_model_read_buf(p, test_find_model_buf(p, "x"), actual, sizeof(actual)), 0);
+    ASSERT_TRUE(!memcmp(actual, bad, sizeof(actual)));
     ASSERT_EQ(poly_model_call(p, "forward", &io, 1), 0);
     io.data = bad;
     ASSERT_TRUE(poly_model_call(p, "forward", &io, 1) != 0);

@@ -395,10 +395,9 @@ inference-only; unsupported operators and shapes produce an import error.
 ### Export Products
 
 Use `save()` / `load()` for a portable graph-and-weights bundle.
-Development builds require C ABI109 and write PGIR23/PGPM10. PGIR23 preserves
-Model input checks and reads PGIR19/22. C extensions must be rebuilt against
-the matching package; published Polygrad 0.7.0 uses ABI108/PGIR22.
-PGIR19 bundles remain readable; incompatible artifacts are rejected.
+Polygrad 0.7.1 loads portable models saved by 0.7.0. Models saved by 0.7.1
+use an updated format that preserves input checks and require 0.7.1 or newer.
+Existing graph-author extensions built for 0.7.0 remain compatible.
 Cached models save their program and weights, not conversation history.
 
 For separate artifacts:
@@ -755,12 +754,11 @@ collection boundaries with `poly_uop_retain()`, and release them with
 
 ## Versioning
 
-Python and JavaScript share the same major/minor core release line. ABI-compatible
-core bug fixes ship as a patch in both packages; wrapper-only fixes may increment
-only the affected package. New public features, ABI changes and intentional
-incompatible behaviour changes require a minor or major release. Correcting a
-backend to execute already-supported graphs is a bug fix, not a new feature.
-Binary extension compatibility is checked separately from package versions.
+Python and JavaScript share the same core release line; wrapper-only fixes may
+increment only the affected package. Additive APIs and internal fixes preserve
+existing binary interfaces. Binary and saved-model compatibility are checked
+separately from package versions; incompatible changes are identified in the
+release notes.
 
 ## Building From Source
 

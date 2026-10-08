@@ -1,7 +1,10 @@
 """Small pinned HF fixture; no Transformers installation or download required."""
 import base64
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -14,8 +17,8 @@ AUDIO_FIXTURE = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures
 
 @pytest.mark.parametrize('fixture,token,label', [(IMAGE_FIXTURE,30,'image'), (AUDIO_FIXTURE,28,'audio')])
 @pytest.mark.parametrize('delta', [-1,1])
-def test_embeddinggemma2_rejects_wrong_slots_before_writes(fixture, token, label, delta):
-    with pg.create(device='CPU') as rt:
+def test_embeddinggemma2_rejects_wrong_slots_before_writes(fixture, token, label, delta, device='CPU'):
+    with pg.create(device=device) as rt:
         model = pg.Model.from_hf(config_json=json.dumps(fixture['config']),
                                 weight_bytes_list=[base64.b64decode(fixture['weights'])],
                                 max_batch=2,max_seq_len=fixture['config']['max_seq_len'],runtime=rt)
@@ -30,6 +33,8 @@ def test_embeddinggemma2_rejects_wrong_slots_before_writes(fixture, token, label
             ids[tuple(location)]=1 if delta<0 else token
             for m in (model,restored,from_ir):
                 expected=m.forward(**good)['sentence_embedding'].copy()
+                np.testing.assert_allclose(expected, fixture['cases'][0]['sentence_embedding'],
+                                           atol=2e-5, rtol=2e-4)
                 before=m.read_buffer('input_ids').copy()
                 with pytest.raises(Exception,match=f'{label} features and token slots do not match'):
                     m.forward(**bad)
@@ -45,6 +50,23 @@ def test_embeddinggemma2_rejects_wrong_slots_before_writes(fixture, token, label
             from_ir.dispose()
             restored.dispose()
             model.dispose()
+
+
+@pytest.mark.parametrize('label,token', [('image',30), ('audio',28)])
+def test_embeddinggemma2_slots_without_compiler(label, token):
+    # Fresh process: neither an in-memory runner nor a disk cache may hide a
+    # dependency on the C compiler when running an interpreter-only model.
+    script = f"""
+import runpy
+suite = runpy.run_path({str(Path(__file__).resolve())!r})
+for delta in (-1, 1):
+    suite['test_embeddinggemma2_rejects_wrong_slots_before_writes'](
+        suite[{(label.upper() + '_FIXTURE')!r}], {token}, {label!r}, delta, device='INTERP')
+"""
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True,
+                            env={**os.environ, 'CC':'/nonexistent/cc', 'POLY_CACHE':'0'},
+                            timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize('fixture', [FIXTURE, IMAGE_FIXTURE, AUDIO_FIXTURE], ids=['text','image','audio'])

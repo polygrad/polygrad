@@ -216,7 +216,8 @@ PolyStatus poly_model_build(PolyModel *inst, PolyModelError *err);
  * entrypoint. Predicate inputs must match a fixed-shape subset of its inputs;
  * its sole entrypoint/output must be a scalar bool, with no state or controls.
  * Checked inputs must be supplied as host data (not Tensor bindings). Checks
- * run before any parent input/state write and survive IR and bundle round trips.
+ * run in the compiler-free interpreter before any parent input/state write and
+ * survive IR and bundle round trips.
  * Compiled-program export and graph inlining reject Models with requirements. */
 PolyStatus poly_model_require(
     PolyModel *inst,
