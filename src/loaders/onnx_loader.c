@@ -19,7 +19,6 @@
 #define ONNX_NODES 4096
 #define ONNX_IO 128
 #define ONNX_RANK 16
-#define ONNX_NAME 256
 #define ONNX_BYTES ((size_t)1 << 30)
 
 typedef struct {
@@ -37,7 +36,7 @@ typedef struct {
   Bytes bytes;
 } Field;
 typedef struct {
-  char name[ONNX_NAME];
+  const char *name;
   PolyTensor *tensor;
   uint8_t *host; /* owned initializer, retained until post-build coherent write */
   size_t nbytes;
@@ -47,7 +46,7 @@ typedef struct {
   bool initializer;
   bool constant; /* closed graph: safe to evaluate import-time shape operands */
   int scope;
-  char binding[ONNX_NAME]; /* Model state names are global; ONNX names are lexical. */
+  const char *binding; /* Model state names are global; ONNX names are lexical. */
 } Value;
 typedef struct {
   PolyCtx *ctx;
@@ -58,7 +57,8 @@ typedef struct {
   int nvalues, opset, microsoft_opset, ml_opset, node_index;
   int scopes[33], depth, next_scope;
   size_t initializer_bytes;
-  char op[ONNX_NAME];
+  const char *op;
+  PolyArena *strings; /* Import-local strings; Model APIs copy retained names. */
 } Import;
 
 static bool fail(Import *d, PolyImportError code, const char *fmt, ...) {
@@ -131,15 +131,24 @@ static bool field(Import *d, Bytes b, unsigned tag, unsigned wire, Field *out, b
   return true;
 }
 
-static bool text(Import *d, Bytes b, char out[ONNX_NAME], bool empty) {
-  if ((!b.size && !empty) || b.size >= ONNX_NAME || (b.size && memchr(b.data, 0, b.size)))
+static bool text(Import *d, Bytes b, const char **out, bool empty) {
+  if ((!b.size && !empty) || b.size >= ONNX_BYTES || (b.size && memchr(b.data, 0, b.size)))
     return fail(d, POLY_IMPORT_ERR_PARSE, "invalid name/string length");
-  if (b.size) memcpy(out, b.data, b.size);
-  out[b.size] = 0;
+  if (!b.size) {
+    *out = "";
+    return true;
+  }
+  if (poly_arena_used(d->strings) > ONNX_BYTES - b.size - 1)
+    return fail(d, POLY_IMPORT_ERR_PARSE, "import string budget exceeded");
+  char *copy = poly_arena_alloc(d->strings, b.size + 1, 1);
+  if (!copy) return fail(d, POLY_IMPORT_ERR_INTERNAL, "string allocation failed");
+  memcpy(copy, b.data, b.size);
+  copy[b.size] = 0;
+  *out = copy;
   return true;
 }
 
-static bool name_field(Import *d, Bytes b, unsigned tag, char out[ONNX_NAME], bool required) {
+static bool name_field(Import *d, Bytes b, unsigned tag, const char **out, bool required) {
   Field f;
   return field(d, b, tag, 2, &f, required) && text(d, f.bytes, out, !required);
 }
@@ -221,6 +230,38 @@ static Value *lookup(Import *d, const char *name) {
   return NULL;
 }
 
+/* ONNX identifiers are not Model scope paths (exporters use e.g. "...a").
+ * Escape only forbidden path bytes and '%' so distinct names stay distinct. */
+static const char *state_name(Import *d, const char *name) {
+  size_t len = strlen(name), extra = 0;
+  for (size_t i = 0; i < len; i++)
+    if (name[i] == '%' || (unsigned char)name[i] < 32 ||
+        (name[i] == '.' && (!i || name[i - 1] == '.' || !name[i + 1] || name[i + 1] == '.')))
+      extra += 2;
+  if (!extra) return name;
+  if (len + extra >= ONNX_BYTES || poly_arena_used(d->strings) > ONNX_BYTES - len - extra - 1) {
+    fail(d, POLY_IMPORT_ERR_PARSE, "import string budget exceeded");
+    return NULL;
+  }
+  char *out = poly_arena_alloc(d->strings, len + extra + 1, 1), *p = out;
+  if (!out) {
+    fail(d, POLY_IMPORT_ERR_INTERNAL, "state name allocation failed");
+    return NULL;
+  }
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)name[i];
+    if (c == '%' || c < 32 ||
+        (c == '.' && (!i || name[i - 1] == '.' || !name[i + 1] || name[i + 1] == '.'))) {
+      *p++ = '%';
+      *p++ = "0123456789ABCDEF"[c >> 4];
+      *p++ = "0123456789ABCDEF"[c & 15];
+    } else
+      *p++ = (char)c;
+  }
+  *p = 0;
+  return out;
+}
+
 static Value *add_value(Import *d, const char *name) {
   Value *existing = lookup(d, name);
   if (!name[0] || (existing && existing->scope == d->scopes[d->depth]) ||
@@ -229,12 +270,16 @@ static Value *add_value(Import *d, const char *name) {
     return NULL;
   }
   Value *v = &d->values[d->nvalues++];
-  strcpy(v->name, name);
+  if (!text(d, (Bytes){(const uint8_t *)name, strlen(name)}, &v->name, false)) return NULL;
   v->scope = d->scopes[d->depth];
-  if (v->scope)
-    snprintf(v->binding, sizeof(v->binding), "__onnx_subgraph_%d", d->nvalues);
-  else
-    strcpy(v->binding, name);
+  v->binding = state_name(d, v->name);
+  if (!v->binding) return NULL;
+  if (v->scope) {
+    char binding[48];
+    snprintf(binding, sizeof(binding), "__onnx_subgraph_%d", d->nvalues);
+    if (!text(d, (Bytes){(const uint8_t *)binding, strlen(binding)}, &v->binding, false))
+      return NULL;
+  }
   return v;
 }
 
@@ -265,14 +310,14 @@ static bool decimal(Import *d, const char *s, size_t *out) {
 static bool external_bytes(Import *d, Bytes proto, Bytes *raw) {
   Reader r = {.bytes = proto};
   Field f;
-  char location[ONNX_NAME] = {0};
+  const char *location = "";
   size_t offset = 0, length = SIZE_MAX;
   unsigned seen = 0;
   while (next(&r, &f))
     if (f.tag == 13) {
-      char key[ONNX_NAME], val[ONNX_NAME];
-      if (f.wire != 2 || !name_field(d, f.bytes, 1, key, true) ||
-          !name_field(d, f.bytes, 2, val, true))
+      const char *key, *val;
+      if (f.wire != 2 || !name_field(d, f.bytes, 1, &key, true) ||
+          !name_field(d, f.bytes, 2, &val, true))
         return false;
       unsigned bit = !strcmp(key, "location") ? 1
                      : !strcmp(key, "offset") ? 2
@@ -282,7 +327,7 @@ static bool external_bytes(Import *d, Bytes proto, Bytes *raw) {
         return fail(d, POLY_IMPORT_ERR_PARSE, "unsupported/duplicate external key '%s'", key);
       seen |= bit;
       if (bit == 1)
-        strcpy(location, val);
+        location = val;
       else if (!decimal(d, val, bit == 2 ? &offset : &length))
         return false;
     }
@@ -334,11 +379,11 @@ static PolyTensor *onnx_scalar(Import *d, PolyDType dtype, const void *data) {
 }
 
 static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
-  char name[ONNX_NAME];
+  const char *name;
   Field typ, raw, location;
   if (output_name)
-    strcpy(name, output_name);
-  else if (!name_field(d, proto, 8, name, true))
+    name = output_name;
+  else if (!name_field(d, proto, 8, &name, true))
     return false;
   Value *v = add_value(d, name);
   if (!v || !field(d, proto, 2, 0, &typ, true) || !dtype(d, typ.integer, &v->dtype) ||
@@ -433,12 +478,15 @@ static bool onnx_initializer(Import *d, Bytes proto, const char *output_name) {
         poly_buffer_write(d->ctx, buffer, v->host, v->nbytes))
       return false;
   }
-  return v->tensor != NULL || fail(d, POLY_IMPORT_ERR_INTERNAL, "initializer declaration failed");
+  return v->tensor != NULL || fail(
+                                  d, POLY_IMPORT_ERR_INTERNAL, "initializer '%s': %s", name,
+                                  poly_model_last_error(d->model)->message
+                              );
 }
 
 static bool value_info(Import *d, Bytes b, Value *v, bool output) {
   Field type, tensor, dt, shape;
-  if (!name_field(d, b, 1, v->name, true) || !field(d, b, 2, 2, &type, true) ||
+  if (!name_field(d, b, 1, &v->name, true) || !field(d, b, 2, 2, &type, true) ||
       !field(d, type.bytes, 1, 2, &tensor, true) || !field(d, tensor.bytes, 1, 0, &dt, true) ||
       !dtype(d, dt.integer, &v->dtype) || !field(d, tensor.bytes, 2, 2, &shape, true))
     return false;
@@ -463,8 +511,8 @@ static bool value_info(Import *d, Bytes b, Value *v, bool output) {
           return fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "dimension overflow");
         n = (int64_t)fixed.integer;
       } else {
-        char key[ONNX_NAME];
-        if (!text(d, symbolic.bytes, key, false)) return false;
+        const char *key;
+        if (!text(d, symbolic.bytes, &key, false)) return false;
         cJSON *x = cJSON_GetObjectItemCaseSensitive(d->dimensions, key);
         if (!x && inferred && v->rank < inferred->rank) {
           n = inferred->shape[v->rank];
@@ -581,14 +629,14 @@ static PolyTensor *onnx_not(Import *d, PolyTensor *x) {
 }
 
 typedef struct {
-  char name[ONNX_NAME];
+  const char *name;
   Bytes proto;
   int type;
 } Attr;
 typedef struct {
   Value *inputs[ONNX_IO];
   int nin;
-  char outputs[ONNX_IO][ONNX_NAME];
+  const char *outputs[ONNX_IO];
   int nout;
   Attr attrs[32];
   int nattrs;
@@ -601,11 +649,21 @@ static Attr *attr(Node *n, const char *key) {
     if (!strcmp(n->attrs[i].name, key)) return &n->attrs[i];
   return NULL;
 }
+static bool listed(const char *list, const char *name) {
+  size_t len = strlen(name);
+  while (*list) {
+    if (*list++ != '|') continue;
+    const char *end = strchr(list, '|');
+    if (!end) break;
+    if ((size_t)(end - list) == len && !memcmp(list, name, len)) return true;
+    list = end + 1;
+  }
+  return false;
+}
+
 static bool attrs(Import *d, Node *n, const char *allowed) {
   for (int i = 0; i < n->nattrs; i++) {
-    char key[ONNX_NAME + 2];
-    snprintf(key, sizeof(key), "|%s|", n->attrs[i].name);
-    if (!strstr(allowed, key))
+    if (!listed(allowed, n->attrs[i].name))
       return fail(
           d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "unsupported attribute '%s'", n->attrs[i].name
       );
@@ -644,17 +702,11 @@ static bool attr_ints(Import *d, Node *n, const char *key, int64_t *out, int cap
   return (a->type == 7 && integers(d, a->proto, 8, out, cap, count)) ||
          fail(d, POLY_IMPORT_ERR_PARSE, "'%s' must be INTS", key);
 }
-static bool attr_text(
-    Import *d,
-    Node *n,
-    const char *key,
-    const char *fallback,
-    char out[ONNX_NAME]
-) {
+static bool attr_text(Import *d, Node *n, const char *key, const char *fallback, const char **out) {
   Attr *a = attr(n, key);
   Field f;
   if (!a) {
-    strcpy(out, fallback);
+    *out = fallback;
     return true;
   }
   return a->type == 3 && field(d, a->proto, 4, 2, &f, true) && text(d, f.bytes, out, false);
@@ -803,8 +855,8 @@ static bool onnx_spatial(
       (attr(n, "dilations") && count != dims) || !attr_ints(d, n, "pads", pads, 2 * dims, &count) ||
       (attr(n, "pads") && count != 2 * dims))
     return false;
-  char mode[ONNX_NAME];
-  if (!attr_text(d, n, "auto_pad", "NOTSET", mode)) return false;
+  const char *mode;
+  if (!attr_text(d, n, "auto_pad", "NOTSET", &mode)) return false;
   bool explicit_pad = !strcmp(mode, "NOTSET"), valid = !strcmp(mode, "VALID"),
        upper = !strcmp(mode, "SAME_UPPER");
   if (!explicit_pad && !valid && !upper && strcmp(mode, "SAME_LOWER")) return false;
@@ -886,11 +938,11 @@ static PolyTensor *onnx_resize(Import *d, Node *n, bool legacy) {
   if (nr < 3) return NULL;
   int64_t axes[ONNX_RANK], perm[ONNX_RANK], inverse[ONNX_RANK], sizes[ONNX_RANK];
   double scales[ONNX_RANK];
-  char mode[ONNX_NAME], transform[ONNX_NAME], nearest[ONNX_NAME], aspect[ONNX_NAME];
-  if (!attr_text(d, n, "mode", "nearest", mode) ||
-      !attr_text(d, n, "coordinate_transformation_mode", "half_pixel", transform) ||
-      !attr_text(d, n, "nearest_mode", "round_prefer_floor", nearest) ||
-      !attr_text(d, n, "keep_aspect_ratio_policy", "stretch", aspect) ||
+  const char *mode, *transform, *nearest, *aspect;
+  if (!attr_text(d, n, "mode", "nearest", &mode) ||
+      !attr_text(d, n, "coordinate_transformation_mode", "half_pixel", &transform) ||
+      !attr_text(d, n, "nearest_mode", "round_prefer_floor", &nearest) ||
+      !attr_text(d, n, "keep_aspect_ratio_policy", "stretch", &aspect) ||
       !attr_ints(d, n, "axes", axes, ONNX_RANK, &na))
     return NULL;
   if (strcmp(mode, "nearest") && strcmp(mode, "linear") && strcmp(mode, "cubic")) return NULL;
@@ -1038,7 +1090,85 @@ static PolyTensor *onnx_resize(Import *d, Node *n, bool legacy) {
   return x ? poly_tensor_permute(ctx, x, inverse, nr) : NULL;
 }
 
-static bool onnx_subgraph(Import *d, Bytes proto, Value **outputs, int *nout);
+static bool onnx_subgraph(
+    Import *d,
+    Bytes proto,
+    Value **inputs,
+    int nin,
+    Value **outputs,
+    int *nout
+);
+
+static bool loop_condition(Import *d, Value *v, bool *condition) {
+  if (!v || v->rank || !poly_dtype_eq(v->dtype, POLY_BOOL) || !v->constant)
+    return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "Loop condition must be a constant scalar bool");
+  if (!onnx_const_data(d, v)) return false;
+  *condition = v->host[0] != 0;
+  return true;
+}
+
+/* Static unrolling only: no host observation of runtime inputs and no second
+ * executor. The ordinary node/value budgets also bound expanded loop bodies. */
+static PolyTensor *onnx_loop(Import *d, Node *n) {
+  if (!arity_outputs(d, n, 0, ONNX_IO, ONNX_IO) || !attrs(d, n, "|body|") || n->nin < 3 ||
+      n->nout != n->nin - 2) {
+    fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "Loop requires carried values without scan outputs");
+    return NULL;
+  }
+  Attr *body = attr(n, "body");
+  Field graph;
+  if (!body || body->type != 5 || !field(d, body->proto, 6, 2, &graph, true)) return NULL;
+  int64_t trips = INT64_MAX;
+  if (n->inputs[0]) {
+    Value *m = n->inputs[0];
+    int count;
+    if (m->rank || !poly_dtype_eq(m->dtype, POLY_INT64) || !onnx_ints(d, m, &trips, 1, &count) ||
+        count != 1)
+      return NULL;
+  }
+  bool condition = true;
+  if (n->inputs[1] && !loop_condition(d, n->inputs[1], &condition)) return NULL;
+  Value *args[ONNX_IO], *result[ONNX_IO];
+  for (int i = 2; i < n->nin; i++) {
+    if (!(args[i] = n->inputs[i])) return NULL;
+  }
+  for (int64_t iteration = 0; iteration < trips && condition; iteration++) {
+    if (iteration == ONNX_NODES) {
+      fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "Loop static iteration budget exceeded");
+      return NULL;
+    }
+    uint8_t yes = 1;
+    Value iter = {.dtype = POLY_INT64, .nbytes = 8, .constant = true},
+          cond = {.dtype = POLY_BOOL, .nbytes = 1, .constant = true};
+    iter.tensor = onnx_scalar(d, POLY_INT64, &iteration);
+    cond.tensor = onnx_scalar(d, POLY_BOOL, &yes);
+    args[0] = &iter;
+    args[1] = &cond;
+    int count = 0;
+    if (!iter.tensor || !cond.tensor ||
+        !onnx_subgraph(d, graph.bytes, args, n->nin, result, &count))
+      return NULL;
+    if (count != n->nout + 1) {
+      fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "Loop body output count mismatch");
+      return NULL;
+    }
+    if (!loop_condition(d, result[0], &condition)) return NULL;
+    for (int i = 0; i < n->nout; i++) {
+      Value *previous = args[i + 2], *next = result[i + 1];
+      if (!poly_dtype_eq(previous->dtype, next->dtype) || previous->rank != next->rank ||
+          memcmp(previous->shape, next->shape, next->rank * sizeof(int64_t))) {
+        fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "Loop carried shapes/dtypes must stay fixed");
+        return NULL;
+      }
+      args[i + 2] = next;
+    }
+  }
+  for (int i = 0; i < n->nout; i++) {
+    n->extra[i] = args[i + 2]->tensor;
+    n->captures_runtime |= !args[i + 2]->constant;
+  }
+  return n->extra[0];
+}
 
 /* onnx.py:attention_onnx. Present state is returned before head expansion. */
 static PolyTensor *onnx_attention(Import *d, Node *n) {
@@ -1254,6 +1384,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
   PolyTensor *x = n->nin && n->inputs[0] ? n->inputs[0]->tensor : NULL;
   PolyTensor *y = n->nin > 1 && n->inputs[1] ? n->inputs[1]->tensor : NULL;
   const char *op = d->op;
+  if (!strcmp(op, "Loop")) return onnx_loop(d, n);
   if (!strcmp(op, "Range")) {
     /* onnx.py:Range resolves all three operands on the host, then uses arange.
      * Runtime-dependent lengths remain rejected by onnx_const_data. */
@@ -1326,7 +1457,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
       Field graph;
       int count = 0;
       if (!a || a->type != 5 || !field(d, a->proto, 6, 2, &graph, true) ||
-          !onnx_subgraph(d, graph.bytes, branches[b], &count))
+          !onnx_subgraph(d, graph.bytes, NULL, 0, branches[b], &count))
         return NULL;
       if (count != n->nout) {
         fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "If branch output count mismatch");
@@ -1518,7 +1649,7 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     Attr *a = attr(n, "value");
     if (a) {
       Field tensor;
-      char name[ONNX_NAME];
+      char name[48];
       int serial = d->nvalues;
       do {
         snprintf(name, sizeof(name), "__onnx_constant_%d", serial++);
@@ -1753,8 +1884,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     if (count < 1 || count > nx || nu != ni - 1 + nx - count || is[0] > 2048) return NULL;
     for (int i = 0; i < nu; i++)
       if (us[i] != (i < ni - 1 ? is[i] : xs[i - ni + 1 + count])) return NULL;
-    char reduction[ONNX_NAME];
-    if (!attr_text(d, n, "reduction", "none", reduction)) return NULL;
+    const char *reduction;
+    if (!attr_text(d, n, "reduction", "none", &reduction)) return NULL;
     int reduce = !strcmp(reduction, "none")  ? 0
                  : !strcmp(reduction, "add") ? 1
                  : !strcmp(reduction, "mul") ? 2
@@ -1813,8 +1944,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
         !poly_dtype_is_int(y->uop_physical->dtype))
       return NULL;
     int64_t axis = attr_int(d, n, "axis", 0);
-    char reduction[ONNX_NAME];
-    if (!onnx_axis(d, &axis, rank(d, x)) || !attr_text(d, n, "reduction", "none", reduction))
+    const char *reduction;
+    if (!onnx_axis(d, &axis, rank(d, x)) || !attr_text(d, n, "reduction", "none", &reduction))
       return NULL;
     y = poly_tensor_alu2(
         ctx, POLY_OP_ADD, y,
@@ -1970,8 +2101,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
           pads[i + na] < -INT_MAX)
         return NULL;
     }
-    char mode[ONNX_NAME];
-    if (!attr_text(d, n, "mode", "constant", mode)) return NULL;
+    const char *mode;
+    if (!attr_text(d, n, "mode", "constant", &mode)) return NULL;
     if (strcmp(mode, "constant")) {
       int id = !strcmp(mode, "wrap")      ? 1
                : !strcmp(mode, "reflect") ? 2
@@ -2203,9 +2334,9 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
   UNARY("Cosh", poly_tensor_cosh)
   UNARY("Erf", poly_tensor_erf)
   if (!strcmp(op, "Gelu")) {
-    char approximate[ONNX_NAME];
+    const char *approximate;
     if (!arity(d, n, 1, 1) || !attrs(d, n, "|approximate|") ||
-        !attr_text(d, n, "approximate", "none", approximate))
+        !attr_text(d, n, "approximate", "none", &approximate))
       return NULL;
     return !strcmp(approximate, "none")   ? poly_tensor_gelu_exact(ctx, x)
            : !strcmp(approximate, "tanh") ? poly_tensor_gelu(ctx, x)
@@ -2258,10 +2389,10 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     return values;
   }
   if (!strcmp(op, "Einsum")) {
-    char equation[ONNX_NAME];
+    const char *equation;
     PolyTensor *inputs[ONNX_IO];
     if (!arity(d, n, 1, ONNX_IO) || !attrs(d, n, "|equation|") || !attr(n, "equation") ||
-        !attr_text(d, n, "equation", "", equation))
+        !attr_text(d, n, "equation", "", &equation))
       return NULL;
     for (int i = 0; i < n->nin; i++) {
       if (!n->inputs[i]) return NULL;
@@ -2438,8 +2569,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     bool softmax = !strcmp(op, "SoftmaxCrossEntropyLoss");
     if (!arity_outputs(d, n, 2, 3, softmax ? 2 : 1) || !attrs(d, n, "|ignore_index||reduction|"))
       return NULL;
-    char reduction[ONNX_NAME];
-    if (!attr_text(d, n, "reduction", "mean", reduction)) return NULL;
+    const char *reduction;
+    if (!attr_text(d, n, "reduction", "mean", &reduction)) return NULL;
     int r = !strcmp(reduction, "none")   ? 0
             : !strcmp(reduction, "sum")  ? 1
             : !strcmp(reduction, "mean") ? 2
@@ -2765,8 +2896,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     int64_t kernel[ONNX_RANK], stride[ONNX_RANK], dilation[ONNX_RANK], padding[2 * ONNX_RANK];
     int64_t output_pad[ONNX_RANK] = {0}, output_shape[ONNX_RANK];
     /* Resolve transposed-convolution padding separately from forward SAME padding. */
-    char mode[ONNX_NAME];
-    if (!attr_text(d, n, "auto_pad", "NOTSET", mode) ||
+    const char *mode;
+    if (!attr_text(d, n, "auto_pad", "NOTSET", &mode) ||
         (strcmp(mode, "NOTSET") && strcmp(mode, "VALID") && strcmp(mode, "SAME_UPPER") &&
          strcmp(mode, "SAME_LOWER")))
       return NULL;
@@ -2854,8 +2985,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
         rank(d, x) != 4)
       return NULL;
     int64_t block = attr_int(d, n, "blocksize", 0), sizes[2] = {block, block};
-    char mode[ONNX_NAME];
-    if (block <= 0 || block > INT_MAX || !attr_text(d, n, "mode", "DCR", mode) ||
+    const char *mode;
+    if (block <= 0 || block > INT_MAX || !attr_text(d, n, "mode", "DCR", &mode) ||
         (strcmp(mode, "DCR") && strcmp(mode, "CRD")))
       return NULL;
     const char *formula = !strcmp(op, "SpaceToDepth") ? "b c (h h1) (w w1) -> b (h1 w1 c) h w"
@@ -2934,28 +3065,31 @@ static bool onnx_literal(
 
 static bool onnx_node(Import *d, Bytes proto) {
   Node n = {0};
-  char domain[ONNX_NAME];
-  if (!name_field(d, proto, 4, d->op, true) || !name_field(d, proto, 7, domain, false))
+  const char *domain;
+  if (!name_field(d, proto, 4, &d->op, true) || !name_field(d, proto, 7, &domain, false))
     return false;
   const char *microsoft = "|BiasGelu||FastGelu||SkipLayerNormalization||QLinearAdd||QLinearMul||"
                           "QLinearGlobalAveragePool|";
   const char *ml = "|Binarizer||ArrayFeatureExtractor|";
-  char key[ONNX_NAME + 2];
-  snprintf(key, sizeof(key), "|%s|", d->op);
   bool standard = !domain[0] || !strcmp(domain, "ai.onnx");
-  if ((standard && (strstr(microsoft, key) || strstr(ml, key))) ||
+  if ((standard && (listed(microsoft, d->op) || listed(ml, d->op))) ||
       (!standard &&
-       !((!strcmp(domain, "com.microsoft") && d->microsoft_opset && strstr(microsoft, key)) ||
-         (!strcmp(domain, "ai.onnx.ml") && d->ml_opset && strstr(ml, key)))))
+       !((!strcmp(domain, "com.microsoft") && d->microsoft_opset && listed(microsoft, d->op)) ||
+         (!strcmp(domain, "ai.onnx.ml") && d->ml_opset && listed(ml, d->op)))))
     return fail(
         d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "unsupported operator/domain pair '%s:%s'", domain, d->op
     );
   Reader r = {.bytes = proto};
   Field f;
   while (next(&r, &f)) {
+    if (f.tag == 10 || (f.tag == 8 && f.bytes.size))
+      return fail(
+          d, POLY_IMPORT_ERR_UNSUPPORTED_OP,
+          "node device configurations and overloads are unsupported"
+      );
     if (f.tag == 1 || f.tag == 2) {
-      char name[ONNX_NAME];
-      if (f.wire != 2 || !text(d, f.bytes, name, true)) return false;
+      const char *name;
+      if (f.wire != 2 || !text(d, f.bytes, &name, true)) return false;
       if (f.tag == 1) {
         if (n.nin == ONNX_IO) return fail(d, POLY_IMPORT_ERR_PARSE, "too many node inputs");
         Value *v = name[0] ? lookup(d, name) : NULL;
@@ -2964,14 +3098,14 @@ static bool onnx_node(Import *d, Bytes proto) {
         n.inputs[n.nin++] = v;
       } else {
         if (n.nout == ONNX_IO) return false;
-        strcpy(n.outputs[n.nout++], name);
+        n.outputs[n.nout++] = name;
       }
     } else if (f.tag == 5) {
       if (f.wire != 2 || n.nattrs == 32)
         return fail(d, POLY_IMPORT_ERR_PARSE, "too many/invalid attributes");
       Attr *a = &n.attrs[n.nattrs];
       Field type;
-      if (!name_field(d, f.bytes, 1, a->name, true) || attr(&n, a->name) ||
+      if (!name_field(d, f.bytes, 1, &a->name, true) || attr(&n, a->name) ||
           !field(d, f.bytes, 20, 0, &type, true))
         return fail(d, POLY_IMPORT_ERR_PARSE, "invalid/duplicate attribute");
       a->proto = f.bytes;
@@ -3069,25 +3203,56 @@ static bool onnx_node(Import *d, Bytes proto) {
   return true;
 }
 
-static bool onnx_subgraph(Import *d, Bytes proto, Value **outputs, int *nout) {
+static bool onnx_subgraph(
+    Import *d,
+    Bytes proto,
+    Value **inputs,
+    int nin,
+    Value **outputs,
+    int *nout
+) {
   if (d->depth == 32) return fail(d, POLY_IMPORT_ERR_PARSE, "subgraph nesting exceeds 32");
-  char parent_op[ONNX_NAME];
-  strcpy(parent_op, d->op);
+  const char *parent_op = d->op;
   d->scopes[++d->depth] = ++d->next_scope;
   bool ok = false;
   Reader r = {.bytes = proto};
   Field f;
   while (next(&r, &f)) {
     if (f.tag == 5 && (f.wire != 2 || !onnx_initializer(d, f.bytes, NULL))) goto done;
-    if (f.tag == 11 || f.tag == 15) {
-      fail(
-          d, POLY_IMPORT_ERR_UNSUPPORTED_OP,
-          "If branches require lexical captures and dense initializers"
-      );
+    if (f.tag == 15) {
+      fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "subgraphs require dense initializers");
       goto done;
     }
   }
   if (r.bad) goto done;
+  int bound = 0;
+  r = (Reader){.bytes = proto};
+  while (next(&r, &f))
+    if (f.tag == 11) {
+      Value info = {0};
+      if (f.wire != 2 || bound == nin || !value_info(d, f.bytes, &info, false)) {
+        fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "subgraph input count/declaration mismatch");
+        goto done;
+      }
+      Value *source = inputs[bound++];
+      if (!poly_dtype_eq(info.dtype, source->dtype) || info.rank != source->rank ||
+          memcmp(info.shape, source->shape, info.rank * sizeof(int64_t))) {
+        fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "subgraph input shape/dtype mismatch");
+        goto done;
+      }
+      Value *v = add_value(d, info.name);
+      if (!v) goto done;
+      v->tensor = source->tensor;
+      v->dtype = info.dtype;
+      v->rank = info.rank;
+      memcpy(v->shape, info.shape, sizeof(v->shape));
+      v->nbytes = info.nbytes;
+      v->constant = source->constant;
+    }
+  if (r.bad || bound != nin) {
+    fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "subgraph input count mismatch");
+    goto done;
+  }
   r = (Reader){.bytes = proto};
   while (next(&r, &f))
     if (f.tag == 1 && (f.wire != 2 || ++d->node_index > ONNX_NODES || !onnx_node(d, f.bytes)))
@@ -3112,7 +3277,7 @@ static bool onnx_subgraph(Import *d, Bytes proto, Value **outputs, int *nout) {
   ok = !r.bad && *nout > 0;
 done:
   d->depth--;
-  strcpy(d->op, parent_op);
+  d->op = parent_op;
   return ok;
 }
 
@@ -3212,8 +3377,14 @@ PolyModel *poly_onnx_load_into(
     return NULL;
   }
   d->options = options;
+  d->op = "";
+  d->strings = poly_arena_new(0);
   bool ok = false, scoped = false;
   PolyModelFactoryScope scope = {0};
+  if (!d->strings) {
+    fail(d, POLY_IMPORT_ERR_INTERNAL, "string arena allocation failed");
+    goto done;
+  }
   if (!data || len <= 0 || (uint64_t)len > ONNX_BYTES) {
     fail(d, POLY_IMPORT_ERR_PARSE, "expected 1..1GiB model bytes");
     goto done;
@@ -3259,14 +3430,18 @@ PolyModel *poly_onnx_load_into(
   }
   Bytes model = {data, (size_t)len};
   Field g, version;
-  if (!field(d, model, 1, 0, &version, true) || version.integer < 3 || version.integer > 10 ||
+  if (!field(d, model, 1, 0, &version, true) || version.integer < 3 || version.integer > 13 ||
       !field(d, model, 7, 2, &g, true)) {
-    fail(d, POLY_IMPORT_ERR_PARSE, "supported ONNX IR versions are 3..10");
+    fail(d, POLY_IMPORT_ERR_PARSE, "supported ONNX IR versions are 3..13");
     goto done;
   }
   Reader r = {.bytes = model};
   Field f;
   while (next(&r, &f)) {
+    if (f.tag == 26) {
+      fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "multi-device configurations are unsupported");
+      goto done;
+    }
     if (f.tag == 20 || f.tag == 25) {
       fail(
           d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "training graphs and local functions are unsupported"
@@ -3274,9 +3449,9 @@ PolyModel *poly_onnx_load_into(
       goto done;
     }
     if (f.tag == 8) {
-      char domain[ONNX_NAME];
+      const char *domain;
       Field opset;
-      if (f.wire != 2 || !name_field(d, f.bytes, 1, domain, false) ||
+      if (f.wire != 2 || !name_field(d, f.bytes, 1, &domain, false) ||
           !field(d, f.bytes, 2, 0, &opset, true))
         goto done;
       int *extension = !strcmp(domain, "com.microsoft") ? &d->microsoft_opset
@@ -3325,6 +3500,7 @@ done:
   for (int i = 0; i < d->nvalues; i++)
     free(d->values[i].host);
   cJSON_Delete(d->dimensions);
+  poly_arena_destroy(d->strings);
   free(d);
   return result;
 }

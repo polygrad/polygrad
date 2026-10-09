@@ -117,6 +117,118 @@ def _replace_graph(data, graph):
     return b'\x08\x08' + _field(7, graph) + _field(8, b'\x0a\x00\x10\x11')
 
 
+@pytest.mark.parametrize('version', [10, 11, 12, 13])
+def test_onnx_new_ir_with_existing_tensor_semantics(version):
+    raw = base64.b64decode(CASES[0]['onnx'])
+    data = bytes([8, version]) + _replace_graph(raw, _graph(raw))[2:]
+    with pg.Runtime(device='INTERP') as rt:
+        model = rt.Model.from_onnx(data, dimensions={'batch': 2})
+        model.dispose()
+
+
+def test_onnx_long_names_preserve_identity_and_roundtrip():
+    # Distinct identifiers with the same long prefix must never alias/truncate.
+    names = [('shared/' * 600 + suffix).encode() for suffix in ('x', 'y')]
+    def info(name):
+        shape = _field(1, b'\x08\x02')
+        return _field(1, name) + _field(2, _field(1, b'\x08\x01' + _field(2, shape)))
+    node = _field(1, names[0]) + _field(2, names[1]) + _field(4, b'Neg')
+    graph = _field(1, node) + _field(11, info(names[0])) + _field(12, info(names[1]))
+    with pg.Runtime(device='INTERP') as rt:
+        model = rt.Model.from_onnx(_replace_graph(b'', graph))
+        restored = rt.Model.load(model.save())
+        try:
+            for current in (model, restored):
+                actual = current.call('forward', {names[0].decode(): np.array([2., -3.], np.float32)})
+                np.testing.assert_array_equal(actual[names[1].decode()], [-2., 3.])
+        finally:
+            restored.dispose()
+            model.dispose()
+
+
+def test_onnx_new_ir_rejects_unsupported_execution_metadata():
+    raw = base64.b64decode(CASES[0]['onnx'])
+    graph = _graph(raw)
+    node = next(value for tag, value in _fields(graph) if tag == 1)
+    base = b'\x08\x0d' + _replace_graph(raw, graph)[2:]
+    with pg.Runtime(device='INTERP') as rt:
+        for data in (base + _field(26, b''),
+                     _replace_graph(raw, graph.replace(_field(1, node),
+                                    _field(1, node + _field(10, b'')), 1)),
+                     _replace_graph(raw, graph.replace(_field(1, node),
+                                    _field(1, node + _field(8, b'custom')), 1))):
+            with pytest.raises(ValueError, match='configurations|overloads'):
+                rt.Model.from_onnx(data, dimensions={'batch': 2})
+        with pytest.raises(ValueError, match='IR versions'):
+            rt.Model.from_onnx(b'\x08\x7f' + base[2:])
+
+
+def _message(fields):
+    return b''.join(_varint(tag * 8) + _varint(value) if isinstance(value, int)
+                    else _field(tag, value) for tag, value in fields)
+
+
+def test_onnx_static_loop_rejects_dynamic_control_and_scans():
+    raw = base64.b64decode(next(c for c in CASES if c['name'] == 'loop_early')['onnx'])
+    graph = _graph(raw)
+    loop = next(value for tag, value in _fields(graph) if tag == 1)
+    def replace_loop(node):
+        return _replace_graph(raw, graph.replace(_field(1, loop), _field(1, node), 1))
+    def node(op, inputs, output, extra=b''):
+        return b''.join(_field(1, x.encode()) for x in inputs) + _field(2, output.encode()) + _field(4, op.encode()) + extra
+    keepdims = _field(5, _field(1, b'keepdims') + b'\x18\x00\xa0\x01\x02')
+    dynamic = []
+    for tag, value in _fields(loop):
+        if tag == 5:
+            attrs = []
+            for atag, avalue in _fields(value):
+                if atag == 6:
+                    body = []
+                    for btag, bvalue in _fields(avalue):
+                        if btag == 1 and (4, b'Less') in list(_fields(bvalue)):
+                            body.extend((1, n) for n in (
+                                node('ReduceSum', ['carry'], 'sum_carry', keepdims),
+                                node('ReduceSum', ['increment'], 'sum_increment', keepdims),
+                                node('Less', ['sum_carry', 'sum_increment'], 'keep_going')))
+                        else:
+                            body.append((btag, bvalue))
+                    avalue = _message(body)
+                attrs.append((atag, avalue))
+            value = _message(attrs)
+        dynamic.append((tag, value))
+    with pg.Runtime(device='INTERP') as rt:
+        for data, message in ((replace_loop(_message(dynamic)), 'constant scalar bool'),
+                              (replace_loop(loop + _field(2, b'scan')), 'without scan outputs')):
+            with pytest.raises(ValueError, match=message):
+                rt.Model.from_onnx(data)
+        # Failed imports must release scopes and leave the same runtime usable.
+        model = rt.Model.from_onnx(raw)
+        try:
+            np.testing.assert_array_equal(model.call('forward', {'x': np.array([2., -3.], np.float32)})['y'], [3.5, 0.])
+        finally:
+            model.dispose()
+
+
+def test_onnx_static_loop_expansion_is_bounded():
+    raw = base64.b64decode(next(c for c in CASES if c['name'] == 'loop_early')['onnx'])
+    fields = []
+    for tag, value in _fields(_graph(raw)):
+        if tag == 5:
+            tensor = list(_fields(value))
+            name = next(v for t, v in tensor if t == 8)
+            if name in (b'trips', b'stop'):
+                width = 8 if name == b'trips' else 4
+                value = _message([(t, (100000).to_bytes(width, 'little') if t == 9 else v)
+                                  for t, v in tensor])
+        fields.append((tag, value))
+    with pg.Runtime(device='INTERP') as rt:
+        with pytest.raises(ValueError, match='value limit exceeded|iteration budget exceeded'):
+            rt.Model.from_onnx(_replace_graph(raw, _message(fields)))
+        # Exceeding a resource limit must not leave the capture scope active.
+        model = rt.Model.from_onnx(raw)
+        model.dispose()
+
+
 def test_onnx_large_graph_stays_bounded():
     raw = base64.b64decode(CASES[0]['onnx'])
     def graph(count):

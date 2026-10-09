@@ -6,6 +6,9 @@
   Tensor storage, without delaying reclamation or changing output ownership.
 - Fix Model calls, host-buffer copies and release, and kernel loading above
   2 GiB of Wasm memory.
+- Support long ONNX identifiers, format versions through 13 and bounded static
+  loops with fixed-shape carried values. Unsupported format features,
+  runtime-dependent loops and scan outputs are rejected.
 
 ## 0.7.1 (2026-10-08)
 

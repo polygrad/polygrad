@@ -4,6 +4,9 @@
 
 - Avoid repeated traversal of unrelated model graphs when reclaiming temporary
   Tensor storage, without delaying reclamation or changing output ownership.
+- Support long ONNX identifiers, format versions through 13 and bounded static
+  loops with fixed-shape carried values. Unsupported format features,
+  runtime-dependent loops and scan outputs are rejected.
 
 ## 0.7.1 (2026-10-08)
 

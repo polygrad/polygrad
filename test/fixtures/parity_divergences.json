@@ -288,6 +288,18 @@
       "close_when": "Pinned tinygrad supplies a cancellation-free tanh with equivalent numerical coverage."
     },
     {
+      "id": "PG-DIV-019",
+      "status": "approved",
+      "stages": ["model", "import"],
+      "area": "bounded static ONNX Loop import",
+      "tinygrad": "Pinned ONNX runner has no Loop implementation.",
+      "polygrad": "Unroll Loop at import only when trip count and each evaluated condition are closed constant graphs. Carry fixed-shape tensors through scoped subgraphs, bounded by the existing node/value budgets and a 4096-iteration guard. Reject data-dependent control and scan outputs. Execute the resulting ordinary Model through existing Tensor/compiler/runtime paths.",
+      "rationale": "Supports statically terminating exported model programs without a second executor or observing runtime inputs during import.",
+      "approval": "User 2026-10-09: Yes, add bounded static Loop support.",
+      "evidence": ["src/loaders/onnx_loader.c:onnx_loop", "test/generate_onnx_fixture.py", "test/fixtures/onnx.json", "py/tests/test_onnx.py"],
+      "close_when": "Revisit when pinned tinygrad implements Loop. This grants no Tensor, compiler or runtime parity mismatch."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

@@ -307,6 +307,8 @@ locations are exact keys, not files fetched by the loader. Initializers are
 copied into frozen state; this import does not create a training objective or
 Transformer generation methods. Unsupported operators and shapes raise an
 import error; see [ONNX import](https://github.com/polygrad/polygrad#onnx-import).
+Constant-terminated loops with fixed-shape carried values are unrolled during
+import; runtime-dependent loops and scan outputs are rejected.
 
 ### Pretrained models
 

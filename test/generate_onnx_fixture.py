@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / 'references/tinygrad_014'))
 from tinygrad.nn.onnx import OnnxRunner
 
 
-def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, opset=17, domains=None):
+def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, opset=17, domains=None, pinned=True):
     graph = h.make_graph(nodes, name,
         [h.make_tensor_value_info(k, T.FLOAT, (['batch'] + list(v.shape[1:])) if dims else v.shape)
          for k, v in inputs.items()],
@@ -26,12 +26,13 @@ def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, op
     onnx.checker.check_model(model)
     raw = model.SerializeToString()
     expected = ort.InferenceSession(raw, providers=['CPUExecutionProvider']).run(list(outputs), inputs)
-    with tempfile.TemporaryDirectory() as td:
-        path = Path(td) / 'model.onnx'
-        path.write_bytes(raw)
-        actual = OnnxRunner(path)(inputs)
-        for key, ref in zip(outputs, expected):
-            np.testing.assert_allclose(actual[key].numpy(), ref, atol=2e-5, rtol=2e-5)
+    if pinned:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'model.onnx'
+            path.write_bytes(raw)
+            actual = OnnxRunner(path)(inputs)
+            for key, ref in zip(outputs, expected):
+                np.testing.assert_allclose(actual[key].numpy(), ref, atol=2e-5, rtol=2e-5)
     external_data = {}
     if external:
         payload = bytearray(b'offset-prefix')
@@ -43,6 +44,7 @@ def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, op
         raw = model.SerializeToString()
         external_data['weights.bin'] = base64.b64encode(payload).decode()
     return dict(name=name, onnx=base64.b64encode(raw).decode(), dimensions=dims or {}, external=external_data,
+                reference='onnxruntime+tinygrad' if pinned else 'onnxruntime (approved static Loop extension)',
                 inputs={k: dict(shape=list(v.shape), values=v.reshape(-1).tolist()) for k, v in inputs.items()},
                 outputs={k: dict(shape=list(v.shape), values=v.reshape(-1).tolist()) for k, v in zip(outputs, expected)})
 
@@ -54,6 +56,34 @@ def fixtures():
                         h.make_node('Relu', ['hidden'], ['relu']),
                         h.make_node('Gemm', ['relu', 'out'], ['y'], transB=1, alpha=.7)],
                {'x': f((2, 4))}, {'y': (2, 2)}, {'w': f((4, 6)), 'b': f((6,)), 'out': f((2, 6))}, dims={'batch': 2})
+    prefix = 'exported/layer/' * 40
+    x, w, y = (prefix + suffix for suffix in ('input', 'weight', 'output'))
+    yield case('long_identifiers', [h.make_node('Add', [x, w], [y])],
+               {x: np.array([2., -3.], np.float32)}, {y: (2,)},
+               {w: np.array([1., 4.], np.float32)})
+    yield case('initializer_scope_names', [h.make_node('Add', ['x', '...a'], ['tmp']),
+               h.make_node('Add', ['tmp', '%2E%2E%2Ea'], ['y'])],
+               {'x': np.array([1., 2.], np.float32)}, {'y': (2,)},
+               {'...a': np.array([3., 4.], np.float32), '%2E%2E%2Ea': np.array([5., 6.], np.float32)})
+    for label, trips, initial, stop in [('early', 10, True, 3), ('trip', 2, True, 8),
+                                       ('zero', 0, True, 3), ('false', 5, False, 3),
+                                       ('while', None, True, 3), ('no_cond', 2, None, 8)]:
+        body = h.make_graph([
+            h.make_node('Add', ['carry', 'increment'], ['updated']),
+            h.make_node('Add', ['counter', 'one'], ['next_counter']),
+            h.make_node('Less', ['next_counter', 'stop'], ['keep_going'])], 'body',
+            [h.make_tensor_value_info('iter', T.INT64, []), h.make_tensor_value_info('cond', T.BOOL, []),
+             h.make_tensor_value_info('carry', T.FLOAT, [2]), h.make_tensor_value_info('counter', T.INT32, [])],
+            [h.make_tensor_value_info('keep_going', T.BOOL, []),
+             h.make_tensor_value_info('updated', T.FLOAT, [2]), h.make_tensor_value_info('next_counter', T.INT32, [])])
+        weights = {'increment': np.array([.5, 1.], np.float32), 'counter0': np.array(0, np.int32),
+                   'one': np.array(1, np.int32), 'stop': np.array(stop, np.int32)}
+        if trips is not None: weights['trips'] = np.array(trips, np.int64)
+        if initial is not None: weights['initial'] = np.array(initial, np.bool_)
+        yield case('loop_'+label, [h.make_node('Loop',
+                   ['trips' if trips is not None else '', 'initial' if initial is not None else '', 'x', 'counter0'],
+                   ['y', 'count'], body=body), h.make_node('Cast', ['count'], ['steps'], to=T.FLOAT)],
+                   {'x': np.array([2., -3.], np.float32)}, {'y': (2,), 'steps': ()}, weights, pinned=False)
     yield case('integer_pow_shape', [h.make_node('Shape', ['x'], ['shape']),
                h.make_node('Gather', ['shape', 'axis'], ['rows']),
                h.make_node('Pow', ['rows', 'exponent'], ['squared']),

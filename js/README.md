@@ -335,6 +335,8 @@ the loader does not fetch files. Initializers are copied into frozen state.
 Placement and bundle save/load work as for other Models; training objectives
 and Transformer generation methods are not inferred. See the
 [ONNX import reference](https://github.com/polygrad/polygrad#onnx-import).
+Constant-terminated loops with fixed-shape carried values are unrolled during
+import; runtime-dependent loops and scan outputs are rejected.
 
 ### Pretrained And Configured Models
 

@@ -7,6 +7,10 @@
 - Keep Wasm Tensor handles above 2 GiB valid when passed to or returned from
   Model calls, instead of misclassifying signed pointer values as host data.
   Preserve unsigned addresses for host-buffer copies, release and kernel loading.
+- Import ONNX files with long identifiers and format versions through 13,
+  while rejecting unsupported device configurations and function overloads.
+  Unroll bounded, constant-terminated loops with fixed-shape carried values;
+  runtime-dependent loops and scan outputs remain unsupported.
 
 ## 0.7.1 (2026-10-08)
 
