@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize('target', ['test-py', 'test-readme'])
 def test_python_docs_build_wasm(target):
-    rule = next(line for line in (ROOT / 'Makefile').read_text().splitlines()
+    rule = next(line for line in (ROOT / 'Makefile').read_text(encoding='utf-8').splitlines()
                 if line.startswith(target + ':'))
     assert 'wasm-pkg' in rule.split()
 
