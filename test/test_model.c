@@ -2819,6 +2819,87 @@ TEST(model, binding_frozen_flag_sets_resource_trainability) {
   PASS();
 }
 
+TEST(model, residency_root_deduplication_is_linear) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *model = poly_model_new(ctx, NULL);
+  ASSERT_NOT_NULL(model);
+  int64_t shape[] = {1};
+  PolyTensor *x = poly_model_input(model, "x", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(x);
+  for (int i = 0; i < 128; i++) {
+    char name[32];
+    snprintf(name, sizeof(name), "weight%d", i);
+    ASSERT_NOT_NULL(poly_model_param(model, name, POLY_FLOAT32, shape, 1));
+  }
+  ASSERT_INT_EQ(poly_model_output(model, "y", x), POLY_STATUS_OK);
+  const char *inputs[] = {"x"}, *outputs[] = {"y"};
+  ASSERT_INT_EQ(poly_model_entrypoint(model, "forward", inputs, 1, outputs, 1, NULL), 0);
+  ASSERT_INT_EQ(poly_model_build(model, NULL), 0);
+  size_t before = poly_model_test_residency_root_checks();
+  ASSERT_INT_EQ(poly_model_set_param_trainable(model, 0, false), 0);
+  size_t checks = poly_model_test_residency_root_checks() - before;
+  int count = poly_model_buf_count(model);
+  poly_model_free(model);
+  poly_ctx_destroy(ctx);
+  /* Count membership work, not timing: each published field gets one lookup. */
+  ASSERT_TRUE(checks < (size_t)count * 12);
+  PASS();
+}
+
+TEST(model, trainability_batch_validates_before_changing_any_buffer) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *model = poly_model_new(ctx, NULL);
+  int64_t shape[] = {1};
+  PolyTensor *a = poly_model_param(model, "a", POLY_FLOAT32, shape, 1);
+  PolyTensor *b = poly_model_param(model, "b", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+  ASSERT_INT_EQ(poly_model_state(model, "alias", a, 0), 0);
+  PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+  ASSERT_INT_EQ(poly_model_output(model, "y", y), 0);
+  const char *outputs[] = {"y"};
+  ASSERT_INT_EQ(poly_model_entrypoint(model, "forward", NULL, 0, outputs, 1, NULL), 0);
+  ASSERT_INT_EQ(poly_model_build(model, NULL), 0);
+  int ai = poly_model_find_buf(model, "a"), bi = poly_model_find_buf(model, "b");
+  int alias = poly_model_find_buf(model, "alias");
+  ASSERT_TRUE(ai >= 0 && bi >= 0 && alias >= 0);
+  int invalid[] = {ai, poly_model_buf_count(model)}, indices[] = {ai, bi, ai};
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, invalid, 2, false), -1);
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, NULL, 1, false), -1);
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, indices, -1, false), -1);
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, NULL, 0, false), 0);
+  ASSERT_TRUE(poly_model_buf_trainable(model, ai));
+  ASSERT_TRUE(poly_model_buf_trainable(model, bi));
+  poly_model_test_fail_residency_roots_after(3);
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, indices, 3, false), -1);
+  ASSERT_TRUE(poly_model_buf_trainable(model, ai));
+  ASSERT_TRUE(poly_model_buf_trainable(model, bi));
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, indices, 3, false), 0);
+  ASSERT_FALSE(poly_model_buf_trainable(model, ai));
+  ASSERT_FALSE(poly_model_buf_trainable(model, bi));
+  ASSERT_FALSE(poly_model_buf_trainable(model, alias));
+  ASSERT_INT_EQ(poly_model_set_bufs_trainable(model, &alias, 1, true), 0);
+  ASSERT_TRUE(poly_model_buf_trainable(model, ai));
+  ASSERT_TRUE(poly_model_buf_trainable(model, alias));
+  ASSERT_FALSE(poly_model_buf_trainable(model, bi));
+  int ir_len;
+  uint8_t *ir = poly_model_export_ir(model, &ir_len);
+  ASSERT_NOT_NULL(ir);
+  PolyModel *loaded = poly_model_from_ir_into(ctx, ir, ir_len, NULL, 0, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(loaded);
+  ASSERT_TRUE(poly_model_buf_trainable(loaded, poly_model_find_buf(loaded, "a")));
+  ASSERT_FALSE(poly_model_buf_trainable(loaded, poly_model_find_buf(loaded, "b")));
+  poly_model_free(loaded);
+  free(ir);
+  poly_model_free(model);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, staged_objective_accepts_one_element_output) {
   PolyCtx *ctx = poly_ctx_new();
   PolyModel *inst = poly_model_new(ctx, NULL);

@@ -322,6 +322,9 @@ int poly_model_buf_role(const PolyModel *inst, int i);
 bool poly_model_buf_trainable(const PolyModel *inst, int i);
 bool poly_model_param_trainable(const PolyModel *inst, int i);
 int poly_model_set_buf_trainable(PolyModel *inst, int i, bool trainable);
+/* Atomic batch update, including storage aliases. Invalid indices or failed
+ * preparation leave trainability and cached optimizer state unchanged. */
+int poly_model_set_bufs_trainable(PolyModel *inst, const int *indices, int count, bool trainable);
 int poly_model_set_param_trainable(PolyModel *inst, int i, bool trainable);
 int poly_model_buf_shape(const PolyModel *inst, int i, int64_t *shape_out, int max_dims);
 /* buf_shape describes capacity. These queries distinguish the declared bounds
@@ -399,6 +402,7 @@ int poly_model_set_device_map_arrays(
 
 /* Deterministically fail Model owner-root preparation after N additions. */
 void poly_model_test_fail_residency_roots_after(int additions);
+size_t poly_model_test_residency_root_checks(void);
 bool poly_model_test_has_vag(const PolyModel *inst);
 bool poly_model_test_has_train(const PolyModel *inst);
 int poly_model_test_optimizer_kind(const PolyModel *inst);

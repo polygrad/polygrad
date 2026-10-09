@@ -367,6 +367,11 @@ static void model_mutated(PolyModel *inst, bool transient) {
 
 #ifdef POLY_TESTING
 static int test_residency_root_fail_after = -1;
+static size_t test_residency_root_checks;
+
+size_t poly_model_test_residency_root_checks(void) {
+  return test_residency_root_checks;
+}
 
 void poly_model_test_fail_residency_roots_after(int additions) {
   test_residency_root_fail_after = additions;
@@ -399,6 +404,7 @@ static bool model_append_residency_root(
     PolyUOp ***roots,
     int *count,
     int *capacity,
+    PolyMap *seen,
     PolyUOp *root
 ) {
   if (!root) return true;
@@ -409,8 +415,10 @@ static bool model_append_residency_root(
   }
   if (test_residency_root_fail_after > 0) test_residency_root_fail_after--;
 #endif
-  for (int i = 0; i < *count; i++)
-    if ((*roots)[i] == root) return true;
+#ifdef POLY_TESTING
+  test_residency_root_checks++;
+#endif
+  if (poly_map_get(seen, poly_ptr_hash(root), root, poly_ptr_eq)) return true;
   if (*count >= *capacity) {
     int new_capacity = *capacity ? *capacity * 2 : 16;
     PolyUOp **new_roots = realloc(*roots, (size_t)new_capacity * sizeof(*new_roots));
@@ -419,6 +427,7 @@ static bool model_append_residency_root(
     *capacity = new_capacity;
   }
   (*roots)[(*count)++] = root;
+  poly_map_set(seen, poly_ptr_hash(root), root, root, poly_ptr_eq);
   return true;
 }
 
@@ -431,11 +440,12 @@ static bool build_publish_roots(
     const PolyModelBuildState *build,
     PolyUOp ***roots,
     int *count,
-    int *capacity
+    int *capacity,
+    PolyMap *seen
 ) {
 #define PUBLISH_ROOT(root)                                                                         \
   do {                                                                                             \
-    if (!model_append_residency_root(roots, count, capacity, (root))) return false;                \
+    if (!model_append_residency_root(roots, count, capacity, seen, (root))) return false;          \
   } while (0)
   if (build) {
     for (int i = 0; i < build->n_bindings; i++) {
@@ -457,11 +467,12 @@ static bool training_publish_roots(
     int n_params,
     PolyUOp ***roots,
     int *count,
-    int *capacity
+    int *capacity,
+    PolyMap *seen
 ) {
 #define PUBLISH_ROOT(root)                                                                         \
   do {                                                                                             \
-    if (!model_append_residency_root(roots, count, capacity, (root))) return false;                \
+    if (!model_append_residency_root(roots, count, capacity, seen, (root))) return false;          \
   } while (0)
   if (training->vag) {
     PUBLISH_ROOT(training->vag->combined_sink);
@@ -496,11 +507,14 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
   *prepared = (ModelResidencyRoots){0};
   PolyUOp **roots = NULL;
   int count = 0, capacity = 0;
+  /* The vector preserves first-encounter publication order. Membership must
+   * not compare each field with every root already collected. */
+  PolyMap *seen = poly_map_new(64);
 #define ADD_MODEL_ROOT(root)                                                                       \
   do {                                                                                             \
-    if (!model_append_residency_root(&roots, &count, &capacity, (root))) goto fail;                \
+    if (!model_append_residency_root(&roots, &count, &capacity, seen, (root))) goto fail;          \
   } while (0)
-  if (!build_publish_roots(state->build, &roots, &count, &capacity)) goto fail;
+  if (!build_publish_roots(state->build, &roots, &count, &capacity, seen)) goto fail;
   for (int i = 0; i < state->n_controls; i++)
     ADD_MODEL_ROOT(state->controls[i].variable);
   for (int i = 0; i < state->n_bufs; i++) {
@@ -521,7 +535,7 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
     for (int j = 0; j < state->modules[i].n_inputs; j++)
       ADD_MODEL_ROOT(state->modules[i].logical_inputs[j]);
   }
-  if (!training_publish_roots(&state->training, state->n_params, &roots, &count, &capacity))
+  if (!training_publish_roots(&state->training, state->n_params, &roots, &count, &capacity, seen))
     goto fail;
 #undef ADD_MODEL_ROOT
   for (int i = 0; i < count; i++)
@@ -532,9 +546,11 @@ static int model_prepare_residency_roots(const PolyModel *state, ModelResidencyR
     }
   prepared->items = roots;
   prepared->count = count;
+  poly_map_destroy(seen);
   return 0;
 
 fail:
+  poly_map_destroy(seen);
   free(roots);
   return -1;
 }
@@ -3347,14 +3363,30 @@ static int build_trainable_param_indices(const PolyModel *inst, int **indices_ou
 }
 
 int poly_model_set_buf_trainable(PolyModel *inst, int i, bool trainable) {
-  if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  return poly_model_set_bufs_trainable(inst, &i, 1, trainable);
+}
+
+int poly_model_set_bufs_trainable(PolyModel *inst, const int *indices, int count, bool trainable) {
+  if (!inst || count < 0 || (count && !indices)) return -1;
+  for (int i = 0; i < count; i++)
+    if (indices[i] < 0 || indices[i] >= inst->n_bufs) return -1;
+  if (!count) return 0;
   NamedBuf *candidate_bufs = malloc((size_t)inst->n_bufs * sizeof(*candidate_bufs));
   if (!candidate_bufs) return -1;
   memcpy(candidate_bufs, inst->bufs, (size_t)inst->n_bufs * sizeof(*candidate_bufs));
 
-  PolyUOp *shared = candidate_bufs[i].buffer;
+  PolyMap *selected = poly_map_new((size_t)count);
+  for (int i = 0; i < count; i++) {
+    PolyUOp *buffer = candidate_bufs[indices[i]].buffer;
+    poly_map_set(selected, poly_ptr_hash(buffer), buffer, buffer, poly_ptr_eq);
+  }
+  /* Trainability belongs to shared parameter storage, not an alias name. */
   for (int j = 0; j < inst->n_bufs; j++)
-    if (candidate_bufs[j].buffer == shared) candidate_bufs[j].trainable = trainable;
+    if (poly_map_get(
+            selected, poly_ptr_hash(candidate_bufs[j].buffer), candidate_bufs[j].buffer, poly_ptr_eq
+        ))
+      candidate_bufs[j].trainable = trainable;
+  poly_map_destroy(selected);
   PolyModel candidate = *inst;
   candidate.bufs = candidate_bufs;
   candidate.training.train = NULL;

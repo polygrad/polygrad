@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Deduplicate Model ownership roots with a hash set and freeze imported ONNX
+  initializers in one transaction, reducing model construction overhead.
+
 - Match tinygrad's realization traversal cache for unaffected graphs, avoiding
   repeated scans of shared dependencies during model import and Tensor execution.
 

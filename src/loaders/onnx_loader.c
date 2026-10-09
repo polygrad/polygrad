@@ -3346,21 +3346,18 @@ static bool onnx_graph(Import *d, Bytes proto) {
   if (poly_model_entrypoint(d->model, "forward", inputs, nin, outputs, nout, NULL) ||
       poly_model_build(d->model, &err))
     return fail(d, POLY_IMPORT_ERR_INTERNAL, "Model build: %s", err.message);
+  int frozen[ONNX_VALUES], n_frozen = 0;
   for (int i = 0; i < d->nvalues; i++)
     if (d->values[i].initializer) {
       Value *v = &d->values[i];
       if (poly_model_write_buf_named(d->model, v->binding, v->host, v->nbytes))
         return fail(d, POLY_IMPORT_ERR_INTERNAL, "initializer upload failed");
       /* Inference imports do not guess which float initializers should train. */
-      int index = -1;
-      for (int j = 0; j < poly_model_buf_count(d->model); j++)
-        if (!strcmp(poly_model_buf_name(d->model, j), v->binding)) {
-          index = j;
-          break;
-        }
-      if (index < 0 || poly_model_set_buf_trainable(d->model, index, false)) return false;
+      int index = poly_model_find_buf(d->model, v->binding);
+      if (index < 0) return false;
+      frozen[n_frozen++] = index;
     }
-  return true;
+  return poly_model_set_bufs_trainable(d->model, frozen, n_frozen, false) == 0;
 }
 
 PolyModel *poly_onnx_load_into(

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reduce Model import overhead by deduplicating ownership roots and freezing
+  ONNX initializers in one batch.
+
 - Avoid repeatedly scanning unaffected Tensor graphs during realization,
   reducing large-model import overhead without changing computed values.
 
