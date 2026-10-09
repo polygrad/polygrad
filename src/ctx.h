@@ -53,9 +53,15 @@ struct PolyCtx {
   /* C analogue of Tinygrad's weak UOp/Buffer ownership. Values are positive
    * retain counts encoded as uintptr_t. */
   PolyMap *retained_uops;
-  /* Weak trigger snapshot, not owners: direct-owner counts for roots whose
-   * traversal covered new residency rows in the last successful collection. */
-  PolyMap *collection_roots;
+  /* Incremental physical reachability: direct owners plus edges from live
+   * parents. Not IR ownership: logical roots and PROGRAM bodies are excluded. */
+  PolyMap *residency_refs;
+  bool residency_refs_valid;
+  bool check_residency; /* POLY_CHECK_RESIDENCY: compare against declared owners before sweeping */
+#ifdef POLY_TESTING
+  size_t residency_walk_count;
+  bool residency_fail_stack_growth;
+#endif
   bool collection_requested;
   bool collection_dirty; /* runtime residency may have lost an owner */
   bool ir_collection_dirty; /* weak CSE/shape rows may have lost an owner */

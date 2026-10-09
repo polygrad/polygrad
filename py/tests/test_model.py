@@ -1706,6 +1706,30 @@ def test_runtime_import_isolation_aliases_and_failed_load(device):
 
 
 @pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_tensor_result_and_named_output_mutations_are_independent(device):
+    from polygrad import create
+    with create(device=device) as rt:
+        x = rt.Tensor.empty(4)
+        y = x + 1
+        model = rt.Model.from_tensors(inputs={'x': x}, outputs={'y': y})
+        x.dispose()
+        y.dispose()
+        source = rt.Tensor(np.arange(4, dtype=np.float32)).realize()
+        result = None
+        try:
+            result = model.call('forward', {'x': source})['y']
+            result.assign(np.full(4, 11, dtype=np.float32)).realize()
+            rt.collect()
+            np.testing.assert_array_equal(model.read_buffer('y'), [1, 2, 3, 4])
+            model.write_buffer('y', np.full(4, 22, dtype=np.float32))
+            np.testing.assert_array_equal(result.numpy(), [11, 11, 11, 11])
+        finally:
+            if result is not None: result.dispose()
+            source.dispose()
+            model.dispose()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
 def test_runtime_import_disposal_reclaims_storage(device):
     from polygrad import create
     with create(device=device) as rt:

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Avoid repeated traversal of unrelated model graphs when reclaiming temporary
+  Tensor storage, without delaying reclamation or changing output ownership.
+
 ## 0.7.1 (2026-10-08)
 
 - Models saved with 0.7.1 cannot be loaded by 0.7.0. Loading models saved by

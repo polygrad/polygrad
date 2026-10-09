@@ -102,7 +102,13 @@ PolyCtx *poly_ctx_new(void) {
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->retained_uops = poly_map_new(16);
-  ctx->collection_roots = poly_map_new(16);
+  ctx->residency_refs = poly_map_new(16);
+  ctx->residency_refs_valid = true;
+  ctx->check_residency = poly_getenv_flag("POLY_CHECK_RESIDENCY");
+#ifdef POLY_TESTING
+  ctx->residency_walk_count = 0;
+  ctx->residency_fail_stack_growth = false;
+#endif
   ctx->collection_requested = false;
   ctx->collection_dirty = false;
   ctx->ir_collection_dirty = false;
@@ -122,7 +128,7 @@ PolyCtx *poly_ctx_new(void) {
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->uop_storage || !ctx->schedule_cache ||
       !ctx->to_program_cache || !ctx->runtime_cache || !ctx->local_size_cache ||
       !ctx->graph_cache || !ctx->mem_used_by_device || !ctx->shape_cache || !ctx->buffers ||
-      !ctx->retained_uops || !ctx->collection_roots || !ctx->rng_states) {
+      !ctx->retained_uops || !ctx->residency_refs || !ctx->rng_states) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
@@ -136,7 +142,7 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->retained_uops) poly_map_destroy(ctx->retained_uops);
-    if (ctx->collection_roots) poly_map_destroy(ctx->collection_roots);
+    if (ctx->residency_refs) poly_map_destroy(ctx->residency_refs);
     if (ctx->rng_states) poly_map_destroy(ctx->rng_states);
     free(ctx);
     return NULL;
@@ -168,7 +174,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
   poly_map_destroy(ctx->buffers);
   poly_map_destroy(ctx->retained_uops);
-  poly_map_destroy(ctx->collection_roots);
+  poly_map_destroy(ctx->residency_refs);
   poly_map_destroy(ctx->rng_states);
   poly_map_foreach(ctx->mem_used_by_device, free_memory_entry, NULL);
   poly_map_destroy(ctx->mem_used_by_device);
@@ -181,27 +187,20 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   free(ctx);
 }
 
+static bool residency_ref_update(PolyCtx *ctx, PolyUOp *root, bool acquire);
+
 void poly_ctx_root_acquired(PolyCtx *ctx, PolyUOp *root) {
-  uintptr_t count =
-      (uintptr_t)poly_map_get(ctx->collection_roots, poly_ptr_hash(root), root, poly_ptr_eq);
-  if (count)
-    poly_map_set(
-        ctx->collection_roots, poly_ptr_hash(root), root, (void *)(count + 1), poly_ptr_eq
-    );
+  if (!ctx || !root) return;
+  if (!ctx->residency_refs_valid || !residency_ref_update(ctx, root, true)) {
+    ctx->residency_refs_valid = false;
+    ctx->collection_requested = true;
+  }
 }
 
 void poly_ctx_root_released(PolyCtx *ctx, PolyUOp *root) {
-  uintptr_t count =
-      (uintptr_t)poly_map_get(ctx->collection_roots, poly_ptr_hash(root), root, poly_ptr_eq);
-  if (count > 1) {
-    poly_map_set(
-        ctx->collection_roots, poly_ptr_hash(root), root, (void *)(count - 1), poly_ptr_eq
-    );
-  } else if (count) {
-    /* A covering root lost its last direct owner. Other graphs may still
-     * reach its buffers: only the ordinary collector can decide to free them.
-     * No graph traversal or buffer destruction belongs on the release path. */
-    poly_map_remove(ctx->collection_roots, poly_ptr_hash(root), root, poly_ptr_eq);
+  if (!ctx || !root) return;
+  if (!ctx->residency_refs_valid || !residency_ref_update(ctx, root, false)) {
+    ctx->residency_refs_valid = false;
     ctx->collection_requested = true;
   }
 }
@@ -265,74 +264,124 @@ static void collect_residency_row(const void *key, void *value, void *userdata) 
   rows->count++;
 }
 
-typedef struct {
-  PolyCtx *ctx;
-  PolyMap *marked;
-  PolyMap *visited;
-  PolyMap *cover;
-  PolyUOp **stack;
-  int n_stack;
-  int cap_stack;
-  bool failed;
-} ResidencyMarker;
-
-static bool residency_mark_root(ResidencyMarker *marker, PolyUOp *root) {
-  /* Tinygrad 2026-08-22 UOp weak ownership makes shared DAG reachability one
-   * object-lifetime relation. This is the C mark traversal for that concept;
-   * one visited set is shared by every declared root in this collection. */
-  if (!marker || marker->failed) return false;
-  if (!root) return true;
-  if (marker->n_stack >= marker->cap_stack) {
-    int capacity = marker->cap_stack ? marker->cap_stack * 2 : 256;
-    PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
-    if (!stack) return false;
-    marker->stack = stack;
-    marker->cap_stack = capacity;
-  }
-  marker->stack[marker->n_stack++] = root;
-  while (marker->n_stack > 0) {
-    PolyUOp *uop = marker->stack[--marker->n_stack];
-    if (!uop || poly_map_get(marker->visited, poly_ptr_hash(uop), uop, poly_ptr_eq)) continue;
-    poly_map_set(marker->visited, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
-    if (poly_map_get(marker->ctx->buffers, poly_ptr_hash(uop), uop, poly_ptr_eq))
-      poly_map_set(marker->marked, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
-    if (uop->n_src > marker->cap_stack - marker->n_stack) {
-      int capacity = marker->cap_stack;
-      while (capacity - marker->n_stack < uop->n_src)
-        capacity *= 2;
-      PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
-      if (!stack) return false;
-      marker->stack = stack;
-      marker->cap_stack = capacity;
+static bool residency_ref_update(PolyCtx *ctx, PolyUOp *root, bool acquire) {
+  /* Immutable source edges contribute once per live parent, not once per path
+   * or Tensor wrapper. Follow edges only across zero, as Python UOp ownership
+   * does. Storage destruction stays deferred to the existing safe points. */
+  PolyUOp *local[64], **stack = local;
+  size_t count = 1, capacity = 64;
+  local[0] = root;
+  bool ok = true;
+  while (count && ok) {
+    PolyUOp *uop = stack[--count];
+    if (!uop) continue;
+    uintptr_t refs =
+        (uintptr_t)poly_map_get(ctx->residency_refs, poly_ptr_hash(uop), uop, poly_ptr_eq);
+    if ((acquire && refs == UINTPTR_MAX) || (!acquire && !refs)) {
+      ok = false;
+      break;
     }
-    /* PROGRAM bodies contain abstract parameters, but graph functions contain
-     * concrete scratch buffers omitted from the outer CALL's input list. The
-     * live caller, not the weak graph-runtime cache, owns that storage. */
-    int first_src =
+    uintptr_t next = acquire ? refs + 1 : refs - 1;
+    if (next)
+      poly_map_set(ctx->residency_refs, poly_ptr_hash(uop), uop, (void *)next, poly_ptr_eq);
+    else
+      poly_map_remove(ctx->residency_refs, poly_ptr_hash(uop), uop, poly_ptr_eq);
+    if (acquire ? refs != 0 : next != 0) continue;
+#ifdef POLY_TESTING
+    ctx->residency_walk_count++;
+#endif
+    if (!acquire && (poly_map_get(ctx->buffers, poly_ptr_hash(uop), uop, poly_ptr_eq) ||
+                     poly_map_get(ctx->graph_cache, poly_ptr_hash(uop), uop, poly_ptr_eq)))
+      ctx->collection_requested = ctx->collection_dirty = true;
+    size_t needed = count + (size_t)uop->n_src;
+    if (needed > capacity) {
+#ifdef POLY_TESTING
+      if (ctx->residency_fail_stack_growth) {
+        ctx->residency_fail_stack_growth = false;
+        ok = false;
+        break;
+      }
+#endif
+      size_t size = needed > capacity * 2 ? needed : capacity * 2;
+      PolyUOp **grown = size <= SIZE_MAX / sizeof(*stack) ? malloc(size * sizeof(*stack)) : NULL;
+      if (!grown) {
+        ok = false;
+        break;
+      }
+      memcpy(grown, stack, count * sizeof(*stack));
+      if (stack != local) free(stack);
+      stack = grown;
+      capacity = size;
+    }
+    /* PROGRAM bodies are not residency owners. CUSTOM_FUNCTION bodies contain
+     * concrete graph-private scratch buffers and must remain reachable. */
+    int first =
         uop->op == POLY_OP_CALL && uop->n_src && uop->src[0]->op != POLY_OP_CUSTOM_FUNCTION ? 1 : 0;
-    for (int i = first_src; i < uop->n_src; i++)
-      marker->stack[marker->n_stack++] = uop->src[i];
+    for (int i = first; i < uop->n_src; i++)
+      stack[count++] = uop->src[i];
   }
-  return true;
+  if (stack != local) free(stack);
+  return ok;
 }
 
-static bool residency_mark_owner(ResidencyMarker *marker, PolyUOp *root) {
-  size_t before = poly_map_len(marker->marked);
-  if (!residency_mark_root(marker, root)) return false;
-  uintptr_t count = (uintptr_t)poly_map_get(marker->cover, poly_ptr_hash(root), root, poly_ptr_eq);
-  /* Greedy coverage uses the existing traversal, not one walk per owner.
-   * Redundant views do not become collection triggers. Exact duplicate roots
-   * still contribute their direct-owner count, including explicit UOp owners. */
-  if (count || poly_map_len(marker->marked) != before)
-    poly_map_set(marker->cover, poly_ptr_hash(root), root, (void *)(count + 1), poly_ptr_eq);
-  return true;
-}
-
-static void mark_retained_uop(const void *key, void *value, void *userdata) {
+static void residency_retain_root(const void *key, void *value, void *userdata) {
   (void)value;
-  ResidencyMarker *marker = (ResidencyMarker *)userdata;
-  if (!marker || marker->failed) return;
-  marker->failed = !residency_mark_owner(marker, (PolyUOp *)key);
+  PolyCtx *ctx = userdata;
+  if (ctx->residency_refs_valid)
+    ctx->residency_refs_valid = residency_ref_update(ctx, (PolyUOp *)key, true);
+}
+
+static bool residency_rebuild(PolyCtx *ctx) {
+  /* A stack-allocation failure cannot make partially updated counts evidence
+   * for freeing storage. Reconstruct from declared owners before any sweep. */
+  poly_map_clear(ctx->residency_refs);
+  ctx->residency_refs_valid = true;
+  poly_map_foreach(ctx->retained_uops, residency_retain_root, ctx);
+  for (int i = 0; ctx->residency_refs_valid && i < ctx->n_tensors; i++) {
+    PolyTensor *tensor = ctx->tensors[i];
+    if (tensor && tensor->owner_refs && tensor->uop_physical)
+      ctx->residency_refs_valid = residency_ref_update(ctx, tensor->uop_physical, true);
+  }
+  return ctx->residency_refs_valid;
+}
+
+typedef struct {
+  PolyMap *expected;
+  bool equal;
+} ResidencyCheck;
+
+static void residency_compare(const void *key, void *value, void *userdata) {
+  ResidencyCheck *check = userdata;
+  void *expected = poly_map_get(check->expected, poly_ptr_hash(key), key, poly_ptr_eq);
+  if (value != expected && check->equal) {
+    fprintf(
+        stderr, "polygrad: residency count drift at %p: incremental=%zu rebuilt=%zu\n", key,
+        (size_t)(uintptr_t)value, (size_t)(uintptr_t)expected
+    );
+    check->equal = false;
+  }
+}
+
+static bool residency_check(PolyCtx *ctx) {
+  /* Rebuild from the owner registry, not the incremental map. Do not repair
+   * a mismatch: that would hide a missing acquire/release on a root change. */
+  PolyMap *incremental = ctx->residency_refs;
+  ctx->residency_refs = poly_map_new(16);
+#ifdef POLY_TESTING
+  size_t walked = ctx->residency_walk_count;
+#endif
+  ResidencyCheck check = {.expected = ctx->residency_refs, .equal = residency_rebuild(ctx)};
+  if (check.equal) {
+    poly_map_foreach(incremental, residency_compare, &check);
+    check.equal = check.equal && poly_map_len(incremental) == poly_map_len(check.expected);
+  }
+  poly_map_destroy(ctx->residency_refs);
+  ctx->residency_refs = incremental;
+  ctx->residency_refs_valid = true;
+#ifdef POLY_TESTING
+  ctx->residency_walk_count = walked;
+#endif
+  return check.equal;
 }
 
 typedef struct {
@@ -501,32 +550,24 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
   if (!ctx || ctx->collecting) return -1;
   ctx->collecting = true;
   PolyMap *marked = poly_map_new(64);
-  ResidencyMarker roots = {
-      .ctx = ctx,
-      .marked = marked,
-      .visited = poly_map_new(256),
-      .cover = poly_map_new(32),
-  };
-  bool failed = marked == NULL || roots.visited == NULL || roots.cover == NULL;
-  /* Model/JIT owners can outlive repeatedly replaced Tensor views. Let those
-   * explicit roots cover storage first, so each view's retirement need not
-   * rediscover the unchanged graph owner. */
-  roots.failed = failed;
-  if (!failed) poly_map_foreach(ctx->retained_uops, mark_retained_uop, &roots);
-  failed = failed || roots.failed;
-  for (int i = 0; !failed && i < ctx->n_tensors; i++) {
-    PolyTensor *tensor = ctx->tensors[i];
-    if (tensor && tensor->owner_refs > 0)
-      failed = !residency_mark_owner(&roots, tensor->uop_physical);
+  bool failed = marked == NULL || (!ctx->residency_refs_valid && !residency_rebuild(ctx));
+  if (!failed && ctx->check_residency && !residency_check(ctx)) {
+    fprintf(stderr, "polygrad: residency verification failed before collection\n");
+    abort();
   }
-  /* A call-local allocation guard is not a persistent owner. Let persistent
-   * roots establish coverage before adding that temporary protection. */
-  if (!failed && transient_root) failed = !residency_mark_root(&roots, transient_root);
-  free(roots.stack);
+  bool transient_retained = false;
+  if (!failed && transient_root) {
+    transient_retained = residency_ref_update(ctx, transient_root, true);
+    if (!transient_retained) ctx->residency_refs_valid = false;
+    failed = !transient_retained;
+  }
 
   ResidencyRows rows = {0};
   if (!failed) poly_map_foreach(ctx->buffers, collect_residency_row, &rows);
   failed = failed || rows.failed;
+  for (int i = 0; !failed && i < rows.count; i++)
+    if (poly_map_get(ctx->residency_refs, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
+      poly_map_set(marked, poly_ptr_hash(rows.items[i]), rows.items[i], rows.items[i], poly_ptr_eq);
   if (!failed) {
     /* Existing view and multi-buffer rows point at their storage owner. Close
      * that runtime alias relation without creating buffer metadata. */
@@ -569,19 +610,14 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
   }
   /* Destroy native graph objects before releasing any storage they reference.
    * This also runs on residency-only collection, not just the later IR sweep. */
-  if (!failed && poly_graph_cache_evict_unmarked(ctx, roots.visited) != 0) failed = true;
-  poly_map_destroy(roots.visited);
+  if (!failed && poly_graph_cache_evict_unmarked(ctx, ctx->residency_refs) != 0) failed = true;
   if (!failed) {
     for (int i = 0; i < rows.count; i++)
       if (!poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
         poly_buffer_remove(ctx, rows.items[i]);
     ctx->collection_dirty = false;
-    poly_map_destroy(ctx->collection_roots);
-    ctx->collection_roots = roots.cover;
-    roots.cover = NULL;
     ctx->collection_requested = false;
   }
-  poly_map_destroy(roots.cover);
   free(rows.items);
   free(rows.buffers);
   poly_map_destroy(marked);
@@ -607,6 +643,7 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
     }
   }
   poly_map_destroy(live_ir);
+  if (transient_retained) poly_ctx_root_released(ctx, transient_root);
   ctx->collecting = false;
   return failed ? -1 : 0;
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Track live storage dependencies incrementally, avoiding repeated traversal of
+  unrelated model graphs during Tensor calls while preserving prompt reclamation.
+
 ## 0.7.1 (2026-10-08)
 
 - Add EmbeddingGemma 2 builders and Hugging Face import for text, image and audio

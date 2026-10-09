@@ -10,6 +10,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "test_harness.h"
 #include "../src/bigint.h"
@@ -22,6 +28,7 @@
 #include "../src/nn/optim.h"
 #include "../src/tensor.h"
 #include "../src/codegen/codegen.h"
+#include "../src/utils.h"
 
 TEST(tensor, extension_resolver_uses_current_core) {
   ASSERT_TRUE(poly_get_proc_address(NULL) == NULL);
@@ -713,6 +720,107 @@ TEST(tensor, downstream_graph_owns_input_residency_after_input_handle_release) {
   ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.mem_used == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, residency_collection_does_not_rewalk_unchanged_graphs) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyTensor *input = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+  float value = 3;
+  ASSERT_INT_EQ(poly_buffer_write(ctx, input->uop_physical, &value, sizeof(value)), 0);
+  PolyUOp *root = input->uop_physical;
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1), POLY_FLOAT32);
+  for (int i = 0; i < 2048; i++)
+    root = poly_uop_alu2(ctx, POLY_OP_ADD, root, one);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, root), 0);
+  poly_tensor_release(input);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  size_t before = ctx->residency_walk_count;
+  for (int i = 0; i < 16; i++) {
+    PolyTensor *temporary =
+        poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(temporary);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, temporary->uop_physical, &value, sizeof(value)), 0);
+    poly_tensor_release(temporary);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_TRUE(ctx->mem_used == sizeof(value));
+  }
+  size_t walked = ctx->residency_walk_count - before;
+  poly_uop_release(ctx, root);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  bool freed = ctx->mem_used == 0;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(freed);
+  ASSERT_TRUE(walked < 256);
+  PASS();
+}
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+TEST(tensor, residency_debug_check_detects_count_and_root_drift) {
+  for (int fault = 0; fault < 3; fault++) {
+    pid_t child = fork();
+    ASSERT_TRUE(child >= 0);
+    if (child == 0) {
+      struct rlimit no_core = {0, 0};
+      (void)setrlimit(RLIMIT_CORE, &no_core);
+      setenv("POLY_CHECK_RESIDENCY", "1", 1);
+      PolyCtx *ctx = poly_ctx_new();
+      PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+      PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+      if (fault == 0)
+        poly_map_remove(
+            ctx->residency_refs, poly_ptr_hash(a->uop_physical), a->uop_physical, poly_ptr_eq
+        );
+      else if (fault == 1)
+        poly_map_set(
+            ctx->residency_refs, poly_ptr_hash(a->uop_physical), a->uop_physical,
+            (void *)(uintptr_t)2, poly_ptr_eq
+        );
+      else
+        /* Simulate a root replacement that forgot the ownership hooks. */
+        a->uop_physical = b->uop_physical;
+      (void)poly_ctx_collect(ctx);
+      _exit(0);
+    }
+    int status = 0;
+    ASSERT_TRUE(waitpid(child, &status, 0) == child);
+    ASSERT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+  }
+  PASS();
+}
+#endif
+
+TEST(tensor, residency_rebuilds_after_interrupted_owner_update) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyTensor *inputs[128];
+  PolyUOp *roots[128];
+  float value = 7, actual = 0;
+  for (int i = 0; i < 128; i++) {
+    inputs[i] = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_CPU);
+    ASSERT_NOT_NULL(inputs[i]);
+    roots[i] = inputs[i]->uop_physical;
+    ASSERT_INT_EQ(poly_buffer_write(ctx, roots[i], &value, sizeof(value)), 0);
+  }
+  PolyUOp *owner = poly_uop_sink_n(ctx, roots, 128);
+  ASSERT_NOT_NULL(owner);
+  ctx->residency_fail_stack_growth = true;
+  ASSERT_INT_EQ(poly_uop_retain(ctx, owner), 0);
+  ASSERT_FALSE(ctx->residency_refs_valid);
+  for (int i = 0; i < 128; i++)
+    poly_tensor_release(inputs[i]);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(ctx->residency_refs_valid);
+  ASSERT_TRUE(ctx->mem_used == 128 * sizeof(value));
+  for (int i = 0; i < 128; i++) {
+    ASSERT_INT_EQ(poly_buffer_read(ctx, roots[i], &actual, sizeof(actual)), 0);
+    ASSERT_FLOAT_EQ(actual, value, 0);
+  }
+  poly_uop_release(ctx, owner);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(ctx->mem_used == 0);
   poly_ctx_destroy(ctx);
   PASS();
 }

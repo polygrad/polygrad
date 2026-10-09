@@ -1246,6 +1246,14 @@ async function checkModelTensorIO(pg) {
     const shaped = await model.forwardAsync({x:{data:new Float32Array([1,2,3,4]), shape:[2,2]},
       y:new Float32Array([0,0,0,0])})
     assertClose(shaped.prediction, [2,4,6,8], 0)
+    const detached = (await model.forwardAsync({x:zero, y:zero})).prediction
+    owned.push(detached)
+    detached.assign(11)
+    await detached.realizeAsync()
+    pg.collect()
+    assertClose(await model.readBufferAsync('prediction'), [0,0,0,0], 0)
+    await model.writeBufferAsync('prediction', new Float32Array([22,22,22,22]))
+    assertClose(await detached.toArrayAsync(), [11,11,11,11], 0)
     const afterShape = await model.readBufferAsync('x')
     for (const bad of [pg.Tensor.zeros([4]), pg.Tensor.zeros([2,2], {dtype:'int32'})]) {
       owned.push(bad)
