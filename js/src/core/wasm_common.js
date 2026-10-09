@@ -203,7 +203,7 @@ function createWasmCoreFromModule(Module, device) {
   function readPtrArray(ptr, n) {
     const out = new Array(n)
     const h32 = heap32()
-    for (let i = 0; i < n; i++) out[i] = h32[(ptr >>> 2) + i]
+    for (let i = 0; i < n; i++) out[i] = h32[(ptr >>> 2) + i] >>> 0
     return out
   }
 
@@ -442,7 +442,10 @@ function createWasmCoreFromModule(Module, device) {
           const view = new DataView(heapU8().buffer)
           shaped.shape.forEach((dim, j) => view.setBigInt64(shapePtr + j*8, BigInt(dim), true))
         }
-        const tensor = Number.isInteger(value) && value > 0 ? value : 0
+        // C exports may return a wasm32 pointer as a signed i32. It is still
+        // a Tensor handle above 2GB, not a host TypedArray or an invalid input.
+        const tensor = Number.isInteger(value) && value >= -0x80000000 && value <= 0xffffffff
+          ? value >>> 0 : 0
         const dtype = tensor ? 0 : modelBindingDTypeId(value)
         if (dtype < 0) throw new TypeError('polygrad: unsupported Model binding TypedArray')
         const dataPtr = tensor ? 0 : alloc(value.byteLength)
@@ -1107,7 +1110,7 @@ function createWasmCoreFromModule(Module, device) {
         heap32().set([...results, ...logical.map(x => x || 0), ...physical, ...Array(n).fill(0)], ptr >>> 2)
         const rc = Module._poly_tensor_function(ctx, ptr, n, logicalPtr, physicalPtr, m,
           namePtr, +allowImplicit, +precompile, +precompileBackward, outputsPtr)
-        const outputs = readPtrArray(outputsPtr, n).map(x => x >>> 0)
+        const outputs = readPtrArray(outputsPtr, n)
         if (rc !== 0) {
           for (const output of outputs) if (output) Module._poly_tensor_release(output)
           throw new Error(rc === -2 ? 'function has implicit buffer(s), but allowImplicit=false' : 'poly_tensor_function failed')
@@ -1133,7 +1136,7 @@ function createWasmCoreFromModule(Module, device) {
         }
         /* C graph construction may grow Wasm memory. Reacquire HEAP32 before
          * reading outputs, as the realization and gradient bridges do. */
-        return readPtrArray(outputsPtr, n).map(x => x >>> 0)
+        return readPtrArray(outputsPtr, n)
       } finally {
         Module._free(inputsPtr)
         Module._free(outputsPtr)
@@ -2797,7 +2800,7 @@ function createWasmCoreFromModule(Module, device) {
       const finish = rc => {
         if (!tensorOutputs) return rc
         if (rc !== 0) throw new Error(this.lastError(instPtr) || 'Model Tensor call failed')
-        return Array.from(heap32().subarray(outputPtr >>> 2, (outputPtr >>> 2) + count))
+        return readPtrArray(outputPtr, count)
       }
       const symbol = tensorOutputs ? 'poly_model_call_tensors_with_controls' : 'poly_model_call_with_controls'
       const args = [instPtr, entrypointPtr, bindingPtr, n, controlPtr, controls.length]
@@ -2922,7 +2925,7 @@ function createWasmCoreFromModule(Module, device) {
       Module.__polygradHostBuffers.set(String(bufferKey), value)
     },
     unregisterHostBuffer(bufferKey) {
-      Module.__polygradHostBuffers.delete(String(bufferKey))
+      Module.__polygradHostBuffers.delete(String(Number(bufferKey) >>> 0))
     },
     destroy() {
       if (asyncifyDestroyPromise) return asyncifyDestroyPromise

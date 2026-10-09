@@ -4,6 +4,9 @@
 
 - Track live storage dependencies incrementally, avoiding repeated traversal of
   unrelated model graphs during Tensor calls while preserving prompt reclamation.
+- Keep Wasm Tensor handles above 2 GiB valid when passed to or returned from
+  Model calls, instead of misclassifying signed pointer values as host data.
+  Preserve unsigned addresses for host-buffer copies, release and kernel loading.
 
 ## 0.7.1 (2026-10-08)
 

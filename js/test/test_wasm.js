@@ -448,6 +448,46 @@ async function runWasmOwnershipTests() {
     }
   })
 
+  await test('Model Tensor bindings preserve high wasm32 addresses', async () => {
+    const pg = polygrad.create({ core: 'wasm' })
+    const core = pg._core, Module = core.Module
+    const keys = ['_poly_model_call_with_controls', '_poly_model_call_tensors_with_controls',
+      '_poly_model_entrypoint_output_count']
+    const saved = Object.fromEntries(keys.map(key => [key, Module[key]]))
+    try {
+      // The handles are never dereferenced: test actual marshalling in a small heap.
+      for (const address of [1024, 0x80000400, 0x80000400 | 0]) {
+        core.registerHostBuffer(BigInt(address >>> 0), new Uint8Array([1]))
+        core.unregisterHostBuffer(address)
+        if (Module.__polygradHostBuffers.has(String(address >>> 0)))
+          throw new Error('signed release key leaked its host buffer')
+        let calls = 0
+        const check = (model, entry, rows, count) => {
+          const row = core.heap32().subarray(rows >>> 2, (rows >>> 2) + 7)
+          if (count !== 1 || (row[4] >>> 0) !== (address >>> 0) || row[1] || row[2])
+            throw new Error('Tensor pointer was treated as host data')
+          calls++
+          return 0
+        }
+        Module._poly_model_call_with_controls = check
+        Module._poly_model_entrypoint_output_count = () => 1
+        Module._poly_model_call_tensors_with_controls = (...args) => {
+          check(...args)
+          core.heap32()[args[6] >>> 2] = address | 0
+          return 0
+        }
+        if (core.model.call(1, 'forward', ['x'], [address]) !== 0)
+          throw new Error('Model call failed')
+        const outputs = core.model.callTensors(1, 'forward', ['x'], [address])
+        if (calls !== 2 || outputs.length !== 1 || outputs[0] !== (address >>> 0))
+          throw new Error('Model Tensor output did not normalize its address')
+      }
+    } finally {
+      for (const key of keys) Module[key] = saved[key]
+      await pg.dispose()
+    }
+  })
+
   await test('tokenizer marshalling uses unsigned wasm32 addresses above 2GB', async () => {
     const pg = polygrad.create({ core:'wasm' })
     const core = pg._core, Module = core.Module

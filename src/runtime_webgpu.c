@@ -176,7 +176,7 @@ EM_JS(int, js_webgpu_write_buffer_from_wasm, (uintptr_t handle, const uint8_t *s
   /* WebGPU requires queue.writeBuffer data length to be a multiple of 4.
    * The GPU allocation is rounded up, but typed-array inputs can be uint8. */
   const data = new Uint8Array(writeBytes);
-  data.set(HEAPU8.subarray(src, src + logical));
+  data.set(HEAPU8.subarray(src >>> 0, (src >>> 0) + logical));
   const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   st.device.queue.writeBuffer(buf, dstOffset, data);
   return 0;
@@ -186,7 +186,8 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   const st = Module.__polygradWebGpuState;
   const buf = st && st.buffers.get(handle);
   const map = Module.__polygradHostBuffers;
-  const src = map && map.get(String(src_key));
+  // Host keys are wasm32 addresses, not signed JavaScript integers.
+  const src = map && map.get(String(src_key >>> 0));
   if (!buf || !src) return -1;
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
@@ -217,7 +218,7 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer_to_wasm, (uint8_t * dst, uintptr_t handle
   st.device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
   const mapped = staging.getMappedRange();
-  HEAPU8.set(new Uint8Array(mapped, 0, logical), dst);
+  HEAPU8.set(new Uint8Array(mapped, 0, logical), dst >>> 0);
   staging.unmap();
   staging.destroy();
   return 0;
@@ -231,7 +232,7 @@ EM_ASYNC_JS(
       const st = await Module.__polygradEnsureWebGPU();
       const src = st.buffers.get(handle);
       const map = Module.__polygradHostBuffers;
-      const dst = map && map.get(String(dst_key));
+      const dst = map && map.get(String(dst_key >>> 0));
       if (!src || !dst) return -1;
       const logical = Math.max(0, nbytes | 0);
       if (logical === 0) return 0;

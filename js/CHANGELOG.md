@@ -4,6 +4,8 @@
 
 - Avoid repeated traversal of unrelated model graphs when reclaiming temporary
   Tensor storage, without delaying reclamation or changing output ownership.
+- Fix Model calls, host-buffer copies and release, and kernel loading above
+  2 GiB of Wasm memory.
 
 ## 0.7.1 (2026-10-08)
 

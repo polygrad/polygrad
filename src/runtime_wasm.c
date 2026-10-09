@@ -30,23 +30,25 @@ static PolyUOp *wasm_program_kernel_body(PolyUOp *program) {
 // clang-format off
 EM_JS(int, js_host_copy_out_to_wasm, (uintptr_t src_key, uint8_t *dst, int nbytes), {
   const map = Module.__polygradHostBuffers;
-  const src = map && map.get(String(src_key));
+  // C uintptr_t crosses Wasm imports as signed i32; map keys are unsigned.
+  const src = map && map.get(String(src_key >>> 0));
   if (!src) return -1;
   const bytes = new Uint8Array(src.buffer, src.byteOffset, Math.min(nbytes, src.byteLength));
-  HEAPU8.set(bytes, dst);
+  HEAPU8.set(bytes, dst >>> 0);
   return 0;
 })
 
 EM_JS(int, js_host_copy_in_from_wasm, (uintptr_t dst_key, const uint8_t *src, int nbytes), {
   const map = Module.__polygradHostBuffers;
-  const dst = map && map.get(String(dst_key));
+  const dst = map && map.get(String(dst_key >>> 0));
   if (!dst) return -1;
   const out = new Uint8Array(dst.buffer, dst.byteOffset, Math.min(nbytes, dst.byteLength));
-  out.set(HEAPU8.subarray(src, src + out.byteLength));
+  out.set(HEAPU8.subarray(src >>> 0, (src >>> 0) + out.byteLength));
   return 0;
 })
 
 EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
+  bytes = bytes >>> 0;
   var mod;
   try {
     mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));

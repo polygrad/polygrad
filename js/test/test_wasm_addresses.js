@@ -14,10 +14,35 @@ function source(file) {
 function bridge(file, name, args, env) {
   const text = source(file).split(name + ',')[1]?.split(/\nEM_(?:ASYNC_)?JS\(/)[0]
   assert(text, name)
-  const end = text.search(/\n(?:    }\n\)|}\);)/)
+  const end = text.search(/\n(?:    }\n\)|}\);?)/)
   assert(end > 0, name + ' closing delimiter')
   const body = text.slice(text.indexOf('{') + 1, end)
-  return vm.runInNewContext(`(function(${args}) {${body}\n})`, env)
+  return vm.runInNewContext(`(${name.startsWith('js_webgpu_read') ? 'async ' : ''}function(${args}) {${body}\n})`, env)
+}
+
+async function checkHostCopies(address) {
+  const values = new Uint8Array([1, 2, 3, 4])
+  const Module = {__polygradHostBuffers: new Map([[String(address >>> 0), values]])}
+  const HEAPU8 = {
+    set(bytes, offset) { assert.equal(offset, address >>> 0); assert.deepEqual(Array.from(bytes), [1, 2, 3, 4]) },
+    subarray(start, end) { assert.equal(start, address >>> 0); assert.equal(end, (address >>> 0) + 4); return values },
+  }
+  const env = {Module, HEAPU8}
+  assert.equal(bridge('runtime_wasm.c', 'js_host_copy_out_to_wasm', 'src_key,dst,nbytes', env)(address, address, 4), 0)
+  assert.equal(bridge('runtime_wasm.c', 'js_host_copy_in_from_wasm', 'dst_key,src,nbytes', env)(address, address, 4), 0)
+  const buffer = () => ({destroy() {}, unmap() {}, async mapAsync() {}, getMappedRange() { return values.buffer }})
+  const st = {buffers: new Map([[1, buffer()]]), device: {
+    createBuffer: buffer,
+    createCommandEncoder() { return {copyBufferToBuffer() {}, finish() { return {} }} },
+    queue: {submit() {}, writeBuffer(buf, offset, bytes) { assert.deepEqual(Array.from(bytes), [1, 2, 3, 4]) }},
+  }}
+  Module.__polygradWebGpuState = st
+  Module.__polygradEnsureWebGPU = async () => st
+  Object.assign(env, {GPUBufferUsage: {}, GPUMapMode: {READ: 1}})
+  assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_wasm', 'handle,src,nbytes', env)(1, address, 4), 0)
+  assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_hostkey', 'handle,src_key,nbytes', env)(1, address, 4), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_hostkey', 'dst_key,handle,nbytes', env)(address, 1, 4), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_wasm', 'dst,handle,nbytes', env)(address, 1, 4), 0)
 }
 
 async function checkWebgpu(address, timed) {
@@ -63,18 +88,23 @@ function checkWasm(address, count) {
   expected.forEach((value, i) => { HEAP32[(address >>> 2) + i] = value })
   const Module = {}
   const compile = bridge('runtime_wasm.c', 'js_compile_wasm_kernel', 'bytes,len', {
-    Module, HEAP32, HEAPU8: new Uint8Array(), wasmMemory: {},
+    Module, HEAP32, HEAPU8: {subarray(start, end) {
+      assert.equal(start, address >>> 0)
+      assert.equal(end, (address >>> 0) + 4)
+      return new Uint8Array(4)
+    }}, wasmMemory: {},
     WebAssembly: {Module: function() {}, Instance: function() { this.exports = {kernel} }},
   })
-  assert.equal(compile(0, 0), 0)
+  assert.equal(compile(address, 4), 0)
   Module._polyKernelCache[0].launch(address)
   assert.deepEqual(received, expected)
 }
 
 ;(async () => {
   for (const address of [1024, 0x80000400, 0x80000400 | 0]) {
+    await checkHostCopies(address)
     for (const timed of [false, true]) await checkWebgpu(address, timed)
     for (let count = 0; count <= 9; count++) checkWasm(address, count)
   }
-  console.log('Wasm addresses: 36 passed')
+  console.log('Wasm addresses: 54 passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })
