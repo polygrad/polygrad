@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Match Transformers checkpoint precedence in `Model.planHF`: prefer a single
+  file over an index within each format, while preferring safetensors overall.
 - Avoid repeated traversal of unrelated model graphs when reclaiming temporary
   Tensor storage, without delaying reclamation or changing output ownership.
 - Fix Model calls, host-buffer copies and release, and kernel loading above
@@ -10,6 +12,12 @@
   loops with fixed-shape carried values. Unsupported format features,
   runtime-dependent loops and scan outputs are rejected.
 - Increase the graph-rewrite worklist limit to match tinygrad for large imports.
+
+- Add `Model.planHF` for deterministic checkpoint selection before downloading.
+  It shares filename and shard validation with Python's loader.
+
+- `Model.fromHF` accepts supported PyTorch ZIP state dictionaries as weight bytes
+  on Node and Wasm, without executing Python code.
 
 ## 0.7.1 (2026-10-08)
 

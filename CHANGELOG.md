@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prefer a single Hugging Face checkpoint over a shard index when both exist
+  in the same format, matching Transformers; safetensors still takes precedence.
 - Track live storage dependencies incrementally, avoiding repeated traversal of
   unrelated model graphs during Tensor calls while preserving prompt reclamation.
 - Keep Wasm Tensor handles above 2 GiB valid when passed to or returned from
@@ -13,6 +15,16 @@
   runtime-dependent loops and scan outputs remain unsupported.
 - Match tinygrad's graph-rewrite worklist limit, allowing larger decoder graphs
   to import without hitting Polygrad's lower limit.
+
+- Share Hugging Face checkpoint selection across C, Python and JavaScript.
+  Downloads fetch only the selected files at one revision, not unrelated weight
+  variants. Rejected pickle globals identify the unsupported symbol safely.
+
+- Read restricted PyTorch ZIP state dictionaries through the shared HF importer,
+  without executing Python code. Validate storage bounds, strides, checksums
+  and resource limits; support all existing decoded scalar dtypes.
+- Python HF loading prefers safetensors, supports `.bin` shard indexes, rejects
+  missing shards and accepts pinned download revisions without downloading both formats.
 
 ## 0.7.1 (2026-10-08)
 

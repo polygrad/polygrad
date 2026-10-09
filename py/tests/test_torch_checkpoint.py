@@ -146,6 +146,7 @@ def test_hf_checkpoint_selection_is_fail_closed(tmp_path):
     assert plan()['files'] == ['pytorch_model.bin']
     (tmp_path / 'model.safetensors').write_bytes(b'bad')
     assert plan()['files'] == ['model.safetensors']
+    (tmp_path / 'model.safetensors').unlink()
     index = tmp_path / 'model.safetensors.index.json'
     for name in ['missing.safetensors', '../outside', '/absolute', 'sub\\outside']:
         index.write_text(json.dumps({'weight_map': {'x': name}}), encoding='utf-8')
@@ -158,6 +159,8 @@ def test_shared_hf_plan():
     names = ['model.fp16.safetensors', 'pytorch_model.bin', 'model.safetensors']
     assert plan_hf(names) == dict(format='safetensors', index=None, files=['model.safetensors'])
     names += ['model.safetensors.index.json', 'b.safetensors', 'a.safetensors']
+    assert plan_hf(names)['files'] == ['model.safetensors']
+    names.remove('model.safetensors')
     assert plan_hf(names)['files'] == []
     index = {'weight_map': {'z': 'b.safetensors', 'x': 'a.safetensors', 'y': 'b.safetensors'}}
     assert plan_hf(names, index)['files'] == ['a.safetensors', 'b.safetensors']
@@ -219,6 +222,7 @@ def test_hf_local_bin_and_sharded_selection(tmp_path):
     (tmp_path / 'pytorch_model.bin').write_bytes(data)
     for sharded in [False, True]:
         if sharded:
+            (tmp_path / 'pytorch_model.bin').unlink()
             (tmp_path / 'shard.bin').write_bytes(data)
             (tmp_path / 'pytorch_model.bin.index.json').write_text(
                 json.dumps({'weight_map': {t['name']: 'shard.bin' for t in case['tensors']}}), encoding='utf-8')
@@ -253,6 +257,10 @@ def test_hf_download_pins_fallback_without_fetching_both_formats(tmp_path, monke
         json.dumps({'weight_map': {'x': 'weights/part1.bin', 'y': 'weights/part2.bin'}}), encoding='utf-8')
     names += ['pytorch_model.bin.index.json', 'weights/part1.bin', 'weights/part2.bin']
     download_hf('org/model', revision='release')
+    assert [c[0] for c in calls] == ['config.json', 'pytorch_model.bin']
+    calls.clear()
+    names.remove('pytorch_model.bin')
+    download_hf('org/model', revision='release')
     assert [c[0] for c in calls] == ['pytorch_model.bin.index.json', 'config.json', 'weights/part1.bin', 'weights/part2.bin']
     calls.clear()
     names += ['model.safetensors']
@@ -262,6 +270,10 @@ def test_hf_download_pins_fallback_without_fetching_both_formats(tmp_path, monke
     names += ['model.safetensors.index.json']
     (snapshot / 'model.safetensors.index.json').write_text(
         json.dumps({'weight_map': {'x': 'missing.safetensors'}}), encoding='utf-8')
+    download_hf('org/model', revision='release')
+    assert [c[0] for c in calls] == ['config.json', 'model.safetensors']
+    calls.clear()
+    names.remove('model.safetensors')
     with pytest.raises(ValueError, match='shard not found'):
         download_hf('org/model', revision='release')
     assert [c[0] for c in calls] == ['model.safetensors.index.json']

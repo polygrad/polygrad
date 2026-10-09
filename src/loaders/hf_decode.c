@@ -60,14 +60,14 @@ int poly_hf_plan(const char *files_json, const char *index_json, char *out, int 
   }
   qsort(names, (size_t)count, sizeof(*names), hf_name_cmp);
   const char *candidates[] = {
-      "model.safetensors.index.json", "model.safetensors", "pytorch_model.bin.index.json",
-      "pytorch_model.bin"};
+      "model.safetensors", "model.safetensors.index.json", "pytorch_model.bin",
+      "pytorch_model.bin.index.json"};
   int choice;
   for (choice = 0; choice < 4; choice++)
     if (bsearch(&candidates[choice], names, (size_t)count, sizeof(*names), hf_name_cmp)) break;
   error = "no model.safetensors or pytorch_model.bin checkpoint found";
   if (choice == 4) goto done;
-  bool indexed = choice % 2 == 0;
+  bool indexed = choice % 2 == 1;
   result = cJSON_CreateObject();
   if (!result ||
       !cJSON_AddStringToObject(result, "format", choice < 2 ? "safetensors" : "pytorch") ||

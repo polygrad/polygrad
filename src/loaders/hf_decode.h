@@ -47,7 +47,8 @@ int poly_hf_decode(
 void poly_hf_decoded_free(PolyHfDecoded *hf);
 
 /* Plan checkpoint files without I/O. files_json is an array of repository-relative
- * names. Prefer safetensors over PyTorch; within a format an index is authoritative.
+ * names. Prefer safetensors over PyTorch; within a format prefer the single file
+ * over an index, matching Transformers' default checkpoint selection.
  * The JSON result has format, index (name or null), and files (sorted unique names).
  * If an index is selected but index_json is NULL, files is empty: fetch the index
  * and call again. Otherwise every selected shard must exist in files_json.

@@ -336,7 +336,7 @@ it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
 ### Hugging Face checkpoints
 
 Local loading selects `model.safetensors`, then `pytorch_model.bin`; each
-format's `.index.json` takes precedence over its single file. Other filenames
+format's single file takes precedence over its `.index.json`. Other filenames
 are not collected automatically. Missing shards and malformed files raise errors; a broken
 safetensors checkpoint is never silently replaced with `.bin`. Pass
 `revision="<commit>"` to `download_hf` for a pinned download. Only one weight

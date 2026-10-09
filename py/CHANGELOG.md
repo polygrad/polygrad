@@ -2,12 +2,21 @@
 
 ## Unreleased
 
+- Match Transformers checkpoint precedence: prefer a single file over an index
+  within each format, while preferring safetensors overall.
 - Avoid repeated traversal of unrelated model graphs when reclaiming temporary
   Tensor storage, without delaying reclamation or changing output ownership.
 - Support long ONNX identifiers, format versions through 13 and bounded static
   loops with fixed-shape carried values. Unsupported format features,
   runtime-dependent loops and scan outputs are rejected.
 - Increase the graph-rewrite worklist limit to match tinygrad for large imports.
+
+- Select only standard checkpoint filenames or indexed shards. Downloads no
+  longer fetch unrelated safetensors variants. Expose the shared selection as
+  `polygrad.hf.plan_hf` for callers managing their own downloads.
+
+- Load supported PyTorch ZIP state dictionaries through `Model.from_hf`.
+  Prefer safetensors, fail on missing shards, and support pinned download revisions.
 
 ## 0.7.1 (2026-10-08)
 

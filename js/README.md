@@ -421,7 +421,7 @@ fetch that index and call `pg.Model.planHF(filenames, indexJSON)` again.
 Fetch the returned `files` plus `config.json`, then pass their bytes to `fromHF`.
 Use one pinned repository revision for the listing and all downloads.
 The shared C planner prefers `model.safetensors` over `pytorch_model.bin`, with
-each format's `.index.json` taking precedence over its single file. It rejects
+each format's single file taking precedence over its `.index.json`. It rejects
 missing shards and unsafe paths; it never collects arbitrary `.safetensors`
 variants. Planning does not validate the weight contents; import does that.
 
