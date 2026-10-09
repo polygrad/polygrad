@@ -464,7 +464,10 @@ static bool tensor_map_scope_visit(
     PolyMap *scope_map
 ) {
   if (!ctx || !root || !exact || !scope_map) return false;
-  if (poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq)) return true;
+  /* Tinygrad topovisit caches both booleans. NULL means unvisited, so encode
+   * false as 1 and true as 2; unrelated shared subgraphs must be pruned too. */
+  void *cached = poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq);
+  if (cached) return cached == (void *)(uintptr_t)2;
 
   int n_topo = 0;
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
@@ -477,15 +480,18 @@ static bool tensor_map_scope_visit(
   }
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
+#ifdef POLY_TESTING
+    ctx->realize_scope_walk_count++;
+#endif
     bool scope = tensor_map_scope_node(u, exact);
     for (int j = 0; j < u->n_src; j++) {
       void *child = poly_map_get(scope_map, poly_ptr_hash(u->src[j]), u->src[j], poly_ptr_eq);
-      scope |= child != NULL;
+      scope |= child == (void *)(uintptr_t)2;
     }
-    if (scope) poly_map_set(scope_map, poly_ptr_hash(u), u, (void *)(uintptr_t)1, poly_ptr_eq);
+    poly_map_set(scope_map, poly_ptr_hash(u), u, (void *)(uintptr_t)(scope ? 2 : 1), poly_ptr_eq);
   }
   poly_ctx_scratch_rewind(ctx, scratch);
-  return poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq) != NULL;
+  return poly_map_get(scope_map, poly_ptr_hash(root), root, poly_ptr_eq) == (void *)(uintptr_t)2;
 }
 
 static PolyUOp *tensor_exact_logical_resource(PolyCtx *ctx, const PolyTensor *tensor);

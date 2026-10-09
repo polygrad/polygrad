@@ -724,6 +724,53 @@ TEST(tensor, downstream_graph_owns_input_residency_after_input_handle_release) {
   PASS();
 }
 
+TEST(tensor, realize_map_visits_unaffected_shared_graph_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_INTERP);
+  PolyTensor *mapped = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_INTERP);
+  PolyTensor *replacement =
+      poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(mapped);
+  ASSERT_NOT_NULL(replacement);
+  PolyUOp *shared = base->uop_physical;
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_float(1), POLY_FLOAT32);
+  for (int i = 0; i < 256; i++)
+    shared = poly_uop_alu2(ctx, POLY_OP_ADD, shared, one);
+  PolyTensor *unaffected[96];
+  PolyUOp *roots[96];
+  for (int i = 0; i < 96; i++) {
+    PolyUOp *offset = poly_uop_const(ctx, poly_arg_float(i + 2), POLY_FLOAT32);
+    roots[i] = poly_uop_alu2(ctx, POLY_OP_ADD, shared, offset);
+    unaffected[i] = poly_tensor_create_with_roots(
+        ctx, roots[i], roots[i], POLY_TENSOR_VALUE, POLY_DEVICE_INTERP
+    );
+    ASSERT_NOT_NULL(unaffected[i]);
+  }
+  PolyTensor *dependent = poly_tensor_alu2(ctx, POLY_OP_ADD, mapped, base);
+  ASSERT_NOT_NULL(dependent);
+  PolyUOp *from = mapped->uop_physical, *to = replacement->uop_physical;
+  size_t before = ctx->realize_scope_walk_count;
+  ASSERT_INT_EQ(poly_tensor_apply_realize_map(ctx, &from, &to, 1, POLY_DEVICE_INTERP), 0);
+  size_t visited = ctx->realize_scope_walk_count - before;
+  ASSERT_TRUE(mapped->uop_physical == to);
+  ASSERT_TRUE(dependent->uop_physical == poly_uop_add(ctx, to, base->uop_physical));
+  for (int i = 0; i < 96; i++) {
+    ASSERT_TRUE(unaffected[i]->uop_physical == roots[i]);
+    poly_tensor_release(unaffected[i]);
+  }
+  poly_tensor_release(dependent);
+  poly_tensor_release(replacement);
+  poly_tensor_release(mapped);
+  poly_tensor_release(base);
+  poly_ctx_destroy(ctx);
+  /* The 256-node shared chain must not be re-walked for each of 96 roots. */
+  ASSERT_TRUE(visited < 600);
+  PASS();
+}
+
 TEST(tensor, residency_collection_does_not_rewalk_unchanged_graphs) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

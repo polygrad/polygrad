@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Match tinygrad's realization traversal cache for unaffected graphs, avoiding
+  repeated scans of shared dependencies during model import and Tensor execution.
+
 - Prefer a single Hugging Face checkpoint over a shard index when both exist
   in the same format, matching Transformers; safetensors still takes precedence.
 - Track live storage dependencies incrementally, avoiding repeated traversal of

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Avoid repeatedly scanning unaffected Tensor graphs during realization,
+  reducing large-model import overhead without changing computed values.
+
 - Match Transformers checkpoint precedence: prefer a single file over an index
   within each format, while preferring safetensors overall.
 - Avoid repeated traversal of unrelated model graphs when reclaiming temporary

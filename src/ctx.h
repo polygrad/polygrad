@@ -60,6 +60,7 @@ struct PolyCtx {
   bool check_residency; /* POLY_CHECK_RESIDENCY: compare against declared owners before sweeping */
 #ifdef POLY_TESTING
   size_t residency_walk_count;
+  size_t realize_scope_walk_count;
   bool residency_fail_stack_growth;
 #endif
   bool collection_requested;
