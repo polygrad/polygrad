@@ -11,6 +11,8 @@
   while rejecting unsupported device configurations and function overloads.
   Unroll bounded, constant-terminated loops with fixed-shape carried values;
   runtime-dependent loops and scan outputs remain unsupported.
+- Match tinygrad's graph-rewrite worklist limit, allowing larger decoder graphs
+  to import without hitting Polygrad's lower limit.
 
 ## 0.7.1 (2026-10-08)
 

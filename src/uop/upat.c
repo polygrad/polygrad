@@ -960,7 +960,8 @@ static void waitlist_destroy(PolyMap *wl) {
   poly_map_destroy(wl);
 }
 
-#define REWRITE_STACK_LIMIT 100000
+/* Match the pinned tinygrad RewriteContext guard, including valid deep DAGs. */
+#define REWRITE_STACK_LIMIT 250000
 
 static int rewrite_stack_limit(void) {
   int limit = poly_getenv_int("POLY_REWRITE_STACK_LIMIT", REWRITE_STACK_LIMIT);

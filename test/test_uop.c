@@ -33,6 +33,18 @@ static bool content_keys_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return equal;
 }
 
+TEST(uop, graph_rewrite_pinned_stack_capacity) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *root = poly_uop_const(ctx, poly_arg_float(1), POLY_FLOAT32);
+  /* A valid deep DAG exceeds the old 100k guard but fits tinygrad's 250k. */
+  for (int i = 0; i < 120000; i++)
+    root = poly_uop(ctx, POLY_OP_NEG, POLY_FLOAT32, &root, 1, poly_arg_none());
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, root, NULL);
+  bool same = rewritten == root;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(same);
+}
+
 static bool content_args_differ(PolyCtx *ctx, PolyArg a, PolyArg b) {
   PolyUOp *x = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, a);
   PolyUOp *y = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, b);

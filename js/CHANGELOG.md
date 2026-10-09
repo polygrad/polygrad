@@ -9,6 +9,7 @@
 - Support long ONNX identifiers, format versions through 13 and bounded static
   loops with fixed-shape carried values. Unsupported format features,
   runtime-dependent loops and scan outputs are rejected.
+- Increase the graph-rewrite worklist limit to match tinygrad for large imports.
 
 ## 0.7.1 (2026-10-08)
 
