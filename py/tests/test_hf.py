@@ -8,7 +8,7 @@ import struct
 from pathlib import Path
 import numpy as np
 import pytest
-from polygrad.hf import generate, load_hf_bytes, _find_safetensors, _get_vocab_size
+from polygrad.hf import generate, load_hf_bytes, _get_vocab_size
 from polygrad.model import Model, ROLE_AUX
 
 

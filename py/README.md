@@ -326,9 +326,37 @@ finally:
 ```
 
 `load_hf` uses the same checkpoint importer as `Model.from_hf`, including the
-vision and embedding models below, with F32/F16/BF16 safetensors.
+vision and embedding models below, with F32/F16/BF16 safetensors or supported
+PyTorch ZIP state dictionaries.
 The `generate` helper above expects GPT-2 input/output names;
 it is not a Llama generation API. Qwen loading uses the shared C/GGUF path.
+
+### Hugging Face checkpoints
+
+Local loading selects `model.safetensors`, then `pytorch_model.bin`; each
+format's `.index.json` takes precedence over its single file. Other filenames
+are not collected automatically. Missing shards and malformed files raise errors; a broken
+safetensors checkpoint is never silently replaced with `.bin`. Pass
+`revision="<commit>"` to `download_hf` for a pinned download. Only one weight
+format is downloaded, without downloading unrelated precision variants.
+`polygrad.hf.plan_hf(filenames, index=None)` exposes the same C selection used
+by JavaScript: it returns `format`, `index` and sorted unique `files`. If it
+selects an index with no files yet, read the index and call again with its JSON.
+Planning does not validate weight contents. For arbitrary `.pt` filenames, pass the file contents
+through `Model.from_hf(config_json=..., weight_bytes_list=[...])`.
+
+The C reader accepts uncompressed ZIP/ZIP64 archives containing a flat mapping
+of names to ordinary tensors (pickle protocols 2–5). It never executes Python
+code. Supported storage types are float32/16, bfloat16, float64, signed integers
+8/16/32/64, uint8 and bool; individual model builders may accept fewer types.
+Storage offsets and nonnegative strides are checked. Non-contiguous views are
+packed; shared checkpoint storage does not impose shared trainable Model state.
+
+Pickled model objects, custom classes, nested training checkpoints, compressed
+ZIP entries and pre-ZIP serialization are rejected. Limits include eight tensor
+axes, 100,000 ZIP entries/tensors, a 64 MiB pickle index, a 64 MiB parser metadata
+budget and 256 MiB of packed-view data per archive. Referenced entries must have
+valid ZIP checksums. Downloads and tokenization remain outside the C loader.
 
 `models.GPT2(config)` and `models.Llama(config)` build topology without pretrained
 weights. They reject execution and saving until every required parameter has been

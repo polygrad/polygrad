@@ -7253,6 +7253,41 @@ static napi_value napi_poly_tokenizer_eos_id(napi_env env, napi_callback_info in
 
 /* ── HF / GGUF loaders ─────────────────────────────────────────────────── */
 
+static napi_value napi_poly_hf_plan(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char *listing = read_utf8_arg(env, argv[0], NULL);
+  if (!listing) return NULL;
+  napi_valuetype type;
+  if (napi_typeof(env, argv[1], &type) != napi_ok) {
+    free(listing);
+    return NULL;
+  }
+  char *index = type == napi_null ? NULL : read_utf8_arg(env, argv[1], NULL);
+  if (type != napi_null && !index) {
+    free(listing);
+    return NULL;
+  }
+  int size = poly_hf_plan(listing, index, NULL, 0);
+  char *out = size > 0 ? malloc((size_t)size) : NULL;
+  int ok = out && poly_hf_plan(listing, index, out, size) == size;
+  free(index);
+  free(listing);
+  if (!ok) {
+    free(out);
+    napi_throw_error(
+        env, NULL,
+        size < 0 ? poly_import_last_error_message() : "checkpoint planning allocation failed"
+    );
+    return NULL;
+  }
+  napi_status status = napi_create_string_utf8(env, out, (size_t)size - 1, &result);
+  free(out);
+  NAPI_CALL(env, status);
+  return result;
+}
+
 static napi_value napi_poly_hf_load_into(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
@@ -7913,6 +7948,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tokenizer_eos_id", napi_poly_tokenizer_eos_id),
 
       /* Loaders */
+      DECLARE_NAPI_METHOD("poly_hf_plan", napi_poly_hf_plan),
       DECLARE_NAPI_METHOD("poly_hf_load_into", napi_poly_hf_load_into),
       DECLARE_NAPI_METHOD("poly_gguf_load_into", napi_poly_gguf_load_into),
       DECLARE_NAPI_METHOD("poly_onnx_load_into", napi_poly_onnx_load_into),

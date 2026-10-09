@@ -2679,6 +2679,20 @@ function createWasmCoreFromModule(Module, device) {
       } finally { for (const ptr of allocated) Module._free(ptr) }
     },
 
+    planHF(files, index) {
+      const listing = allocString(files)
+      let idx = 0, out = 0
+      try {
+        idx = index == null ? 0 : allocString(index)
+        const size = Module._poly_hf_plan(listing, idx, 0, 0)
+        if (size < 0) throw new Error(readCString(Module._poly_import_last_error_message()))
+        out = malloc(size)
+        if (!out || Module._poly_hf_plan(listing, idx, out, size) !== size)
+          throw new Error('checkpoint planning failed')
+        return readCString(out)
+      } finally { Module._free(out); Module._free(idx); Module._free(listing) }
+    },
+
     importLastError() {
       const code = Module._poly_import_last_error_code()
       if (code === 0) return null

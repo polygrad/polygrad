@@ -1588,6 +1588,8 @@ def _declare_signatures(lib):
         ctypes.c_bool, ctypes.c_bool]
 
     # HF/model loaders (src/models/*.c)
+    lib.poly_hf_plan.restype = ctypes.c_int
+    lib.poly_hf_plan.argtypes = [ctypes.c_char_p, ctypes.c_char_p, _ptr, ctypes.c_int]
     lib.poly_hf_load_into.restype = _ptr
     lib.poly_hf_load_into.argtypes = [
         _ptr, ctypes.c_char_p, ctypes.c_int,

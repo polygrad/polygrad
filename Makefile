@@ -36,12 +36,13 @@ HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/capability.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/mixin/gradient.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/kernels/select.c src/kernels/match.c src/kernels/gemm.c src/kernels/cpu.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
 FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigint.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/capability.c src/engine/jit.c src/uop/ops.c src/uop/spec.c src/uop/weak.c src/uop/movement.c src/uop/symbolic.c src/mixin/elementwise.c src/mixin/movement.c src/uop/upat.c src/alu.c src/shape.c src/mixin/gradient.c src/codegen/codegen.c src/codegen/opt/tc.c src/codegen/decomp/dtype.c src/codegen/simplify.c src/codegen/gpudims.c src/codegen/late/coalesce.c src/codegen/late/gater.c src/codegen/late/linearizer.c src/renderer/cstyle.c src/kernels/select.c src/kernels/match.c src/kernels/gemm.c src/kernels/cpu.c src/renderer/wgsl.c src/runtime/support/memory.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/renderer/wasm.c src/frontend.c src/tensor.c src/nn/optim.c src/schedule/rangeify.c src/schedule/multi.c src/schedule/allreduce.c src/schedule/schedule.c src/schedule/memory.c src/schedule/indexing.c src/nn/nn.c src/engine/schedule.c src/interp.c
-LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/onnx_loader.c
+LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/torch_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/onnx_loader.c
 SRC += src/uop/key.c
 FILC_SRC += src/uop/key.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/model.c src/tokenizer.c src/models/compose.c src/models/layers.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/distilgpt2.c src/models/qwen3.c src/models/llama.c src/models/transformer.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_model.c test/test_program.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_placement.c test/test_realize.c test/test_threading.c
 TEST_SRC += test/test_llama.c
+TEST_SRC += test/test_torch.c
 CODEC_SRC += src/models/embeddinggemma2.c src/models/gemma.c src/models/gemma4_vision.c src/models/gemma4_audio.c
 TEST_SRC += test/test_onnx.c
 
@@ -781,6 +782,22 @@ fuzz: fuzz-symbolic fuzz-symbolic-div
 
 fuzz-smoke:
 	$(MAKE) fuzz FUZZ_ARGS="$(FUZZ_SMOKE_ARGS)"
+
+.PHONY: test-torch-checkpoint test-torch-checkpoint-reference fuzz-torch
+test-torch-checkpoint: build/polygrad_test build/libpolygrad.so
+	$(SAN_RUN) ./build/polygrad_test torch_checkpoint
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PYTHON) -m pytest -q py/tests/test_torch_checkpoint.py
+
+test-torch-checkpoint-reference: build/libpolygrad.so
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(HF_PYTHON) test/external/check_torch_checkpoint.py $(TORCH_CHECKPOINT_ARGS)
+
+fuzz-torch: build/fuzz_torch
+	$(PYTHON) test/torch_corpus.py $(FUZZ_WORK_DIR)/torch
+	$(FUZZ_RUN_ENV) ./build/fuzz_torch $(FUZZ_WORK_DIR)/torch $(FUZZ_ARGS)
+
+build/fuzz_torch: test/fuzz_torch.c src/loaders/torch_decode.c src/loaders/decoded.c src/loaders/import_error.c src/loaders/torch_decode.h
+	@mkdir -p build
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 fuzz-nightly:
 	$(MAKE) fuzz FUZZ_ARGS="$(FUZZ_NIGHTLY_ARGS)"

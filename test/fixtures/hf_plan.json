@@ -1,0 +1,19 @@
+[
+  {"files":["model.fp16.safetensors","pytorch_model.bin","model.safetensors"],"expected":{"format":"safetensors","index":null,"files":["model.safetensors"]}},
+  {"files":["model.fp16.safetensors","pytorch_model.bin"],"expected":{"format":"pytorch","index":null,"files":["pytorch_model.bin"]}},
+  {"files":["model.safetensors","model.safetensors.index.json"],"expected":{"format":"safetensors","index":"model.safetensors.index.json","files":[]}},
+  {"files":["model.safetensors.index.json","b.safetensors","a.safetensors","pytorch_model.bin"],"index":{"weight_map":{"x":"b.safetensors","y":"a.safetensors","z":"b.safetensors"}},"expected":{"format":"safetensors","index":"model.safetensors.index.json","files":["a.safetensors","b.safetensors"]}},
+  {"files":["pytorch_model.bin.index.json","parts/1.bin"],"index":{"weight_map":{"x":"parts/1.bin"}},"expected":{"format":"pytorch","index":"pytorch_model.bin.index.json","files":["parts/1.bin"]}},
+  {"files":["model.fp16.safetensors"],"error":"no model.safetensors"},
+  {"files":["pytorch_model.bin","model.safetensors.index.json"],"index":{"weight_map":{"x":"missing"}},"error":"shard not found"},
+  {"files":["pytorch_model.bin.index.json","../escape"],"index":{"weight_map":{"x":"../escape"}},"error":"shard path"},
+  {"files":["pytorch_model.bin.index.json","/absolute"],"index":{"weight_map":{"x":"/absolute"}},"error":"shard path"},
+  {"files":["pytorch_model.bin.index.json","https://host/weights"],"index":{"weight_map":{"x":"https://host/weights"}},"error":"shard path"},
+  {"files":["pytorch_model.bin.index.json","dir\\file"],"index":{"weight_map":{"x":"dir\\file"}},"error":"shard path"},
+  {"files":["pytorch_model.bin.index.json"],"index":{"weight_map":{}},"error":"weight_map"},
+  {"files":["pytorch_model.bin.index.json"],"index":"{bad","error":"weight_map"},
+  {"files":["pytorch_model.bin.index.json"],"index":"","error":"weight_map"},
+  {"files":["model.safetensors"],"index":{"weight_map":{"x":"model.safetensors"}},"error":"unsharded"},
+  {"files":["pytorch_model.bin.index.json"],"index":{"weight_map":{"x":12}},"error":"weight_map"},
+  {"files":["pytorch_model.bin.index.json"],"index":"{\"weight_map\":{\"x\":\"part\\u0000.bin\"}}","error":"weight_map"}
+]

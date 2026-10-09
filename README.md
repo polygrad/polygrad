@@ -206,6 +206,14 @@ reject. Explicit Python `strict=False` / JS `{strict:false}` (C:
 potentially different token IDs. Both frontends also expose GGUF tokenization.
 See [tokenizer support](js/README.md#pretrained-and-configured-models).
 
+HF import accepts safetensors and a restricted subset of PyTorch ZIP state
+dictionaries (`.bin`/`.pt`). It reads weights without executing Python code;
+it does not load pickled models or add support for an unknown architecture.
+Python and JavaScript share checkpoint file selection in C; network access
+stays in the frontends. See the [Python](py/README.md#hugging-face-checkpoints)
+and [JavaScript](js/README.md#hugging-face-checkpoints) guides for selection,
+supported formats and limits.
+
 EmbeddingGemma 2 produces text, image and audio embeddings using external
 Hugging Face preprocessing; see the [Python](py/README.md#embeddinggemma-2) and
 [JavaScript](js/README.md#embeddinggemma-2) guides for inputs and modality selection.

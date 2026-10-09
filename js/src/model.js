@@ -733,6 +733,18 @@ function createBoundModelClass(runtime) {
       return lowerTensorSpec(spec, true)
     }
 
+    static planHF(files, index = null) {
+      if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
+      if (_runtime._activeAsync > 0) throw new Error('Model HF planning requires an idle Runtime')
+      if (!Array.isArray(files) || files.some(x => typeof x !== 'string'))
+        throw new TypeError('files must be an array of filenames')
+      const listing = JSON.stringify(files)
+      const text = index == null ? null : typeof index === 'string' ? index : JSON.stringify(index)
+      if (listing.includes('\0') || (text != null && text.includes('\0')))
+        throw new Error('checkpoint metadata contains NUL')
+      return JSON.parse(_runtime._core.model.planHF(listing, text))
+    }
+
     static fromHF(configBytes, weightFiles, opts = {}) {
       if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
       if (_runtime._activeAsync > 0) throw new Error('Model HF load requires an idle Runtime')

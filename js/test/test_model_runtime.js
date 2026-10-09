@@ -4,6 +4,58 @@ const onnxFixture = require('../../test/fixtures/onnx.json')
 const embeddingGemma2Fixture = require('../../test/fixtures/embeddinggemma2.json')
 const embeddingGemma2ImageFixture = require('../../test/fixtures/embeddinggemma2_image.json')
 const embeddingGemma2AudioFixture = require('../../test/fixtures/embeddinggemma2_audio.json')
+const torchFixture = require('../../test/fixtures/torch.json')
+
+async function checkTorchCheckpoint(pg) {
+  for (const row of require('../../test/fixtures/hf_plan.json')) {
+    if (row.error) {
+      let error
+      try { pg.Model.planHF(row.files, row.index) } catch (e) { error = e }
+      assert(error && error.message.includes(row.error), `HF plan rejection: ${row.error}`)
+    } else {
+      assert(JSON.stringify(pg.Model.planHF(row.files, row.index)) === JSON.stringify(row.expected), 'shared HF plan')
+    }
+  }
+  const f = torchFixture.model
+  const bytes = Uint8Array.from(atob(f.archive), c => c.charCodeAt(0))
+  const config = new TextEncoder().encode(JSON.stringify(f.config))
+  const model = pg.Model.fromHF(config, [bytes], {maxSeqLen: 4})
+  let restored, reference
+  try {
+    const header = {}, payload = []
+    for (const t of f.tensors) {
+      const start = payload.length
+      payload.push(...t.hex.match(/../g).map(x => parseInt(x, 16)))
+      header[t.name] = {dtype: 'F32', shape: t.shape, data_offsets: [start, payload.length]}
+    }
+    const encoded = new TextEncoder().encode(JSON.stringify(header))
+    const safe = new Uint8Array(8 + encoded.length + payload.length)
+    new DataView(safe.buffer).setUint32(0, encoded.length, true)
+    safe.set(encoded, 8); safe.set(payload, 8 + encoded.length)
+    reference = pg.Model.fromHF(config, [safe], {maxSeqLen: 4})
+    // GPT-2's builder transposes Conv1D weights in both formats. Compare the
+    // canonical Model state, not the raw checkpoint orientation.
+    for (const t of f.tensors) {
+      const name = t.name.replace('transformer.', '')
+      assertClose(await model.readBufferAsync(name), await reference.readBufferAsync(name), 0)
+    }
+    const inputs = {x: new Int32Array([1, 2, 3, 4]), positions: new Int32Array([0, 1, 2, 3])}
+    const expected = (await reference.forwardAsync(inputs)).output
+    assertClose((await model.forwardAsync(inputs)).output, expected, 0)
+    restored = pg.Model.load(await model.saveAsync())
+    assertClose((await restored.forwardAsync(inputs)).output, expected, 0)
+    for (const invalid of [bytes.slice(0, -1), bytes.slice(0, 30)]) {
+      let error
+      try { pg.Model.fromHF(config, [invalid], {maxSeqLen: 4}) } catch (e) { error = e }
+      assert(error && error.message.includes('PyTorch checkpoint'), 'checkpoint rejection must preserve C error')
+    }
+    assertClose((await model.forwardAsync(inputs)).output, expected, 0)
+  } finally {
+    if (restored) await restored.dispose()
+    if (reference) await reference.dispose()
+    await model.dispose()
+  }
+}
 
 async function checkEmbeddingGemma2(pg) {
   for (const f of [embeddingGemma2Fixture, embeddingGemma2ImageFixture, embeddingGemma2AudioFixture]) {
@@ -2270,6 +2322,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
+  await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
@@ -3050,6 +3103,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
+  await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))

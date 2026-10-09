@@ -1,7 +1,7 @@
 """
 HuggingFace model loader for polygrad.
 
-Loads models from config.json + safetensors files into PolyModel.
+Loads config.json with safetensors or restricted PyTorch ZIP state dictionaries.
 No file I/O happens in C -- this module reads files and passes byte buffers.
 
 Usage:
@@ -32,7 +32,7 @@ def load_hf(model_path, max_batch=1, max_seq_len=0, device=None, *, runtime=None
     """Load a HuggingFace model from a local directory.
 
     Args:
-        model_path: Path to directory containing config.json and safetensors.
+        model_path: Directory containing config.json and a supported checkpoint.
         max_batch: Maximum batch size for the model instance.
         max_seq_len: Maximum sequence length (0 = use config default).
 
@@ -47,10 +47,13 @@ def load_hf(model_path, max_batch=1, max_seq_len=0, device=None, *, runtime=None
         raise FileNotFoundError(f'config.json not found in {model_path}')
     config_bytes = config_path.read_bytes()
 
-    # Find safetensors files
-    weight_files = _find_safetensors(model_path)
-    if not weight_files:
-        raise FileNotFoundError(f'No safetensors files found in {model_path}')
+    # Prefer safetensors, including an authoritative shard index. Never fall
+    # back after a missing shard or parse error in the preferred format.
+    names = [p.relative_to(model_path).as_posix() for p in model_path.rglob('*') if p.is_file()]
+    plan = plan_hf(names)
+    if plan['index']:
+        plan = plan_hf(names, (model_path / plan['index']).read_text(encoding='utf-8'))
+    weight_files = [model_path / name for name in plan['files']]
 
     # Read all weight files into memory
     weight_data = []
@@ -65,7 +68,7 @@ def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, de
 
     Args:
         config_json: config.json content as bytes or str.
-        weight_bytes_list: List of safetensors file contents as bytes.
+        weight_bytes_list: Safetensors or supported PyTorch ZIP files as bytes.
         max_batch: Maximum batch size.
         max_seq_len: Maximum sequence length (0 = use config default).
 
@@ -77,7 +80,7 @@ def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, de
     return _load_from_bytes(config_json, weight_bytes_list, max_batch, max_seq_len, device, runtime)
 
 
-def download_hf(repo_id, cache_dir=None):
+def download_hf(repo_id, cache_dir=None, *, revision=None):
     """Download a HuggingFace model to a local directory.
 
     Requires huggingface_hub: pip install huggingface_hub
@@ -85,21 +88,55 @@ def download_hf(repo_id, cache_dir=None):
     Args:
         repo_id: HuggingFace model repo (e.g. 'gpt2', 'hf-internal-testing/tiny-random-gpt2').
         cache_dir: Optional cache directory.
+        revision: Optional pinned Hub commit or revision.
 
     Returns:
         str: Path to the downloaded model directory.
     """
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import model_info, hf_hub_download
     except ImportError:
         raise ImportError(
             'huggingface_hub is required for download_hf. '
             'Install with: pip install huggingface_hub'
         )
-    kwargs = {'allow_patterns': ['*.json', '*.safetensors']}
-    if cache_dir:
-        kwargs['cache_dir'] = cache_dir
-    return snapshot_download(repo_id, **kwargs)
+    info = model_info(repo_id, revision=revision)
+    names = [item.rfilename for item in info.siblings]
+    # Resolve a moving branch once; metadata and payloads use the same commit.
+    if not info.sha or len(info.sha) != 40 or any(c not in '0123456789abcdef' for c in info.sha):
+        raise ValueError('Hub did not return a commit identifier')
+    kwargs = dict(revision=info.sha, cache_dir=cache_dir)
+    plan = plan_hf(names)
+    if plan['index']:
+        index = hf_hub_download(repo_id, plan['index'], **kwargs)
+        plan = plan_hf(names, pathlib.Path(index).read_text(encoding='utf-8'))
+    config = hf_hub_download(repo_id, 'config.json', **kwargs)
+    for name in plan['files']:
+        hf_hub_download(repo_id, name, **kwargs)
+    return str(pathlib.Path(config).parent)
+
+
+def plan_hf(files, index=None):
+    """Select checkpoint filenames without I/O using Polygrad's shared C planner.
+
+    ``files`` contains repository-relative names. If the result names an index
+    and has an empty files list, read that index and pass its JSON as ``index``.
+    The result contains ``format``, ``index`` and sorted unique ``files``.
+    """
+    if not isinstance(files, (list, tuple)) or any(not isinstance(x, str) for x in files):
+        raise TypeError('files must be a sequence of filenames')
+    listing = json.dumps(files).encode('utf-8')
+    data = (index if isinstance(index, str) else json.dumps(index)).encode('utf-8') if index is not None else None
+    if b'\0' in listing or (data is not None and b'\0' in data):
+        raise ValueError('checkpoint metadata contains NUL')
+    lib = _get_lib()
+    size = lib.poly_hf_plan(listing, data, None, 0)
+    if size < 0:
+        raise ValueError(lib.poly_import_last_error_message().decode('utf-8'))
+    out = ctypes.create_string_buffer(size)
+    if lib.poly_hf_plan(listing, data, out, size) != size:
+        raise RuntimeError('checkpoint planning failed')
+    return json.loads(out.value)
 
 
 def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
@@ -173,29 +210,6 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
         tokens = np.concatenate([tokens, next_token], axis=1)
 
     return tokens
-
-
-def _find_safetensors(model_path):
-    """Find safetensors files, handling both single and sharded models."""
-    model_path = pathlib.Path(model_path)
-
-    # Check for index file (sharded model)
-    index_path = model_path / 'model.safetensors.index.json'
-    if index_path.exists():
-        with open(index_path) as f:
-            index = json.load(f)
-        # Get unique shard filenames
-        shard_names = sorted(set(index.get('weight_map', {}).values()))
-        return [model_path / name for name in shard_names if (model_path / name).exists()]
-
-    # Single file
-    single = model_path / 'model.safetensors'
-    if single.exists():
-        return [single]
-
-    # Fallback: any safetensors file
-    files = sorted(model_path.glob('*.safetensors'))
-    return files
 
 
 def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len, device=None, runtime=None):

@@ -86,6 +86,7 @@
         "csrc/src/loaders/import_error.c",
         "csrc/src/loaders/bind.c",
         "csrc/src/loaders/hf_decode.c",
+        "csrc/src/loaders/torch_decode.c",
         "csrc/src/loaders/gguf_decode.c",
         "csrc/src/loaders/gguf_loader.c",
         "csrc/src/loaders/onnx_loader.c",

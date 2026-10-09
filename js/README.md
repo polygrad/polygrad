@@ -399,13 +399,36 @@ Qwen3 GGUF imports take only `x` (`Int32Array`) and return `output`:
 Model-owned state, included in saved bundles. Older bundles retain their
 original signatures; inspect them with `model.entrypoints()`.
 
+### Hugging Face checkpoints
+
+Load HF config and weight bytes with `pg.Model.fromHF(configBytes, weightFiles)`.
+
+`weightFiles` accepts safetensors or restricted PyTorch ZIP state dictionaries
+(`.bin`/`.pt`), through the same C reader on Node and Wasm. The reader never
+executes Python code. It supports ordinary tensor dictionaries, storage offsets
+and nonnegative strides; it rejects pickled model objects, custom classes,
+compressed entries and legacy non-ZIP files. See the
+[checkpoint limits](https://github.com/polygrad/polygrad/blob/main/py/README.md#hugging-face-checkpoints).
+Pass complete file bytes, not URLs; downloading, progress and caching belong
+to the caller. This does not add model architectures or tokenizers.
+
+Use `pg.Model.planHF(filenames)` to select files before fetching weights.
+`filenames` is the repository's list of relative paths; the result contains
+`format`, `index` and `files`. When `index` is non-null and `files` is empty,
+fetch that index and call `pg.Model.planHF(filenames, indexJSON)` again.
+Fetch the returned `files` plus `config.json`, then pass their bytes to `fromHF`.
+Use one pinned repository revision for the listing and all downloads.
+The shared C planner prefers `model.safetensors` over `pytorch_model.bin`, with
+each format's `.index.json` taking precedence over its single file. It rejects
+missing shards and unsafe paths; it never collects arbitrary `.safetensors`
+variants. Planning does not validate the weight contents; import does that.
+
 ### Vision models
 
 `pg.models.CLIP`, `ViT`, `DINOv2` and `DINOv3` use the same C builders as Python.
-Load HF config/safetensors bytes with `pg.Model.fromHF(configBytes, weightFiles)`,
-or a Python-saved bundle with `pg.Model.load(bytes)`. Configuration-only models
-require weights before execution or saving; WebGPU construction uses the `Async`
-factory variants.
+Load HF weights with `pg.Model.fromHF`, or a Python-saved bundle with
+`pg.Model.load(bytes)`. Configuration-only models require weights before
+execution or saving; WebGPU construction uses the `Async` factory variants.
 
 | Model | Inputs | Forward outputs |
 | --- | --- | --- |

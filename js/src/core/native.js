@@ -217,6 +217,9 @@ function createNativeCore(device) {
     setDevice(inst, device) {
       return binding.poly_model_set_device_name(inst, String(device))
     },
+    planHF(files, index) {
+      return binding.poly_hf_plan(files, index)
+    },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       return binding.poly_hf_load_into(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
