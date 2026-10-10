@@ -57,6 +57,37 @@ def test_onnx_scatter_preserves_caller_tensor():
             model.dispose()
 
 
+@pytest.mark.parametrize('constant', [c for c in CASES if c['name'].startswith('scatter_pair_')
+                                    and c['name'].endswith('_constant')], ids=lambda c: c['name'])
+def test_scatter_constant_map_matches_dynamic_lowering(constant):
+    dynamic = next(c for c in CASES if c['name'] == constant['name'].replace('_constant', '_dynamic'))
+    inputs = {k: np.array(v['values'], np.float32).reshape(v['shape'])
+              for k, v in dynamic['inputs'].items()}
+    with pg.Runtime(device='CPU') as rt:
+        mapped = rt.Model.from_onnx(base64.b64decode(constant['onnx']))
+        fallback = rt.Model.from_onnx(base64.b64decode(dynamic['onnx']))
+        restored = rt.Model.load(mapped.save())
+        try:
+            maps = [b for b in mapped.bindings() if b['name'].startswith('%onnx_scatter_')]
+            assert len(maps) == 1
+            for scale in (1., -2.):
+                feed = {k: v if k == 'index_input' else v*scale for k, v in inputs.items()}
+                expected = fallback.call('forward', feed)['y']
+                for model in (mapped, restored):
+                    np.testing.assert_array_equal(model.call('forward',
+                        {k:v for k,v in feed.items() if k != 'index_input'})['y'], expected)
+            # Dynamic indices are not frozen to their first values.
+            changed_index = (np.zeros_like(inputs['index_input']) if np.any(inputs['index_input'])
+                             else np.ones_like(inputs['index_input']))
+            changed = dict(inputs, index_input=changed_index)
+            assert not np.array_equal(fallback.call('forward', changed)['y'],
+                                      fallback.call('forward', inputs)['y'])
+        finally:
+            restored.dispose()
+            fallback.dispose()
+            mapped.dispose()
+
+
 def test_onnx_inferred_outputs_still_validate_explicit_dimensions():
     case = next(c for c in CASES if c['name'] == 'inferred_output_dimension')
     raw = base64.b64decode(case['onnx'])
@@ -352,6 +383,20 @@ def test_onnx_range_rejects_runtime_lengths_and_invalid_constants():
             raw = _replace_graph(b'', graph + _field(1, node) + _field(12, _info('y', [3], 1)))
             with pytest.raises(ValueError, match='Range'):
                 rt.Model.from_onnx(raw)
+
+
+@pytest.mark.parametrize('index', [-4, 3, -(2**63), 2**63-1])
+def test_scatter_constant_indices_reject_out_of_bounds(index):
+    node = b''.join(_field(1, k.encode()) for k in ('x', 'indices', 'updates'))
+    node += _field(2, b'y') + _field(4, b'ScatterND')
+    indices = (_int_field(1, 2) + _int_field(1, 1) + _int_field(2, 7) + _field(8, b'indices')
+               + _field(9, np.array([[index], [0]], np.int64).tobytes()))
+    graph = (_field(1, node) + _field(5, indices) + _field(11, _info('x', [3,4]))
+             + _field(11, _info('updates', [2,4])) + _field(12, _info('y', [3,4])))
+    with pg.Runtime(device='INTERP') as rt:
+        for _ in range(2):
+            with pytest.raises(ValueError, match='ScatterND constant index out of bounds'):
+                rt.Model.from_onnx(_replace_graph(b'', graph))
 
 
 @pytest.mark.parametrize('dtype,code,value', [

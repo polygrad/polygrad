@@ -541,19 +541,27 @@ static bool same_dtype(PolyTensor *a, PolyTensor *b) {
 
 /* OnnxRunner._get_python_const caches closed shape operands. Never read a
  * graph input at import: that would freeze one caller's data into the bundle. */
-static bool onnx_const_data(Import *d, Value *v) {
+static bool onnx_const_data_bounded(Import *d, Value *v, size_t limit) {
   if (!v || !v->constant)
     return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "shape operand depends on runtime data");
   if (v->host) return true;
   /* Empty intermediate shape slices carry no data and need no residency. */
   if (!v->nbytes) return (v->host = malloc(1)) != NULL;
-  if (v->nbytes > 65536)
-    return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "host shape operand exceeds 64KiB");
+  if (v->nbytes > limit)
+    return fail(d, POLY_IMPORT_ERR_UNSUPPORTED_OP, "host constant exceeds its import budget");
   PolyTensor *t = poly_tensor_contiguous(d->ctx, v->tensor), *out = NULL;
+  /* Like Tensor readback, explicitly materialize virtual constant expressions.
+   * Ordinary realize correctly leaves a device-free arange/expand unchanged. */
+  if (t && poly_uop_device(t->uop_physical) == POLY_DEVICE_AUTO)
+    t = poly_tensor_clone(d->ctx, t, POLY_DEVICE_INTERP);
   if (!t || poly_realize_tensors(d->ctx, &t, 1, &out)) return false;
   PolyUOp *buffer = out ? (PolyUOp *)poly_uop_get_buffer_identity(out->uop_physical) : NULL;
   v->host = malloc(v->nbytes ? v->nbytes : 1);
   return buffer && v->host && !poly_buffer_read(d->ctx, buffer, v->host, v->nbytes);
+}
+
+static bool onnx_const_data(Import *d, Value *v) {
+  return onnx_const_data_bounded(d, v, 65536);
 }
 
 static bool onnx_ints(Import *d, Value *v, int64_t *values, int cap, int *count) {
@@ -1379,6 +1387,106 @@ static PolyTensor *onnx_rotary(Import *d, Node *n) {
                  : poly_tensor_permute(ctx, out, (int64_t[]){0, 2, 1, 3}, 4);
 }
 
+/* PG-DIV-020: unique closed overwrite indices define a partial permutation
+ * of update slices. One source map avoids an OR of whole-output equality
+ * masks. Dynamic indices, duplicates and reductions keep the pinned lowering. */
+static PolyTensor *onnx_scatter_constant(Import *d, Node *n, int depth, bool *handled) {
+  *handled = false;
+  Value *iv = n->inputs[1];
+  if (!iv->constant) return NULL;
+  PolyTensor *x = n->inputs[0]->tensor, *updates = n->inputs[2]->tensor;
+  int nx = rank(d, x);
+  int64_t xs[ONNX_RANK];
+  memcpy(xs, shape(d, x), (size_t)nx * sizeof(*xs));
+  int64_t prefix = 1, rows = (int64_t)(iv->nbytes / 8 / (size_t)depth);
+  for (int i = 0; i < depth; i++) {
+    if (xs[i] < 1 || (uint64_t)xs[i] > ONNX_BYTES / 4 / (uint64_t)prefix) return NULL;
+    prefix *= xs[i];
+  }
+  if (!rows) {
+    *handled = true;
+    return x;
+  }
+  size_t map_bytes = (size_t)prefix * sizeof(int32_t);
+  size_t host_bytes = iv->host ? 0 : iv->nbytes;
+  if (host_bytes > ONNX_BYTES - d->initializer_bytes ||
+      map_bytes > ONNX_BYTES - d->initializer_bytes - host_bytes || d->nvalues == ONNX_VALUES)
+    return NULL;
+  *handled = true;
+  if (!onnx_const_data_bounded(d, iv, ONNX_BYTES - d->initializer_bytes)) {
+    fail(d, POLY_IMPORT_ERR_INTERNAL, "ScatterND constant evaluation failed");
+    return NULL;
+  }
+  d->initializer_bytes += host_bytes;
+  int32_t *map = malloc(map_bytes);
+  if (!map) return NULL;
+  for (int64_t i = 0; i < prefix; i++)
+    map[i] = -1;
+  bool duplicate = false;
+  for (int64_t row = 0; row < rows; row++) {
+    int64_t dest = 0;
+    for (int axis = 0; axis < depth; axis++) {
+      int64_t index;
+      memcpy(&index, iv->host + (size_t)(row * depth + axis) * 8, 8);
+      if (index < -xs[axis] || index >= xs[axis]) {
+        free(map);
+        fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "ScatterND constant index out of bounds");
+        return NULL;
+      }
+      if (index < 0) index += xs[axis];
+      dest = dest * xs[axis] + index;
+    }
+    duplicate |= map[dest] != -1;
+    /* The import byte budget bounds the number of int64 tuples below INT32_MAX. */
+    map[dest] = (int32_t)row;
+  }
+  if (duplicate) {
+    free(map);
+    *handled = false;
+    return NULL;
+  }
+  /* Private state cannot collide with any ONNX identifier, including later
+   * nodes: state_name escapes every user '%', and scope -1 is never looked up. */
+  char name[48];
+  snprintf(name, sizeof(name), "%%onnx_scatter_%d", d->nvalues);
+  Value *v = &d->values[d->nvalues++];
+  *v = (Value
+  ){.name = "",
+    .scope = -1,
+    .host = (uint8_t *)map,
+    .nbytes = map_bytes,
+    .dtype = POLY_INT32,
+    .rank = 1,
+    .shape = {prefix},
+    .initializer = true,
+    .constant = true};
+  d->initializer_bytes += map_bytes;
+  if (!text(d, (Bytes){(const uint8_t *)name, strlen(name)}, &v->binding, false)) return NULL;
+  v->tensor = poly_model_aux_from_host(d->model, v->binding, v->dtype, v->shape, 1, map, map_bytes);
+  if (!v->tensor) return NULL;
+  PolyTensor *zero = poly_tensor_cast(d->ctx, onnx_int(d, 0), POLY_INT32);
+  PolyTensor *valid = poly_tensor_alu2(
+      d->ctx, POLY_OP_CMPLT, poly_tensor_cast(d->ctx, onnx_int(d, -1), POLY_INT32), v->tensor
+  );
+  PolyTensor *safe = poly_tensor_alu2(d->ctx, POLY_OP_MAX, v->tensor, zero);
+  int nr = nx - depth + 1;
+  int64_t dims[ONNX_RANK], mask_dims[ONNX_RANK];
+  dims[0] = rows;
+  mask_dims[0] = prefix;
+  for (int i = 1; i < nr; i++) {
+    dims[i] = xs[depth + i - 1];
+    mask_dims[i] = 1;
+  }
+  PolyTensor *value =
+      poly_tensor_index_select(d->ctx, poly_tensor_reshape(d->ctx, updates, dims, nr), 0, safe);
+  dims[0] = prefix;
+  PolyTensor *base = poly_tensor_reshape(d->ctx, x, dims, nr);
+  value = poly_tensor_alu3(
+      d->ctx, POLY_OP_WHERE, poly_tensor_reshape(d->ctx, valid, mask_dims, nr), value, base
+  );
+  return value ? poly_tensor_reshape(d->ctx, value, xs, nx) : NULL;
+}
+
 static PolyTensor *onnx_operation(Import *d, Node *n) {
   PolyCtx *ctx = d->ctx;
   PolyTensor *x = n->nin && n->inputs[0] ? n->inputs[0]->tensor : NULL;
@@ -1893,6 +2001,11 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
                  : !strcmp(reduction, "max") ? 4
                                              : -1;
     if (reduce < 0 || (reduce >= 3 && d->opset < 18)) return NULL;
+    if (!reduce) {
+      bool handled;
+      PolyTensor *mapped = onnx_scatter_constant(d, n, (int)count, &handled);
+      if (handled) return mapped;
+    }
     /* The pin updates one axis-0 slice at a time via _getitem(indices, value).
      * Keep the functional result: ONNX values are immutable, not mutable state. */
     PolyTensor *out = x;

@@ -313,6 +313,26 @@ async function checkOnnxImport(pg) {
       restored = pg.Model.load(await model.saveAsync())
       const result = await forward(restored, inputs, item.name)
       for (const [name, value] of Object.entries(item.outputs)) assertClose(result[name], value.values, 2e-5)
+      const maps = model.bindings().filter(b => b.name.startsWith('%onnx_scatter_'))
+      if (item.name.startsWith('scatter_pair_')) {
+        const constant = item.name.endsWith('_constant')
+        assert(maps.length === (constant ? 1 : 0), 'ScatterND lowering selection')
+        if (constant) {
+          const row = onnxFixture.cases.find(c => c.name === item.name.replace('_constant', '_dynamic'))
+          const fallback = pg.Model.fromONNX(bytes(row.onnx))
+          try {
+            const changed = Object.fromEntries(Object.entries(inputs).map(([k,v]) =>
+              [k, Float32Array.from(v, x => -2*x)]))
+            const expected = await fallback.forwardAsync({...changed,
+              index_input: new Float32Array(row.inputs.index_input.values)})
+            assertClose((await model.forwardAsync(changed)).y, expected.y, 0)
+            assertClose((await restored.forwardAsync(changed)).y, expected.y, 0)
+          } finally { await fallback.dispose() }
+        }
+      }
+      if (['scatter_nd_add', 'scatter_nd_mul', 'scatter_nd_min', 'scatter_nd_max',
+           'scatter_nd_batched_indices', 'scatter_nd_duplicate_overwrite'].includes(item.name))
+        assert(maps.length === 0, 'ScatterND fallback must not freeze indices')
       assert(!(model instanceof pg.models.Transformer), 'ONNX imported as Transformer')
     } finally {
       if (restored) await restored.dispose()

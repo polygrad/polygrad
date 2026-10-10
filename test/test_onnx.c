@@ -130,6 +130,22 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     if (!strncmp(cJSON_GetObjectItem(row, "name")->valuestring, "if_", 3))
       ASSERT_EQ(selections, 1); /* Tinygrad If selects equal-shaped branch values with WHERE. */
     const char *fixture_name = cJSON_GetObjectItem(row, "name")->valuestring;
+    int maps = 0;
+    for (int i = 0; i < poly_model_buf_count(m); i++)
+      if (!strncmp(poly_model_buf_name(m, i), "%onnx_scatter_", 14)) maps++;
+    if (!strcmp(fixture_name, "scatter_nd_constant_grid")) {
+      ASSERT_EQ(maps, 1);
+      ASSERT_TRUE(count < 150);
+      ASSERT_TRUE(selections <= 3);
+    }
+    if (!strncmp(fixture_name, "scatter_pair_", 13))
+      ASSERT_EQ(maps, strstr(fixture_name, "_constant") ? 1 : 0);
+    if (!strcmp(fixture_name, "scatter_nd_constant_range")) ASSERT_EQ(maps, 1);
+    if (!strcmp(fixture_name, "scatter_nd_duplicate_overwrite") ||
+        !strcmp(fixture_name, "scatter_nd_add") || !strcmp(fixture_name, "scatter_nd_mul") ||
+        !strcmp(fixture_name, "scatter_nd_min") || !strcmp(fixture_name, "scatter_nd_max") ||
+        !strcmp(fixture_name, "scatter_nd_batched_indices"))
+      ASSERT_EQ(maps, 0);
     if (!strcmp(fixture_name, "scalar_constants")) {
       int powers = 0;
       for (int i = 0; i < count; i++)

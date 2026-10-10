@@ -370,6 +370,40 @@ def fixtures():
                {'x':np.arange(12,dtype=np.float32).reshape(3,4)}, {'y':(3,4)},
                {'indices':np.array([[[0,1],[2,3]],[[0,1],[-1,-1]]],np.int64),
                 'updates':np.array([[4,8],[2,3]],np.int32)},opset=18)
+    grid = np.stack(np.meshgrid(np.arange(2), np.arange(4), np.arange(0,16,2),
+                                indexing='ij'), axis=-1).astype(np.int64)
+    yield case('scatter_nd_constant_grid',
+               [h.make_node('Add',['grid','zero'],['indices']),
+                h.make_node('ScatterND',['x','indices','updates'],['y'])],
+               {'x':f((2,4,16)), 'updates':f((2,4,8))}, {'y':(2,4,16)},
+               {'grid':grid, 'zero':np.array(0,np.int64)})
+    # Paired constant/dynamic models run the same indices through both
+    # lowerings. Include tuples addressing slices, negative indices and batches.
+    for nr in range(1,5):
+        shape = tuple(range(2,nr+2))
+        for depth in sorted({1,nr}):
+            coords = np.array(list(np.ndindex(shape[:depth])), np.int64)[::2]
+            if len(coords) > 1: coords[-1] -= np.array(shape[:depth])
+            if nr % 2 == 0: coords = coords[None]
+            x, updates = f(shape), f(coords.shape[:-1]+shape[depth:])
+            for dynamic in (False,True):
+                nodes = [h.make_node('Cast',['index_input'],['indices'],to=T.INT64)] if dynamic else []
+                nodes.append(h.make_node('ScatterND',['x','indices','updates'],['y']))
+                inputs = {'x':x,'updates':updates}
+                if dynamic: inputs['index_input'] = coords.astype(np.float32)
+                yield case(f'scatter_pair_{nr}_{depth}_{"dynamic" if dynamic else "constant"}',
+                           nodes, inputs, {'y':shape}, {} if dynamic else {'indices':coords})
+    yield case('scatter_nd_constant_range',
+               [h.make_node('Range',['start','end','step'],['r']),
+                h.make_node('Unsqueeze',['r','axis'],['indices']),
+                h.make_node('ScatterND',['x','indices','updates'],['y'])],
+               {'x':f((16,)), 'updates':f((8,))}, {'y':(16,)},
+               {'start':np.array(0,np.int64), 'end':np.array(16,np.int64),
+                'step':np.array(2,np.int64), 'axis':np.array([1],np.int64)})
+    yield case('scatter_nd_duplicate_overwrite',
+               [h.make_node('ScatterND',['x','indices','updates'],['y'])],
+               {'x':f((3,4)), 'updates':f((2,4))}, {'y':(3,4)},
+               {'indices':np.array([[1],[1]],np.int64)})
     yield case('spatial', [h.make_node('MaxPool',['x'],['max','idx'],kernel_shape=[2,2],strides=[2,2]),
                h.make_node('Cast',['idx'],['indices'],to=T.FLOAT),
                h.make_node('AveragePool',['x'],['avg'],kernel_shape=[3,3],strides=[2,2],auto_pad='SAME_UPPER'),

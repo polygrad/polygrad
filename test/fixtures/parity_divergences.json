@@ -300,6 +300,18 @@
       "close_when": "Revisit when pinned tinygrad implements Loop. This grants no Tensor, compiler or runtime parity mismatch."
     },
     {
+      "id": "PG-DIV-020",
+      "status": "approved",
+      "stages": ["model", "import"],
+      "area": "constant unique ONNX ScatterND overwrite indices",
+      "tinygrad": "Pinned ONNX runner updates one axis-0 slice at a time through tensor indexing.",
+      "polygrad": "For closed constant, unique indices and concrete import-time shapes with reduction=none, precompute one int32 source map with -1 for untouched destinations. Gather update slices and select against the original data. Dynamic indices, duplicates, reductions and maps outside the import budget keep the existing lowering. Unresolved dimensions remain rejected by ONNX shape admission.",
+      "rationale": "Avoid Cartesian boolean masks whose repeated substitution exceeds the browser memory budget. No Tensor operation or compiler rewrite changes; source-map storage is retained in the portable Model.",
+      "approval": "User 2026-10-09 approved option 1 with conditions: verify indexed-load collapse, one int32 map, closed unique reduction-free indices, differential/fallback tests, decoder ORT and memory checks, and an importer-only divergence.",
+      "evidence": ["src/loaders/onnx_loader.c:onnx_scatter_constant", "test/test_onnx.c", "test/generate_onnx_fixture.py", "py/tests/test_onnx.py:test_scatter_constant_map_matches_dynamic_lowering", "temp/magenta-benchmark-20261009/SCATTER_PROBE.md"],
+      "close_when": "Pinned ONNX lowering supports equivalent compact constant scatter maps. This grants no Tensor, compiler or runtime parity mismatch."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

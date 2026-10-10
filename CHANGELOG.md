@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Lower ONNX ScatterND overwrites with constant unique indices through a compact
+  source map, avoiding decoder compilation memory blow-ups. Dynamic indices,
+  duplicates and reductions retain the existing path. Saved models include
+  four bytes per destination element or slice for each optimized source map.
+
 - Deduplicate Model ownership roots with a hash set and freeze imported ONNX
   initializers in one transaction, reducing model construction overhead.
 
