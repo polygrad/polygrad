@@ -74,9 +74,13 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     bool budget_case =
         !strcmp(cJSON_GetObjectItem(row, "name")->valuestring, "scatter_nd_map_budget");
     if (budget_case) poly_test_onnx_scatter_budget = 4608;
+    uint64_t reads_before = ctx->buffer_read_bytes;
     PolyModel *m = poly_onnx_load_into(ctx, data, (int64_t)size, &options, POLY_DEVICE_INTERP);
     poly_test_onnx_scatter_budget = (size_t)1 << 30;
     ASSERT_NOT_NULL(m);
+    const char *case_name = cJSON_GetObjectItem(row, "name")->valuestring;
+    if (!strcmp(case_name, "scatter_grid_large") || !strcmp(case_name, "scatter_computed_budget"))
+      ASSERT_TRUE(ctx->buffer_read_bytes - reads_before < 4096);
     ASSERT_EQ(ctx->n_tensors, before);
     ASSERT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
     memset(data, 0, size);
@@ -136,6 +140,8 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     if (!strncmp(cJSON_GetObjectItem(row, "name")->valuestring, "if_", 3))
       ASSERT_EQ(selections, 1); /* Tinygrad If selects equal-shaped branch values with WHERE. */
     const char *fixture_name = cJSON_GetObjectItem(row, "name")->valuestring;
+    if (!strncmp(fixture_name, "scatter_grid_", 13) && strcmp(fixture_name, "scatter_grid_large"))
+      ASSERT_EQ(reductions, 0); /* Grid writes must not construct one-hot gather reductions. */
     int maps = 0;
     for (int i = 0; i < poly_model_buf_count(m); i++)
       if (!strncmp(poly_model_buf_name(m, i), "%onnx_scatter_", 14)) maps++;
@@ -147,7 +153,10 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     if (budget_case) ASSERT_EQ(maps, 2);
     if (!strncmp(fixture_name, "scatter_pair_", 13))
       ASSERT_EQ(maps, strstr(fixture_name, "_constant") ? 1 : 0);
-    if (!strcmp(fixture_name, "scatter_nd_constant_range")) ASSERT_EQ(maps, 1);
+    if (!strcmp(fixture_name, "scatter_nd_constant_range") ||
+        !strncmp(fixture_name, "scatter_grid_", 13) ||
+        !strcmp(fixture_name, "scatter_computed_budget"))
+      ASSERT_EQ(maps, 0);
     if (!strcmp(fixture_name, "scatter_nd_duplicate_overwrite") ||
         !strcmp(fixture_name, "scatter_nd_add") || !strcmp(fixture_name, "scatter_nd_mul") ||
         !strcmp(fixture_name, "scatter_nd_min") || !strcmp(fixture_name, "scatter_nd_max") ||
@@ -174,6 +183,35 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
   }
   poly_ctx_destroy(ctx);
   cJSON_Delete(fixture);
+}
+
+TEST(onnx, grid_scatter_stages_output_before_convolution) {
+  cJSON *fixture = onnx_fixture();
+  ASSERT_NOT_NULL(fixture);
+  cJSON *row, *match = NULL;
+  cJSON_ArrayForEach(row, cJSON_GetObjectItem(fixture, "cases")) {
+    if (!strcmp(cJSON_GetObjectItem(row, "name")->valuestring, "scatter_dilated_conv")) match = row;
+  }
+  ASSERT_NOT_NULL(match);
+  size_t size;
+  uint8_t *data = fixture_bytes(cJSON_GetObjectItem(match, "onnx")->valuestring, &size);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *m = poly_onnx_load_into(ctx, data, (int64_t)size, NULL, POLY_DEVICE_INTERP);
+  ASSERT_NOT_NULL(m);
+  int count = 0;
+  PolyUOp **nodes = poly_uop_toposort(ctx, poly_model_get_sink(m, "forward"), &count);
+  bool staged_scatter = false;
+  for (int i = 0; i < count; i++)
+    if (nodes[i]->op == POLY_OP_CONTIGUOUS && nodes[i]->n_src > 0 &&
+        nodes[i]->src[0]->op == POLY_OP_WHERE)
+      staged_scatter = true;
+  /* Stage the selected, dilated value, not only the update expression:
+   * otherwise the following convolution repeats padding/select work. */
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  free(data);
+  cJSON_Delete(fixture);
+  ASSERT_TRUE(staged_scatter);
 }
 
 TEST(onnx, truncated_proto_and_varints_fail_without_leaking_handles) {

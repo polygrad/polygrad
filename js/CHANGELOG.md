@@ -3,6 +3,8 @@
 ## 0.7.2 (2026-10-10)
 
 - Reduce repeated-call collection overhead when other large models stay loaded.
+- Import regular ONNX ScatterND writes without expanding index arrays or storing
+  lookup maps; bound host evaluation for irregular computed maps.
 
 - Reduce ONNX decoder compilation memory for ScatterND overwrites with constant
   unique indices. Optimized models store one four-byte source index per

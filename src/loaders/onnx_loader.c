@@ -20,6 +20,9 @@
 #define ONNX_IO 128
 #define ONNX_RANK 16
 #define ONNX_BYTES ((size_t)1 << 30)
+/* A source map must not force large virtual index tensors through the host
+ * interpreter. Stored indices need no evaluation; regular grids need neither. */
+#define ONNX_SCATTER_COMPUTED_BYTES ((size_t)65536)
 #ifdef POLY_TESTING
 /* Exercise aggregate import budgets without allocating gigabyte fixtures. */
 size_t poly_test_onnx_scatter_budget = ONNX_BYTES;
@@ -40,6 +43,14 @@ typedef struct {
   Bytes bytes;
 } Field;
 typedef struct {
+  int axis; /* -1 for a constant coordinate */
+  int64_t start, step;
+} IndexAxis;
+typedef struct {
+  int n;
+  IndexAxis coordinates[ONNX_RANK];
+} IndexGrid;
+typedef struct {
   const char *name;
   PolyTensor *tensor;
   uint8_t *host; /* owned initializer, retained until post-build coherent write */
@@ -51,6 +62,7 @@ typedef struct {
   bool constant; /* closed graph: safe to evaluate import-time shape operands */
   int scope;
   const char *binding; /* Model state names are global; ONNX names are lexical. */
+  IndexGrid *grid; /* Import-local proof for integer Range/movement expressions. */
 } Value;
 typedef struct {
   PolyCtx *ctx;
@@ -1391,6 +1403,187 @@ static PolyTensor *onnx_rotary(Import *d, Node *n) {
                  : poly_tensor_permute(ctx, out, (int64_t[]){0, 2, 1, 3}, 4);
 }
 
+/* Preserve a narrow affine proof while constructing ordinary Tensor graphs.
+ * This is not another evaluator: all dimensions and scalar operands have
+ * already been validated by the corresponding ONNX operation. */
+static void onnx_index_grid(Import *d, Node *n, Value *v) {
+  if (!v->constant || !poly_dtype_eq(v->dtype, POLY_INT64) || !v->rank || !v->nbytes) return;
+  IndexGrid grid = {.n = 1};
+  Value *source = n->nin ? n->inputs[0] : NULL;
+  const char *op = d->op;
+  if (!strcmp(op, "Range")) {
+    if (!source->host || !n->inputs[2]->host) return;
+    grid.coordinates[0].axis = 0;
+    memcpy(&grid.coordinates[0].start, source->host, 8);
+    memcpy(&grid.coordinates[0].step, n->inputs[2]->host, 8);
+  } else if (!strcmp(op, "Concat")) {
+    int64_t axis = attr_int(d, n, "axis", 0);
+    if (axis < 0) axis += v->rank;
+    if (axis != v->rank - 1 || n->nin > ONNX_RANK) return;
+    grid.n = n->nin;
+    for (int i = 0; i < n->nin; i++) {
+      Value *part = n->inputs[i];
+      if (!part->grid || part->grid->n != 1 || part->rank != v->rank ||
+          part->shape[v->rank - 1] != 1)
+        return;
+      grid.coordinates[i] = part->grid->coordinates[0];
+    }
+  } else {
+    if (!source || !source->grid || source->grid->n != 1) return;
+    grid = *source->grid;
+    IndexAxis *a = &grid.coordinates[0];
+    if (!strcmp(op, "Reshape") || !strcmp(op, "Unsqueeze") || !strcmp(op, "Squeeze")) {
+      int i = 0, j = 0, axis = -1;
+      while (i < source->rank || j < v->rank) {
+        while (i < source->rank && source->shape[i] == 1)
+          i++;
+        while (j < v->rank && v->shape[j] == 1)
+          j++;
+        if (i == source->rank || j == v->rank) {
+          if (i != source->rank || j != v->rank) return;
+          break;
+        }
+        if (source->shape[i] != v->shape[j]) return;
+        if (a->axis == i) axis = j;
+        i++;
+        j++;
+      }
+      a->axis = axis;
+    } else if (!strcmp(op, "Expand")) {
+      if (a->axis >= 0) a->axis += v->rank - source->rank;
+    } else if (!strcmp(op, "Slice")) {
+      int64_t begin[ONNX_RANK], axes[ONNX_RANK], steps[ONNX_RANK];
+      int count, ignored;
+      if (!onnx_ints(d, n->inputs[1], begin, ONNX_RANK, &count)) return;
+      for (int i = 0; i < count; i++) {
+        axes[i] = i;
+        steps[i] = 1;
+      }
+      if (n->nin > 3 && n->inputs[3] && !onnx_ints(d, n->inputs[3], axes, ONNX_RANK, &ignored))
+        return;
+      if (n->nin > 4 && n->inputs[4] && !onnx_ints(d, n->inputs[4], steps, ONNX_RANK, &ignored))
+        return;
+      for (int i = 0; i < count; i++) {
+        int axis = (int)(axes[i] < 0 ? axes[i] + source->rank : axes[i]);
+        if (axis != a->axis) continue;
+        int64_t dim = source->shape[axis], lo = begin[i];
+        if (lo < 0) lo += dim;
+        int64_t lower = steps[i] > 0 ? 0 : -1, upper = steps[i] > 0 ? dim : dim - 1;
+        lo = lo < lower ? lower : lo > upper ? upper : lo;
+        int64_t offset;
+        if (__builtin_mul_overflow(a->step, lo, &offset) ||
+            __builtin_add_overflow(a->start, offset, &a->start) ||
+            __builtin_mul_overflow(a->step, steps[i], &a->step))
+          return;
+      }
+    } else if (strcmp(op, "Identity") && strcmp(op, "Cast"))
+      return;
+  }
+  for (int i = 0; i < grid.n; i++) {
+    IndexAxis *a = &grid.coordinates[i];
+    if (a->axis >= 0 && v->shape[a->axis] == 1) a->axis = -1;
+  }
+  v->grid = poly_arena_alloc(d->strings, sizeof(grid), _Alignof(IndexGrid));
+  if (v->grid) *v->grid = grid;
+}
+
+static PolyTensor *onnx_grid_pad(
+    Import *d,
+    PolyTensor *value,
+    const int64_t *target,
+    const int64_t *starts,
+    const int64_t *strides,
+    int depth,
+    int nr
+) {
+  int64_t dims[ONNX_RANK + 1], pairs[ONNX_RANK + 1][2];
+  for (int a = 0; a < depth; a++) {
+    if (strides[a] <= 1 || shape(d, value)[a] == 1) continue;
+    int64_t n = shape(d, value)[a];
+    for (int i = 0; i < nr + 1; i++) {
+      dims[i] = i <= a ? shape(d, value)[i] : i == a + 1 ? 1 : shape(d, value)[i - 1];
+      pairs[i][0] = 0;
+      pairs[i][1] = i == a + 1 ? strides[a] - 1 : 0;
+    }
+    value = poly_tensor_reshape(d->ctx, value, dims, nr + 1);
+    value = poly_tensor_pad_value_int(d->ctx, value, pairs, nr + 1, 0);
+    for (int i = 0; i < nr; i++) {
+      dims[i] = i < a ? dims[i] : i == a ? n * strides[a] : dims[i + 1];
+      pairs[i][0] = 0;
+      pairs[i][1] = dims[i];
+    }
+    pairs[a][1] = (n - 1) * strides[a] + 1;
+    value = poly_tensor_reshape(d->ctx, value, dims, nr);
+    value = poly_tensor_shrink(d->ctx, value, pairs, nr);
+    if (!value) return NULL;
+  }
+  for (int i = 0; i < nr; i++) {
+    pairs[i][0] = i < depth ? starts[i] : 0;
+    pairs[i][1] = target[i] - shape(d, value)[i] - pairs[i][0];
+  }
+  return poly_tensor_pad_value_int(d->ctx, value, pairs, nr, 0);
+}
+
+/* PG-DIV-021: prove a one-to-one Cartesian write from Range/movement metadata.
+ * Pad inserts holes; WHERE preserves arbitrary (including NaN) base values.
+ * No index array, source map, data-dependent predicate or compiler rule. */
+static PolyTensor *onnx_scatter_grid(Import *d, Node *n, int depth, bool *handled) {
+  *handled = false;
+  Value *iv = n->inputs[1];
+  if (!iv->grid || iv->grid->n != depth || iv->rank < 2) return NULL;
+  PolyTensor *base = n->inputs[0]->tensor, *updates = n->inputs[2]->tensor;
+  int nr = rank(d, base), grid_rank = iv->rank - 1;
+  if (nr >= ONNX_RANK) return NULL; /* Dilation temporarily inserts one axis. */
+  int64_t target[ONNX_RANK], dims[ONNX_RANK], starts[ONNX_RANK], strides[ONNX_RANK];
+  int64_t perm[ONNX_RANK], flips[ONNX_RANK];
+  bool used[ONNX_RANK] = {0};
+  int np = 0, nf = 0;
+  memcpy(target, shape(d, base), (size_t)nr * sizeof(*target));
+  for (int a = 0; a < depth; a++) {
+    IndexAxis axis = iv->grid->coordinates[a];
+    if (axis.axis >= grid_rank || axis.step == INT64_MIN) return NULL;
+    int64_t len = axis.axis < 0 ? 1 : iv->shape[axis.axis], end, delta;
+    if (len < 1 || (len > 1 && (!axis.step || used[axis.axis])) ||
+        __builtin_mul_overflow(len - 1, axis.step, &delta) ||
+        __builtin_add_overflow(axis.start, delta, &end))
+      return NULL;
+    int64_t lo = axis.start < end ? axis.start : end, hi = axis.start > end ? axis.start : end;
+    if (lo < -target[a] || hi >= target[a] || (lo < 0 && hi >= 0)) return NULL;
+    if (hi < 0) lo += target[a];
+    dims[a] = len;
+    starts[a] = lo;
+    strides[a] = len == 1 ? 1 : axis.step < 0 ? -axis.step : axis.step;
+    if (strides[a] > target[a] || len > INT64_MAX / strides[a]) return NULL;
+    if (len > 1) {
+      used[axis.axis] = true;
+      perm[np++] = axis.axis;
+      if (axis.step < 0) flips[nf++] = a;
+    }
+  }
+  for (int i = 0; i < grid_rank; i++) {
+    if (used[i]) continue;
+    if (iv->shape[i] != 1) return NULL; /* Otherwise the write would have duplicates. */
+    perm[np++] = i;
+  }
+  for (int i = depth; i < nr; i++) {
+    dims[i] = target[i];
+    perm[np++] = grid_rank + i - depth;
+  }
+  *handled = true;
+  updates = poly_tensor_permute(d->ctx, updates, perm, np);
+  updates = poly_tensor_reshape(d->ctx, updates, dims, nr);
+  if (nf) updates = poly_tensor_flip(d->ctx, updates, flips, nf);
+  PolyTensor *mask = poly_tensor_cast(d->ctx, onnx_int(d, 1), POLY_BOOL);
+  mask = poly_tensor_expand(d->ctx, mask, dims, nr);
+  updates = onnx_grid_pad(d, updates, target, starts, strides, depth, nr);
+  mask = onnx_grid_pad(d, mask, target, starts, strides, depth, nr);
+  if (!updates || !mask) return NULL;
+  PolyTensor *result = poly_tensor_alu3(d->ctx, POLY_OP_WHERE, mask, updates, base);
+  /* Stage the complete write before a downstream reduction can repeat its
+   * activation, dilation and select for every tap/output channel. */
+  return result ? poly_tensor_contiguous(d->ctx, result) : NULL;
+}
+
 /* PG-DIV-020: unique closed overwrite indices define a partial permutation
  * of update slices. One source map avoids an OR of whole-output equality
  * masks. Dynamic indices, duplicates and reductions keep the pinned lowering. */
@@ -1398,6 +1591,7 @@ static PolyTensor *onnx_scatter_constant(Import *d, Node *n, int depth, bool *ha
   *handled = false;
   Value *iv = n->inputs[1];
   if (!iv->constant) return NULL;
+  if (!iv->host && iv->nbytes > ONNX_SCATTER_COMPUTED_BYTES) return NULL;
   PolyTensor *x = n->inputs[0]->tensor, *updates = n->inputs[2]->tensor;
   int nx = rank(d, x);
   int64_t xs[ONNX_RANK];
@@ -2022,6 +2216,8 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     if (reduce < 0 || (reduce >= 3 && d->opset < 18)) return NULL;
     if (!reduce) {
       bool handled;
+      PolyTensor *grid = onnx_scatter_grid(d, n, (int)count, &handled);
+      if (handled) return grid;
       PolyTensor *mapped = onnx_scatter_constant(d, n, (int)count, &handled);
       if (handled) return mapped;
     }
@@ -3331,6 +3527,7 @@ static bool onnx_node(Import *d, Bytes proto) {
     if (v->rank < 0 || v->rank > ONNX_RANK) return false;
     if (v->rank) memcpy(v->shape, shape(d, out), v->rank * sizeof(int64_t));
     if (!shape_bytes(d, v, true)) return false;
+    if (n.nout == 1) onnx_index_grid(d, &n, v);
   }
   return true;
 }

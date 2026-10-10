@@ -4,6 +4,8 @@
 
 - Collect unused buffer storage without repeatedly scanning retained models;
   preserve shared views and verify incremental ownership in debug checks.
+- Import regular ONNX ScatterND writes without expanding computed indices or
+  saving large lookup maps. Limit host evaluation for irregular computed maps.
 
 - Lower ONNX ScatterND overwrites with constant unique indices through a compact
   source map, avoiding decoder compilation memory blow-ups. Dynamic indices,

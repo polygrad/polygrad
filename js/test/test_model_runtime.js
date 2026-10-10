@@ -314,6 +314,8 @@ async function checkOnnxImport(pg) {
       const result = await forward(restored, inputs, item.name)
       for (const [name, value] of Object.entries(item.outputs)) assertClose(result[name], value.values, 2e-5)
       const maps = model.bindings().filter(b => b.name.startsWith('%onnx_scatter_'))
+      if (item.name.startsWith('scatter_grid_') || item.name === 'scatter_computed_budget' || item.name === 'scatter_dilated_conv')
+        assert(maps.length === 0, 'ScatterND grid or computed-index budget must avoid source maps')
       if (item.name.startsWith('scatter_pair_')) {
         const constant = item.name.endsWith('_constant')
         assert(maps.length === (constant ? 1 : 0), 'ScatterND lowering selection')
@@ -334,6 +336,8 @@ async function checkOnnxImport(pg) {
            'scatter_nd_batched_indices', 'scatter_nd_duplicate_overwrite'].includes(item.name))
         assert(maps.length === 0, 'ScatterND fallback must not freeze indices')
       assert(!(model instanceof pg.models.Transformer), 'ONNX imported as Transformer')
+    } catch (error) {
+      throw new Error(`ONNX fixture ${item.name}: ${error.message}`, {cause:error})
     } finally {
       if (restored) await restored.dispose()
       await model.dispose()

@@ -42,6 +42,58 @@ def test_onnx_model_and_bundle(case):
             model.dispose()
 
 
+@pytest.mark.parametrize('case', [c for c in CASES if c['name'].startswith('scatter_grid_')
+                               and c['name'] != 'scatter_grid_large'], ids=lambda c: c['name'])
+def test_scatter_grid_matches_constant_map(case):
+    onnx = pytest.importorskip('onnx')
+    raw = base64.b64decode(case['onnx'])
+    proto = onnx.load_from_string(raw)
+    scatter = next(n for n in proto.graph.node if n.op_type == 'ScatterND')
+    original = scatter.input[1]
+    scatter.input[1] = 'unproved_indices'
+    # Identity arithmetic deliberately drops the narrow grid proof. Small
+    # closed indices then take the independently tested source-map lowering.
+    proto.graph.initializer.append(onnx.numpy_helper.from_array(np.array(0, np.int64), 'index_zero'))
+    where = list(proto.graph.node).index(scatter)
+    proto.graph.node.insert(where, onnx.helper.make_node('Add', [original, 'index_zero'], ['unproved_indices']))
+    inputs = {k: np.array(v['values'], np.float32).reshape(v['shape']) for k, v in case['inputs'].items()}
+    with pg.Runtime(device='CPU') as rt:
+        grid = rt.Model.from_onnx(raw)
+        mapped = rt.Model.from_onnx(proto.SerializeToString())
+        try:
+            assert not any(b['name'].startswith('%onnx_scatter_') for b in grid.bindings())
+            assert sum(b['name'].startswith('%onnx_scatter_') for b in mapped.bindings()) == 1
+            for scale in (1., -2.):
+                feed = {k: v*scale for k, v in inputs.items()}
+                np.testing.assert_array_equal(grid.call('forward', feed)['y'], mapped.call('forward', feed)['y'])
+            # Padding must select, not multiply: untouched NaNs survive.
+            inputs['x'].fill(np.nan)
+            np.testing.assert_array_equal(grid.call('forward', inputs)['y'], mapped.call('forward', inputs)['y'])
+        finally:
+            mapped.dispose()
+            grid.dispose()
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_scatter_dilated_convolution_work(device):
+    case = next(c for c in CASES if c['name'] == 'scatter_dilated_conv')
+    inputs = {k: np.array(v['values'], np.float32).reshape(v['shape']) for k, v in case['inputs'].items()}
+    with pg.Runtime(device=device) as rt:
+        model = rt.Model.from_onnx(base64.b64decode(case['onnx']))
+        try:
+            model.call('forward', inputs)
+            before = rt.stats()
+            result = model.call('forward', inputs)['y']
+            after = rt.stats()
+            # One staged strided write and one convolution, not a convolution
+            # that recomputes the activation for each tap and output channel.
+            assert after['launch_count'] - before['launch_count'] == 2
+            ref = case['outputs']['y']
+            np.testing.assert_allclose(result, np.array(ref['values']).reshape(ref['shape']), atol=2e-5, rtol=2e-5)
+        finally:
+            model.dispose()
+
+
 def test_onnx_scatter_preserves_caller_tensor():
     case = next(c for c in CASES if c['name'] == 'scatter_nd_add')
     original = np.array(case['inputs']['x']['values'], np.float32).reshape(3, 4)

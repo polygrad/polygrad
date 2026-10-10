@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT / 'references/tinygrad_014'))
 from tinygrad.nn.onnx import OnnxRunner
 
 
-def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, opset=17, domains=None, pinned=True):
+def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, opset=17, domains=None, pinned=True,
+         reference_note='approved static Loop extension'):
     graph = h.make_graph(nodes, name,
         [h.make_tensor_value_info(k, T.FLOAT, (['batch'] + list(v.shape[1:])) if dims else v.shape)
          for k, v in inputs.items()],
@@ -44,7 +45,7 @@ def case(name, nodes, inputs, outputs, weights, *, dims=None, external=False, op
         raw = model.SerializeToString()
         external_data['weights.bin'] = base64.b64encode(payload).decode()
     return dict(name=name, onnx=base64.b64encode(raw).decode(), dimensions=dims or {}, external=external_data,
-                reference='onnxruntime+tinygrad' if pinned else 'onnxruntime (approved static Loop extension)',
+                reference='onnxruntime+tinygrad' if pinned else f'onnxruntime ({reference_note})',
                 inputs={k: dict(shape=list(v.shape), values=v.reshape(-1).tolist()) for k, v in inputs.items()},
                 outputs={k: dict(shape=list(v.shape), values=v.reshape(-1).tolist()) for k, v in zip(outputs, expected)})
 
@@ -407,6 +408,68 @@ def fixtures():
                {'x':f((16,)), 'updates':f((8,))}, {'y':(16,)},
                {'start':np.array(0,np.int64), 'end':np.array(16,np.int64),
                 'step':np.array(2,np.int64), 'axis':np.array([1],np.int64)})
+    # Structured index expressions, not stored grids: permuted source axes,
+    # singleton coordinates, reversed writes, negative indices and slice updates.
+    for nr in (2, 3):
+        for reverse in (False, True):
+            for negative in (False, True):
+                lengths = tuple(range(1, nr + 1))
+                dest = tuple(2 * k + 1 for k in lengths)
+                order = tuple(reversed(range(nr)))
+                grid_shape = tuple(lengths[i] for i in order)
+                weights = {'grid_shape': np.array(grid_shape, np.int64),
+                           'last_axis': np.array([-1], np.int64)}
+                nodes, parts = [], []
+                for axis, length in enumerate(lengths):
+                    start, step = (2 * (length - 1), -2) if reverse else (0, 2)
+                    if negative: start -= dest[axis]
+                    for key, value in [('start', start), ('end', start + length * step), ('step', step)]:
+                        weights[f'{key}{axis}'] = np.array(value, np.int64)
+                    dims = [1] * nr
+                    dims[order.index(axis)] = length
+                    weights[f'shape{axis}'] = np.array(dims, np.int64)
+                    nodes.extend([h.make_node('Range', [f'start{axis}', f'end{axis}', f'step{axis}'], [f'r{axis}']),
+                                  h.make_node('Reshape', [f'r{axis}', f'shape{axis}'], [f'v{axis}']),
+                                  h.make_node('Expand', [f'v{axis}', 'grid_shape'], [f'e{axis}']),
+                                  h.make_node('Unsqueeze', [f'e{axis}', 'last_axis'], [f'i{axis}'])])
+                    parts.append(f'i{axis}')
+                nodes.extend([h.make_node('Concat', parts, ['indices'], axis=-1),
+                              h.make_node('ScatterND', ['x', 'indices', 'updates'], ['y'])])
+                yield case(f'scatter_grid_{nr}_{int(reverse)}_{int(negative)}', nodes,
+                           {'x': f(dest + (2,)), 'updates': f(grid_shape + (2,))},
+                           {'y': dest + (2,)}, weights)
+    for budget in (False, True):
+        # A large virtual index graph, but a tiny serialized fixture. The Add
+        # deliberately drops the narrow grid proof to exercise the map budget.
+        dims = (1, 1025) if budget else (2, 4097)
+        target = (1,)*8 + (1025,) if budget else dims
+        weights = {'shape':np.array(dims,np.int64), 'target':np.array(target,np.int64), 'zero':np.array(0,np.int64),
+                   'one':np.array(1,np.int64), 'last':np.array([-1],np.int64)}
+        nodes = [h.make_node('Expand',['base','target'],['x']),
+                 h.make_node('Expand',['update','shape'],['updates'])]
+        for axis in range(len(target)):
+            weights[f'end{axis}'] = np.array(target[axis],np.int64)
+            weights[f'shape{axis}'] = np.array([dims[0],1] if axis < len(target)-1 else [1,dims[1]],np.int64)
+            nodes += [h.make_node('Range',['zero',f'end{axis}','one'],[f'r{axis}']),
+                      h.make_node('Reshape',[f'r{axis}',f'shape{axis}'],[f'v{axis}']),
+                      h.make_node('Expand',[f'v{axis}','shape'],[f'e{axis}']),
+                      h.make_node('Unsqueeze',[f'e{axis}','last'],[f'i{axis}'])]
+        nodes.append(h.make_node('Concat',[f'i{a}' for a in range(len(target))],['grid'],axis=-1))
+        if budget: nodes.append(h.make_node('Add',['grid','zero'],['indices']))
+        nodes += [h.make_node('ScatterND',['x','indices' if budget else 'grid','updates'],['result']),
+                  h.make_node('ReduceSum',['result'],['y'],keepdims=0)]
+        yield case('scatter_computed_budget' if budget else 'scatter_grid_large', nodes,
+                   {'base':np.array([7.],np.float32), 'update':np.array([2.],np.float32)}, {'y':()}, weights,
+                   pinned=False, reference_note='large importer budget regression; small grids also checked against tinygrad')
+    yield case('scatter_grid_slice',
+               [h.make_node('Range',['zero','end','one'],['r']),
+                h.make_node('Slice',['r','lo','hi','axis','step'],['s']),
+                h.make_node('Unsqueeze',['s','last'],['indices']),
+                h.make_node('ScatterND',['x','indices','updates'],['y'])],
+               {'x':f((9,2)), 'updates':f((3,2))}, {'y':(9,2)},
+               {'zero':np.array(0,np.int64), 'one':np.array(1,np.int64), 'end':np.array(9,np.int64),
+                'lo':np.array([7],np.int64), 'hi':np.array([1],np.int64), 'axis':np.array([0],np.int64),
+                'step':np.array([-2],np.int64), 'last':np.array([-1],np.int64)})
     yield case('scatter_nd_duplicate_overwrite',
                [h.make_node('ScatterND',['x','indices','updates'],['y'])],
                {'x':f((3,4)), 'updates':f((2,4))}, {'y':(3,4)},
@@ -422,6 +485,23 @@ def fixtures():
                {'x':f((1,1,4,4))}, {'max':(1,1,2,2),'indices':(1,1,2,2),'avg':(1,1,2,2),
                'conv':(1,3,2,2),'transpose':(1,3,4,4),'normalized':(1,1,4,4),'packed':(1,4,2,2),'unpacked':(1,1,4,4)},
                {'w':f((3,1,3,3)), 'tw':f((1,3,3,3)), 'scale':f((1,)), 'bias':f((1,))})
+    # Exported zero-insertion upsampling: an activation feeds a strided write,
+    # followed by a convolution. Values alone miss repeated activation work.
+    yield case('scatter_dilated_conv',
+               [h.make_node('Add', ['x', 'residual'], ['sum']),
+                h.make_node('Elu', ['sum'], ['updates']),
+                h.make_node('Range', ['start', 'end', 'step'], ['positions']),
+                h.make_node('Unsqueeze', ['positions', 'last'], ['indices']),
+                h.make_node('ConstantOfShape', ['base_shape'], ['base']),
+                h.make_node('ScatterND', ['base', 'indices', 'updates'], ['dilated']),
+                h.make_node('Transpose', ['dilated'], ['channels'], perm=[1, 0]),
+                h.make_node('Unsqueeze', ['channels', 'first'], ['batched']),
+                h.make_node('Conv', ['batched', 'weights'], ['y'])],
+               {'x': f((8, 4)), 'residual': f((8, 4))}, {'y': (1, 3, 17)},
+               {'start': np.array(0, np.int64), 'end': np.array(24, np.int64),
+                'step': np.array(3, np.int64), 'last': np.array([1], np.int64),
+                'first': np.array([0], np.int64), 'base_shape': np.array([22, 4], np.int64),
+                'weights': f((3, 4, 6))})
 
 
 if __name__ == '__main__':

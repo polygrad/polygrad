@@ -312,6 +312,18 @@
       "close_when": "Pinned ONNX lowering supports equivalent compact constant scatter maps. This grants no Tensor, compiler or runtime parity mismatch."
     },
     {
+      "id": "PG-DIV-021",
+      "status": "approved",
+      "stages": ["model", "import"],
+      "area": "regular-grid ONNX ScatterND overwrite indices",
+      "tinygrad": "Pinned ONNX runner updates one axis-0 slice at a time through tensor indexing; it does not recognize Cartesian index expressions.",
+      "polygrad": "Track closed int64 Range expressions through supported singleton reshapes, expansion, slicing and concatenation. Prove unique, in-bounds Cartesian overwrite coordinates and lower them with permutation, flip, reshape, padding and WHERE. Try this before source maps. Computed irregular index readbacks above 64 KiB skip the map path; stored indices retain the aggregate import budget. Other cases keep the existing lowering.",
+      "rationale": "Avoid both expanded host index computation and persistent source-map storage for regular writes. Materialize the complete WHERE output so a following reduction does not repeat activation/dilation/select work. No Tensor semantics or compiler rules change.",
+      "approval": "User 2026-10-10 approved collector work followed by grid recognition, a map-path evaluation budget, differential tests and an importer divergence next to PG-DIV-020.",
+      "evidence": ["src/loaders/onnx_loader.c:onnx_index_grid", "src/loaders/onnx_loader.c:onnx_scatter_grid", "test/generate_onnx_fixture.py", "test/test_onnx.c"],
+      "close_when": "Pinned ONNX lowering recognizes equivalent regular index grids without enumerating their elements. This grants no Tensor, compiler or runtime parity mismatch."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],
