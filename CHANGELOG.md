@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2 (2026-10-10)
 
 - Lower ONNX ScatterND overwrites with constant unique indices through a compact
   source map, avoiding decoder compilation memory blow-ups. Dynamic indices,

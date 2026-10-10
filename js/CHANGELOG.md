@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2 (2026-10-10)
 
 - Reduce ONNX decoder compilation memory for ScatterND overwrites with constant
   unique indices. Optimized models store one four-byte source index per
