@@ -586,7 +586,7 @@ static int buffer_publish_replacement(PolyCtx *ctx, PolyUOp *buf, PolyBuffer *ca
   }
   /* The map retains its existing fatal-OOM policy. Publish before invoking
    * old allocator/frontend callbacks, which may inspect the current binding. */
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, candidate, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buf, candidate);
   ctx->collection_requested = true;
   if (old) poly_buffer_free_chain(ctx, old);
   return 0;
@@ -696,6 +696,11 @@ PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf) {
   return poly_map_get(ctx->buffers, poly_ptr_hash(buf), buf, poly_ptr_eq);
 }
 
+void poly_buffer_publish_metadata(PolyCtx *ctx, PolyUOp *key, PolyBuffer *buffer) {
+  poly_map_set(ctx->buffers, poly_ptr_hash(key), key, buffer, poly_ptr_eq);
+  poly_ctx_buffer_changed(ctx, key);
+}
+
 static size_t poly_buffer_nbytes_for_uop(PolyUOp *buf);
 
 /* Current tinygrad UOp.buffer creates an unallocated Buffer object on first
@@ -717,7 +722,7 @@ static PolyBuffer *poly_buffer_metadata(PolyCtx *ctx, PolyUOp *buffer) {
       .valid = false,
       .device_uop = device_uop,
   };
-  poly_map_set(ctx->buffers, poly_ptr_hash(buffer), buffer, metadata, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buffer, metadata);
   return metadata;
 }
 
@@ -860,6 +865,7 @@ void poly_buffer_remove(PolyCtx *ctx, PolyUOp *buf) {
   if (!ctx || !buf) return;
   /* Fully discarding this logical buffer: free current + src chain. */
   PolyBuffer *b = poly_buffer_get(ctx, buf);
+  poly_ctx_buffer_removed(ctx, buf);
   if (b) poly_buffer_free_chain(ctx, b);
   poly_map_remove(ctx->buffers, poly_ptr_hash(buf), buf, poly_ptr_eq);
 }
@@ -1107,7 +1113,7 @@ static PolyBuffer *poly_multi_buffer_for_tuple_buffer(PolyCtx *ctx, PolyUOp *buf
       .n_bufs = n,
       .owns_bufs = true,
   };
-  poly_map_set(ctx->buffers, poly_ptr_hash(buffer), buffer, multi, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buffer, multi);
   return multi;
 }
 
@@ -1155,12 +1161,12 @@ static PolyBuffer *poly_multi_buffer_for_mstack(PolyCtx *ctx, PolyUOp *mstack) {
         .n_bufs = mstack->n_src,
         .owns_bufs = false,
     };
-    poly_map_set(ctx->buffers, poly_ptr_hash(mstack), mstack, cached, poly_ptr_eq);
   } else {
     cached->nbytes = nbytes;
     cached->valid = valid;
     cached->device_uop = device;
   }
+  poly_buffer_publish_metadata(ctx, mstack, cached);
   return cached;
 }
 
@@ -1217,7 +1223,7 @@ static PolyBuffer *poly_buffer_view_metadata(
         .owns_bufs = true,
     };
     *cached = view;
-    poly_map_set(ctx->buffers, poly_ptr_hash(key), key, cached, poly_ptr_eq);
+    poly_buffer_publish_metadata(ctx, key, cached);
     return cached;
 
   multi_view_fail:
@@ -1242,7 +1248,7 @@ static PolyBuffer *poly_buffer_view_metadata(
   cached = poly_buffer_handle_new(0);
   if (!cached) return NULL;
   *cached = view;
-  poly_map_set(ctx->buffers, poly_ptr_hash(key), key, cached, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, key, cached);
   return cached;
 }
 
@@ -1543,6 +1549,7 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
     poly_ctx_record_buffer_copy(ctx, copied);
   }
   cur->src = root;
+  poly_ctx_buffer_handle_changed(ctx, cur);
   if (host_out) *host_out = root;
   return root->valid ? 0 : -1;
 }
@@ -1569,7 +1576,7 @@ int poly_buffer_alloc_owned_host(
   PolyBuffer *host = NULL;
   if (poly_buffer_alloc_host_root(ctx, buf, nbytes, true, &host) != 0) return -1;
   if (zero && host->ptr) memset(host->ptr, 0, nbytes);
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, host, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buf, host);
   if (host_out) *host_out = host;
   return 0;
 }
@@ -1593,7 +1600,7 @@ static int poly_buffer_ensure_host_root_for_write(
                        ? poly_buffer_alloc_residency(ctx, buf, declared, nbytes, false, NULL, &root)
                        : poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root);
     if (alloc_rc != 0) return -1;
-    poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, root, poly_ptr_eq);
+    poly_buffer_publish_metadata(ctx, buf, root);
     if (host_out) *host_out = root;
     return 0;
   }
@@ -1609,6 +1616,7 @@ static int poly_buffer_ensure_host_root_for_write(
   size_t nbytes = cur->nbytes ? cur->nbytes : poly_buffer_nbytes_for_uop(buf);
   if (poly_buffer_alloc_host_root(ctx, buf, nbytes, false, &root) != 0) return -1;
   cur->src = root;
+  poly_ctx_buffer_handle_changed(ctx, cur);
   if (host_out) *host_out = root;
   return 0;
 }
@@ -1661,7 +1669,7 @@ int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice d
   PolyBuffer *dst = NULL;
   if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, false, src, &dst) != 0) return -1;
   poly_buffer_free_except_root(ctx, existing, src);
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buf, dst);
   return 0;
 }
 
@@ -1695,7 +1703,7 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
     size_t nbytes = poly_buffer_nbytes_for_uop(buf);
     PolyBuffer *dst = NULL;
     if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, true, NULL, &dst) != 0) return -1;
-    poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
+    poly_buffer_publish_metadata(ctx, buf, dst);
     return 0;
   }
   if (cur && poly_devices_share_storage(cur->device, device)) {
@@ -1723,7 +1731,7 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   }
   poly_ctx_record_buffer_copy(ctx, copied);
   poly_buffer_free_except_root(ctx, cur, src_root);
-  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
+  poly_buffer_publish_metadata(ctx, buf, dst);
   return 0;
 }
 

@@ -1499,39 +1499,19 @@ static void poly_graph_cache_clear(PolyCtx *ctx) {
   poly_map_clear(ctx->graph_cache);
 }
 
-typedef struct {
-  PolyMap *live;
-  PolyUOp **keys;
-  size_t count;
-} GraphEvictionRows;
-
-static void collect_dead_graph(const void *key, void *value, void *userdata) {
-  (void)value;
-  GraphEvictionRows *rows = userdata;
-  if (!poly_map_get(rows->live, poly_ptr_hash(key), key, poly_ptr_eq))
-    rows->keys[rows->count++] = (PolyUOp *)key;
-}
 #endif
 
-int poly_graph_cache_evict_unmarked(PolyCtx *ctx, PolyMap *live) {
-  if (!ctx || !live) return -1;
+void poly_graph_cache_evict(PolyCtx *ctx, PolyUOp *key) {
 #ifdef POLY_HAS_CUDA
-  /* Pinned realize.py uses WeakKeyDictionary: a cache row cannot keep its
-   * function (and graph-private buffers) alive after the last caller dies. */
-  size_t capacity = poly_map_len(ctx->graph_cache);
-  PolyUOp **keys = capacity ? malloc(capacity * sizeof(*keys)) : NULL;
-  if (capacity && !keys) return -1;
-  GraphEvictionRows rows = {.live = live, .keys = keys};
-  poly_map_foreach(ctx->graph_cache, collect_dead_graph, &rows);
-  for (size_t i = 0; i < rows.count; i++) {
-    PolyUOp *key = keys[i];
-    void *entry = poly_map_get(ctx->graph_cache, poly_ptr_hash(key), key, poly_ptr_eq);
+  void *entry = poly_map_get(ctx->graph_cache, poly_ptr_hash(key), key, poly_ptr_eq);
+  if (entry) {
     poly_map_remove(ctx->graph_cache, poly_ptr_hash(key), key, poly_ptr_eq);
     poly_graph_cache_entry_free(key, entry, ctx);
   }
-  free(keys);
+#else
+  (void)ctx;
+  (void)key;
 #endif
-  return 0;
 }
 
 void poly_runtime_cache_clear(PolyCtx *ctx) {

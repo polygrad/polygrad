@@ -155,6 +155,9 @@ void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf);
 
 /* Look up full PolyBuffer for a BUFFER UOp. Returns NULL if not attached. */
 PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf);
+/* Internal publication of owned metadata, including rollback/migration. The
+ * caller retires the previous metadata; this updates the residency indexes. */
+void poly_buffer_publish_metadata(PolyCtx *ctx, PolyUOp *key, PolyBuffer *buffer);
 /* Failure is terminal for this storage and shared by all its views. */
 bool poly_buffer_failed(const PolyBuffer *buffer);
 void poly_buffer_fail(PolyBuffer *buffer);

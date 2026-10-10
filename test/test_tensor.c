@@ -804,9 +804,79 @@ TEST(tensor, residency_collection_does_not_rewalk_unchanged_graphs) {
   PASS();
 }
 
+TEST(tensor, residency_sweep_work_is_independent_of_retained_storage) {
+  size_t work[2];
+  for (int pass = 0; pass < 2; pass++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    PolyTensor *retained[256];
+    int count = pass ? 256 : 1;
+    float value = 7;
+    for (int i = 0; i < count; i++) {
+      retained[i] = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_INTERP);
+      ASSERT_NOT_NULL(retained[i]);
+      ASSERT_INT_EQ(poly_buffer_write(ctx, retained[i]->uop_physical, &value, sizeof(value)), 0);
+    }
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    size_t before = ctx->residency_sweep_count;
+    for (int i = 0; i < 16; i++) {
+      PolyTensor *tmp = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, POLY_DEVICE_INTERP);
+      ASSERT_NOT_NULL(tmp);
+      ASSERT_INT_EQ(poly_buffer_write(ctx, tmp->uop_physical, &value, sizeof(value)), 0);
+      poly_tensor_release(tmp);
+      ASSERT_INT_EQ(poly_ctx_collect_at_safe_point(ctx), 0);
+    }
+    work[pass] = ctx->residency_sweep_count - before;
+    for (int i = 0; i < count; i++) {
+      float actual = 0;
+      ASSERT_INT_EQ(poly_buffer_read(ctx, retained[i]->uop_physical, &actual, sizeof(actual)), 0);
+      ASSERT_FLOAT_EQ(actual, value, 0);
+      poly_tensor_release(retained[i]);
+    }
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    ASSERT_TRUE(ctx->mem_used == 0);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_EQ(work[0], work[1]);
+  ASSERT_TRUE(work[0] <= 32);
+  PASS();
+}
+
+TEST(tensor, residency_candidates_preserve_runtime_aliases_and_reacquired_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyTensor *base = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_INTERP);
+  PolyTensor *alias = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){2}, 1, POLY_DEVICE_INTERP);
+  float values[] = {1, 2, 3, 4}, actual[2];
+  ASSERT_INT_EQ(poly_buffer_write(ctx, base->uop_physical, values, sizeof(values)), 0);
+  PolyBuffer view = *poly_buffer_get(ctx, base->uop_physical);
+  view.base = poly_buffer_get(ctx, base->uop_physical);
+  view.ptr = NULL;
+  view.offset = sizeof(float);
+  view.nbytes = sizeof(actual);
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, alias->uop_physical, &view), 0);
+  PolyUOp *root = alias->uop_physical;
+  poly_tensor_release(base);
+  poly_tensor_release(alias);
+  /* A candidate can acquire another owner before the safe point. Neither
+   * that owner nor the runtime-only base edge appears in the old Tensor list. */
+  ASSERT_INT_EQ(poly_uop_retain(ctx, root), 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, root, actual, sizeof(actual)), 0);
+  ASSERT_FLOAT_EQ(actual[0], 2, 0);
+  ASSERT_FLOAT_EQ(actual[1], 3, 0);
+  poly_uop_release(ctx, root);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(ctx->mem_used == 0);
+  ASSERT_TRUE(poly_map_len(ctx->buffer_records) == 0);
+  ASSERT_TRUE(poly_map_len(ctx->buffer_owners) == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 TEST(tensor, residency_debug_check_detects_count_and_root_drift) {
-  for (int fault = 0; fault < 3; fault++) {
+  for (int fault = 0; fault < 4; fault++) {
     pid_t child = fork();
     ASSERT_TRUE(child >= 0);
     if (child == 0) {
@@ -825,9 +895,16 @@ TEST(tensor, residency_debug_check_detects_count_and_root_drift) {
             ctx->residency_refs, poly_ptr_hash(a->uop_physical), a->uop_physical,
             (void *)(uintptr_t)2, poly_ptr_eq
         );
-      else
+      else if (fault == 2)
         /* Simulate a root replacement that forgot the ownership hooks. */
         a->uop_physical = b->uop_physical;
+      else {
+        /* Runtime aliases need publication even when no UOp edge changes. */
+        float value = 1;
+        (void)poly_buffer_write(ctx, a->uop_physical, &value, sizeof(value));
+        (void)poly_buffer_write(ctx, b->uop_physical, &value, sizeof(value));
+        poly_buffer_get(ctx, a->uop_physical)->base = poly_buffer_get(ctx, b->uop_physical);
+      }
       (void)poly_ctx_collect(ctx);
       _exit(0);
     }

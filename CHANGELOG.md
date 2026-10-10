@@ -2,6 +2,9 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Collect unused buffer storage without repeatedly scanning retained models;
+  preserve shared views and verify incremental ownership in debug checks.
+
 - Lower ONNX ScatterND overwrites with constant unique indices through a compact
   source map, avoiding decoder compilation memory blow-ups. Dynamic indices,
   duplicates and reductions retain the existing path. Saved models include

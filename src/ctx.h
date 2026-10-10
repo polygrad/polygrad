@@ -10,7 +10,8 @@
 #include "polygrad.h"
 #include "arena.h"
 
-/* Maximum new UOp storage retained between automatic IR sweeps. */
+/* Minimum allocation budget between automatic IR sweeps; large retained
+ * graphs use a proportional budget so tracing cost is amortized. */
 #define POLY_IR_COLLECTION_MIN_GROWTH ((size_t)1 << 20)
 
 struct PolyCtx {
@@ -56,10 +57,14 @@ struct PolyCtx {
   /* Incremental physical reachability: direct owners plus edges from live
    * parents. Not IR ownership: logical roots and PROGRAM bodies are excluded. */
   PolyMap *residency_refs;
+  PolyMap *residency_candidates;
+  PolyMap *buffer_records; /* BUFFER key -> storage dependency record */
+  PolyMap *buffer_owners; /* owned metadata (including children) -> record */
   bool residency_refs_valid;
   bool check_residency; /* POLY_CHECK_RESIDENCY: compare against declared owners before sweeping */
 #ifdef POLY_TESTING
   size_t residency_walk_count;
+  size_t residency_sweep_count;
   size_t realize_scope_walk_count;
   bool residency_fail_stack_growth;
 #endif
@@ -126,6 +131,10 @@ int poly_ctx_collect_before_allocation(PolyCtx *ctx, PolyUOp *transient_root);
 bool poly_ctx_ir_collection_due(const PolyCtx *ctx);
 void poly_ctx_root_acquired(PolyCtx *ctx, PolyUOp *root);
 void poly_ctx_root_released(PolyCtx *ctx, PolyUOp *root);
+void poly_ctx_buffer_changed(PolyCtx *ctx, PolyUOp *key);
+void poly_ctx_buffer_removed(PolyCtx *ctx, PolyUOp *key);
+struct PolyBuffer;
+void poly_ctx_buffer_handle_changed(PolyCtx *ctx, struct PolyBuffer *buffer);
 int poly_ctx_collect_at_safe_point(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);

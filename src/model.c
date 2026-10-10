@@ -1570,9 +1570,9 @@ static bool build_buffer_transaction_rollback(
         poly_buffer_free_chain(ctx, cursor);
         cursor = next;
       }
-      poly_map_set(ctx->buffers, poly_ptr_hash(key), key, saved_head, poly_ptr_eq);
     }
     *saved_head = transaction->saved_heads[prior];
+    poly_buffer_publish_metadata(ctx, key, saved_head);
   }
   free(current_keys);
 
@@ -1580,7 +1580,7 @@ static bool build_buffer_transaction_rollback(
     PolyUOp *key = transaction->keys[i];
     if (poly_buffer_get(ctx, key)) continue;
     *transaction->heads[i] = transaction->saved_heads[i];
-    poly_map_set(ctx->buffers, poly_ptr_hash(key), key, transaction->heads[i], poly_ptr_eq);
+    poly_buffer_publish_metadata(ctx, key, transaction->heads[i]);
   }
   return ok;
 }
@@ -4257,8 +4257,7 @@ static void model_discard_candidate_residencies(
     if (duplicate) continue;
     PolyBuffer *candidate = poly_buffer_get(inst->ctx, targets[i]);
     if (!candidate) continue;
-    poly_map_remove(inst->ctx->buffers, poly_ptr_hash(targets[i]), targets[i], poly_ptr_eq);
-    poly_buffer_free_chain(inst->ctx, candidate);
+    poly_buffer_remove(inst->ctx, targets[i]);
   }
 }
 

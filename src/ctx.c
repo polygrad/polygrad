@@ -17,6 +17,7 @@
 
 /* Defined in ops.c */
 void poly_init_group_ops(void);
+static void free_buffer_record(const void *key, void *value, void *userdata);
 
 /* Optional cleanup hooks (defined in other files, linked weakly). */
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
@@ -103,10 +104,14 @@ PolyCtx *poly_ctx_new(void) {
   ctx->buffers = poly_map_new(64);
   ctx->retained_uops = poly_map_new(16);
   ctx->residency_refs = poly_map_new(16);
+  ctx->residency_candidates = poly_map_new(16);
+  ctx->buffer_records = poly_map_new(64);
+  ctx->buffer_owners = poly_map_new(64);
   ctx->residency_refs_valid = true;
   ctx->check_residency = poly_getenv_flag("POLY_CHECK_RESIDENCY");
 #ifdef POLY_TESTING
   ctx->residency_walk_count = 0;
+  ctx->residency_sweep_count = 0;
   ctx->residency_fail_stack_growth = false;
 #endif
   ctx->collection_requested = false;
@@ -143,6 +148,9 @@ PolyCtx *poly_ctx_new(void) {
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->retained_uops) poly_map_destroy(ctx->retained_uops);
     if (ctx->residency_refs) poly_map_destroy(ctx->residency_refs);
+    poly_map_destroy(ctx->residency_candidates);
+    poly_map_destroy(ctx->buffer_records);
+    poly_map_destroy(ctx->buffer_owners);
     if (ctx->rng_states) poly_map_destroy(ctx->rng_states);
     free(ctx);
     return NULL;
@@ -175,6 +183,10 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->buffers);
   poly_map_destroy(ctx->retained_uops);
   poly_map_destroy(ctx->residency_refs);
+  poly_map_destroy(ctx->residency_candidates);
+  poly_map_foreach(ctx->buffer_records, free_buffer_record, NULL);
+  poly_map_destroy(ctx->buffer_records);
+  poly_map_destroy(ctx->buffer_owners);
   poly_map_destroy(ctx->rng_states);
   poly_map_foreach(ctx->mem_used_by_device, free_memory_entry, NULL);
   poly_map_destroy(ctx->mem_used_by_device);
@@ -232,36 +244,154 @@ void poly_uop_release(PolyCtx *ctx, PolyUOp *uop) {
   }
 }
 
-typedef struct {
-  PolyUOp **items;
-  PolyBuffer **buffers;
-  int count;
-  int capacity;
-  bool failed;
-} ResidencyRows;
+typedef struct BufferRecord {
+  PolyUOp *key;
+  PolyBuffer **owned;
+  struct BufferRecord **dependencies;
+  size_t n_owned, n_dependencies, borrowers;
+} BufferRecord;
 
-static void collect_residency_row(const void *key, void *value, void *userdata) {
-  ResidencyRows *rows = (ResidencyRows *)userdata;
-  if (!rows || rows->failed || !key || !value) return;
-  if (rows->count >= rows->capacity) {
-    int capacity = rows->capacity ? rows->capacity * 2 : 32;
-    PolyUOp **items = realloc(rows->items, (size_t)capacity * sizeof(*items));
-    if (!items) {
-      rows->failed = true;
-      return;
-    }
-    rows->items = items;
-    PolyBuffer **buffers = realloc(rows->buffers, (size_t)capacity * sizeof(*buffers));
-    if (!buffers) {
-      rows->failed = true;
-      return;
-    }
-    rows->buffers = buffers;
-    rows->capacity = capacity;
+static void residency_candidate(PolyCtx *ctx, PolyUOp *key) {
+  poly_map_set(ctx->residency_candidates, poly_ptr_hash(key), key, key, poly_ptr_eq);
+  ctx->collection_requested = true;
+}
+
+static void free_buffer_record(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  BufferRecord *record = value;
+  free(record->owned);
+  free(record->dependencies);
+  free(record);
+}
+
+/* This index shares PolyMap's fatal-OOM policy: publishing incomplete storage
+ * ownership would allow a later collection to free an aliased allocation. */
+static void *residency_resize(void *ptr, size_t size) {
+  void *out = realloc(ptr, size);
+  if (!out) {
+    fprintf(stderr, "polygrad: storage ownership allocation failed\n");
+    abort();
   }
-  rows->items[rows->count] = (PolyUOp *)key;
-  rows->buffers[rows->count] = (PolyBuffer *)value;
-  rows->count++;
+  return out;
+}
+
+static void buffer_record_clear(PolyCtx *ctx, BufferRecord *record) {
+  for (size_t i = 0; i < record->n_owned; i++)
+    poly_map_remove(
+        ctx->buffer_owners, poly_ptr_hash(record->owned[i]), record->owned[i], poly_ptr_eq
+    );
+  for (size_t i = 0; i < record->n_dependencies; i++) {
+    BufferRecord *owner = record->dependencies[i];
+    if (!--owner->borrowers) residency_candidate(ctx, owner->key);
+  }
+  record->n_owned = record->n_dependencies = 0;
+}
+
+static void buffer_record_own(PolyCtx *ctx, BufferRecord *record, PolyBuffer *buffer) {
+  if (!buffer) return;
+  record->owned = residency_resize(record->owned, (record->n_owned + 1) * sizeof(*record->owned));
+  record->owned[record->n_owned++] = buffer;
+  poly_map_set(ctx->buffer_owners, poly_ptr_hash(buffer), buffer, record, poly_ptr_eq);
+  buffer_record_own(ctx, record, buffer->src);
+  if (buffer->owns_bufs)
+    for (int i = 0; i < buffer->n_bufs; i++)
+      buffer_record_own(ctx, record, buffer->bufs[i]);
+}
+
+static void buffer_record_borrow(PolyCtx *ctx, BufferRecord *record, PolyBuffer *buffer) {
+  if (!buffer) return;
+  BufferRecord *owner =
+      poly_map_get(ctx->buffer_owners, poly_ptr_hash(buffer), buffer, poly_ptr_eq);
+  if (!owner || owner == record) return;
+  for (size_t i = 0; i < record->n_dependencies; i++)
+    if (record->dependencies[i] == owner) return;
+  record->dependencies = residency_resize(
+      record->dependencies, (record->n_dependencies + 1) * sizeof(*record->dependencies)
+  );
+  record->dependencies[record->n_dependencies++] = owner;
+  owner->borrowers++;
+}
+
+void poly_ctx_buffer_changed(PolyCtx *ctx, PolyUOp *key) {
+  BufferRecord *record = poly_map_get(ctx->buffer_records, poly_ptr_hash(key), key, poly_ptr_eq);
+  if (!record) {
+    record = residency_resize(NULL, sizeof(*record));
+    *record = (BufferRecord){.key = key};
+    poly_map_set(ctx->buffer_records, poly_ptr_hash(key), key, record, poly_ptr_eq);
+  } else
+    buffer_record_clear(ctx, record);
+  buffer_record_own(ctx, record, poly_buffer_get(ctx, key));
+  for (size_t i = 0; i < record->n_owned; i++) {
+    PolyBuffer *buffer = record->owned[i];
+    buffer_record_borrow(ctx, record, buffer->base);
+    if (!buffer->owns_bufs)
+      for (int j = 0; j < buffer->n_bufs; j++)
+        buffer_record_borrow(ctx, record, buffer->bufs[j]);
+  }
+  residency_candidate(ctx, key);
+}
+
+void poly_ctx_buffer_removed(PolyCtx *ctx, PolyUOp *key) {
+  BufferRecord *record = poly_map_get(ctx->buffer_records, poly_ptr_hash(key), key, poly_ptr_eq);
+  if (!record) return;
+  buffer_record_clear(ctx, record);
+  poly_map_remove(ctx->buffer_records, poly_ptr_hash(key), key, poly_ptr_eq);
+  free_buffer_record(NULL, record, NULL);
+}
+
+void poly_ctx_buffer_handle_changed(PolyCtx *ctx, PolyBuffer *buffer) {
+  BufferRecord *owner =
+      poly_map_get(ctx->buffer_owners, poly_ptr_hash(buffer), buffer, poly_ptr_eq);
+  if (owner) poly_ctx_buffer_changed(ctx, owner->key);
+}
+
+static void rebuild_buffer_record(const void *key, void *value, void *userdata) {
+  (void)value;
+  poly_ctx_buffer_changed(userdata, (PolyUOp *)key);
+}
+
+typedef struct {
+  PolyCtx *expected;
+  bool equal;
+} BufferRecordCheck;
+
+static void compare_buffer_record(const void *key, void *value, void *userdata) {
+  BufferRecordCheck *check = userdata;
+  BufferRecord *record = value;
+  BufferRecord *expected =
+      poly_map_get(check->expected->buffer_records, poly_ptr_hash(key), key, poly_ptr_eq);
+  if (!expected || record->borrowers != expected->borrowers ||
+      record->n_owned != expected->n_owned || record->n_dependencies != expected->n_dependencies) {
+    check->equal = false;
+    return;
+  }
+  for (size_t i = 0; i < record->n_owned; i++)
+    if (record->owned[i] != expected->owned[i]) check->equal = false;
+  for (size_t i = 0; i < record->n_dependencies; i++)
+    if (record->dependencies[i]->key != expected->dependencies[i]->key) check->equal = false;
+}
+
+static bool buffer_records_check(PolyCtx *ctx) {
+  /* Independent raw-metadata reconstruction; do not repair incremental drift.
+   * Two passes establish every metadata owner before resolving alias edges. */
+  PolyCtx expected = *ctx;
+  expected.buffer_records = poly_map_new(64);
+  expected.buffer_owners = poly_map_new(64);
+  expected.residency_candidates = poly_map_new(16);
+  poly_map_foreach(ctx->buffers, rebuild_buffer_record, &expected);
+  poly_map_foreach(ctx->buffers, rebuild_buffer_record, &expected);
+  BufferRecordCheck check = {.expected = &expected, .equal = true};
+  poly_map_foreach(ctx->buffer_records, compare_buffer_record, &check);
+  check.equal = check.equal &&
+                poly_map_len(ctx->buffer_records) == poly_map_len(expected.buffer_records) &&
+                poly_map_len(ctx->buffer_owners) == poly_map_len(expected.buffer_owners);
+  poly_map_foreach(expected.buffer_records, free_buffer_record, NULL);
+  poly_map_destroy(expected.buffer_records);
+  poly_map_destroy(expected.buffer_owners);
+  poly_map_destroy(expected.residency_candidates);
+  if (!check.equal) fprintf(stderr, "polygrad: storage ownership drift\n");
+  return check.equal;
 }
 
 static bool residency_ref_update(PolyCtx *ctx, PolyUOp *root, bool acquire) {
@@ -291,8 +421,10 @@ static bool residency_ref_update(PolyCtx *ctx, PolyUOp *root, bool acquire) {
     ctx->residency_walk_count++;
 #endif
     if (!acquire && (poly_map_get(ctx->buffers, poly_ptr_hash(uop), uop, poly_ptr_eq) ||
-                     poly_map_get(ctx->graph_cache, poly_ptr_hash(uop), uop, poly_ptr_eq)))
-      ctx->collection_requested = ctx->collection_dirty = true;
+                     poly_map_get(ctx->graph_cache, poly_ptr_hash(uop), uop, poly_ptr_eq))) {
+      residency_candidate(ctx, uop);
+      ctx->collection_dirty = true;
+    }
     size_t needed = count + (size_t)uop->n_src;
     if (needed > capacity) {
 #ifdef POLY_TESTING
@@ -546,12 +678,42 @@ static int mark_live_ir(PolyCtx *ctx, PolyUOp *transient_root, PolyMap *live) {
   return marker.failed ? -1 : 0;
 }
 
+static void queue_residency_row(const void *key, void *value, void *userdata) {
+  (void)value;
+  residency_candidate(userdata, (PolyUOp *)key);
+}
+
+static void evict_candidate_graph(const void *key, void *value, void *userdata) {
+  (void)value;
+  PolyCtx *ctx = userdata;
+  if (!poly_map_get(ctx->residency_refs, poly_ptr_hash(key), key, poly_ptr_eq))
+    poly_graph_cache_evict(ctx, (PolyUOp *)key);
+}
+
+static void sweep_candidate_buffer(const void *key, void *value, void *userdata) {
+  (void)value;
+  PolyCtx *ctx = userdata;
+#ifdef POLY_TESTING
+  ctx->residency_sweep_count++;
+#endif
+  BufferRecord *record = poly_map_get(ctx->buffer_records, poly_ptr_hash(key), key, poly_ptr_eq);
+  /* All published aliases count, even dead ones. Removing a dead alias queues
+   * its owner again, so storage outlives views regardless of hash-table order. */
+  if (record && !record->borrowers &&
+      !poly_map_get(ctx->residency_refs, poly_ptr_hash(key), key, poly_ptr_eq))
+    poly_buffer_remove(ctx, (PolyUOp *)key);
+}
+
 static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, bool collect_ir) {
   if (!ctx || ctx->collecting) return -1;
   ctx->collecting = true;
-  PolyMap *marked = poly_map_new(64);
-  bool failed = marked == NULL || (!ctx->residency_refs_valid && !residency_rebuild(ctx));
-  if (!failed && ctx->check_residency && !residency_check(ctx)) {
+  bool rebuild = !ctx->residency_refs_valid;
+  bool failed = rebuild && !residency_rebuild(ctx);
+  if (!failed && rebuild) {
+    poly_map_foreach(ctx->buffers, queue_residency_row, ctx);
+    poly_map_foreach(ctx->graph_cache, queue_residency_row, ctx);
+  }
+  if (!failed && ctx->check_residency && (!residency_check(ctx) || !buffer_records_check(ctx))) {
     fprintf(stderr, "polygrad: residency verification failed before collection\n");
     abort();
   }
@@ -562,65 +724,18 @@ static int poly_ctx_collect_with_root(PolyCtx *ctx, PolyUOp *transient_root, boo
     failed = !transient_retained;
   }
 
-  ResidencyRows rows = {0};
-  if (!failed) poly_map_foreach(ctx->buffers, collect_residency_row, &rows);
-  failed = failed || rows.failed;
-  for (int i = 0; !failed && i < rows.count; i++)
-    if (poly_map_get(ctx->residency_refs, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
-      poly_map_set(marked, poly_ptr_hash(rows.items[i]), rows.items[i], rows.items[i], poly_ptr_eq);
-  if (!failed) {
-    /* Existing view and multi-buffer rows point at their storage owner. Close
-     * that runtime alias relation without creating buffer metadata. */
-    PolyMap *row_by_buffer = poly_map_new((size_t)rows.count * 2 + 16);
-    int *alias_stack = rows.count ? malloc((size_t)rows.count * sizeof(*alias_stack)) : NULL;
-    if (!row_by_buffer || (rows.count && !alias_stack)) {
-      failed = true;
-    } else {
-      int n_alias = 0;
-      for (int i = 0; i < rows.count; i++) {
-        poly_map_set(
-            row_by_buffer, poly_ptr_hash(rows.buffers[i]), rows.buffers[i],
-            (void *)(uintptr_t)(i + 1), poly_ptr_eq
-        );
-        if (poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
-          alias_stack[n_alias++] = i;
-      }
-      while (n_alias > 0) {
-        PolyBuffer *buffer = rows.buffers[alias_stack[--n_alias]];
-        int n_owned = buffer->n_bufs + 2;
-        for (int i = 0; i < n_owned; i++) {
-          PolyBuffer *owned = i == 0 ? buffer->base : i == 1 ? buffer->src : buffer->bufs[i - 2];
-          uintptr_t row =
-              owned
-                  ? (uintptr_t)poly_map_get(row_by_buffer, poly_ptr_hash(owned), owned, poly_ptr_eq)
-                  : 0;
-          if (!row) continue;
-          int j = (int)row - 1;
-          if (poly_map_get(marked, poly_ptr_hash(rows.items[j]), rows.items[j], poly_ptr_eq))
-            continue;
-          poly_map_set(
-              marked, poly_ptr_hash(rows.items[j]), rows.items[j], rows.items[j], poly_ptr_eq
-          );
-          alias_stack[n_alias++] = j;
-        }
-      }
-    }
-    free(alias_stack);
-    poly_map_destroy(row_by_buffer);
+  while (!failed && poly_map_len(ctx->residency_candidates)) {
+    PolyMap *candidates = ctx->residency_candidates;
+    ctx->residency_candidates = poly_map_new(16);
+    /* Native graph objects must die before their referenced storage. */
+    poly_map_foreach(candidates, evict_candidate_graph, ctx);
+    poly_map_foreach(candidates, sweep_candidate_buffer, ctx);
+    poly_map_destroy(candidates);
   }
-  /* Destroy native graph objects before releasing any storage they reference.
-   * This also runs on residency-only collection, not just the later IR sweep. */
-  if (!failed && poly_graph_cache_evict_unmarked(ctx, ctx->residency_refs) != 0) failed = true;
   if (!failed) {
-    for (int i = 0; i < rows.count; i++)
-      if (!poly_map_get(marked, poly_ptr_hash(rows.items[i]), rows.items[i], poly_ptr_eq))
-        poly_buffer_remove(ctx, rows.items[i]);
     ctx->collection_dirty = false;
     ctx->collection_requested = false;
   }
-  free(rows.items);
-  free(rows.buffers);
-  poly_map_destroy(marked);
   PolyMap *live_ir = NULL;
   if (!failed && collect_ir) {
     live_ir = poly_map_new(256);
@@ -655,8 +770,11 @@ int poly_ctx_collect(PolyCtx *ctx) {
 bool poly_ctx_ir_collection_due(const PolyCtx *ctx) {
   if (!ctx || !ctx->ir_collection_dirty) return false;
   if (ctx->uop_storage_bytes < ctx->ir_collection_baseline_bytes) return true;
-  return ctx->uop_storage_bytes - ctx->ir_collection_baseline_bytes >=
-         POLY_IR_COLLECTION_MIN_GROWTH;
+  /* Amortize tracing against the retained graph, not a fixed allocation
+   * interval that makes small calls repeatedly walk unrelated large Models. */
+  size_t growth = ctx->ir_collection_baseline_bytes / 2;
+  if (growth < POLY_IR_COLLECTION_MIN_GROWTH) growth = POLY_IR_COLLECTION_MIN_GROWTH;
+  return ctx->uop_storage_bytes - ctx->ir_collection_baseline_bytes >= growth;
 }
 
 int poly_ctx_collect_at_safe_point(PolyCtx *ctx) {
