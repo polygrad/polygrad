@@ -5,6 +5,8 @@
 - Reduce ONNX decoder compilation memory for ScatterND overwrites with constant
   unique indices. Optimized models store one four-byte source index per
   destination element or slice; dynamic indices and reductions are unchanged.
+  Temporary index readbacks are freed after each map, keeping larger imports
+  within the memory budget.
 
 - Reduce Model import overhead by deduplicating ownership roots and freezing
   ONNX initializers in one batch.

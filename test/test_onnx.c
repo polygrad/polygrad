@@ -3,6 +3,8 @@
 #include "../src/loaders/import_error.h"
 #include "../vendor/cjson/cJSON.h"
 
+extern size_t poly_test_onnx_scatter_budget;
+
 static cJSON *onnx_fixture(void) {
   FILE *file = fopen("test/fixtures/onnx.json", "rb");
   if (!file) return NULL;
@@ -69,7 +71,11 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
     int64_t length = (int64_t)external_size;
     PolyOnnxOptions options = {dims, &name, &ptr, &length, external ? 1 : 0};
     int before = ctx->n_tensors;
+    bool budget_case =
+        !strcmp(cJSON_GetObjectItem(row, "name")->valuestring, "scatter_nd_map_budget");
+    if (budget_case) poly_test_onnx_scatter_budget = 4608;
     PolyModel *m = poly_onnx_load_into(ctx, data, (int64_t)size, &options, POLY_DEVICE_INTERP);
+    poly_test_onnx_scatter_budget = (size_t)1 << 30;
     ASSERT_NOT_NULL(m);
     ASSERT_EQ(ctx->n_tensors, before);
     ASSERT_EQ(poly_ctx_get_logical_policy(ctx), POLY_LOGICAL_NEVER);
@@ -138,6 +144,7 @@ TEST(onnx, reference_graphs_preserve_context_and_storage) {
       ASSERT_TRUE(count < 150);
       ASSERT_TRUE(selections <= 3);
     }
+    if (budget_case) ASSERT_EQ(maps, 2);
     if (!strncmp(fixture_name, "scatter_pair_", 13))
       ASSERT_EQ(maps, strstr(fixture_name, "_constant") ? 1 : 0);
     if (!strcmp(fixture_name, "scatter_nd_constant_range")) ASSERT_EQ(maps, 1);

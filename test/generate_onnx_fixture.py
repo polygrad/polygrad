@@ -377,6 +377,13 @@ def fixtures():
                 h.make_node('ScatterND',['x','indices','updates'],['y'])],
                {'x':f((2,4,16)), 'updates':f((2,4,8))}, {'y':(2,4,16)},
                {'grid':grid, 'zero':np.array(0,np.int64)})
+    yield case('scatter_nd_map_budget',
+               [h.make_node('Add',['grid','zero'],['indices0']),
+                h.make_node('ScatterND',['x','indices0','updates'],['mid']),
+                h.make_node('Add',['grid','zero'],['indices1']),
+                h.make_node('ScatterND',['mid','indices1','updates'],['y'])],
+               {'x':f((2,4,16)), 'updates':f((2,4,8))}, {'y':(2,4,16)},
+               {'grid':grid, 'zero':np.array(0,np.int64)})
     # Paired constant/dynamic models run the same indices through both
     # lowerings. Include tuples addressing slices, negative indices and batches.
     for nr in range(1,5):

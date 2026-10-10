@@ -20,6 +20,10 @@
 #define ONNX_IO 128
 #define ONNX_RANK 16
 #define ONNX_BYTES ((size_t)1 << 30)
+#ifdef POLY_TESTING
+/* Exercise aggregate import budgets without allocating gigabyte fixtures. */
+size_t poly_test_onnx_scatter_budget = ONNX_BYTES;
+#endif
 
 typedef struct {
   const uint8_t *data;
@@ -1409,17 +1413,30 @@ static PolyTensor *onnx_scatter_constant(Import *d, Node *n, int depth, bool *ha
   }
   size_t map_bytes = (size_t)prefix * sizeof(int32_t);
   size_t host_bytes = iv->host ? 0 : iv->nbytes;
-  if (host_bytes > ONNX_BYTES - d->initializer_bytes ||
-      map_bytes > ONNX_BYTES - d->initializer_bytes - host_bytes || d->nvalues == ONNX_VALUES)
+  size_t budget = ONNX_BYTES;
+#ifdef POLY_TESTING
+  budget = poly_test_onnx_scatter_budget;
+#endif
+  if (d->initializer_bytes > budget || host_bytes > budget - d->initializer_bytes ||
+      map_bytes > budget - d->initializer_bytes - host_bytes || d->nvalues == ONNX_VALUES)
     return NULL;
   *handled = true;
   if (!onnx_const_data_bounded(d, iv, ONNX_BYTES - d->initializer_bytes)) {
     fail(d, POLY_IMPORT_ERR_INTERNAL, "ScatterND constant evaluation failed");
     return NULL;
   }
-  d->initializer_bytes += host_bytes;
+  /* Computed indices are a temporary host readback, not Model state. Keeping
+   * every readback until import ends can exhaust the budget and send later
+   * nodes back through the mask-heavy lowering. Initializer hosts stay owned
+   * by Value for post-build upload; later users can reevaluate closed graphs. */
+  const uint8_t *indices = iv->host;
+  uint8_t *temporary = host_bytes ? iv->host : NULL;
+  if (temporary) iv->host = NULL;
   int32_t *map = malloc(map_bytes);
-  if (!map) return NULL;
+  if (!map) {
+    free(temporary);
+    return NULL;
+  }
   for (int64_t i = 0; i < prefix; i++)
     map[i] = -1;
   bool duplicate = false;
@@ -1427,9 +1444,10 @@ static PolyTensor *onnx_scatter_constant(Import *d, Node *n, int depth, bool *ha
     int64_t dest = 0;
     for (int axis = 0; axis < depth; axis++) {
       int64_t index;
-      memcpy(&index, iv->host + (size_t)(row * depth + axis) * 8, 8);
+      memcpy(&index, indices + (size_t)(row * depth + axis) * 8, 8);
       if (index < -xs[axis] || index >= xs[axis]) {
         free(map);
+        free(temporary);
         fail(d, POLY_IMPORT_ERR_SHAPE_MISMATCH, "ScatterND constant index out of bounds");
         return NULL;
       }
@@ -1440,6 +1458,7 @@ static PolyTensor *onnx_scatter_constant(Import *d, Node *n, int depth, bool *ha
     /* The import byte budget bounds the number of int64 tuples below INT32_MAX. */
     map[dest] = (int32_t)row;
   }
+  free(temporary);
   if (duplicate) {
     free(map);
     *handled = false;

@@ -6,6 +6,8 @@
   source map, avoiding decoder compilation memory blow-ups. Dynamic indices,
   duplicates and reductions retain the existing path. Saved models include
   four bytes per destination element or slice for each optimized source map.
+  Temporary index readbacks are freed after each map instead of exhausting
+  the import budget by retaining data that is no longer needed.
 
 - Deduplicate Model ownership roots with a hash set and freeze imported ONNX
   initializers in one transaction, reducing model construction overhead.
