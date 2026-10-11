@@ -161,6 +161,9 @@ void poly_buffer_publish_metadata(PolyCtx *ctx, PolyUOp *key, PolyBuffer *buffer
 /* Failure is terminal for this storage and shared by all its views. */
 bool poly_buffer_failed(const PolyBuffer *buffer);
 void poly_buffer_fail(PolyBuffer *buffer);
+/* Conservative storage conflict check, including views and retained host
+ * sources. Opaque borrowed allocations cannot prove disjointness. */
+bool poly_buffer_may_alias(const PolyBuffer *a, const PolyBuffer *b);
 
 /* C analogue of tinygrad UOp.buffer. It resolves tuple BUFFER/MSTACK/MSELECT
  * runtime values as well as the existing scalar identities/views. */

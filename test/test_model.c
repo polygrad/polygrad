@@ -643,6 +643,62 @@ TEST(model, variable_invocations_preserve_result_owners) {
   PASS();
 }
 
+TEST(model, tensor_io_snapshots_cross_input_aliases_before_host_writes) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  PolyModel *m = poly_model_new(ctx, NULL);
+  int64_t shape[] = {2};
+  PolyTensor *x = poly_model_input(m, "x", POLY_FLOAT32, shape, 1);
+  PolyTensor *y = poly_model_input(m, "y", POLY_FLOAT32, shape, 1);
+  PolyTensor *difference = poly_tensor_alu2(ctx, POLY_OP_SUB, x, y);
+  ASSERT_EQ(poly_model_output(m, "difference", difference), POLY_STATUS_OK);
+  ASSERT_EQ(
+      poly_model_entrypoint(
+          m, "forward", (const char *[]){"x", "y"}, 2, (const char *[]){"difference"}, 1, NULL
+      ),
+      POLY_STATUS_OK
+  );
+  ASSERT_EQ(poly_model_build(m, NULL), POLY_STATUS_OK);
+  float a[] = {1, 2}, b[] = {4, 8}, output[2];
+  ASSERT_EQ(poly_model_set_device(m, POLY_DEVICE_INTERP), 0);
+  PolyTensor *aliases[2];
+  const char *names[] = {"x", "y"};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *buffer = poly_model_get_buffer(m, names[i]);
+    aliases[i] =
+        poly_tensor_create_with_roots(ctx, NULL, buffer, POLY_TENSOR_VALUE, POLY_DEVICE_INTERP);
+    ASSERT_NOT_NULL(aliases[i]);
+  }
+  PolyIOBinding io[] = {{.name = "x", .tensor = aliases[1]}, {.name = "y", .tensor = aliases[0]}};
+  ASSERT_EQ(poly_model_write_buf_named(m, "x", a, sizeof(a)), 0);
+  ASSERT_EQ(poly_model_write_buf_named(m, "y", b, sizeof(b)), 0);
+  ASSERT_EQ(poly_model_call(m, "forward", io, 2), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "difference", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 3, 0);
+  ASSERT_FLOAT_EQ(output[1], 6, 0);
+  /* Host y is written before Tensor x is bound. x must retain y's old data. */
+  io[1] = (PolyIOBinding)POLY_IO_BINDING_ARRAY("y", b, POLY_FLOAT32);
+  ASSERT_EQ(poly_model_call(m, "forward", io, 2), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "difference", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], -3, 0);
+  ASSERT_FLOAT_EQ(output[1], -6, 0);
+  PolyTensor *flipped = poly_tensor_flip(ctx, aliases[1], (int64_t[]){0}, 1);
+  ASSERT_NOT_NULL(flipped);
+  io[0].tensor = flipped;
+  io[1] = (PolyIOBinding)POLY_IO_BINDING_ARRAY("y", a, POLY_FLOAT32);
+  ASSERT_EQ(poly_model_call(m, "forward", io, 2), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "difference", output, sizeof(output)), 0);
+  ASSERT_FLOAT_EQ(output[0], 7, 0);
+  ASSERT_FLOAT_EQ(output[1], 2, 0);
+  poly_tensor_release(flipped);
+  poly_tensor_release(aliases[0]);
+  poly_tensor_release(aliases[1]);
+  poly_tensor_release(difference);
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, tensor_io_owns_outputs_and_rejects_invalid_bindings) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
@@ -663,7 +719,11 @@ TEST(model, tensor_io_owns_outputs_and_rejects_invalid_bindings) {
   ASSERT_EQ(poly_buffer_write(ctx, poly_uop_base(input->uop_physical), data, sizeof(data)), 0);
   PolyIOBinding io = {.name = "x", .tensor = input};
   PolyTensor *first = NULL, *second = NULL;
+  uint64_t kernels_before = ctx->kernel_count;
   ASSERT_EQ(poly_model_call_tensors(model, "forward", &io, 1, &first, 1), 0);
+  /* One input binding, one add, one independent output. A disjoint realized
+   * input needs no preliminary snapshot before binding the named input. */
+  ASSERT_EQ(ctx->kernel_count - kernels_before, 3);
   ASSERT_NOT_NULL(first);
   ASSERT_EQ(first->owner_refs, 1);
   ASSERT_TRUE(first->uop_logical == NULL);

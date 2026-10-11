@@ -5067,6 +5067,37 @@ static int bind_model_io(
   return model_check_requirements(inst, entry, io, n_io);
 }
 
+static bool model_input_needs_snapshot(
+    PolyModel *inst,
+    PolyTensor *source,
+    PolyIOBinding *io,
+    int n_io
+) {
+  PolyUOp *identity = NULL;
+  PolyUOp *root = source->uop_physical;
+  while (root && root->op == POLY_OP_RESHAPE)
+    root = root->src[0];
+  if (root && poly_uop_has_buffer_identity(root)) {
+    identity = (PolyUOp *)poly_uop_get_buffer_identity(root);
+  } else {
+    PolyShape shape;
+    int64_t numel;
+    size_t offset;
+    if (!poly_uop_contiguous_view_info(inst->ctx, root, &identity, &shape, &numel, &offset))
+      return true;
+  }
+  PolyBuffer *buffer = poly_buffer_get(inst->ctx, identity);
+  if (!buffer || !buffer->valid) return true;
+  /* Resolve conflicts against every destination before any host or Tensor
+   * input is written. Cross-input swaps and views must see the old values. */
+  for (int i = 0; i < n_io; i++) {
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (poly_buffer_may_alias(buffer, poly_buffer_get(inst->ctx, inst->bufs[bi].buffer)))
+      return true;
+  }
+  return false;
+}
+
 static int prepare_model_io(
     PolyModel *inst,
     PolyIOBinding *io,
@@ -5074,8 +5105,9 @@ static int prepare_model_io(
     const ModelInvocation *inv
 ) {
 
-  /* Snapshot all Tensor expressions before touching any named input, including
-   * host rows. This handles views and cross-input aliases without order effects. */
+  /* Snapshot conflicting Tensor inputs before touching any named input,
+   * including host rows. Copy disjoint realized inputs straight to their
+   * destinations, without an intermediate snapshot. */
   int n_tensors = 0, ret = -1;
   for (int i = 0; i < n_io; i++)
     n_tensors += io[i].tensor != NULL;
@@ -5094,22 +5126,24 @@ static int prepare_model_io(
   ti = 0;
   for (int i = 0; i < n_io; i++) {
     if (!io[i].tensor) continue;
+    if (!model_input_needs_snapshot(inst, io[i].tensor, io, n_io)) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     NamedBuf *b = &inst->bufs[bi];
-    snapshots[ti] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
-    if (!snapshots[ti]) goto cleanup;
+    snapshots[i] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
+    if (!snapshots[i]) goto cleanup;
     stores[ti] =
-        poly_uop_store_val(inst->ctx, snapshots[ti]->uop_physical, io[i].tensor->uop_physical);
+        poly_uop_store_val(inst->ctx, snapshots[i]->uop_physical, io[i].tensor->uop_physical);
     if (!stores[ti++]) goto cleanup;
   }
-  if (model_run_copies(inst->ctx, stores, n_tensors) != 0) goto cleanup;
+  if (model_run_copies(inst->ctx, stores, ti) != 0) goto cleanup;
   ti = 0;
   for (int i = 0; i < n_io; i++) {
     if (!io[i].tensor) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     NamedBuf *b = &inst->bufs[bi];
     stores[ti] = poly_uop_store_val(
-        inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]), snapshots[ti]->uop_physical
+        inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]),
+        snapshots[i] ? snapshots[i]->uop_physical : io[i].tensor->uop_physical
     );
     if (!stores[ti++]) goto cleanup;
   }
@@ -5118,13 +5152,13 @@ static int prepare_model_io(
     int bi = find_buf_by_name(inst, io[i].name);
     NamedBuf *b = &inst->bufs[bi];
     if (model_view_is_prefix(b, inv->shapes[bi])) continue;
-    snapshots[ti] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
-    if (!snapshots[ti]) goto cleanup;
-    const PolyUOp *buffer = poly_uop_get_buffer_identity(snapshots[ti]->uop_physical);
+    snapshots[i] = model_result_storage(inst->ctx, b, inv->shapes[bi]);
+    if (!snapshots[i]) goto cleanup;
+    const PolyUOp *buffer = poly_uop_get_buffer_identity(snapshots[i]->uop_physical);
     if (!buffer || poly_buffer_write(inst->ctx, (PolyUOp *)buffer, io[i].data, io[i].nbytes))
       goto cleanup;
     stores[ti] = poly_uop_store_val(
-        inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]), snapshots[ti]->uop_physical
+        inst->ctx, model_concrete_view(inst->ctx, b, inv->shapes[bi]), snapshots[i]->uop_physical
     );
     if (!stores[ti++]) goto cleanup;
   }

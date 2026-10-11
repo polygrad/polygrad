@@ -561,6 +561,30 @@ static bool buffer_depends_on_retirement(const PolyBuffer *value, const PolyBuff
   return false;
 }
 
+bool poly_buffer_may_alias(const PolyBuffer *a, const PolyBuffer *b) {
+  if (!a || !b) return false;
+  if (a == b) return true;
+  if (a->base && poly_buffer_may_alias(a->base, b)) return true;
+  if (b->base && poly_buffer_may_alias(a, b->base)) return true;
+  if (a->src && poly_buffer_may_alias(a->src, b)) return true;
+  if (b->src && poly_buffer_may_alias(a, b->src)) return true;
+  for (int i = 0; i < a->n_bufs; i++)
+    if (poly_buffer_may_alias(a->bufs[i], b)) return true;
+  for (int i = 0; i < b->n_bufs; i++)
+    if (poly_buffer_may_alias(a, b->bufs[i])) return true;
+  if (!a->ptr || !b->ptr) return a->frontend_release || b->frontend_release;
+  if (a->allocator && a->allocator->host_addressable && b->allocator &&
+      b->allocator->host_addressable) {
+    uintptr_t x = (uintptr_t)a->ptr, y = (uintptr_t)b->ptr;
+    return x <= y ? y - x < a->nbytes : x - y < b->nbytes;
+  }
+  if (a->device != b->device) return false;
+  if (a->ptr == b->ptr) return true;
+  /* Views with known bases were handled above. Other borrowed GPU handles
+   * may refer to suballocations whose address ranges are not observable. */
+  return (!a->owned && !a->base) || (!b->owned && !b->base);
+}
+
 typedef struct {
   const PolyUOp *key;
   const PolyBuffer *retired;

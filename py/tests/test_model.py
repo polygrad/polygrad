@@ -1607,6 +1607,11 @@ def test_tensor_io_owns_results_and_validates_before_writes(device):
         second = model.forward(x=first, y=rt.Tensor.zeros(2, 2))['prediction']
         np.testing.assert_array_equal(first.numpy(), [[3, 7], [5, 9]])
         np.testing.assert_array_equal(second.numpy(), [[6, 14], [10, 18]])
+        before_kernels = rt.stats()['kernel_count']
+        third = model.forward(x=first, y=np.zeros((2, 2), dtype=np.float32))['prediction']
+        assert rt.stats()['kernel_count'] - before_kernels == 3
+        np.testing.assert_array_equal(third.numpy(), second.numpy())
+        third.dispose()
         before = model.read_buffer('x')
         for bad in (other.Tensor.zeros(2, 2), rt.Tensor.zeros(4),
                     rt.Tensor.zeros(2, 2, dtype='int32')):
