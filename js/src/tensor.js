@@ -3144,7 +3144,7 @@ function createBoundTensorClass(runtime) {
     layernorm(axis = -1, eps = 1e-5) {
       const axes = axis === null ? this.shape.map((_, i) => i) : Array.isArray(axis) ? axis : [axis]
       return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_layernorm_axes_apply(
-        this._ctx, this._tensor, null, null, axes.map(a => this._resolveDim(a)), eps))
+        this._ctx, this._tensor, null, null, axes.map(a => this._resolveDim(a)), axes.length, eps))
     }
 
     // --- Indexing ---

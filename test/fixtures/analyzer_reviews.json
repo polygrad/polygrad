@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-10-11",
-  "basis": "Fresh Clang14 scan after renderer, shared-binding and compiler-setting fixes. Every diagnostic maps to a byte-identical statement from the source-bound a4df159 review; reviewed the changed surrounding code and retained applicable source-ownership/shape rationales. No warning suppression or scope reduction. HIP device execution is not covered. Evidence: temp/model-coverage-20261011/analyzer-renderer-adapters/report.json and raw.log; analyzer-renderer-correspondence.json records exact statement mappings.",
+  "basis": "Clang14 review after array/owned-result adapter consolidation and WebGPU view admission. The changed C inputs are device.c, frontend.c and frontend_exports.h; none contain reviewed diagnostics. Existing diagnostic statements and rationales are unchanged from the renderer review; no warning suppression or scope reduction. HIP device execution is not covered. Evidence: temp/model-coverage-20261011/analyzer-array-adapters-final/report.json and raw.log; earlier statement correspondence is in analyzer-renderer-correspondence.json.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -142,7 +142,7 @@
       "src/core.h": "8061bede9a1b607fd0d716d84e40a9e6888c9b3eddbbaf430b6f7aa47f6afbba",
       "src/ctx.c": "f24938f8752310676d537bd3150342c4b3d5558cea12b6bea0e2e0355dc19dbf",
       "src/ctx.h": "f6ed8ed86c76ab15670cb19d357ad88ce58e034e4b61adaaf5391fb33e734c31",
-      "src/device.c": "1bed66e5957022892572b946428368c1414078611736f18c6c6771bae40767b9",
+      "src/device.c": "821dec92c5f032f7eab87842c9ffd3973e60c5fce88ea8f23135b72bfc8789de",
       "src/device.h": "fdac341c3f0f733b50c6cdd04235cef8f2df82b2ba231c7a855feed697fac9d8",
       "src/dtype.c": "a5a1b720adca3e0465b41416aff8e0fdc2c08d2cde14e73a9ccfbc67c378c383",
       "src/engine/capability.c": "0e1a3a77e2eaadae6124d908cbcdd203a0f0f325a4e6105e9ee5b3fc98e37e21",
@@ -152,9 +152,9 @@
       "src/engine/realize.h": "0efb03179b956db6da7005b5ef2094237cacd641837d2bf4b86a36d5e06366c1",
       "src/engine/schedule.c": "c4f9dd8a4d29ea42eeae21b820a083b6cae854ad05cb467ab8801d35c4e3c6e3",
       "src/engine/schedule.h": "76f6ecd3b1039b64479f0802f248ff6348f611f0438b982aab696cbdd787c709",
-      "src/frontend.c": "7a735a3911311da2784035c6f7d1596cab2475ef0f706a2dfa2737cc063890fb",
+      "src/frontend.c": "7eaf495bb6b1a818b1408f7d93c16daa0af6142f498a74bd71c2b056b57e2957",
       "src/frontend.h": "2d39835aecf178a381d1760bcb8ef5e630a3f112d9b2ad07beb99c6f12224a72",
-      "src/frontend_exports.h": "bc2b062395cd9924c8c5ebc4d692bbe17e9449cd378043a495ead2b6d4c03f5d",
+      "src/frontend_exports.h": "4a6a22107d8549974b38a40369d5516c8f020efb4d1bea7ab5d8983ef975b269",
       "src/hashmap.c": "633d112cba4a866ea1f50ca67b62e343e1c1d52b122541fb24d388782f2808ed",
       "src/interp.c": "a89f21b2aef6db7a5b97fc0bdbb88deac0a4b40ed468391f1d63284cad2a98e9",
       "src/interp.h": "3aa411e5b5fd8d7c8ea4fa98393b463c59dd1754072fd1768fe744c8d4bf1276",

@@ -393,6 +393,93 @@ async function runWasmOwnershipTests() {
     }
   })
 
+  await test('generated multi-array adapters clean up each allocation failure and thrown call', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const core = pg._core, Module = core.Module
+    const malloc = Module._malloc, free = Module._free, pool = Module._poly_tensor_pool
+    const live = new Set(), prefix = core.heapU8().slice(0, 32)
+    try {
+      for (let failAt = 1; failAt <= 4; failAt++) {
+        let allocated = 0, entered = 0, rejected = false
+        Module._malloc = size => {
+          if (++allocated === failAt) return 0
+          const ptr = malloc(size) >>> 0
+          if (ptr) live.add(ptr)
+          return ptr
+        }
+        Module._free = ptr => { live.delete(ptr); free(ptr) }
+        Module._poly_tensor_pool = () => { entered++; throw new Error('injected call failure') }
+        try { core.ffi.poly_tensor_pool(core.ctx, 0, [1], 1, [1], [1]) }
+        catch (e) { rejected = /allocation|injected/.test(e.message) }
+        if (!rejected || entered !== (failAt === 4 ? 1 : 0) || live.size ||
+            !prefix.every((v, i) => core.heapU8()[i] === v))
+          throw new Error(`multi-array failure ${failAt} leaked, entered C, or wrote address zero`)
+      }
+    } finally {
+      Module._malloc = malloc; Module._free = free; Module._poly_tensor_pool = pool
+      for (const ptr of live) free(ptr)
+      core.heapU8().set(prefix, 0)
+      await pg.dispose()
+    }
+  })
+
+  await test('generated Tensor pair adapters release failed outputs and preserve unsigned handles', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const core = pg._core, Module = core.Module
+    const sort = Module._poly_tensor_sort, release = Module._poly_tensor_release
+    const freed = []
+    try {
+      Module._poly_tensor_release = ptr => freed.push(ptr)
+      for (const outcome of ['error', 'throw', 'success']) {
+        Module._poly_tensor_sort = (ctx, src, dim, descending, first, second) => {
+          core.heap32()[first >>> 2] = 0x80000004
+          core.heap32()[second >>> 2] = 0xf0000008
+          if (outcome === 'throw') throw new Error('injected failure')
+          return outcome === 'error' ? -1 : 0
+        }
+        const before = freed.length
+        let result, error
+        try { result = core.ffi.poly_tensor_sort(core.ctx, 0, 0, 0) }
+        catch (e) { error = e }
+        if (outcome === 'success') {
+          if (error || result[0] !== 0x80000004 || result[1] !== 0xf0000008 || freed.length !== before)
+            throw new Error('owned handles changed or were released on success')
+        } else if (!error || freed.slice(before).join() !== [0x80000004, 0xf0000008].join()) {
+          throw new Error('failed pair leaked handles')
+        }
+      }
+    } finally {
+      Module._poly_tensor_sort = sort; Module._poly_tensor_release = release
+      await pg.dispose()
+    }
+  })
+
+  await test('generated optional Tensor output frees partial results on failure', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    const core = pg._core, Module = core.Module
+    const pool = Module._poly_tensor_max_pool2d, release = Module._poly_tensor_release
+    const freed = []
+    try {
+      Module._poly_tensor_release = ptr => freed.push(ptr)
+      Module._poly_tensor_max_pool2d = (...args) => {
+        core.heap32()[args[9] >>> 2] = 0x80000004
+        return 0
+      }
+      const result = core.ffi.poly_tensor_max_pool2d(core.ctx, 0, [1], 1, [1], [1], [], 0, false, true)
+      if (result !== null || freed.join() !== [0x80000004].join())
+        throw new Error('optional output leaked after failed values result')
+      Module._poly_tensor_max_pool2d = (...args) => {
+        if (args[9] !== 0) throw new Error('unrequested output was allocated')
+        return 0x80000008
+      }
+      const value = core.ffi.poly_tensor_max_pool2d(core.ctx, 0, [1], 1, [1], [1], [], 0, false, false)
+      if (value !== 0x80000008 || freed.length !== 1) throw new Error('single output changed')
+    } finally {
+      Module._poly_tensor_max_pool2d = pool; Module._poly_tensor_release = release
+      await pg.dispose()
+    }
+  })
+
   await test('cold WebGPU host registration failure preserves the previous binding', async () => {
     const pg = await polygrad.create({ core: 'wasm' })
     const { createWasmCoreFromModule } = require('../src/core/wasm_common')

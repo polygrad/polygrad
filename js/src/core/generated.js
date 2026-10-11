@@ -2,12 +2,12 @@
 'use strict'
 const { integer64 } = require('./integer')
 
-module.exports = (Module, callWithInt64) => ({
+module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   poly_tensor_abs: (a0, a1) => Module._poly_tensor_abs((a0 || 0), (a1 || 0)),
   poly_tensor_acos: (a0, a1) => Module._poly_tensor_acos((a0 || 0), (a1 || 0)),
   poly_tensor_acosh: (a0, a1) => Module._poly_tensor_acosh((a0 || 0), (a1 || 0)),
   poly_tensor_all: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_all, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
@@ -15,7 +15,7 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_alu2: (a0, a1, a2, a3) => Module._poly_tensor_alu2((a0 || 0), Number(a1), (a2 || 0), (a3 || 0)),
   poly_tensor_alu3: (a0, a1, a2, a3, a4) => Module._poly_tensor_alu3((a0 || 0), Number(a1), (a2 || 0), (a3 || 0), (a4 || 0)),
   poly_tensor_any: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_any, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
@@ -29,13 +29,34 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_assign_after: (a0, a1, a2, a3) => Module._poly_tensor_assign_after((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_atan: (a0, a1) => Module._poly_tensor_atan((a0 || 0), (a1 || 0)),
   poly_tensor_atanh: (a0, a1) => Module._poly_tensor_atanh((a0 || 0), (a1 || 0)),
+  poly_tensor_avg_pool2d: (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    if (!Array.isArray(a4) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a4.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a4) integer64(value)
+    if (!Array.isArray(a5) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a5.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a5) integer64(value)
+    if (!Array.isArray(a6) || !Number.isInteger(a7) || a7 < 0 || a7 > 128 || a6.length !== a7 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a6) integer64(value)
+    return callWithArrays(Module._poly_tensor_avg_pool2d, [(a0 || 0), (a1 || 0), a2, Number(a3), a4, a5, a6, Number(a7), +!!a8, +!!a9], [2, 4, 5, 6])
+  },
+  poly_tensor_batchnorm: (a0, a1, a2, a3, a4, a5, a6, a7) => {
+    if (!Array.isArray(a6) || !Number.isInteger(a7) || a7 < 0 || a7 > 64 || a6.length !== a7 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a6) integer64(value)
+    return callWithArrays(Module._poly_tensor_batchnorm, [(a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), (a5 || 0), a6, Number(a7)], [6])
+  },
+  poly_tensor_batchnorm_apply: (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) => Module._poly_tensor_batchnorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), (a5 || 0), (a6 || 0), +!!a7, a8, a9),
+  poly_tensor_batchnorm_stats: (a0, a1, a2, a3, a4) => callTensorPair(Module._poly_tensor_batchnorm_stats, [(a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), +!!a4], 'poly_tensor_batchnorm_stats'),
   poly_tensor_binary_crossentropy: (a0, a1, a2, a3) => Module._poly_tensor_binary_crossentropy((a0 || 0), (a1 || 0), (a2 || 0), Number(a3)),
   poly_tensor_binary_crossentropy_logits: (a0, a1, a2, a3, a4) => Module._poly_tensor_binary_crossentropy_logits((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4)),
   poly_tensor_bitcast_by_id: (a0, a1, a2) => Module._poly_tensor_bitcast_by_id((a0 || 0), (a1 || 0), Number(a2)),
   poly_tensor_bitwise_not: (a0, a1) => Module._poly_tensor_bitwise_not((a0 || 0), (a1 || 0)),
+  poly_tensor_cached_sdpa: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_cached_sdpa((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), (a5 || 0)),
   poly_tensor_capture_bind: (a0, a1) => Module._poly_tensor_capture_bind((a0 || 0), (a1 || 0)),
   poly_tensor_capture_binding: (a0, a1) => Module._poly_tensor_capture_binding((a0 || 0), Number(a1)),
   poly_tensor_cast_by_id: (a0, a1, a2) => Module._poly_tensor_cast_by_id((a0 || 0), (a1 || 0), Number(a2)),
+  poly_tensor_causal_mask: (a0, a1) => Module._poly_tensor_causal_mask((a0 || 0), integer64(a1, false)),
+  poly_tensor_causal_mask_offset: (a0, a1, a2) => Module._poly_tensor_causal_mask_offset((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_ceil: (a0, a1) => Module._poly_tensor_ceil((a0 || 0), (a1 || 0)),
   poly_tensor_celu: (a0, a1, a2) => Module._poly_tensor_celu((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_cholesky: (a0, a1, a2) => Module._poly_tensor_cholesky((a0 || 0), (a1 || 0), Number(a2)),
@@ -55,6 +76,8 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_cosh: (a0, a1) => Module._poly_tensor_cosh((a0 || 0), (a1 || 0)),
   poly_tensor_cross_entropy: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_cross_entropy((a0 || 0), (a1 || 0), (a2 || 0), Number(a3), Number(a4), a5),
   poly_tensor_cubic_sample_axis: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_cubic_sample_axis((a0 || 0), (a1 || 0), (a2 || 0), Number(a3), a4, +!!a5),
+  poly_tensor_cummax: (a0, a1, a2) => callTensorPair(Module._poly_tensor_cummax, [(a0 || 0), (a1 || 0), Number(a2)], 'poly_tensor_cummax'),
+  poly_tensor_cummin: (a0, a1, a2) => callTensorPair(Module._poly_tensor_cummin, [(a0 || 0), (a1 || 0), Number(a2)], 'poly_tensor_cummin'),
   poly_tensor_cumprod: (a0, a1, a2) => Module._poly_tensor_cumprod((a0 || 0), (a1 || 0), Number(a2)),
   poly_tensor_cumsum: (a0, a1, a2) => Module._poly_tensor_cumsum((a0 || 0), (a1 || 0), Number(a2)),
   poly_tensor_detach: (a0, a1) => Module._poly_tensor_detach((a0 || 0), (a1 || 0)),
@@ -63,10 +86,12 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_div: (a0, a1, a2, a3) => Module._poly_tensor_div((a0 || 0), (a1 || 0), (a2 || 0), Number(a3)),
   poly_tensor_dot: (a0, a1, a2) => Module._poly_tensor_dot((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_dot_dtype_by_id: (a0, a1, a2, a3) => Module._poly_tensor_dot_dtype_by_id((a0 || 0), (a1 || 0), (a2 || 0), Number(a3)),
+  poly_tensor_dropout: (a0, a1, a2, a3) => Module._poly_tensor_dropout((a0 || 0), (a1 || 0), a2, Number(a3)),
   poly_tensor_elu: (a0, a1, a2) => Module._poly_tensor_elu((a0 || 0), (a1 || 0), a2),
   poly_tensor_elu_tensor: (a0, a1, a2) => Module._poly_tensor_elu_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_tensor_embedding_apply: (a0, a1, a2) => Module._poly_tensor_embedding_apply((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_empty_by_id: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_empty_by_id, (a0 || 0), Number(a1), a2, Number(a3), Number(a4))
   },
@@ -74,14 +99,14 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_erf: (a0, a1) => Module._poly_tensor_erf((a0 || 0), (a1 || 0)),
   poly_tensor_exp: (a0, a1) => Module._poly_tensor_exp((a0 || 0), (a1 || 0)),
   poly_tensor_expand: (a0, a1, a2, a3) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_expand, (a0 || 0), (a1 || 0), a2, Number(a3))
   },
   poly_tensor_expm1: (a0, a1) => Module._poly_tensor_expm1((a0 || 0), (a1 || 0)),
   poly_tensor_eye_by_id: (a0, a1, a2, a3, a4) => Module._poly_tensor_eye_by_id((a0 || 0), integer64(a1, false), integer64(a2, false), Number(a3), Number(a4)),
   poly_tensor_flip: (a0, a1, a2, a3) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_flip, (a0 || 0), (a1 || 0), a2, Number(a3))
   },
@@ -92,18 +117,27 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_gelu_exact: (a0, a1) => Module._poly_tensor_gelu_exact((a0 || 0), (a1 || 0)),
   poly_tensor_gradient: (a0, a1, a2) => Module._poly_tensor_gradient((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_gradient_target: (a0, a1, a2) => Module._poly_tensor_gradient_target((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_tensor_groupnorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_groupnorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
   poly_tensor_hardsigmoid: (a0, a1, a2, a3) => Module._poly_tensor_hardsigmoid((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_hardswish: (a0, a1) => Module._poly_tensor_hardswish((a0 || 0), (a1 || 0)),
   poly_tensor_index_select: (a0, a1, a2, a3) => Module._poly_tensor_index_select((a0 || 0), (a1 || 0), Number(a2), (a3 || 0)),
+  poly_tensor_instancenorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_instancenorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
   poly_tensor_isclose: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_isclose((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), +!!a5),
   poly_tensor_isfinite: (a0, a1) => Module._poly_tensor_isfinite((a0 || 0), (a1 || 0)),
   poly_tensor_isinf: (a0, a1) => Module._poly_tensor_isinf((a0 || 0), (a1 || 0)),
   poly_tensor_isinf_flags: (a0, a1, a2, a3) => Module._poly_tensor_isinf_flags((a0 || 0), (a1 || 0), +!!a2, +!!a3),
   poly_tensor_isnan: (a0, a1) => Module._poly_tensor_isnan((a0 || 0), (a1 || 0)),
+  poly_tensor_layernorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_layernorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
+  poly_tensor_layernorm_axes_apply: (a0, a1, a2, a3, a4, a5, a6) => {
+    if (!Array.isArray(a4) || !Number.isInteger(a5) || a5 < 0 || a5 > 64 || a4.length !== a5 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a4) integer64(value)
+    return callWithArrays(Module._poly_tensor_layernorm_axes_apply, [(a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), a4, Number(a5), a6], [4])
+  },
   poly_tensor_le: (a0, a1, a2) => Module._poly_tensor_le((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_leaky_relu: (a0, a1, a2) => Module._poly_tensor_leaky_relu((a0 || 0), (a1 || 0), a2),
   poly_tensor_leaky_relu_tensor: (a0, a1, a2) => Module._poly_tensor_leaky_relu_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_lerp: (a0, a1, a2, a3, a4) => Module._poly_tensor_lerp((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), +!!a4),
+  poly_tensor_linear_apply: (a0, a1, a2, a3) => Module._poly_tensor_linear_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_linspace_by_id: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_linspace_by_id((a0 || 0), a1, a2, integer64(a3, false), Number(a4), Number(a5)),
   poly_tensor_log: (a0, a1) => Module._poly_tensor_log((a0 || 0), (a1 || 0)),
   poly_tensor_log10: (a0, a1) => Module._poly_tensor_log10((a0 || 0), (a1 || 0)),
@@ -114,23 +148,35 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_logical_not: (a0, a1) => Module._poly_tensor_logical_not((a0 || 0), (a1 || 0)),
   poly_tensor_logsigmoid: (a0, a1) => Module._poly_tensor_logsigmoid((a0 || 0), (a1 || 0)),
   poly_tensor_logsumexp: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_logsumexp, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
+  poly_tensor_lstm_cell: (a0, a1, a2, a3, a4, a5, a6, a7) => callTensorPair(Module._poly_tensor_lstm_cell, [(a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), (a5 || 0), (a6 || 0), (a7 || 0)], 'poly_tensor_lstm_cell'),
   poly_tensor_lstsq: (a0, a1, a2) => Module._poly_tensor_lstsq((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_max: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_max, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
+  poly_tensor_max_pool2d: (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    if (!Array.isArray(a4) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a4.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a4) integer64(value)
+    if (!Array.isArray(a5) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a5.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a5) integer64(value)
+    if (!Array.isArray(a6) || !Number.isInteger(a7) || a7 < 0 || a7 > 128 || a6.length !== a7 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a6) integer64(value)
+    return callWithArrays((...args) => callTensorPair(Module._poly_tensor_max_pool2d, args, 'poly_tensor_max_pool2d', true), [(a0 || 0), (a1 || 0), a2, Number(a3), a4, a5, a6, Number(a7), +!!a8, +!!a9], [2, 4, 5, 6])
+  },
   poly_tensor_mean: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_mean, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
   poly_tensor_min: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_min, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
@@ -141,31 +187,69 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_nll_loss: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_nll_loss((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), Number(a5)),
   poly_tensor_normalize: (a0, a1, a2, a3, a4) => Module._poly_tensor_normalize((a0 || 0), (a1 || 0), a2, Number(a3), a4),
   poly_tensor_one_hot: (a0, a1, a2) => Module._poly_tensor_one_hot((a0 || 0), (a1 || 0), integer64(a2, false)),
+  poly_tensor_pad_mode: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 2) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_pad_mode, (a0 || 0), (a1 || 0), a2, Number(a3), Number(a4))
+  },
+  poly_tensor_pad_value_bool: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 2) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_pad_value_bool, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
+  },
+  poly_tensor_pad_value_float: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 2) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_pad_value_float, (a0 || 0), (a1 || 0), a2, Number(a3), a4)
+  },
+  poly_tensor_pad_value_int: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 2) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_pad_value_int, (a0 || 0), (a1 || 0), a2, Number(a3), integer64(a4, false))
+  },
   poly_tensor_permute: (a0, a1, a2, a3) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_permute, (a0 || 0), (a1 || 0), a2, Number(a3))
   },
+  poly_tensor_pool: (a0, a1, a2, a3, a4, a5) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    if (!Array.isArray(a4) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a4.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a4) integer64(value)
+    if (!Array.isArray(a5) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a5.length !== a3 * 1) throw new RangeError('invalid dimension array')
+    for (const value of a5) integer64(value)
+    return callWithArrays(Module._poly_tensor_pool, [(a0 || 0), (a1 || 0), a2, Number(a3), a4, a5], [2, 4, 5])
+  },
   poly_tensor_prod: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_prod, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
+  poly_tensor_qr_ex: (a0, a1, a2) => callTensorPair(Module._poly_tensor_qr_ex, [(a0 || 0), (a1 || 0), Number(a2)], 'poly_tensor_qr_ex'),
   poly_tensor_quick_gelu: (a0, a1) => Module._poly_tensor_quick_gelu((a0 || 0), (a1 || 0)),
   poly_tensor_reciprocal: (a0, a1) => Module._poly_tensor_reciprocal((a0 || 0), (a1 || 0)),
   poly_tensor_relu: (a0, a1) => Module._poly_tensor_relu((a0 || 0), (a1 || 0)),
   poly_tensor_relu6: (a0, a1) => Module._poly_tensor_relu6((a0 || 0), (a1 || 0)),
   poly_tensor_repeat_interleave: (a0, a1, a2, a3) => Module._poly_tensor_repeat_interleave((a0 || 0), (a1 || 0), Number(a2), Number(a3)),
   poly_tensor_reshape: (a0, a1, a2, a3) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_reshape, (a0 || 0), (a1 || 0), a2, Number(a3))
   },
   poly_tensor_retain: (a0) => Module._poly_tensor_retain((a0 || 0)),
+  poly_tensor_rmsnorm_apply: (a0, a1, a2, a3) => Module._poly_tensor_rmsnorm_apply((a0 || 0), (a1 || 0), (a2 || 0), a3),
   poly_tensor_rope: (a0, a1, a2, a3) => Module._poly_tensor_rope((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_round: (a0, a1) => Module._poly_tensor_round((a0 || 0), (a1 || 0)),
   poly_tensor_rsqrt: (a0, a1) => Module._poly_tensor_rsqrt((a0 || 0), (a1 || 0)),
+  poly_tensor_sample_logits: (a0, a1, a2, a3, a4) => Module._poly_tensor_sample_logits((a0 || 0), (a1 || 0), (a2 || 0), Number(a3), Number(a4)),
+  poly_tensor_sdpa: (a0, a1, a2, a3, a4, a5, a6, a7, a8) => Module._poly_tensor_sdpa((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), a5, Number(a6), Number(a7), Number(a8)),
   poly_tensor_selu: (a0, a1, a2, a3) => Module._poly_tensor_selu((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
+  poly_tensor_shrink: (a0, a1, a2, a3) => {
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 2) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_shrink, (a0 || 0), (a1 || 0), a2, Number(a3))
+  },
   poly_tensor_sigmoid: (a0, a1) => Module._poly_tensor_sigmoid((a0 || 0), (a1 || 0)),
   poly_tensor_sign: (a0, a1) => Module._poly_tensor_sign((a0 || 0), (a1 || 0)),
   poly_tensor_silu: (a0, a1) => Module._poly_tensor_silu((a0 || 0), (a1 || 0)),
@@ -175,21 +259,23 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_softplus_tensor: (a0, a1, a2, a3) => Module._poly_tensor_softplus_tensor((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_softsign: (a0, a1) => Module._poly_tensor_softsign((a0 || 0), (a1 || 0)),
   poly_tensor_solve: (a0, a1, a2) => Module._poly_tensor_solve((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_tensor_sort: (a0, a1, a2, a3) => callTensorPair(Module._poly_tensor_sort, [(a0 || 0), (a1 || 0), Number(a2), Number(a3)], 'poly_tensor_sort'),
   poly_tensor_sparse_categorical_crossentropy: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_sparse_categorical_crossentropy((a0 || 0), (a1 || 0), (a2 || 0), integer64(a3, false), a4, Number(a5)),
   poly_tensor_square: (a0, a1) => Module._poly_tensor_square((a0 || 0), (a1 || 0)),
   poly_tensor_sum: (a0, a1, a2, a3, a4) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_sum, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
   poly_tensor_sum_dtype_by_id: (a0, a1, a2, a3, a4, a5) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_sum_dtype_by_id, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4, Number(a5))
   },
   poly_tensor_tan: (a0, a1) => Module._poly_tensor_tan((a0 || 0), (a1 || 0)),
   poly_tensor_tanh: (a0, a1) => Module._poly_tensor_tanh((a0 || 0), (a1 || 0)),
   poly_tensor_to_device: (a0, a1, a2) => Module._poly_tensor_to_device((a0 || 0), (a1 || 0), Number(a2)),
+  poly_tensor_topk: (a0, a1, a2, a3, a4, a5) => callTensorPair(Module._poly_tensor_topk, [(a0 || 0), (a1 || 0), integer64(a2, false), Number(a3), Number(a4), Number(a5)], 'poly_tensor_topk'),
   poly_tensor_triangular_solve: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_triangular_solve((a0 || 0), (a1 || 0), (a2 || 0), Number(a3), Number(a4), Number(a5)),
   poly_tensor_tril: (a0, a1, a2) => Module._poly_tensor_tril((a0 || 0), (a1 || 0), Number(a2)),
   poly_tensor_tril_tensor: (a0, a1, a2) => Module._poly_tensor_tril_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
@@ -200,7 +286,7 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_uop_logical: (a0) => Module._poly_tensor_uop_logical((a0 || 0)),
   poly_tensor_uop_physical: (a0) => Module._poly_tensor_uop_physical((a0 || 0)),
   poly_tensor_var_axes: (a0, a1, a2, a3, a4, a5) => {
-    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_var_axes, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4, (a5 || 0))
   },
@@ -236,6 +322,7 @@ module.exports = (Module, callWithInt64) => ({
   poly_uop_buffer_f64: (a0, a1) => Module._poly_uop_buffer_f64((a0 || 0), integer64(a1, false)),
   poly_uop_buffer_on_device_by_id: (a0, a1, a2, a3) => Module._poly_uop_buffer_on_device_by_id((a0 || 0), Number(a1), integer64(a2, false), Number(a3)),
   poly_uop_cast_by_id: (a0, a1, a2) => Module._poly_uop_cast_by_id((a0 || 0), (a1 || 0), Number(a2)),
+  poly_uop_causal_mask_offset: (a0, a1, a2) => Module._poly_uop_causal_mask_offset((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_ceil: (a0, a1) => Module._poly_uop_ceil((a0 || 0), (a1 || 0)),
   poly_uop_celu: (a0, a1, a2) => Module._poly_uop_celu((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_cholesky: (a0, a1, a2) => Module._poly_uop_cholesky((a0 || 0), (a1 || 0), Number(a2)),
@@ -269,6 +356,7 @@ module.exports = (Module, callWithInt64) => ({
   poly_uop_elementwise_neg: (a0, a1) => Module._poly_uop_elementwise_neg((a0 || 0), (a1 || 0)),
   poly_uop_elu: (a0, a1, a2) => Module._poly_uop_elu((a0 || 0), (a1 || 0), a2),
   poly_uop_elu_tensor: (a0, a1, a2) => Module._poly_uop_elu_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_uop_embedding_apply: (a0, a1, a2) => Module._poly_uop_embedding_apply((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_eq: (a0, a1, a2) => Module._poly_uop_eq((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_erf: (a0, a1) => Module._poly_uop_erf((a0 || 0), (a1 || 0)),
   poly_uop_erfc: (a0, a1) => Module._poly_uop_erfc((a0 || 0), (a1 || 0)),
@@ -286,22 +374,26 @@ module.exports = (Module, callWithInt64) => ({
   poly_uop_get_idx: (a0, a1) => Module._poly_uop_get_idx((a0 || 0), (a1 || 0)),
   poly_uop_get_valid: (a0, a1) => Module._poly_uop_get_valid((a0 || 0), (a1 || 0)),
   poly_uop_grad: (a0, a1, a2) => Module._poly_uop_grad((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_uop_groupnorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_uop_groupnorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
   poly_uop_gt: (a0, a1, a2) => Module._poly_uop_gt((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_hardsigmoid: (a0, a1) => Module._poly_uop_hardsigmoid((a0 || 0), (a1 || 0)),
   poly_uop_hardsigmoid_tensor: (a0, a1, a2, a3) => Module._poly_uop_hardsigmoid_tensor((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_uop_hardswish: (a0, a1) => Module._poly_uop_hardswish((a0 || 0), (a1 || 0)),
   poly_uop_hardtanh: (a0, a1, a2, a3) => Module._poly_uop_hardtanh((a0 || 0), (a1 || 0), a2, a3),
   poly_uop_index_select: (a0, a1, a2, a3) => Module._poly_uop_index_select((a0 || 0), (a1 || 0), Number(a2), (a3 || 0)),
+  poly_uop_instancenorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_uop_instancenorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
   poly_uop_isclose: (a0, a1, a2, a3, a4, a5) => Module._poly_uop_isclose((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), +!!a5),
   poly_uop_isfinite: (a0, a1) => Module._poly_uop_isfinite((a0 || 0), (a1 || 0)),
   poly_uop_isinf: (a0, a1) => Module._poly_uop_isinf((a0 || 0), (a1 || 0)),
   poly_uop_isinf_flags: (a0, a1, a2, a3) => Module._poly_uop_isinf_flags((a0 || 0), (a1 || 0), +!!a2, +!!a3),
   poly_uop_isnan: (a0, a1) => Module._poly_uop_isnan((a0 || 0), (a1 || 0)),
+  poly_uop_layernorm_apply: (a0, a1, a2, a3, a4, a5) => Module._poly_uop_layernorm_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), Number(a4), a5),
   poly_uop_le: (a0, a1, a2) => Module._poly_uop_le((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_leaky_relu: (a0, a1, a2) => Module._poly_uop_leaky_relu((a0 || 0), (a1 || 0), a2),
   poly_uop_leaky_relu_tensor: (a0, a1, a2) => Module._poly_uop_leaky_relu_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_uop_lerp: (a0, a1, a2, a3, a4) => Module._poly_uop_lerp((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), +!!a4),
   poly_uop_lgamma: (a0, a1) => Module._poly_uop_lgamma((a0 || 0), (a1 || 0)),
+  poly_uop_linear_apply: (a0, a1, a2, a3) => Module._poly_uop_linear_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_uop_linspace: (a0, a1, a2, a3) => Module._poly_uop_linspace((a0 || 0), a1, a2, integer64(a3, false)),
   poly_uop_linspace_by_id: (a0, a1, a2, a3, a4) => Module._poly_uop_linspace_by_id((a0 || 0), a1, a2, integer64(a3, false), Number(a4)),
   poly_uop_load: (a0, a1) => Module._poly_uop_load((a0 || 0), (a1 || 0)),
@@ -333,9 +425,11 @@ module.exports = (Module, callWithInt64) => ({
   poly_uop_relu: (a0, a1) => Module._poly_uop_relu((a0 || 0), (a1 || 0)),
   poly_uop_relu6: (a0, a1) => Module._poly_uop_relu6((a0 || 0), (a1 || 0)),
   poly_uop_repeat_interleave: (a0, a1, a2, a3) => Module._poly_uop_repeat_interleave((a0 || 0), (a1 || 0), Number(a2), Number(a3)),
+  poly_uop_rmsnorm_apply: (a0, a1, a2, a3) => Module._poly_uop_rmsnorm_apply((a0 || 0), (a1 || 0), (a2 || 0), a3),
   poly_uop_rope: (a0, a1, a2, a3) => Module._poly_uop_rope((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_uop_round: (a0, a1) => Module._poly_uop_round((a0 || 0), (a1 || 0)),
   poly_uop_rsqrt: (a0, a1) => Module._poly_uop_rsqrt((a0 || 0), (a1 || 0)),
+  poly_uop_sdpa: (a0, a1, a2, a3, a4, a5, a6) => Module._poly_uop_sdpa((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), Number(a5), Number(a6)),
   poly_uop_selu: (a0, a1, a2, a3) => Module._poly_uop_selu((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_uop_shape_dim: (a0, a1, a2) => Module._poly_uop_shape_dim((a0 || 0), (a1 || 0), Number(a2)),
   poly_uop_sigmoid: (a0, a1) => Module._poly_uop_sigmoid((a0 || 0), (a1 || 0)),

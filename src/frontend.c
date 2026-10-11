@@ -11,6 +11,7 @@
 #include "bigint.h"
 #include "ctx.h"
 #include "engine/realize.h"
+#include "nn/nn.h"
 #include "tensor.h"
 #include <string.h>
 

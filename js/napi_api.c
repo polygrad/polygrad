@@ -90,6 +90,27 @@ static napi_value make_external_pair(napi_env env, void *a, void *b) {
   return out;
 }
 
+static napi_value generated_tensor_pair(
+    napi_env env,
+    int rc,
+    PolyTensor *first,
+    PolyTensor *second,
+    const char *name
+) {
+  napi_value out = NULL, a = NULL, b = NULL;
+  /* Transfer both owned handles together; externals have no release finalizer. */
+  if (rc == 0 && napi_create_array_with_length(env, 2, &out) == napi_ok &&
+      (a = make_external(env, first)) && (b = make_external(env, second)) &&
+      napi_set_element(env, out, 0, a) == napi_ok && napi_set_element(env, out, 1, b) == napi_ok)
+    return out;
+  if (first) poly_tensor_release(first);
+  if (second) poly_tensor_release(second);
+  bool pending = false;
+  napi_is_exception_pending(env, &pending);
+  if (!pending) napi_throw_error(env, NULL, name);
+  return NULL;
+}
+
 static void set_named_size(napi_env env, napi_value obj, const char *name, size_t value) {
   napi_value v;
   napi_create_double(env, (double)value, &v);
@@ -1435,27 +1456,6 @@ static napi_value napi_poly_tensor_repeat(napi_env env, napi_callback_info info)
   );
 }
 
-static napi_value napi_poly_tensor_pad_mode(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  int64_t pairs[32];
-  int read_pairs = read_int64_array(env, argv[2], pairs, 32);
-  int ndim = 0;
-  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &ndim));
-  int mode = 0;
-  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &mode));
-  if (read_pairs != 2 * ndim) {
-    napi_throw_range_error(env, NULL, "array length mismatch");
-    return NULL;
-  }
-  return make_external(
-      env, poly_tensor_pad_mode(
-               get_external(env, argv[0]), get_external(env, argv[1]), pairs, ndim, mode
-           )
-  );
-}
-
 static napi_value napi_tensor_join(napi_env env, napi_callback_info info, bool stack) {
   napi_value argv[3];
   size_t argc = 3;
@@ -1477,396 +1477,6 @@ static napi_value napi_poly_tensor_stack(napi_env env, napi_callback_info info) 
 
 static napi_value napi_poly_tensor_cat(napi_env env, napi_callback_info info) {
   return napi_tensor_join(env, info, false);
-}
-
-static napi_value napi_poly_tensor_cummax(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  int32_t axis = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  napi_get_value_int32(env, argv[2], &axis);
-  PolyTensor *values = NULL, *indices = NULL;
-  if (poly_tensor_cummax(
-          get_external(env, argv[0]), get_external(env, argv[1]), axis, &values, &indices
-      ) != 0) {
-    napi_throw_error(env, NULL, "polygrad: poly_tensor_cummax failed");
-    return NULL;
-  }
-  return make_external_pair(env, values, indices);
-}
-
-static napi_value napi_poly_tensor_cummin(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  int32_t axis = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  napi_get_value_int32(env, argv[2], &axis);
-  PolyTensor *values = NULL, *indices = NULL;
-  if (poly_tensor_cummin(
-          get_external(env, argv[0]), get_external(env, argv[1]), axis, &values, &indices
-      ) != 0) {
-    napi_throw_error(env, NULL, "polygrad: poly_tensor_cummin failed");
-    return NULL;
-  }
-  return make_external_pair(env, values, indices);
-}
-
-static napi_value napi_poly_tensor_qr_ex(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  int32_t mode = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  napi_get_value_int32(env, argv[2], &mode);
-  PolyTensor *q = NULL, *r = NULL;
-  if (poly_tensor_qr_ex(get_external(env, argv[0]), get_external(env, argv[1]), mode, &q, &r) !=
-      0) {
-    napi_throw_error(env, NULL, "polygrad: poly_tensor_qr_ex failed");
-    return NULL;
-  }
-  return make_external_pair(env, q, r);
-}
-
-static napi_value napi_poly_tensor_sort(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  int32_t dim = 0, descending = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  napi_get_value_int32(env, argv[2], &dim);
-  napi_get_value_int32(env, argv[3], &descending);
-  PolyTensor *values = NULL, *indices = NULL;
-  if (poly_tensor_sort(
-          get_external(env, argv[0]), get_external(env, argv[1]), dim, descending, &values, &indices
-      ) != 0) {
-    napi_throw_error(env, NULL, "polygrad: poly_tensor_sort failed");
-    return NULL;
-  }
-  return make_external_pair(env, values, indices);
-}
-
-static napi_value napi_poly_tensor_dropout(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  double p;
-  bool training;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_double(env, argv[2], &p));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[3], &training));
-  return make_external(
-      env, poly_tensor_dropout(get_external(env, argv[0]), get_external(env, argv[1]), p, training)
-  );
-}
-
-static napi_value napi_poly_tensor_sdpa(napi_env env, napi_callback_info info) {
-  napi_value argv[9];
-  size_t argc = 9;
-  double p;
-  bool causal, gqa, training;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_double(env, argv[5], &p));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[6], &causal));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[7], &gqa));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[8], &training));
-  return make_external(
-      env, poly_tensor_sdpa(
-               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
-               get_external(env, argv[3]),
-               napi_is_nullish(env, argv[4]) ? NULL : get_external(env, argv[4]), p, causal, gqa,
-               training
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_linear_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  return make_external(
-      env, poly_tensor_linear_apply(
-               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
-               napi_is_nullish(env, argv[3]) ? NULL : get_external(env, argv[3])
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_layernorm_axes_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  int64_t axes[POLY_MAX_DIMS];
-  double eps;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  int n = read_int64_array(env, argv[4], axes, POLY_MAX_DIMS);
-  NAPI_CALL(env, napi_get_value_double(env, argv[5], &eps));
-  return make_external(
-      env, poly_tensor_layernorm_axes_apply(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               napi_is_nullish(env, argv[2]) ? NULL : get_external(env, argv[2]),
-               napi_is_nullish(env, argv[3]) ? NULL : get_external(env, argv[3]), axes, n, eps
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_groupnorm_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  int32_t groups;
-  double eps;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &groups));
-  NAPI_CALL(env, napi_get_value_double(env, argv[5], &eps));
-  return make_external(
-      env, poly_tensor_groupnorm_apply(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               napi_is_nullish(env, argv[2]) ? NULL : get_external(env, argv[2]),
-               napi_is_nullish(env, argv[3]) ? NULL : get_external(env, argv[3]), groups, eps
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_batchnorm_stats(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  bool training;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[4], &training));
-  PolyTensor *mean = NULL, *var = NULL;
-  if (poly_tensor_batchnorm_stats(
-          get_external(env, argv[0]), get_external(env, argv[1]),
-          napi_is_nullish(env, argv[2]) ? NULL : get_external(env, argv[2]),
-          napi_is_nullish(env, argv[3]) ? NULL : get_external(env, argv[3]), training, &mean, &var
-      ) != 0) {
-    napi_throw_error(env, NULL, "poly_tensor_batchnorm_stats failed");
-    return NULL;
-  }
-  return make_external_pair(env, mean, var);
-}
-
-static napi_value napi_poly_tensor_batchnorm_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[10];
-  size_t argc = 10;
-  bool training;
-  double eps, momentum;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[7], &training));
-  NAPI_CALL(env, napi_get_value_double(env, argv[8], &eps));
-  NAPI_CALL(env, napi_get_value_double(env, argv[9], &momentum));
-  PolyTensor *inputs[6];
-  for (int i = 0; i < 6; i++)
-    inputs[i] = napi_is_nullish(env, argv[i + 1]) ? NULL : get_external(env, argv[i + 1]);
-  return make_external(
-      env, poly_tensor_batchnorm_apply(
-               get_external(env, argv[0]), inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-               inputs[5], training, eps, momentum
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_rmsnorm_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  double eps = 1e-6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_double(env, argv[3], &eps));
-  return make_external(
-      env, poly_tensor_rmsnorm_apply(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               napi_is_nullish(env, argv[2]) ? NULL : get_external(env, argv[2]), eps
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_instancenorm_apply(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  double eps = 1e-5;
-  int32_t features = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &features));
-  NAPI_CALL(env, napi_get_value_double(env, argv[5], &eps));
-  return make_external(
-      env, poly_tensor_instancenorm_apply(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               napi_is_nullish(env, argv[2]) ? NULL : get_external(env, argv[2]),
-               napi_is_nullish(env, argv[3]) ? NULL : get_external(env, argv[3]), features, eps
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_lstm_cell(napi_env env, napi_callback_info info) {
-  napi_value argv[8];
-  size_t argc = 8;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  if (argc != 8) {
-    napi_throw_error(env, NULL, "poly_tensor_lstm_cell expects 8 arguments");
-    return NULL;
-  }
-  PolyTensor *inputs[7];
-  for (int i = 0; i < 7; i++)
-    inputs[i] = napi_is_nullish(env, argv[i + 1]) ? NULL : get_external(env, argv[i + 1]);
-  PolyTensor *h = NULL, *c = NULL;
-  if (poly_tensor_lstm_cell(
-          get_external(env, argv[0]), inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-          inputs[5], inputs[6], &h, &c
-      ) != 0) {
-    napi_throw_error(env, NULL, "poly_tensor_lstm_cell failed");
-    return NULL;
-  }
-  return make_external_pair(env, h, c);
-}
-
-static napi_value napi_poly_tensor_sample_logits(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  int32_t top_k = 0, keepdim = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &top_k));
-  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &keepdim));
-  return make_external(
-      env, poly_tensor_sample_logits(
-               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
-               top_k, keepdim
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_topk(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  int64_t k = 0;
-  int32_t dim = 0, largest = 0, sorted = 0;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  napi_get_value_int64(env, argv[2], &k);
-  napi_get_value_int32(env, argv[3], &dim);
-  napi_get_value_int32(env, argv[4], &largest);
-  napi_get_value_int32(env, argv[5], &sorted);
-  PolyTensor *values = NULL, *indices = NULL;
-  if (poly_tensor_topk(
-          get_external(env, argv[0]), get_external(env, argv[1]), k, dim, largest, sorted, &values,
-          &indices
-      ) != 0) {
-    napi_throw_error(env, NULL, "polygrad: poly_tensor_topk failed");
-    return NULL;
-  }
-  return make_external_pair(env, values, indices);
-}
-
-static napi_value napi_poly_tensor_shrink(napi_env env, napi_callback_info info) {
-  napi_value argv[4];
-  size_t argc = 4;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyTensor *tensor = get_external(env, argv[1]);
-  int64_t flat[POLY_MAX_DIMS * 2];
-  int32_t ndim = 0;
-  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &ndim);
-  return make_external(env, poly_tensor_shrink(ctx, tensor, (int64_t(*)[2])flat, ndim));
-}
-
-static napi_value napi_poly_tensor_pad_value_bool(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyTensor *tensor = get_external(env, argv[1]);
-  int64_t flat[POLY_MAX_DIMS * 2];
-  int32_t ndim = 0;
-  bool value = false;
-  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &ndim);
-  napi_get_value_bool(env, argv[4], &value);
-  return make_external(
-      env, poly_tensor_pad_value_bool(ctx, tensor, (int64_t(*)[2])flat, ndim, value)
-  );
-}
-
-static napi_value napi_poly_tensor_pad_value_int(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyTensor *tensor = get_external(env, argv[1]);
-  int64_t flat[POLY_MAX_DIMS * 2];
-  int32_t ndim = 0;
-  int64_t value = 0;
-  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &ndim);
-  napi_get_value_int64(env, argv[4], &value);
-  return make_external(
-      env, poly_tensor_pad_value_int(ctx, tensor, (int64_t(*)[2])flat, ndim, value)
-  );
-}
-
-static napi_value napi_poly_tensor_pad_value_float(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyTensor *tensor = get_external(env, argv[1]);
-  int64_t flat[POLY_MAX_DIMS * 2];
-  int32_t ndim = 0;
-  double value = 0.0;
-  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &ndim);
-  napi_get_value_double(env, argv[4], &value);
-  return make_external(
-      env, poly_tensor_pad_value_float(ctx, tensor, (int64_t(*)[2])flat, ndim, value)
-  );
-}
-
-static napi_value napi_poly_tensor_pool(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
-  int32_t n_kernel = 0;
-  if (read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &n_kernel);
-  if (read_int64_array(env, argv[4], stride, POLY_MAX_DIMS) < 0) return NULL;
-  if (read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS) < 0) return NULL;
-  return make_external(
-      env,
-      poly_tensor_pool(
-          get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel, stride, dilation
-      )
-  );
-}
-
-static napi_value napi_tensor_pool2d(napi_env env, napi_callback_info info, bool average) {
-  napi_value argv[10];
-  size_t argc = 10;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
-  int64_t padding[2 * POLY_MAX_DIMS];
-  int32_t n_kernel = 0, n_padding = 0;
-  if (read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS) < 0) return NULL;
-  napi_get_value_int32(env, argv[3], &n_kernel);
-  if (read_int64_array(env, argv[4], stride, POLY_MAX_DIMS) < 0) return NULL;
-  if (read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS) < 0) return NULL;
-  if (read_int64_array(env, argv[6], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
-  napi_get_value_int32(env, argv[7], &n_padding);
-  bool ceil_mode = false, option = false;
-  NAPI_CALL(env, napi_get_value_bool(env, argv[8], &ceil_mode));
-  NAPI_CALL(env, napi_get_value_bool(env, argv[9], &option));
-  PolyTensor *indices = NULL;
-  PolyTensor *values =
-      average ? poly_tensor_avg_pool2d(
-                    get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel,
-                    stride, dilation, padding, n_padding, ceil_mode, option
-                )
-              : poly_tensor_max_pool2d(
-                    get_external(env, argv[0]), get_external(env, argv[1]), kernel, n_kernel,
-                    stride, dilation, padding, n_padding, ceil_mode, option ? &indices : NULL
-                );
-  return !average && option && values ? make_external_pair(env, values, indices)
-                                      : make_external(env, values);
-}
-
-static napi_value napi_poly_tensor_max_pool2d(napi_env env, napi_callback_info info) {
-  return napi_tensor_pool2d(env, info, false);
-}
-
-static napi_value napi_poly_tensor_avg_pool2d(napi_env env, napi_callback_info info) {
-  return napi_tensor_pool2d(env, info, true);
 }
 
 static napi_value napi_poly_tensor_max_unpool2d(napi_env env, napi_callback_info info) {
@@ -1994,23 +1604,6 @@ static napi_value napi_poly_tensor_conv2d_dtype_by_id(napi_env env, napi_callbac
                get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
                get_external_nullable(env, argv[3]), groups, stride, dilation, padding, n_padding,
                dtype_id
-           )
-  );
-}
-
-static napi_value napi_poly_tensor_batchnorm(napi_env env, napi_callback_info info) {
-  napi_value argv[8];
-  size_t argc = 8;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  int64_t axes[POLY_MAX_DIMS];
-  int32_t n_axes = 0;
-  if (read_int64_array(env, argv[6], axes, POLY_MAX_DIMS) < 0) return NULL;
-  napi_get_value_int32(env, argv[7], &n_axes);
-  return make_external(
-      env, poly_tensor_batchnorm(
-               get_external(env, argv[0]), get_external(env, argv[1]),
-               get_external_nullable(env, argv[2]), get_external_nullable(env, argv[3]),
-               get_external(env, argv[4]), get_external(env, argv[5]), axes, n_axes
            )
   );
 }
@@ -5688,45 +5281,18 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device_name", napi_poly_tensor_to_device_name),
       DECLARE_NAPI_METHOD("poly_tensor_repeat", napi_poly_tensor_repeat),
-      DECLARE_NAPI_METHOD("poly_tensor_pad_mode", napi_poly_tensor_pad_mode),
       DECLARE_NAPI_METHOD("poly_tensor_stack", napi_poly_tensor_stack),
       DECLARE_NAPI_METHOD("poly_tensor_cat", napi_poly_tensor_cat),
-      DECLARE_NAPI_METHOD("poly_tensor_cummax", napi_poly_tensor_cummax),
-      DECLARE_NAPI_METHOD("poly_tensor_cummin", napi_poly_tensor_cummin),
-      DECLARE_NAPI_METHOD("poly_tensor_qr_ex", napi_poly_tensor_qr_ex),
       DECLARE_NAPI_METHOD("poly_tensor_scatter", napi_poly_tensor_scatter),
       DECLARE_NAPI_METHOD("poly_tensor_scatter_reduce", napi_poly_tensor_scatter_reduce),
       DECLARE_NAPI_METHOD("poly_tensor_einsum", napi_poly_tensor_einsum),
       DECLARE_NAPI_METHOD("poly_tensor_rearrange", napi_poly_tensor_rearrange),
-      DECLARE_NAPI_METHOD("poly_tensor_sort", napi_poly_tensor_sort),
-      DECLARE_NAPI_METHOD("poly_tensor_topk", napi_poly_tensor_topk),
-      DECLARE_NAPI_METHOD("poly_tensor_sample_logits", napi_poly_tensor_sample_logits),
-      DECLARE_NAPI_METHOD("poly_tensor_lstm_cell", napi_poly_tensor_lstm_cell),
-      DECLARE_NAPI_METHOD("poly_tensor_linear_apply", napi_poly_tensor_linear_apply),
-      DECLARE_NAPI_METHOD("poly_tensor_dropout", napi_poly_tensor_dropout),
-      DECLARE_NAPI_METHOD("poly_tensor_sdpa", napi_poly_tensor_sdpa),
-      DECLARE_NAPI_METHOD("poly_tensor_rmsnorm_apply", napi_poly_tensor_rmsnorm_apply),
-      DECLARE_NAPI_METHOD(
-          "poly_tensor_layernorm_axes_apply", napi_poly_tensor_layernorm_axes_apply
-      ),
-      DECLARE_NAPI_METHOD("poly_tensor_groupnorm_apply", napi_poly_tensor_groupnorm_apply),
-      DECLARE_NAPI_METHOD("poly_tensor_batchnorm_stats", napi_poly_tensor_batchnorm_stats),
-      DECLARE_NAPI_METHOD("poly_tensor_batchnorm_apply", napi_poly_tensor_batchnorm_apply),
-      DECLARE_NAPI_METHOD("poly_tensor_instancenorm_apply", napi_poly_tensor_instancenorm_apply),
-      DECLARE_NAPI_METHOD("poly_tensor_shrink", napi_poly_tensor_shrink),
-      DECLARE_NAPI_METHOD("poly_tensor_pad_value_bool", napi_poly_tensor_pad_value_bool),
-      DECLARE_NAPI_METHOD("poly_tensor_pad_value_int", napi_poly_tensor_pad_value_int),
-      DECLARE_NAPI_METHOD("poly_tensor_pad_value_float", napi_poly_tensor_pad_value_float),
-      DECLARE_NAPI_METHOD("poly_tensor_pool", napi_poly_tensor_pool),
-      DECLARE_NAPI_METHOD("poly_tensor_max_pool2d", napi_poly_tensor_max_pool2d),
-      DECLARE_NAPI_METHOD("poly_tensor_avg_pool2d", napi_poly_tensor_avg_pool2d),
       DECLARE_NAPI_METHOD("poly_tensor_max_unpool2d", napi_poly_tensor_max_unpool2d),
       DECLARE_NAPI_METHOD("poly_tensor_interpolate", napi_poly_tensor_interpolate),
       DECLARE_NAPI_METHOD("poly_tensor_conv_transpose2d", napi_poly_tensor_conv_transpose2d),
       DECLARE_NAPI_METHOD("poly_tensor_full_invalid_by_id", napi_poly_tensor_full_invalid_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d", napi_poly_tensor_conv2d),
       DECLARE_NAPI_METHOD("poly_tensor_conv2d_dtype_by_id", napi_poly_tensor_conv2d_dtype_by_id),
-      DECLARE_NAPI_METHOD("poly_tensor_batchnorm", napi_poly_tensor_batchnorm),
       DECLARE_NAPI_METHOD("poly_tensor_getitem", napi_poly_tensor_getitem),
       DECLARE_NAPI_METHOD("poly_tensor_setitem", napi_poly_tensor_setitem),
       DECLARE_NAPI_METHOD("poly_tensor_release", napi_poly_tensor_release),

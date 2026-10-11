@@ -40,6 +40,9 @@ async function checkExtension(pg,source,create) {
     }
     reject(()=>author.build([theta,X,y],[2]),/construction failed/)
     equal(await theta.toArrayAsync(),[1,2,3])
+    const arrays=author.build([theta,X,y],[4]);arrays.forEach(own)
+    equal(await arrays[0].toArrayAsync(),[2,3])
+    equal(await arrays[1].toArrayAsync(),[1,2,3])
     const unsorted=own(pg.Tensor.empty(4))
     await unsorted.copyFromAsync(new Float32Array([2,-1,2,0]))
     const sorted=author.build([unsorted,X,y],[3]);sorted.forEach(own)

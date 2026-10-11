@@ -7,6 +7,16 @@ int extension_density(PolyCtx *ctx, PolyTensor **inputs, int kind, PolyTensor **
   int64_t axis = 0;
   outputs[0] = outputs[1] = NULL;
   if (kind == 3) return poly_tensor_sort(ctx, inputs[0], 0, 0, outputs, outputs + 1) == 0;
+  if (kind == 4) {
+    int64_t pairs[1][2] = {{1, 3}}, kernel = 1, stride = 1, dilation = 1;
+    outputs[0] = poly_tensor_shrink(ctx, inputs[0], pairs, 1);
+    outputs[1] = poly_tensor_pool(ctx, inputs[0], &kernel, 1, &stride, &dilation);
+    if (outputs[0] && outputs[1]) return 1;
+    poly_tensor_release(outputs[0]);
+    poly_tensor_release(outputs[1]);
+    outputs[0] = outputs[1] = NULL;
+    return 0;
+  }
 #define OWN(expr)                                                                                  \
   do {                                                                                             \
     owned[count] = (expr);                                                                         \

@@ -44,7 +44,7 @@ function createBoundModules(runtime) {
         throw new Error(`last dimensions of ${JSON.stringify(x.shape)} must match ${JSON.stringify(this.normalizedShape)}`)
       }
       return x._makeResultFromCore(runtime._core.ffi.poly_tensor_layernorm_axes_apply(x._ctx, x._tensor,
-        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor, this.axis, this.eps))
+        this.weight === null ? null : this.weight._tensor, this.bias === null ? null : this.bias._tensor, this.axis, this.axis.length, this.eps))
     }
   }
 

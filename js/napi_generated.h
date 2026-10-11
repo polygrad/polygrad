@@ -45,14 +45,14 @@ static napi_value napi_poly_tensor_all(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -63,7 +63,8 @@ static napi_value napi_poly_tensor_all(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -130,14 +131,14 @@ static napi_value napi_poly_tensor_any(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -148,7 +149,8 @@ static napi_value napi_poly_tensor_any(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -319,6 +321,174 @@ static napi_value napi_poly_tensor_atanh(napi_env env, napi_callback_info info) 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_atanh(a0, a1));
 }
+static napi_value napi_poly_tensor_avg_pool2d(napi_env env, napi_callback_info info) {
+  napi_value argv[10];
+  size_t argc = 10;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 10) {
+    napi_throw_type_error(env, NULL, "poly_tensor_avg_pool2d: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 1];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int64_t a4[POLY_MAX_DIMS * 1];
+  uint32_t length4;
+  NAPI_CALL(env, napi_get_array_length(env, argv[4], &length4));
+  if (length4 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[4], a4, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int64_t a5[POLY_MAX_DIMS * 1];
+  uint32_t length5;
+  NAPI_CALL(env, napi_get_array_length(env, argv[5], &length5));
+  if (length5 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[5], a5, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int64_t a6[POLY_MAX_DIMS * 2];
+  uint32_t length6;
+  NAPI_CALL(env, napi_get_array_length(env, argv[6], &length6));
+  if (length6 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[6], a6, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a7;
+  napi_value v7;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[7], &v7));
+  NAPI_CALL(env, napi_get_value_int32(env, v7, &a7));
+  bool a8;
+  napi_value b8;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[8], &b8));
+  NAPI_CALL(env, napi_get_value_bool(env, b8, &a8));
+  bool a9;
+  napi_value b9;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[9], &b9));
+  NAPI_CALL(env, napi_get_value_bool(env, b9, &a9));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count4;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count4));
+  if (count4 < 0 || count4 > POLY_MAX_DIMS * 1 || count4 != floor(count4) ||
+      count4 * 1 != length4) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count5));
+  if (count5 < 0 || count5 > POLY_MAX_DIMS * 1 || count5 != floor(count5) ||
+      count5 * 1 != length5) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count6;
+  NAPI_CALL(env, napi_get_value_double(env, argv[7], &count6));
+  if (count6 < 0 || count6 > POLY_MAX_DIMS * 2 || count6 != floor(count6) ||
+      count6 * 1 != length6) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_avg_pool2d(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9));
+}
+static napi_value napi_poly_tensor_batchnorm(napi_env env, napi_callback_info info) {
+  napi_value argv[8];
+  size_t argc = 8;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 8) {
+    napi_throw_type_error(env, NULL, "poly_tensor_batchnorm: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  PolyTensor *a5 = get_external_nullable(env, argv[5]);
+  int64_t a6[POLY_MAX_DIMS * 1];
+  uint32_t length6;
+  NAPI_CALL(env, napi_get_array_length(env, argv[6], &length6));
+  if (length6 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[6], a6, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int32_t a7;
+  napi_value v7;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[7], &v7));
+  NAPI_CALL(env, napi_get_value_int32(env, v7, &a7));
+  double count6;
+  NAPI_CALL(env, napi_get_value_double(env, argv[7], &count6));
+  if (count6 < 0 || count6 > POLY_MAX_DIMS * 1 || count6 != floor(count6) ||
+      count6 * 1 != length6) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_batchnorm(a0, a1, a2, a3, a4, a5, a6, a7));
+}
+static napi_value napi_poly_tensor_batchnorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[10];
+  size_t argc = 10;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 10) {
+    napi_throw_type_error(env, NULL, "poly_tensor_batchnorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  PolyTensor *a5 = get_external_nullable(env, argv[5]);
+  PolyTensor *a6 = get_external_nullable(env, argv[6]);
+  bool a7;
+  napi_value b7;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[7], &b7));
+  NAPI_CALL(env, napi_get_value_bool(env, b7, &a7));
+  double a8;
+  NAPI_CALL(env, napi_get_value_double(env, argv[8], &a8));
+  double a9;
+  NAPI_CALL(env, napi_get_value_double(env, argv[9], &a9));
+  return make_external(env, poly_tensor_batchnorm_apply(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9));
+}
+static napi_value napi_poly_tensor_batchnorm_stats(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_batchnorm_stats: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  bool a4;
+  napi_value b4;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[4], &b4));
+  NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_batchnorm_stats(a0, a1, a2, a3, a4, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_batchnorm_stats");
+}
 static napi_value napi_poly_tensor_binary_crossentropy(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -387,6 +557,22 @@ static napi_value napi_poly_tensor_bitwise_not(napi_env env, napi_callback_info 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_bitwise_not(a0, a1));
 }
+static napi_value napi_poly_tensor_cached_sdpa(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_cached_sdpa: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  PolyUOp *a5 = get_external_nullable(env, argv[5]);
+  return make_external(env, poly_tensor_cached_sdpa(a0, a1, a2, a3, a4, a5));
+}
 static napi_value napi_poly_tensor_capture_bind(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -429,6 +615,32 @@ static napi_value napi_poly_tensor_cast_by_id(napi_env env, napi_callback_info i
   NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
   NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
   return make_external(env, poly_tensor_cast_by_id(a0, a1, a2));
+}
+static napi_value napi_poly_tensor_causal_mask(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_causal_mask: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  int64_t a1;
+  if (!generated_read_int64_t(env, argv[1], &a1)) return NULL;
+  return make_external(env, poly_tensor_causal_mask(a0, a1));
+}
+static napi_value napi_poly_tensor_causal_mask_offset(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_tensor_causal_mask_offset: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  return make_external(env, poly_tensor_causal_mask_offset(a0, a1, a2));
 }
 static napi_value napi_poly_tensor_ceil(napi_env env, napi_callback_info info) {
   napi_value argv[2];
@@ -729,6 +941,42 @@ static napi_value napi_poly_tensor_cubic_sample_axis(napi_env env, napi_callback
   NAPI_CALL(env, napi_get_value_bool(env, b5, &a5));
   return make_external(env, poly_tensor_cubic_sample_axis(a0, a1, a2, a3, a4, a5));
 }
+static napi_value napi_poly_tensor_cummax(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_tensor_cummax: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int32_t a2;
+  napi_value v2;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
+  NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_cummax(a0, a1, a2, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_cummax");
+}
+static napi_value napi_poly_tensor_cummin(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_tensor_cummin: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int32_t a2;
+  napi_value v2;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
+  NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_cummin(a0, a1, a2, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_cummin");
+}
 static napi_value napi_poly_tensor_cumprod(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -854,6 +1102,24 @@ static napi_value napi_poly_tensor_dot_dtype_by_id(napi_env env, napi_callback_i
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   return make_external(env, poly_tensor_dot_dtype_by_id(a0, a1, a2, a3));
 }
+static napi_value napi_poly_tensor_dropout(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_dropout: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  double a2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[2], &a2));
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  return make_external(env, poly_tensor_dropout(a0, a1, a2, a3));
+}
 static napi_value napi_poly_tensor_elu(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -881,6 +1147,19 @@ static napi_value napi_poly_tensor_elu_tensor(napi_env env, napi_callback_info i
   PolyTensor *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_tensor_elu_tensor(a0, a1, a2));
 }
+static napi_value napi_poly_tensor_embedding_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_tensor_embedding_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  return make_external(env, poly_tensor_embedding_apply(a0, a1, a2));
+}
 static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -894,14 +1173,14 @@ static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info 
   napi_value v1;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[1], &v1));
   NAPI_CALL(env, napi_get_value_int32(env, v1, &a1));
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -912,7 +1191,8 @@ static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info 
   NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -965,21 +1245,22 @@ static napi_value napi_poly_tensor_expand(napi_env env, napi_callback_info info)
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -1030,21 +1311,22 @@ static napi_value napi_poly_tensor_flip(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -1142,6 +1424,26 @@ static napi_value napi_poly_tensor_gradient_target(napi_env env, napi_callback_i
   PolyTensor *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_tensor_gradient_target(a0, a1, a2));
 }
+static napi_value napi_poly_tensor_groupnorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_groupnorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_tensor_groupnorm_apply(a0, a1, a2, a3, a4, a5));
+}
 static napi_value napi_poly_tensor_hardsigmoid(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -1184,6 +1486,26 @@ static napi_value napi_poly_tensor_index_select(napi_env env, napi_callback_info
   NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
   PolyTensor *a3 = get_external_nullable(env, argv[3]);
   return make_external(env, poly_tensor_index_select(a0, a1, a2, a3));
+}
+static napi_value napi_poly_tensor_instancenorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_instancenorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_tensor_instancenorm_apply(a0, a1, a2, a3, a4, a5));
 }
 static napi_value napi_poly_tensor_isclose(napi_env env, napi_callback_info info) {
   napi_value argv[6];
@@ -1260,6 +1582,61 @@ static napi_value napi_poly_tensor_isnan(napi_env env, napi_callback_info info) 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_isnan(a0, a1));
 }
+static napi_value napi_poly_tensor_layernorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_layernorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_tensor_layernorm_apply(a0, a1, a2, a3, a4, a5));
+}
+static napi_value napi_poly_tensor_layernorm_axes_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[7];
+  size_t argc = 7;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 7) {
+    napi_throw_type_error(env, NULL, "poly_tensor_layernorm_axes_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  int64_t a4[POLY_MAX_DIMS * 1];
+  uint32_t length4;
+  NAPI_CALL(env, napi_get_array_length(env, argv[4], &length4));
+  if (length4 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[4], a4, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int32_t a5;
+  napi_value v5;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[5], &v5));
+  NAPI_CALL(env, napi_get_value_int32(env, v5, &a5));
+  double a6;
+  NAPI_CALL(env, napi_get_value_double(env, argv[6], &a6));
+  double count4;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &count4));
+  if (count4 < 0 || count4 > POLY_MAX_DIMS * 1 || count4 != floor(count4) ||
+      count4 * 1 != length4) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_layernorm_axes_apply(a0, a1, a2, a3, a4, a5, a6));
+}
 static napi_value napi_poly_tensor_le(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -1317,6 +1694,20 @@ static napi_value napi_poly_tensor_lerp(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_coerce_to_bool(env, argv[4], &b4));
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   return make_external(env, poly_tensor_lerp(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_linear_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_linear_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  return make_external(env, poly_tensor_linear_apply(a0, a1, a2, a3));
 }
 static napi_value napi_poly_tensor_linspace_by_id(napi_env env, napi_callback_info info) {
   napi_value argv[6];
@@ -1458,14 +1849,14 @@ static napi_value napi_poly_tensor_logsumexp(napi_env env, napi_callback_info in
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -1476,11 +1867,32 @@ static napi_value napi_poly_tensor_logsumexp(napi_env env, napi_callback_info in
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
   return make_external(env, poly_tensor_logsumexp(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_lstm_cell(napi_env env, napi_callback_info info) {
+  napi_value argv[8];
+  size_t argc = 8;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 8) {
+    napi_throw_type_error(env, NULL, "poly_tensor_lstm_cell: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  PolyTensor *a5 = get_external_nullable(env, argv[5]);
+  PolyTensor *a6 = get_external_nullable(env, argv[6]);
+  PolyTensor *a7 = get_external_nullable(env, argv[7]);
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_lstm_cell(a0, a1, a2, a3, a4, a5, a6, a7, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_lstm_cell");
 }
 static napi_value napi_poly_tensor_lstsq(napi_env env, napi_callback_info info) {
   napi_value argv[3];
@@ -1505,14 +1917,14 @@ static napi_value napi_poly_tensor_max(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -1523,11 +1935,105 @@ static napi_value napi_poly_tensor_max(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
   return make_external(env, poly_tensor_max(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_max_pool2d(napi_env env, napi_callback_info info) {
+  napi_value argv[10];
+  size_t argc = 10;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 10) {
+    napi_throw_type_error(env, NULL, "poly_tensor_max_pool2d: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 1];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int64_t a4[POLY_MAX_DIMS * 1];
+  uint32_t length4;
+  NAPI_CALL(env, napi_get_array_length(env, argv[4], &length4));
+  if (length4 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[4], a4, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int64_t a5[POLY_MAX_DIMS * 1];
+  uint32_t length5;
+  NAPI_CALL(env, napi_get_array_length(env, argv[5], &length5));
+  if (length5 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[5], a5, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int64_t a6[POLY_MAX_DIMS * 2];
+  uint32_t length6;
+  NAPI_CALL(env, napi_get_array_length(env, argv[6], &length6));
+  if (length6 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[6], a6, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a7;
+  napi_value v7;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[7], &v7));
+  NAPI_CALL(env, napi_get_value_int32(env, v7, &a7));
+  bool a8;
+  napi_value b8;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[8], &b8));
+  NAPI_CALL(env, napi_get_value_bool(env, b8, &a8));
+  bool a9;
+  napi_value b9;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[9], &b9));
+  NAPI_CALL(env, napi_get_value_bool(env, b9, &a9));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count4;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count4));
+  if (count4 < 0 || count4 > POLY_MAX_DIMS * 1 || count4 != floor(count4) ||
+      count4 * 1 != length4) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count5));
+  if (count5 < 0 || count5 > POLY_MAX_DIMS * 1 || count5 != floor(count5) ||
+      count5 * 1 != length5) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count6;
+  NAPI_CALL(env, napi_get_value_double(env, argv[7], &count6));
+  if (count6 < 0 || count6 > POLY_MAX_DIMS * 2 || count6 != floor(count6) ||
+      count6 * 1 != length6) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  PolyTensor *second = NULL;
+  PolyTensor *first =
+      poly_tensor_max_pool2d(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9 ? &second : NULL);
+  if (first && a9) return generated_tensor_pair(env, 0, first, second, "poly_tensor_max_pool2d");
+  if (second) poly_tensor_release(second);
+  return make_external(env, first);
 }
 static napi_value napi_poly_tensor_mean(napi_env env, napi_callback_info info) {
   napi_value argv[5];
@@ -1539,14 +2045,14 @@ static napi_value napi_poly_tensor_mean(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -1557,7 +2063,8 @@ static napi_value napi_poly_tensor_mean(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -1573,14 +2080,14 @@ static napi_value napi_poly_tensor_min(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -1591,7 +2098,8 @@ static napi_value napi_poly_tensor_min(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -1700,6 +2208,142 @@ static napi_value napi_poly_tensor_one_hot(napi_env env, napi_callback_info info
   if (!generated_read_int64_t(env, argv[2], &a2)) return NULL;
   return make_external(env, poly_tensor_one_hot(a0, a1, a2));
 }
+static napi_value napi_poly_tensor_pad_mode(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_pad_mode: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 2];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 2 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_pad_mode(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_pad_value_bool(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_pad_value_bool: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 2];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  bool a4;
+  napi_value b4;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[4], &b4));
+  NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 2 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_pad_value_bool(a0, a1, (int64_t(*)[2])a2, a3, a4));
+}
+static napi_value napi_poly_tensor_pad_value_float(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_pad_value_float: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 2];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  double a4;
+  NAPI_CALL(env, napi_get_value_double(env, argv[4], &a4));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 2 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_pad_value_float(a0, a1, (int64_t(*)[2])a2, a3, a4));
+}
+static napi_value napi_poly_tensor_pad_value_int(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_pad_value_int: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 2];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int64_t a4;
+  if (!generated_read_int64_t(env, argv[4], &a4)) return NULL;
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 2 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_pad_value_int(a0, a1, (int64_t(*)[2])a2, a3, a4));
+}
 static napi_value napi_poly_tensor_permute(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -1710,25 +2354,87 @@ static napi_value napi_poly_tensor_permute(napi_env env, napi_callback_info info
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
   return make_external(env, poly_tensor_permute(a0, a1, a2, a3));
+}
+static napi_value napi_poly_tensor_pool(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_pool: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 1];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int64_t a4[POLY_MAX_DIMS * 1];
+  uint32_t length4;
+  NAPI_CALL(env, napi_get_array_length(env, argv[4], &length4));
+  if (length4 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[4], a4, POLY_MAX_DIMS * 1) < 0) return NULL;
+  int64_t a5[POLY_MAX_DIMS * 1];
+  uint32_t length5;
+  NAPI_CALL(env, napi_get_array_length(env, argv[5], &length5));
+  if (length5 > POLY_MAX_DIMS * 1) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[5], a5, POLY_MAX_DIMS * 1) < 0) return NULL;
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count4;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count4));
+  if (count4 < 0 || count4 > POLY_MAX_DIMS * 1 || count4 != floor(count4) ||
+      count4 * 1 != length4) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  double count5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count5));
+  if (count5 < 0 || count5 > POLY_MAX_DIMS * 1 || count5 != floor(count5) ||
+      count5 * 1 != length5) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_pool(a0, a1, a2, a3, a4, a5));
 }
 static napi_value napi_poly_tensor_prod(napi_env env, napi_callback_info info) {
   napi_value argv[5];
@@ -1740,14 +2446,14 @@ static napi_value napi_poly_tensor_prod(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -1758,11 +2464,30 @@ static napi_value napi_poly_tensor_prod(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
   return make_external(env, poly_tensor_prod(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_qr_ex(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_tensor_qr_ex: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int32_t a2;
+  napi_value v2;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
+  NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_qr_ex(a0, a1, a2, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_qr_ex");
 }
 static napi_value napi_poly_tensor_quick_gelu(napi_env env, napi_callback_info info) {
   napi_value argv[2];
@@ -1842,21 +2567,22 @@ static napi_value napi_poly_tensor_reshape(napi_env env, napi_callback_info info
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -1872,6 +2598,21 @@ static napi_value napi_poly_tensor_retain(napi_env env, napi_callback_info info)
   }
   PolyTensor *a0 = get_external_nullable(env, argv[0]);
   return make_external(env, poly_tensor_retain(a0));
+}
+static napi_value napi_poly_tensor_rmsnorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_rmsnorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  double a3;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &a3));
+  return make_external(env, poly_tensor_rmsnorm_apply(a0, a1, a2, a3));
 }
 static napi_value napi_poly_tensor_rope(napi_env env, napi_callback_info info) {
   napi_value argv[4];
@@ -1911,6 +2652,56 @@ static napi_value napi_poly_tensor_rsqrt(napi_env env, napi_callback_info info) 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_rsqrt(a0, a1));
 }
+static napi_value napi_poly_tensor_sample_logits(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 5) {
+    napi_throw_type_error(env, NULL, "poly_tensor_sample_logits: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  return make_external(env, poly_tensor_sample_logits(a0, a1, a2, a3, a4));
+}
+static napi_value napi_poly_tensor_sdpa(napi_env env, napi_callback_info info) {
+  napi_value argv[9];
+  size_t argc = 9;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 9) {
+    napi_throw_type_error(env, NULL, "poly_tensor_sdpa: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  int32_t a6;
+  napi_value v6;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[6], &v6));
+  NAPI_CALL(env, napi_get_value_int32(env, v6, &a6));
+  int32_t a7;
+  napi_value v7;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[7], &v7));
+  NAPI_CALL(env, napi_get_value_int32(env, v7, &a7));
+  int32_t a8;
+  napi_value v8;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[8], &v8));
+  NAPI_CALL(env, napi_get_value_int32(env, v8, &a8));
+  return make_external(env, poly_tensor_sdpa(a0, a1, a2, a3, a4, a5, a6, a7, a8));
+}
 static napi_value napi_poly_tensor_selu(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -1924,6 +2715,37 @@ static napi_value napi_poly_tensor_selu(napi_env env, napi_callback_info info) {
   PolyTensor *a2 = get_external_nullable(env, argv[2]);
   PolyTensor *a3 = get_external_nullable(env, argv[3]);
   return make_external(env, poly_tensor_selu(a0, a1, a2, a3));
+}
+static napi_value napi_poly_tensor_shrink(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_shrink: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2[POLY_MAX_DIMS * 2];
+  uint32_t length2;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
+  if (length2 > POLY_MAX_DIMS * 2) {
+    napi_throw_range_error(env, NULL, "too many dimensions");
+    return NULL;
+  }
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 2) < 0) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  double count2;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 2 != length2) {
+    napi_throw_range_error(env, NULL, "array length mismatch");
+    return NULL;
+  }
+  return make_external(env, poly_tensor_shrink(a0, a1, (int64_t(*)[2])a2, a3));
 }
 static napi_value napi_poly_tensor_sigmoid(napi_env env, napi_callback_info info) {
   napi_value argv[2];
@@ -2042,6 +2864,28 @@ static napi_value napi_poly_tensor_solve(napi_env env, napi_callback_info info) 
   PolyTensor *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_tensor_solve(a0, a1, a2));
 }
+static napi_value napi_poly_tensor_sort(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_tensor_sort: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int32_t a2;
+  napi_value v2;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
+  NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_sort(a0, a1, a2, a3, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_sort");
+}
 static napi_value napi_poly_tensor_sparse_categorical_crossentropy(
     napi_env env,
     napi_callback_info info
@@ -2090,14 +2934,14 @@ static napi_value napi_poly_tensor_sum(napi_env env, napi_callback_info info) {
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -2108,7 +2952,8 @@ static napi_value napi_poly_tensor_sum(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -2124,14 +2969,14 @@ static napi_value napi_poly_tensor_sum_dtype_by_id(napi_env env, napi_callback_i
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -2146,7 +2991,8 @@ static napi_value napi_poly_tensor_sum_dtype_by_id(napi_env env, napi_callback_i
   NAPI_CALL(env, napi_get_value_int32(env, v5, &a5));
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -2191,6 +3037,34 @@ static napi_value napi_poly_tensor_to_device(napi_env env, napi_callback_info in
   NAPI_CALL(env, napi_coerce_to_number(env, argv[2], &v2));
   NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
   return make_external(env, poly_tensor_to_device(a0, a1, a2));
+}
+static napi_value napi_poly_tensor_topk(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_tensor_topk: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  int64_t a2;
+  if (!generated_read_int64_t(env, argv[2], &a2)) return NULL;
+  int32_t a3;
+  napi_value v3;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
+  NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  int32_t a5;
+  napi_value v5;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[5], &v5));
+  NAPI_CALL(env, napi_get_value_int32(env, v5, &a5));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_topk(a0, a1, a2, a3, a4, a5, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_topk");
 }
 static napi_value napi_poly_tensor_triangular_solve(napi_env env, napi_callback_info info) {
   napi_value argv[6];
@@ -2338,14 +3212,14 @@ static napi_value napi_poly_tensor_var_axes(napi_env env, napi_callback_info inf
   }
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
-  int64_t a2[POLY_MAX_DIMS];
+  int64_t a2[POLY_MAX_DIMS * 1];
   uint32_t length2;
   NAPI_CALL(env, napi_get_array_length(env, argv[2], &length2));
-  if (length2 > POLY_MAX_DIMS) {
+  if (length2 > POLY_MAX_DIMS * 1) {
     napi_throw_range_error(env, NULL, "too many dimensions");
     return NULL;
   }
-  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[2], a2, POLY_MAX_DIMS * 1) < 0) return NULL;
   int32_t a3;
   napi_value v3;
   NAPI_CALL(env, napi_coerce_to_number(env, argv[3], &v3));
@@ -2357,7 +3231,8 @@ static napi_value napi_poly_tensor_var_axes(napi_env env, napi_callback_info inf
   PolyTensor *a5 = get_external_nullable(env, argv[5]);
   double count2;
   NAPI_CALL(env, napi_get_value_double(env, argv[3], &count2));
-  if (count2 != length2) {
+  if (count2 < 0 || count2 > POLY_MAX_DIMS * 1 || count2 != floor(count2) ||
+      count2 * 1 != length2) {
     napi_throw_range_error(env, NULL, "array length mismatch");
     return NULL;
   }
@@ -2849,6 +3724,19 @@ static napi_value napi_poly_uop_cast_by_id(napi_env env, napi_callback_info info
   NAPI_CALL(env, napi_get_value_int32(env, v2, &a2));
   return make_external(env, poly_uop_cast_by_id(a0, a1, a2));
 }
+static napi_value napi_poly_uop_causal_mask_offset(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_uop_causal_mask_offset: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  return make_external(env, poly_uop_causal_mask_offset(a0, a1, a2));
+}
 static napi_value napi_poly_uop_ceil(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -3311,6 +4199,19 @@ static napi_value napi_poly_uop_elu_tensor(napi_env env, napi_callback_info info
   PolyUOp *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_uop_elu_tensor(a0, a1, a2));
 }
+static napi_value napi_poly_uop_embedding_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_uop_embedding_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  return make_external(env, poly_uop_embedding_apply(a0, a1, a2));
+}
 static napi_value napi_poly_uop_eq(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -3532,6 +4433,26 @@ static napi_value napi_poly_uop_grad(napi_env env, napi_callback_info info) {
   PolyUOp *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_uop_grad(a0, a1, a2));
 }
+static napi_value napi_poly_uop_groupnorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_uop_groupnorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  PolyUOp *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_uop_groupnorm_apply(a0, a1, a2, a3, a4, a5));
+}
 static napi_value napi_poly_uop_gt(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -3616,6 +4537,26 @@ static napi_value napi_poly_uop_index_select(napi_env env, napi_callback_info in
   PolyUOp *a3 = get_external_nullable(env, argv[3]);
   return make_external(env, poly_uop_index_select(a0, a1, a2, a3));
 }
+static napi_value napi_poly_uop_instancenorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_uop_instancenorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  PolyUOp *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_uop_instancenorm_apply(a0, a1, a2, a3, a4, a5));
+}
 static napi_value napi_poly_uop_isclose(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
@@ -3691,6 +4632,26 @@ static napi_value napi_poly_uop_isnan(napi_env env, napi_callback_info info) {
   PolyUOp *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_uop_isnan(a0, a1));
 }
+static napi_value napi_poly_uop_layernorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 6) {
+    napi_throw_type_error(env, NULL, "poly_uop_layernorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  PolyUOp *a3 = get_external_nullable(env, argv[3]);
+  int32_t a4;
+  napi_value v4;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[4], &v4));
+  NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
+  double a5;
+  NAPI_CALL(env, napi_get_value_double(env, argv[5], &a5));
+  return make_external(env, poly_uop_layernorm_apply(a0, a1, a2, a3, a4, a5));
+}
 static napi_value napi_poly_uop_le(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -3760,6 +4721,20 @@ static napi_value napi_poly_uop_lgamma(napi_env env, napi_callback_info info) {
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyUOp *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_uop_lgamma(a0, a1));
+}
+static napi_value napi_poly_uop_linear_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_uop_linear_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  PolyUOp *a3 = get_external_nullable(env, argv[3]);
+  return make_external(env, poly_uop_linear_apply(a0, a1, a2, a3));
 }
 static napi_value napi_poly_uop_linspace(napi_env env, napi_callback_info info) {
   napi_value argv[4];
@@ -4215,6 +5190,21 @@ static napi_value napi_poly_uop_repeat_interleave(napi_env env, napi_callback_in
   NAPI_CALL(env, napi_get_value_int32(env, v3, &a3));
   return make_external(env, poly_uop_repeat_interleave(a0, a1, a2, a3));
 }
+static napi_value napi_poly_uop_rmsnorm_apply(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 4) {
+    napi_throw_type_error(env, NULL, "poly_uop_rmsnorm_apply: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  double a3;
+  NAPI_CALL(env, napi_get_value_double(env, argv[3], &a3));
+  return make_external(env, poly_uop_rmsnorm_apply(a0, a1, a2, a3));
+}
 static napi_value napi_poly_uop_rope(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -4252,6 +5242,29 @@ static napi_value napi_poly_uop_rsqrt(napi_env env, napi_callback_info info) {
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyUOp *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_uop_rsqrt(a0, a1));
+}
+static napi_value napi_poly_uop_sdpa(napi_env env, napi_callback_info info) {
+  napi_value argv[7];
+  size_t argc = 7;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 7) {
+    napi_throw_type_error(env, NULL, "poly_uop_sdpa: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  PolyUOp *a2 = get_external_nullable(env, argv[2]);
+  PolyUOp *a3 = get_external_nullable(env, argv[3]);
+  PolyUOp *a4 = get_external_nullable(env, argv[4]);
+  int32_t a5;
+  napi_value v5;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[5], &v5));
+  NAPI_CALL(env, napi_get_value_int32(env, v5, &a5));
+  int32_t a6;
+  napi_value v6;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[6], &v6));
+  NAPI_CALL(env, napi_get_value_int32(env, v6, &a6));
+  return make_external(env, poly_uop_sdpa(a0, a1, a2, a3, a4, a5, a6));
 }
 static napi_value napi_poly_uop_selu(napi_env env, napi_callback_info info) {
   napi_value argv[4];

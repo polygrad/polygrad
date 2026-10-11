@@ -24,6 +24,12 @@ def test_extension_model_gradient_and_lifetime():
             with pytest.raises(RuntimeError, match="construction failed"):
                 extension.build([theta, X, y], [2])
             np.testing.assert_array_equal(theta.numpy(), [1, 2, 3])
+            cropped, pooled = extension.build([theta, X, y], [4])
+            try:
+                np.testing.assert_array_equal(cropped.numpy(), [2, 3])
+                np.testing.assert_array_equal(pooled.numpy(), [[1], [2], [3]])
+            finally:
+                cropped.dispose(); pooled.dispose()
             unsorted = rt.Tensor(np.array([2, -1, 2, 0], np.float32))
             values, indices = extension.build([unsorted, X, y], [3])
             try:

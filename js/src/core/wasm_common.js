@@ -96,7 +96,9 @@ function createWasmCoreFromModule(Module, device) {
 
   // --- Int64 marshalling helpers ---
   function writeInt64Array(arr) {
+    if (!arr.length) return 0
     const ptr = malloc(arr.length * 8)
+    if (!ptr) throw new Error('Tensor argument allocation failed')
     for (let i = 0; i < arr.length; i++) {
       const base = (ptr >>> 2) + i * 2
       const val = arr[i]
@@ -157,6 +159,33 @@ function createWasmCoreFromModule(Module, device) {
       return [h32[outPtr >>> 2], h32[(outPtr >>> 2) + 1]]
     } finally {
       Module._free(outPtr)
+    }
+  }
+
+  function callTensorPair(fn, args, name, optional = false) {
+    if (optional && !args.pop()) return fn(...args, 0)
+    const ptr = malloc(8)
+    if (!ptr) throw new Error('Tensor result allocation failed')
+    heap32().fill(0, ptr >>> 2, (ptr >>> 2) + 2)
+    let transferred = false
+    try {
+      const first = optional ? fn(...args, ptr + 4) : 0
+      if (optional) heap32()[ptr >>> 2] = first
+      const rc = optional ? 0 : fn(...args, ptr, ptr + 4)
+      if (rc !== 0) throw new Error(`${name} failed (rc=${rc})`)
+      if (optional && !first) return null
+      const result = [heap32()[ptr >>> 2] >>> 0, heap32()[(ptr >>> 2) + 1] >>> 0]
+      transferred = true
+      return result
+    } finally {
+      // Output slots own references until both handles have reached the caller.
+      if (!transferred) {
+        for (let i = 0; i < 2; i++) {
+          const tensor = heap32()[(ptr >>> 2) + i] >>> 0
+          if (tensor) Module._poly_tensor_release(tensor)
+        }
+      }
+      Module._free(ptr)
     }
   }
 
@@ -316,9 +345,23 @@ function createWasmCoreFromModule(Module, device) {
       return fn(ctx, uop, writeInt64Scratch(arr), ...extra)
     }
     const ptr = writeInt64Array(arr)
-    const result = fn(ctx, uop, ptr, ...extra)
-    Module._free(ptr)
-    return result
+    try { return fn(ctx, uop, ptr, ...extra) }
+    finally { Module._free(ptr) }
+  }
+
+  function callWithArrays(fn, args, indices) {
+    const allocations = []
+    try {
+      for (const index of indices) {
+        const ptr = writeInt64Array(args[index])
+        if (!ptr && args[index].length) throw new Error('Tensor argument allocation failed')
+        allocations.push(ptr)
+        args[index] = ptr
+      }
+      return fn(...args)
+    } finally {
+      for (const ptr of allocations) if (ptr) Module._free(ptr)
+    }
   }
 
   function allocString(str) {
@@ -806,7 +849,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   const ffi = {
-    ...generatedBindings(Module, callWithInt64),
+    ...generatedBindings(Module, callWithInt64, callWithArrays, callTensorPair),
     // Simple ops (no int64 arrays)
     poly_ctx_new: Module._poly_ctx_new,
     poly_ctx_destroy: Module._poly_ctx_destroy,
@@ -1161,8 +1204,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_to_device_name(ctx, tensor, ptr) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_pad_mode: (ctx, src, pairs, ndim, mode) =>
-      callWithInt64(Module._poly_tensor_pad_mode, ctx, src, pairs, ndim, mode),
     poly_tensor_repeat: (ctx, src, repeats) => callWithInt64(Module._poly_tensor_repeat, ctx, src, repeats, repeats.length),
     poly_tensor_stack: (ctx, inputs, dim) => {
       const ptr = writePtrArray(inputs)
@@ -1174,16 +1215,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_cat(ctx, ptr, inputs.length, dim) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_cummax: (ctx, src, axis) =>
-      callUopPair(Module._poly_tensor_cummax, [ctx, src, axis], 'poly_tensor_cummax'),
-    poly_tensor_cummin: (ctx, src, axis) =>
-      callUopPair(Module._poly_tensor_cummin, [ctx, src, axis], 'poly_tensor_cummin'),
-    poly_tensor_qr_ex: (ctx, src, mode) =>
-      callUopPair(
-        Module._poly_tensor_qr_ex,
-        [ctx, src, mode],
-        'poly_tensor_qr_ex'
-      ),
     poly_tensor_scatter: (ctx, self, dim, index, src, reduce) => {
       const reducePtr = allocString(reduce)
       const result = Module._poly_tensor_scatter(ctx, self, dim, index, src, reducePtr)
@@ -1209,93 +1240,6 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(formulaPtr)
       Module._free(tensorPtrs)
       return result
-    },
-    poly_tensor_sort: (ctx, src, dim, descending) =>
-      callUopPair(
-        Module._poly_tensor_sort,
-        [ctx, src, dim, descending ? 1 : 0],
-        'poly_tensor_sort'
-      ),
-    poly_tensor_topk: (ctx, src, k, dim, largest, sorted) =>
-      callUopPair(
-        Module._poly_tensor_topk,
-        [ctx, src, BigInt(k), dim, largest ? 1 : 0, sorted ? 1 : 0],
-        'poly_tensor_topk'
-      ),
-    poly_tensor_lstm_cell: (ctx, x, h, c, wi, wh, bi, bh) =>
-      callUopPair(Module._poly_tensor_lstm_cell, [ctx, x, h || 0, c || 0, wi, wh, bi || 0, bh || 0], 'poly_tensor_lstm_cell'),
-    poly_tensor_linear_apply: (ctx, x, w, b) => Module._poly_tensor_linear_apply(ctx, x, w, b || 0),
-    poly_tensor_dropout: (ctx, x, p, training) => Module._poly_tensor_dropout(ctx, x, p, training ? 1 : 0),
-    poly_tensor_sample_logits: (ctx, logits, temperature, topK, keepdim) => Module._poly_tensor_sample_logits(ctx, logits, temperature, topK, keepdim),
-    poly_tensor_sdpa: (ctx, q, k, v, mask, p, causal, gqa, training) =>
-      Module._poly_tensor_sdpa(ctx, q, k, v, mask || 0, p, causal ? 1 : 0, gqa ? 1 : 0, training ? 1 : 0),
-    poly_tensor_rmsnorm_apply: (ctx, x, w, eps) => Module._poly_tensor_rmsnorm_apply(ctx, x, w || 0, eps),
-    poly_tensor_layernorm_axes_apply: (ctx, x, w, b, axes, eps) => {
-      const ptr = writeInt64Array(axes)
-      try { return Module._poly_tensor_layernorm_axes_apply(ctx, x, w || 0, b || 0, ptr, axes.length, eps) }
-      finally { Module._free(ptr) }
-    },
-    poly_tensor_groupnorm_apply: (ctx, x, w, b, groups, eps) =>
-      Module._poly_tensor_groupnorm_apply(ctx, x, w || 0, b || 0, groups, eps),
-    poly_tensor_batchnorm_stats: (ctx, x, mean, variance, training) =>
-      callUopPair(Module._poly_tensor_batchnorm_stats, [ctx, x, mean || 0, variance || 0, training ? 1 : 0], 'poly_tensor_batchnorm_stats'),
-    poly_tensor_batchnorm_apply: (ctx, x, w, b, mean, variance, batches, training, eps, momentum) =>
-      Module._poly_tensor_batchnorm_apply(ctx, x, w || 0, b || 0, mean || 0, variance || 0, batches || 0, training ? 1 : 0, eps, momentum),
-    poly_tensor_instancenorm_apply: (ctx, x, w, b, features, eps) =>
-      Module._poly_tensor_instancenorm_apply(ctx, x, w || 0, b || 0, features, eps),
-    poly_tensor_shrink: (ctx, tensor, flat, npairs) =>
-      callWithInt64(Module._poly_tensor_shrink, ctx, tensor, flat, npairs),
-    poly_tensor_pad_value_bool: (ctx, tensor, flat, npairs, value) =>
-      callWithInt64(Module._poly_tensor_pad_value_bool, ctx, tensor, flat, npairs, value),
-    poly_tensor_pad_value_int: (ctx, tensor, flat, npairs, value) =>
-      callWithInt64(Module._poly_tensor_pad_value_int, ctx, tensor, flat, npairs, BigInt(value)),
-    poly_tensor_pad_value_float: (ctx, tensor, flat, npairs, value) =>
-      callWithInt64(Module._poly_tensor_pad_value_float, ctx, tensor, flat, npairs, value),
-    poly_tensor_pool: (ctx, tensor, kernel, nKernel, stride, dilation) => {
-      const kernelPtr = writeInt64Array(kernel)
-      const stridePtr = writeInt64Array(stride)
-      const dilationPtr = writeInt64Array(dilation)
-      try {
-        return Module._poly_tensor_pool(
-          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr
-        )
-      } finally {
-        if (kernelPtr) Module._free(kernelPtr)
-        if (stridePtr) Module._free(stridePtr)
-        if (dilationPtr) Module._free(dilationPtr)
-      }
-    },
-    poly_tensor_max_pool2d: (
-      ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding, ceilMode, returnIndices
-    ) => {
-      const kernelPtr = writeInt64Array(kernel)
-      const stridePtr = writeInt64Array(stride)
-      const dilationPtr = writeInt64Array(dilation)
-      const paddingPtr = writeInt64Array(padding)
-      const indexPtr = returnIndices ? malloc(4) : 0
-      try {
-        if (indexPtr) heap32()[indexPtr >>> 2] = 0
-        const values = Module._poly_tensor_max_pool2d(
-          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr, paddingPtr, nPadding,
-          ceilMode ? 1 : 0, indexPtr
-        )
-        return values && returnIndices ? [values, heap32()[indexPtr >>> 2] >>> 0] : values
-      } finally {
-        if (indexPtr) Module._free(indexPtr)
-        if (kernelPtr) Module._free(kernelPtr)
-        if (stridePtr) Module._free(stridePtr)
-        if (dilationPtr) Module._free(dilationPtr)
-        if (paddingPtr) Module._free(paddingPtr)
-      }
-    },
-    poly_tensor_avg_pool2d: (ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding, ceilMode, countIncludePad) => {
-      const kp = writeInt64Array(kernel), sp = writeInt64Array(stride)
-      const dp = writeInt64Array(dilation), pp = writeInt64Array(padding)
-      try {
-        return Module._poly_tensor_avg_pool2d(ctx, tensor, kp, nKernel, sp, dp, pp, nPadding, ceilMode ? 1 : 0, countIncludePad ? 1 : 0)
-      } finally {
-        for (const ptr of [kp, sp, dp, pp]) if (ptr) Module._free(ptr)
-      }
     },
     poly_tensor_interpolate: (ctx, tensor, size, nSize, mode, align) => {
       const sp = writeInt64Array(size), mp = allocString(mode)
@@ -1345,18 +1289,6 @@ function createWasmCoreFromModule(Module, device) {
         if (stridePtr) Module._free(stridePtr)
         if (dilationPtr) Module._free(dilationPtr)
         if (paddingPtr) Module._free(paddingPtr)
-      }
-    },
-    poly_tensor_batchnorm: (
-      ctx, tensor, weight, bias, mean, invstd, axes, nAxes
-    ) => {
-      const axesPtr = writeInt64Array(axes)
-      try {
-        return Module._poly_tensor_batchnorm(
-          ctx, tensor, weight || 0, bias || 0, mean, invstd, axesPtr, nAxes
-        )
-      } finally {
-        if (axesPtr) Module._free(axesPtr)
       }
     },
     poly_tensor_getitem: (ctx, tensor, kinds, starts, sizes, steps, indices, n) => {

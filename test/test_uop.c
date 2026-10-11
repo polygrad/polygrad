@@ -2082,6 +2082,40 @@ TEST(uop, contiguous_view_offset_matches_current_tinygrad) {
   PASS();
 }
 
+TEST(uop, storage_view_metadata_rejects_unbindable_webgpu_offsets) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDevice devices[] = {POLY_DEVICE_CPU, POLY_DEVICE_WEBGPU, POLY_DEVICE_WEBGPU};
+  for (int i = 0; i < 3; i++) {
+    int64_t start = i == 2 ? 64 : 1;
+    int64_t shape[] = {67}, pairs[][2] = {{start, start + 2}};
+    PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, devices[i]);
+    PolyTensor *y = x ? poly_tensor_shrink(ctx, x, pairs, 1) : NULL;
+    ASSERT_NOT_NULL(y);
+    PolyUOp *base = NULL;
+    PolyShape out;
+    int64_t count, symbolic_offset = -1;
+    size_t offset;
+    bool accepted =
+        poly_uop_contiguous_view_info(ctx, y->uop_physical, &base, &out, &count, &offset);
+    ASSERT_INT_EQ(accepted, i != 1);
+    ASSERT_INT_EQ(
+        poly_uop_contiguous_view_offset(ctx, y->uop_physical, &symbolic_offset) == 0,
+        devices[i] == POLY_DEVICE_CPU
+    );
+    if (accepted) {
+      ASSERT_INT_EQ(offset, start * sizeof(float));
+      ASSERT_INT_EQ(count, 2);
+    } else {
+      ASSERT_PTR_EQ(poly_uop_buffer(ctx, y->uop_physical), NULL);
+    }
+    poly_tensor_release(y);
+    poly_tensor_release(x);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, cast_and_bitcast_store_exact_dtype_arg) {
   /* Current tinygrad DTypeMixin.cast/bitcast passes the target DType as arg,
    * and dtype_from_uop derives the result dtype from that same object

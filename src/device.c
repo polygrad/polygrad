@@ -938,6 +938,9 @@ bool poly_uop_contiguous_view_info(
   *out_numel = -1;
   *out_byte_offset = 0;
 
+  const char *device = poly_uop_device_name(ctx, u);
+  if (device && !strncmp(device, "CL", 2)) return false;
+
   int n_steps = 0;
   bool has_shrink = false;
   PolyUOp *base = u;
@@ -1066,6 +1069,15 @@ bool poly_uop_contiguous_view_info(
   size_t byte_offset = (size_t)element_offset * itemsize;
   if (byte_offset > storage->nbytes || numel > SIZE_MAX / itemsize ||
       (size_t)numel * itemsize > storage->nbytes - byte_offset)
+    return false;
+
+  /* Unlike pinned WebGPU's no-view policy, our runtime supports aligned views
+   * for writes through aliases. Never advertise an unbindable view as realized:
+   * keep that movement in the graph so readback and later kernels materialize it.
+   * Match js_webgpu_create_buffer_view's storage-binding alignment. */
+  size_t storage_offset = storage->base ? storage->offset : 0;
+  if (device && !strncmp(device, "WEBGPU", 6) &&
+      (byte_offset > SIZE_MAX - storage_offset || (storage_offset + byte_offset) % 256 != 0))
     return false;
 
   *out_identity = identity;

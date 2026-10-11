@@ -394,8 +394,6 @@ def _declare_signatures(lib):
     lib.poly_uop_randn_by_id.restype = _ptr
     lib.poly_uop_randn_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
 
-    lib.poly_uop_causal_mask_offset.restype = _ptr
-    lib.poly_uop_causal_mask_offset.argtypes = [_ptr, _ptr, _ptr]
 
     lib.poly_uop_full.restype = _ptr
     lib.poly_uop_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
@@ -592,8 +590,6 @@ def _declare_signatures(lib):
     lib.poly_tensor_to_device_name.restype = _ptr
     lib.poly_tensor_to_device_name.argtypes = [_ptr, _ptr, ctypes.c_char_p]
 
-    lib.poly_tensor_pad_mode.restype = _ptr
-    lib.poly_tensor_pad_mode.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_repeat.restype = _ptr
     lib.poly_tensor_repeat.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
     lib.poly_tensor_stack.restype = _ptr
@@ -635,14 +631,6 @@ def _declare_signatures(lib):
         fn.restype = ctypes.c_int
         fn.argtypes = [_ptr]
 
-    for name in ('cummax', 'cummin'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype = ctypes.c_int
-        fn.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
-
-    lib.poly_tensor_qr_ex.restype = ctypes.c_int
-    lib.poly_tensor_qr_ex.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
-
     lib.poly_tensor_scatter.restype = _ptr
     lib.poly_tensor_scatter.argtypes = [
         _ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p,
@@ -658,39 +646,8 @@ def _declare_signatures(lib):
         _ptr, ctypes.c_char_p, ctypes.POINTER(_ptr), ctypes.c_int,
     ]
 
-    lib.poly_tensor_sort.restype = ctypes.c_int
-    lib.poly_tensor_sort.argtypes = [
-        _ptr, _ptr, ctypes.c_int, ctypes.c_int, _ptrp, _ptrp
-    ]
 
-    lib.poly_tensor_topk.restype = ctypes.c_int
-    lib.poly_tensor_lstm_cell.restype = ctypes.c_int
-    lib.poly_tensor_lstm_cell.argtypes = [_ptr] * 8 + [_ptrp, _ptrp]
-    lib.poly_tensor_linear_apply.restype = _ptr
-    lib.poly_tensor_linear_apply.argtypes = [_ptr] * 4
-    lib.poly_tensor_rmsnorm_apply.restype = _ptr
-    lib.poly_tensor_rmsnorm_apply.argtypes = [_ptr] * 3 + [ctypes.c_double]
-    lib.poly_tensor_instancenorm_apply.restype = _ptr
-    lib.poly_tensor_instancenorm_apply.argtypes = [_ptr] * 4 + [ctypes.c_int, ctypes.c_double]
-    lib.poly_tensor_groupnorm_apply.restype = _ptr
-    lib.poly_tensor_groupnorm_apply.argtypes = [_ptr] * 4 + [ctypes.c_int, ctypes.c_double]
-    lib.poly_tensor_layernorm_axes_apply.restype = _ptr
-    lib.poly_tensor_layernorm_axes_apply.argtypes = [_ptr] * 4 + [ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_double]
-    lib.poly_tensor_batchnorm_stats.restype = ctypes.c_int
-    lib.poly_tensor_batchnorm_stats.argtypes = [_ptr] * 4 + [ctypes.c_bool, _ptrp, _ptrp]
-    lib.poly_tensor_batchnorm_apply.restype = _ptr
-    lib.poly_tensor_batchnorm_apply.argtypes = [_ptr] * 7 + [ctypes.c_bool, ctypes.c_double, ctypes.c_double]
-    lib.poly_tensor_topk.argtypes = [
-        _ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        _ptrp, _ptrp
-    ]
 
-    lib.poly_tensor_dropout.restype = _ptr
-    lib.poly_tensor_sample_logits.restype = _ptr
-    lib.poly_tensor_sample_logits.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
-    lib.poly_tensor_dropout.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_int]
-    lib.poly_tensor_sdpa.restype = _ptr
-    lib.poly_tensor_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_double] + [ctypes.c_int] * 3
 
     lib.poly_tensor_reshape_uop.restype = _ptr
     lib.poly_tensor_reshape_uop.argtypes = [
@@ -702,38 +659,14 @@ def _declare_signatures(lib):
         _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int,
     ]
 
-    lib.poly_tensor_shrink.restype = _ptr
-    lib.poly_tensor_shrink.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
 
     lib.poly_tensor_shrink_uop.restype = _ptr
     lib.poly_tensor_shrink_uop.argtypes = [
         _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr), ctypes.c_int,
     ]
 
-    lib.poly_tensor_pad_value_bool.restype = _ptr
-    lib.poly_tensor_pad_value_bool.argtypes = [
-        _ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_bool,
-    ]
-    lib.poly_tensor_pad_value_int.restype = _ptr
-    lib.poly_tensor_pad_value_int.argtypes = [
-        _ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_int64,
-    ]
-    lib.poly_tensor_pad_value_float.restype = _ptr
-    lib.poly_tensor_pad_value_float.argtypes = [
-        _ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_double,
-    ]
 
-    lib.poly_tensor_pool.restype = _ptr
-    lib.poly_tensor_pool.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p]
 
-    lib.poly_tensor_max_pool2d.restype = _ptr
-    lib.poly_tensor_max_pool2d.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.POINTER(_ptr),
-    ]
-    lib.poly_tensor_avg_pool2d.restype = _ptr
-    lib.poly_tensor_avg_pool2d.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.c_bool,
-    ]
     lib.poly_tensor_interpolate.restype = _ptr
     lib.poly_tensor_max_unpool2d.restype = _ptr
     lib.poly_tensor_max_unpool2d.argtypes = [
@@ -757,10 +690,6 @@ def _declare_signatures(lib):
         ctypes.c_int,
     ]
 
-    lib.poly_tensor_batchnorm.restype = _ptr
-    lib.poly_tensor_batchnorm.argtypes = [
-        _ptr, _ptr, _ptr, _ptr, _ptr, _ptr, _i64p, ctypes.c_int,
-    ]
 
     _index_args = [_ptr, _ptr, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(_ptr),
                    ctypes.POINTER(_ptr), ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(_ptr), ctypes.c_int]
@@ -1116,11 +1045,7 @@ def _declare_signatures(lib):
     lib.poly_uop_bind_value.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int64)]
 
     # --- Additional composed ops (shape read from UOp) ---
-    lib.poly_uop_rmsnorm_apply.restype = _ptr
-    lib.poly_uop_rmsnorm_apply.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
 
-    lib.poly_uop_sdpa.restype = _ptr
-    lib.poly_uop_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_int] * 2
 
     lib.poly_uop_sort.restype = ctypes.c_int
     lib.poly_uop_sort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, _ptrp, _ptrp]

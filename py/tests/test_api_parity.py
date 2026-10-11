@@ -48,6 +48,17 @@ def test_composite_frontends_delegate_to_core(python_name, js_name, core_name):
     assert not re.search(r'\.(?:' + '|'.join(forbidden) + r')\(', body.group(1))
 
 
+def test_generated_abi_covers_arrays_and_owned_tensor_pairs():
+    from polygrad import _generated_ffi
+    names = set(re.findall(r'lib\.(poly_\w+)\.argtypes', inspect.getsource(_generated_ffi)))
+    expected = {
+        'shrink', 'pad_mode', 'pad_value_bool', 'pad_value_int', 'pad_value_float',
+        'pool', 'avg_pool2d', 'max_pool2d', 'batchnorm', 'layernorm_axes_apply',
+        'sort', 'topk', 'cummax', 'cummin', 'qr_ex', 'lstm_cell', 'batchnorm_stats',
+    }
+    assert {'poly_tensor_' + name for name in expected} <= names
+
+
 def test_generated_abi_has_no_handwritten_signature_duplicates():
     from polygrad import _generated_ffi
     generated = inspect.getsource(_generated_ffi)

@@ -201,6 +201,75 @@ async function runTensorTests(pg, createRuntime) {
     } finally { x.dispose() }
   })
 
+  await test('paired and multi-array ABI validates every array and preserves full rank', async () => {
+    const ffi = pg._core.ffi
+    const x = Tensor.ones(Array(64).fill(1))
+    try {
+      const raw = ffi.poly_tensor_pad_mode(x._ctx, x._tensor, Array(128).fill(0), 64, 1)
+      assert(raw, 'full-rank padding rejected')
+      ffi.poly_tensor_release(raw)
+      for (const call of [
+        () => ffi.poly_tensor_shrink(x._ctx, x._tensor, [0, 1, 0, 1], 1),
+        () => ffi.poly_tensor_pad_value_float(x._ctx, x._tensor, [0, 0], 0, 0),
+        () => ffi.poly_tensor_pool(x._ctx, x._tensor, [1], 1, [1, 1], [1]),
+        () => ffi.poly_tensor_pool(x._ctx, x._tensor, [1], 1, [1], [1, 1]),
+        ...[NaN, Infinity, -1, 1.5, 4294967297].map(count =>
+          () => ffi.poly_tensor_shrink(x._ctx, x._tensor, [0, 1], count)),
+      ]) {
+        let threw = false
+        try { const result = call(); if (result) ffi.poly_tensor_release(result) }
+        catch (_) { threw = true }
+        assert(threw, 'mismatched array length accepted')
+      }
+    } finally { x.dispose() }
+  })
+
+  await test('owned pair ABI preserves independent results and rejects invalid scalars', async () => {
+    const x = new Tensor([3, 1, 2]), ffi = pg._core.ffi
+    try {
+      const first = ffi.poly_tensor_sort(x._ctx, x._tensor, 0, 0)
+      const second = ffi.poly_tensor_topk(x._ctx, x._tensor, 2n, 0, 1, 1)
+      // Releasing one member must not release its sibling or a later result.
+      ffi.poly_tensor_release(first[0])
+      ffi.poly_tensor_release(second[1])
+      const indices = x._makeResultFromCore(first[1]), values = x._makeResultFromCore(second[0])
+      try {
+        assertClose(await indices.toArray(), [1, 2, 0])
+        assertClose(await values.toArray(), [3, 2])
+      } finally { indices.dispose(); values.dispose() }
+      for (const k of [1.5, NaN, 2 ** 53, 1n << 63n]) {
+        let threw = false
+        try { const pair = ffi.poly_tensor_topk(x._ctx, x._tensor, k, 0, 1, 1); pair.forEach(p => ffi.poly_tensor_release(p)) }
+        catch (_) { threw = true }
+        assert(threw, 'invalid top-k integer accepted')
+      }
+    } finally { x.dispose() }
+  })
+
+  await test('paired padding ABI preserves int64 fill values', async () => {
+    const x = new Tensor([0], {dtype: 'int64'}), ffi = pg._core.ffi
+    try {
+      const value = 9007199254740993n
+      const raw = ffi.poly_tensor_pad_value_int(x._ctx, x._tensor, [1, 0], 1, value)
+      const y = x._makeResultFromCore(raw)
+      try { assert((await y.toArray())[0] === value, 'padding fill value rounded') }
+      finally { y.dispose() }
+    } finally { x.dispose() }
+  })
+
+  await test('contiguous storage views preserve offsets on readback and reuse', async () => {
+    const x = new Tensor([1, 2, 3, 4])
+    let view, out
+    try {
+      await x.realize()
+      view = x.shrink([[1, 3]])
+      assertClose(await view.toArrayAsync(), [2, 3])
+      out = view.add(10)
+      assertClose(await out.toArrayAsync(), [12, 13])
+      assertClose(await x.toArrayAsync(), [1, 2, 3, 4])
+    } finally { if (out) out.dispose(); if (view) view.dispose(); x.dispose() }
+  })
+
   await test('shared variance preserves correction and integer accumulation', async () => {
     for (const dtype of ['float32', 'int32']) {
       const x = new Tensor([[1, 2, 3], [2, 4, 7]], { dtype })
