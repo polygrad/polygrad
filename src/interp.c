@@ -443,7 +443,8 @@ static void mem_store_scalar(void *ptr, InterpLane v, PolyDType s) {
  *     comparison semantics depend on the operand type (float vs int).
  */
 
-static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src) {
+static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src, bool *ok) {
+  *ok = true;
   bool is_flt = poly_dtype_is_float(dt);
   bool is_uns = poly_dtype_is_unsigned(dt);
 
@@ -562,13 +563,11 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
     return is_uns ? il_uint(au * bu + cu)
                   : il_int((int64_t)((uint64_t)ai * (uint64_t)bi + (uint64_t)ci));
 
-  /* THREEFRY is decomposed by pm_decomp before linearization.
-   * If it somehow survives, XOR is a reasonable fallback. */
-  case POLY_OP_THREEFRY:
-    return il_uint(au ^ bu);
-
   default:
+    /* In particular THREEFRY must have been decomposed. Returning a made-up
+     * value here would turn a compiler defect into silent inference errors. */
     fprintf(stderr, "polygrad: interp: unhandled ALU op %s\n", poly_op_name(op));
+    *ok = false;
     return il_int(0);
   }
 }
@@ -1288,10 +1287,10 @@ static int interp_region(
           InterpLane lane_srcs[3];
           for (int j = 0; j < u->n_src && j < 3; j++)
             lane_srcs[j] = (src_idx[j] >= 0) ? iv_get(&vals[src_idx[j]], k) : il_int(0);
-          iv_set(
-              &vals[i], k,
-              interp_truncate_lane(eval_alu(u->op, alu_dt, lane_srcs, u->n_src), u->dtype)
-          );
+          bool ok;
+          InterpLane value = eval_alu(u->op, alu_dt, lane_srcs, u->n_src, &ok);
+          if (!ok) return -1;
+          iv_set(&vals[i], k, interp_truncate_lane(value, u->dtype));
         }
       } else {
         fprintf(stderr, "polygrad: interp: unhandled op %s (%d)\n", poly_op_name(u->op), u->op);

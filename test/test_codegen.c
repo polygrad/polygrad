@@ -4054,6 +4054,18 @@ TEST(codegen, exact_uint64_bigint_const_executes_like_tinygrad) {
 #ifdef POLY_TESTING
 extern void poly_test_interp_alloc_fail_after(int count);
 
+TEST(codegen, interp_undecomposed_alu_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop_const_typed(ctx, POLY_UINT64, 123);
+  PolyUOp *b = poly_uop_const_typed(ctx, POLY_UINT64, 456);
+  PolyUOp *raw = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, a, b, poly_arg_none());
+  PolyUOp *linear[] = {a, b, raw};
+  int rc = poly_interp_eval(ctx, linear, 3, NULL, 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rc < 0);
+  PASS();
+}
+
 TEST(codegen, interp_local_allocation_failure_is_not_success) {
   PolyAddrSpace spaces[] = {POLY_ADDR_REG, POLY_ADDR_LOCAL};
   for (int i = 0; i < 2; i++) {
