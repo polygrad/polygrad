@@ -9,6 +9,10 @@ extern "C" {
 #endif
 
 /* Autograd */
+/* SINK of custom-kernel AFTER outputs in source-topological order. Each source
+ * is AFTER(data, CALL(SINK,...data...)); host callback lookup stays in bindings.
+ * The caller must retain this graph if it crosses a collection safe point. */
+PolyUOp *poly_uop_custom_gradient_outputs(PolyCtx *ctx, PolyUOp *root);
 /* Reverse-mode gradient of loss w.r.t. wrt.
  * Returns a UOp expression for d(loss)/d(wrt), or NULL on unsupported path. */
 PolyUOp *poly_uop_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt);

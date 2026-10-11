@@ -66,6 +66,8 @@
     "wasm/",
     "csrc/",
     "napi_api.c",
+    "napi_generated.h",
+    "napi_generated_exports.h",
     "binding.gyp",
     "scripts/",
     "extension_native.h",

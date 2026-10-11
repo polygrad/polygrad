@@ -26,6 +26,27 @@
 
 /* Local helpers */
 
+PolyUOp *poly_uop_custom_gradient_outputs(PolyCtx *ctx, PolyUOp *root) {
+  if (!ctx || !root) return NULL;
+  int count = 0, selected = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, root, &count);
+  if (!topo) return NULL;
+  for (int i = 0; i < count; i++) {
+    PolyUOp *after = topo[i];
+    if (after->op != POLY_OP_AFTER || after->n_src != 2) continue;
+    PolyUOp *call = after->src[1];
+    if (call->op != POLY_OP_CALL || !call->n_src || call->src[0]->op != POLY_OP_SINK) continue;
+    for (int j = 1; j < call->n_src; j++)
+      if (call->src[j] == after->src[0]) {
+        topo[selected++] = after;
+        break;
+      }
+  }
+  PolyUOp *out = poly_uop_sink_n(ctx, topo, selected);
+  free(topo);
+  return out;
+}
+
 /* Current pm_gradient writes ordinary Python literals into ElementwiseMixin
  * expressions. UOp.ufix creates a weak CONST and _broadcasted keeps the
  * promoted literal weak (mixin/gradient.py:49-62,

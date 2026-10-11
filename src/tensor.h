@@ -386,6 +386,9 @@ PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
 /* Scalar-output gradient. Both root domains are differentiated independently;
  * host-language custom gradient callbacks must be handled by their frontend. */
 PolyTensor *poly_tensor_gradient(PolyCtx *ctx, PolyTensor *loss, PolyTensor *target);
+/* Borrowed current root if this live frontend Tensor is an eligible backward
+ * target. Frontends own their weak wrapper registries; C owns graph admission. */
+PolyUOp *poly_tensor_gradient_target(PolyCtx *ctx, PolyTensor *loss, PolyTensor *candidate);
 
 PolyTensor *poly_tensor_contiguous_backward(PolyCtx *ctx, PolyTensor *src);
 
@@ -400,6 +403,14 @@ PolyTensor *poly_tensor_mean(
 );
 
 PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_var_axes(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    PolyTensor *correction
+);
 
 PolyTensor *poly_tensor_min(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
 

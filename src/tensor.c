@@ -863,6 +863,17 @@ PolyTensor *poly_tensor_create_result_like(
   return poly_tensor_create_result(ctx, inputs, 1, uop_logical, uop_physical, role, device);
 }
 
+PolyUOp *poly_tensor_gradient_target(PolyCtx *ctx, PolyTensor *loss, PolyTensor *candidate) {
+  if (!ctx || !loss || !candidate || loss->owner_ctx != ctx || candidate->owner_ctx != ctx)
+    return NULL;
+  PolyUOp *root = tensor_current_uop(loss), *target = tensor_current_uop(candidate);
+  return root && target && poly_dtype_is_float(target->dtype) &&
+                 poly_uop_device(target) != POLY_DEVICE_AUTO &&
+                 poly_uop_reachable(ctx, root, target)
+             ? target
+             : NULL;
+}
+
 PolyTensor *poly_tensor_gradient(PolyCtx *ctx, PolyTensor *loss, PolyTensor *target) {
   PolyTensor *inputs[] = {loss, target};
   int portable = poly_tensor_result_builds_logical(ctx, inputs, 2);
@@ -1654,6 +1665,17 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
     logical_src[i] = build_logical ? input->uop_logical : NULL;
     physical_src[i] = tensor_current_uop(input);
     if (!physical_src[i]) return NULL;
+    if (op == POLY_OP_AND || op == POLY_OP_OR || op == POLY_OP_XOR || op == POLY_OP_SHL ||
+        op == POLY_OP_SHR) {
+      /* Reject invalid typed graphs at the common Tensor boundary, including
+       * a float RHS that frontend checks of only the receiver would miss. */
+      PolyDType dt = physical_src[i]->dtype;
+      if (!poly_dtype_is_int(dt) && !poly_dtype_is_bool(dt)) return NULL;
+      if (build_logical) {
+        dt = logical_src[i]->dtype;
+        if (!poly_dtype_is_int(dt) && !poly_dtype_is_bool(dt)) return NULL;
+      }
+    }
   }
 
   int promote_from = 0;
@@ -7024,30 +7046,70 @@ PolyUOp *poly_uop_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
   return poly_uop_mean_axes(ctx, x, &a, 1, keepdim != 0);
 }
 
-PolyUOp *poly_uop_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim;
-  ndim = uop_shape(ctx, x, shape);
+PolyUOp *poly_uop_var_axes(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    PolyUOp *correction
+) {
+  if (!ctx || !x || !correction || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes && !axes))
+    return NULL;
+  int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 0) return NULL;
-  if (axis < 0) axis += ndim;
-  int64_t count = shape[axis];
-  PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
-  if (!x_view) return NULL;
-  /* var(x) = mean((x - mean(x))^2) * count / (count - correction) */
-  /* First get mean with keepdim=1 for broadcast */
-  PolyUOp *m = poly_uop_mean_reduce(ctx, x_view, axis, 1);
-  /* Expand mean back to full shape for subtraction */
-  PolyUOp *m_expanded = poly_uop_expand(ctx, m, (int64_t *)shape, ndim);
-  /* (x - mean)^2 */
-  PolyUOp *diff = poly_uop_alu2(ctx, POLY_OP_SUB, x_view, m_expanded);
-  PolyUOp *sq = poly_uop_alu2(ctx, POLY_OP_MUL, diff, diff);
-  /* sum of squares / (count - correction) */
-  int64_t out_shape[POLY_MAX_DIMS];
-  int out_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, sq, shape, ndim, axis, keepdim, out_shape, &out_ndim);
-  double divisor = (double)(count - correction);
-  if (divisor <= 0.0) divisor = 1.0;
-  return poly_uop_alu2(ctx, POLY_OP_FDIV, s, poly_uop_elementwise_float_const(ctx, x, divisor));
+  PolyUOp *count = poly_uop_const_int(ctx, 1);
+  bool seen[POLY_MAX_DIMS] = {false};
+  for (int i = 0; i < n_axes; i++) {
+    int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
+    if (axis < 0 || axis >= ndim || seen[axis]) return NULL;
+    seen[axis] = true;
+    PolyUOp *dim = poly_uop_shape_dim(ctx, x, (int)axis);
+    int64_t n, d;
+    if (!count || !dim) return NULL;
+    if (poly_uop_const_i64(count, &n) == 0 && poly_uop_const_i64(dim, &d) == 0) {
+      if (n < 0 || d < 0 || (d && n > INT64_MAX / d)) return NULL;
+      count = poly_uop_const_int(ctx, n * d);
+    } else
+      count = poly_uop_mul(ctx, count, dim);
+  }
+  /* OpMixin.var casts squares to sum_acc_dtype(input), not the mean's dtype.
+   * Keep the scalar denominator scalar, including zero for excessive correction. */
+  PolyUOp *diff = poly_uop_sub(ctx, x, poly_uop_mean_axes(ctx, x, axes, n_axes, true));
+  PolyUOp *squares = diff ? poly_uop_mul(ctx, diff, diff) : NULL;
+  PolyDType acc;
+  if (!squares || !poly_sum_acc_dtype(x->dtype, &acc)) return NULL;
+  PolyUOp *numerator = sum_axes_root(ctx, poly_uop_cast(ctx, squares, acc), axes, n_axes, keepdim);
+  PolyUOp *denominator;
+  int64_t n;
+  if (poly_uop_const_i64(count, &n) == 0 && correction->op == POLY_OP_CONST &&
+      poly_dtype_is_weak(correction->dtype) && correction->arg.kind == POLY_ARG_INT) {
+    int64_t c = correction->arg.i;
+    if (c < 0 && n > INT64_MAX + c) return NULL;
+    denominator = poly_uop_const_int(ctx, c >= n ? 0 : n - c);
+  } else if (poly_uop_const_i64(count, &n) == 0 && correction->op == POLY_OP_CONST &&
+             poly_dtype_is_weak(correction->dtype) && correction->arg.kind == POLY_ARG_FLOAT) {
+    double value = (double)n - correction->arg.f;
+    denominator = poly_uop_const_float(ctx, value < 0 ? 0 : value);
+  } else {
+    denominator =
+        poly_uop_maximum(ctx, poly_uop_sub(ctx, count, correction), poly_uop_const_int(ctx, 0));
+    /* smax simplifies shape arithmetic in the pin; Tensor-valued corrections
+     * retain ordinary Tensor composition instead. */
+    if (poly_dtype_is_weak(correction->dtype))
+      denominator = poly_graph_rewrite(ctx, denominator, poly_symbolic());
+  }
+  PolyUOp *result = poly_uop_div(ctx, numerator, denominator);
+  return result
+             ? poly_uop_cast(ctx, result, poly_dtype_is_float(x->dtype) ? x->dtype : POLY_FLOAT32)
+             : NULL;
+}
+
+PolyUOp *poly_uop_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction) {
+  int64_t a = axis;
+  int ndim = poly_uop_ndim(ctx, x);
+  int n_axes = ndim == 0 && (axis == 0 || axis == -1) ? 0 : 1;
+  return poly_uop_var_axes(ctx, x, &a, n_axes, keepdim != 0, poly_uop_const_int(ctx, correction));
 }
 
 PolyUOp *poly_uop_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
@@ -8302,6 +8364,29 @@ PolyTensor *poly_tensor_mean(
       ctx, src,
       build_logical ? poly_uop_mean_axes(ctx, src->uop_logical, axes, n_axes, keepdim) : NULL,
       poly_uop_mean_axes(ctx, current, axes, n_axes, keepdim)
+  );
+}
+
+PolyTensor *poly_tensor_var_axes(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    PolyTensor *correction
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, src) || !tensor_roots_owned_by_ctx(ctx, correction))
+    return NULL;
+  PolyTensor *inputs[] = {src, correction};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (logical < 0) return NULL;
+  return tensor_composite_result(
+      ctx,
+      logical
+          ? poly_uop_var_axes(ctx, src->uop_logical, axes, n_axes, keepdim, correction->uop_logical)
+          : NULL,
+      poly_uop_var_axes(ctx, src->uop_physical, axes, n_axes, keepdim, correction->uop_physical),
+      inputs, 2
   );
 }
 

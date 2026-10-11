@@ -31,6 +31,7 @@ from polygrad.uop.ops import UOp as OpsUOp, resolve
     ('triu', 'triu', 'triu_tensor'), ('tril', 'tril', 'tril_tensor'), ('repeat', 'repeat', 'repeat'),
     ('repeat_interleave', 'repeatInterleave', 'repeat_interleave'),
     ('layernorm', 'layernorm', 'layernorm_axes_apply'),
+    ('var', 'var', 'var_axes'),
 ])
 def test_composite_frontends_delegate_to_core(python_name, js_name, core_name):
     # Reviewed ownership inventory, not a ban on host argument normalization.
@@ -45,6 +46,62 @@ def test_composite_frontends_delegate_to_core(python_name, js_name, core_name):
     body = re.search(r'^    ' + re.escape(js_name) + r'\([^\n]*\) \{\n(.*?)^    \}', js.read_text(), re.M | re.S)
     assert body and 'poly_tensor_' + core_name in body.group(1)
     assert not re.search(r'\.(?:' + '|'.join(forbidden) + r')\(', body.group(1))
+
+
+def test_generated_abi_has_no_handwritten_signature_duplicates():
+    from polygrad import _generated_ffi
+    generated = inspect.getsource(_generated_ffi)
+    names = set(re.findall(r'lib\.(poly_\w+)\.argtypes', generated))
+    manual = inspect.getsource(_ffi)
+    assert not names.intersection(re.findall(r'lib\.(poly_\w+)\.(?:argtypes|restype)', manual))
+    for name in names:
+        assert getattr(_ffi._lib, name).argtypes is not None
+    root = Path(__file__).resolve().parents[2]
+    if (root / 'js/napi_api.c').exists():
+        native = (root / 'js/napi_api.c').read_text(encoding='utf-8')
+        wasm = (root / 'js/src/core/wasm_common.js').read_text(encoding='utf-8')
+        assert not names.intersection(re.findall(r'napi_(poly_\w+)\s*\(', native))
+        assert not names.intersection(re.findall(r'^    (poly_\w+):', wasm, re.M))
+
+
+def test_header_changes_invalidate_native_artifacts():
+    root = Path(__file__).resolve().parents[2]
+    if not (root / 'Makefile').exists():
+        pytest.skip('build dependency check requires repository sources')
+    result = subprocess.run(
+        ['make', '-n', '-W', 'src/tensor.h', 'build/libpolygrad.so', 'build/polygrad_test'],
+        cwd=root, capture_output=True, text=True, encoding='utf-8', check=True)
+    for target in ('build/libpolygrad.so', 'build/polygrad_test'):
+        assert '-o ' + target + ' ' in result.stdout
+
+
+def test_c_graph_diagnostic_includes_dependencies_once():
+    import ctypes
+    from polygrad import Runtime
+    lib = _ffi._lib
+    lib.poly_uop_graph_str.argtypes = [ctypes.c_void_p]
+    lib.poly_uop_graph_str.restype = ctypes.c_void_p
+    free = ctypes.CDLL(None).free
+    free.argtypes = [ctypes.c_void_p]
+    with Runtime(device='INTERP') as rt:
+        x = rt.Tensor([1.0, 2.0])
+        result = x + x
+        ptr = lib.poly_uop_graph_str(result.uop.raw)
+        assert ptr
+        try:
+            text = ctypes.string_at(ptr).decode('utf-8')
+            assert len(text.splitlines()) > 1
+            assert text.count('UOp(ADD,') == 1
+            assert 'UOp(BUFFER,' in text
+        finally:
+            free(ptr)
+
+
+def test_autograd_discovery_is_core_owned():
+    targets = inspect.getsource(Tensor._live_grad_targets)
+    custom = inspect.getsource(Tensor._custom_grad_records_for)
+    assert 'poly_tensor_gradient_target' in targets and 'poly_uop_reachable' not in targets
+    assert 'poly_uop_custom_gradient_outputs' in custom and 'while stack' not in custom
 
 
 def test_gguf_annotations_are_deferred_for_python39():

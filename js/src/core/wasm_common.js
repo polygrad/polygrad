@@ -12,6 +12,7 @@
 'use strict'
 
 const { PolyAsyncRequired } = require('../errors')
+const generatedBindings = require('./generated')
 
 /**
  * Wrap an already-loaded Emscripten module into a polygrad core binding.
@@ -797,6 +798,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   const ffi = {
+    ...generatedBindings(Module, callWithInt64),
     // Simple ops (no int64 arrays)
     poly_ctx_new: Module._poly_ctx_new,
     poly_ctx_destroy: Module._poly_ctx_destroy,
@@ -815,15 +817,11 @@ function createWasmCoreFromModule(Module, device) {
     poly_set_default_float: Module._poly_set_default_float,
     poly_set_default_int: Module._poly_set_default_int,
     poly_set_noopt: Module._poly_set_noopt,
-    poly_uop_const_float: Module._poly_uop_const_float,
-    poly_uop_const_double: Module._poly_uop_const_double,
-    poly_uop_const_int: (ctx, val) => Module._poly_uop_const_int(ctx, BigInt(val)),
     poly_uop_const_int_decimal: (ctx, val) => {
       const ptr = allocString(val)
       try { return Module._poly_uop_const_int_decimal(ctx, ptr) }
       finally { Module._free(ptr) }
     },
-    poly_uop_bind: (ctx, variable, value) => Module._poly_uop_bind(ctx, variable, value),
     poly_uop_variable_by_id: (ctx, name, lo, hi, dtype, multiple, param) => {
       const ptr = allocString(name)
       try { return Module._poly_uop_variable_by_id(ctx, ptr, lo, hi, dtype, BigInt(multiple), param) }
@@ -834,21 +832,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return ptr ? Module.UTF8ToString(ptr) : '' }
       finally { Module._free(ptr) }
     },
-    poly_uop_const_float_by_id: Module._poly_uop_const_float_by_id,
-    poly_uop_const_int_by_id: (ctx, val, dtypeId) =>
-      Module._poly_uop_const_int_by_id(ctx, BigInt(val), dtypeId),
-    // Tensor.contiguous() is used as the explicit materialization/readback
-    // boundary for views, matching the native N-API adapter surface.
-    poly_uop_contiguous: Module._poly_uop_contiguous,
-    poly_uop_alu1: Module._poly_uop_alu1,
-    poly_uop_alu2: Module._poly_uop_alu2,
-    poly_uop_binop: Module._poly_uop_binop,
-    poly_uop_sub: Module._poly_uop_sub,
-    poly_uop_div: Module._poly_uop_div,
-    poly_uop_elementwise_neg: Module._poly_uop_elementwise_neg,
-    poly_uop_alu3: Module._poly_uop_alu3,
-    poly_uop_store_val: Module._poly_uop_store_val,
-    poly_uop_sink1: Module._poly_uop_sink1,
     poly_uop_sink_n: (ctx, stores) => {
       const ptr = writePtrArray(stores || [])
       try {
@@ -857,9 +840,6 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
-    poly_uop_placeholder_like: Module._poly_uop_placeholder_like,
-    poly_uop_range_by_id: (ctx, bound, axisId, axisType) =>
-      Module._poly_uop_range_by_id(ctx, BigInt(bound), BigInt(axisId), axisType),
     poly_uop_index: (ctx, base, indices) => {
       const idx = indices || []
       const ptr = writePtrArray(idx)
@@ -869,8 +849,6 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
-    poly_uop_load: Module._poly_uop_load,
-    poly_uop_store: Module._poly_uop_store,
     poly_uop_set: (ctx, addr, value, ranges) => {
       const rs = ranges || []
       const ptr = rs.length ? writePtrArray(rs) : 0
@@ -927,7 +905,6 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
-    poly_uop_after: Module._poly_uop_after,
     poly_uop_reduce: (ctx, op, expr, ranges) => {
       const rs = ranges || []
       const ptr = writePtrArray(rs)
@@ -937,16 +914,7 @@ function createWasmCoreFromModule(Module, device) {
         if (ptr) Module._free(ptr)
       }
     },
-    poly_uop_flatten: Module._poly_uop_flatten,
     poly_uop_numel: (ctx, uop) => Number(Module._poly_uop_numel(ctx, uop)),
-    poly_uop_buffer_by_id: (ctx, dtypeId, size) => Module._poly_uop_buffer_by_id(ctx, dtypeId, BigInt(size)),
-    poly_uop_buffer_on_device_by_id: (ctx, dtypeId, size, device) =>
-      Module._poly_uop_buffer_on_device_by_id(ctx, dtypeId, BigInt(size), device),
-    poly_uop_buffer_f32: (ctx, size) => Module._poly_uop_buffer_f32(ctx, BigInt(size)),
-    poly_uop_buffer_f64: (ctx, size) => Module._poly_uop_buffer_f64(ctx, BigInt(size)),
-
-    // Tinygrad UOp._frompy keeps imported bytes in PYTHON storage until COPY.
-    // Browser HOST bytes stay JS-owned and the C core stores their buffer key.
     poly_buffer_from_host: (ctx, typedArray, nbytes, dtypeId, dims, ndim) => {
       const dimsPtr = (dims && ndim > 0) ? writeInt64Array(Array.from(dims)) : 0
       const uop = Module._poly_buffer_from_host(ctx, 0, nbytes, dtypeId, dimsPtr, ndim)
@@ -974,16 +942,6 @@ function createWasmCoreFromModule(Module, device) {
       }
       return tensor
     },
-    poly_tensor_const_int_by_id: (ctx, value, dtypeId, targetDevice) =>
-      Module._poly_tensor_const_int_by_id(ctx, BigInt(value), dtypeId, targetDevice),
-    poly_tensor_const_uint_by_id: (ctx, value, dtypeId, targetDevice) =>
-      Module._poly_tensor_const_uint_by_id(ctx, BigInt(value), dtypeId, targetDevice),
-    poly_tensor_const_float_by_id: (ctx, value, dtypeId, targetDevice) =>
-      Module._poly_tensor_const_float_by_id(ctx, value, dtypeId, targetDevice),
-    poly_tensor_const_like_int: (ctx, ref, value) =>
-      Module._poly_tensor_const_like_int(ctx, ref, BigInt(value)),
-    poly_tensor_const_like_float: (ctx, ref, value) =>
-      Module._poly_tensor_const_like_float(ctx, ref, value),
     poly_tensor_full_int_by_id: (
       ctx, shape, ndim, value, dtypeId, targetDevice, dtypeExplicit, buffer
     ) => {
@@ -1022,18 +980,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_full_invalid_by_id(ctx, ptr, ndim, dtype, device, buffer ? 1 : 0) }
       finally { if (ptr) Module._free(ptr) }
     },
-    poly_tensor_arange_int_by_id: (ctx, start, stop, step, dtypeId, targetDevice) =>
-      Module._poly_tensor_arange_int_by_id(
-        ctx, BigInt(start), BigInt(stop), BigInt(step), dtypeId, targetDevice
-      ),
-    poly_tensor_arange_float_by_id: (ctx, start, stop, step, dtypeId, targetDevice) =>
-      Module._poly_tensor_arange_float_by_id(ctx, start, stop, step, dtypeId, targetDevice),
-    poly_tensor_linspace_by_id: (ctx, start, stop, steps, dtypeId, targetDevice) =>
-      Module._poly_tensor_linspace_by_id(
-        ctx, start, stop, BigInt(steps), dtypeId, targetDevice
-      ),
-    poly_tensor_eye_by_id: (ctx, n, m, dtypeId, targetDevice) =>
-      Module._poly_tensor_eye_by_id(ctx, BigInt(n), BigInt(m), dtypeId, targetDevice),
     poly_tensor_manual_seed: (ctx, seed) =>
       Module._poly_tensor_manual_seed(ctx, BigInt(seed)),
     poly_tensor_rand_by_id: (ctx, shape, ndim, dtypeId, targetDevice, contiguous) => {
@@ -1057,7 +1003,6 @@ function createWasmCoreFromModule(Module, device) {
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
-    poly_uop_buffer: (ctx, uop) => Module._poly_uop_buffer(ctx, uop),
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_device: (uop) => Module._poly_uop_device(uop),
     poly_uop_device_names: (ctx, uop) => {
@@ -1077,7 +1022,6 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
     poly_uop_key: (uop) => BigInt(uop || 0),
     poly_uop_n_src: (uop) => Module._poly_uop_n_src(uop || 0),
-    poly_uop_src: (uop, idx) => Module._poly_uop_src(uop || 0, idx | 0),
     poly_uop_call_grad_fxn_key: (uop) => Module._poly_uop_call_grad_fxn_key(uop || 0) >>> 0,
     poly_uop_reachable: (ctx, root, target) =>
       !!Module._poly_uop_reachable(ctx, root || 0, target || 0),
@@ -1149,14 +1093,6 @@ function createWasmCoreFromModule(Module, device) {
         Module._free(outputsPtr)
       }
     },
-    poly_tensor_empty_by_id: (ctx, dtypeId, shape, ndim, device) => {
-      const dimsPtr = writeInt64Array(shape || [])
-      try {
-        return Module._poly_tensor_empty_by_id(ctx, dtypeId, dimsPtr, ndim, device)
-      } finally {
-        if (dimsPtr) Module._free(dimsPtr)
-      }
-    },
     poly_tensor_empty_uop_name_by_id: (ctx, dtypeId, shape, ndim, device) => {
       if (!Array.isArray(shape) || shape.length !== ndim) {
         throw new RangeError('polygrad: shape length does not match ndim')
@@ -1177,7 +1113,6 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
     poly_tensor_create_result_like: (ctx, input, logical, physical, role, device) =>
       Module._poly_tensor_create_result_like(ctx, input, logical || 0, physical, role, device),
-    poly_tensor_retain: (tensor) => Module._poly_tensor_retain(tensor),
     poly_tensor_capture_begin: ctx => Module._poly_tensor_capture_begin(ctx),
     poly_tensor_capture_end: capture => Module._poly_tensor_capture_end(capture),
     poly_tensor_capture_rng: (capture, index) => {
@@ -1189,7 +1124,6 @@ function createWasmCoreFromModule(Module, device) {
         return {device, tensors:[heap32()[ptr>>>2], heap32()[(ptr>>>2)+1]]}
       } finally { Module._free(ptr) }
     },
-    poly_tensor_capture_binding: (capture, index) => Module._poly_tensor_capture_binding(capture, index),
     poly_tensor_capture_wrap: (capture, states, mutable, outputs) => {
       if (states.length !== mutable.length || states.length >= 65535 || !outputs.length || outputs.length > 65535)
         throw new Error('invalid Model capture arity')
@@ -1211,8 +1145,6 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_replace_roots(
         ctx, tensor, logical || 0, physical || 0, role, device
       ),
-    poly_tensor_to_device: (ctx, tensor, device) =>
-      Module._poly_tensor_to_device(ctx, tensor, device),
     poly_tensor_to_device_name: (ctx, tensor, device) => {
       // Preserve the established public CPU -> Wasm execution alias, without
       // reducing named storage devices (DISK paths) to backend-only enums.
@@ -1221,128 +1153,13 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_to_device_name(ctx, tensor, ptr) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_assign: (ctx, target, value) =>
-      Module._poly_tensor_assign(ctx, target, value),
-    poly_tensor_alu1: (ctx, op, src) =>
-      Module._poly_tensor_alu1(ctx, op, src),
-    poly_tensor_alu2: (ctx, op, a, b) =>
-      Module._poly_tensor_alu2(ctx, op, a, b),
-    poly_tensor_alu3: (ctx, op, a, b, c) =>
-      Module._poly_tensor_alu3(ctx, op, a, b, c),
-    poly_tensor_div: (ctx, dividend, divisor, rounding) =>
-      Module._poly_tensor_div(ctx, dividend, divisor, rounding),
-    poly_tensor_exp: (ctx, src) =>
-      Module._poly_tensor_exp(ctx, src),
-    poly_tensor_log: (ctx, src) =>
-      Module._poly_tensor_log(ctx, src),
-    poly_tensor_cos: (ctx, src) =>
-      Module._poly_tensor_cos(ctx, src),
-    poly_tensor_tan: (ctx, src) =>
-      Module._poly_tensor_tan(ctx, src),
-    poly_tensor_tanh: (ctx, src) =>
-      Module._poly_tensor_tanh(ctx, src),
-    poly_tensor_log10: (ctx, x) =>
-      Module._poly_tensor_log10(ctx, x),
-    poly_tensor_atanh: (ctx, x) =>
-      Module._poly_tensor_atanh(ctx, x),
-    poly_tensor_asinh: (ctx, x) =>
-      Module._poly_tensor_asinh(ctx, x),
-    poly_tensor_acosh: (ctx, x) =>
-      Module._poly_tensor_acosh(ctx, x),
-    poly_tensor_asin: (ctx, x) =>
-      Module._poly_tensor_asin(ctx, x),
-    poly_tensor_acos: (ctx, x) =>
-      Module._poly_tensor_acos(ctx, x),
-    poly_tensor_atan: (ctx, x) =>
-      Module._poly_tensor_atan(ctx, x),
-    poly_tensor_logsigmoid: (ctx, x) =>
-      Module._poly_tensor_logsigmoid(ctx, x),
-    poly_tensor_sinh: (ctx, x) =>
-      Module._poly_tensor_sinh(ctx, x),
-    poly_tensor_cosh: (ctx, x) =>
-      Module._poly_tensor_cosh(ctx, x),
-    poly_tensor_erf: (ctx, x) =>
-      Module._poly_tensor_erf(ctx, x),
-    poly_tensor_softsign: (ctx, x) =>
-      Module._poly_tensor_softsign(ctx, x),
-    poly_tensor_isfinite: (ctx, x) =>
-      Module._poly_tensor_isfinite(ctx, x),
-    poly_tensor_celu: (ctx, x, alpha) =>
-      Module._poly_tensor_celu(ctx, x, alpha),
-    poly_tensor_selu: (ctx, x, alpha, gamma) =>
-      Module._poly_tensor_selu(ctx, x, alpha, gamma),
-    poly_tensor_copysign: (ctx, x, other) =>
-      Module._poly_tensor_copysign(ctx, x, other),
-    poly_tensor_lerp: (ctx, x, end, weight, scalar_weight) =>
-      Module._poly_tensor_lerp(ctx, x, end, weight, scalar_weight ? 1 : 0),
-    poly_tensor_isclose: (ctx, x, other, rtol, atol, equal_nan) =>
-      Module._poly_tensor_isclose(ctx, x, other, rtol, atol, equal_nan ? 1 : 0),
-    poly_tensor_binary_crossentropy: (ctx, x, target, reduction) =>
-      Module._poly_tensor_binary_crossentropy(ctx, x, target, reduction),
-    poly_tensor_cross_entropy: (ctx, x, target, axis, reduction, smoothing) =>
-      Module._poly_tensor_cross_entropy(ctx, x, target, axis, reduction, smoothing),
-    poly_tensor_binary_crossentropy_logits: (ctx, x, target, weight, reduction) =>
-      Module._poly_tensor_binary_crossentropy_logits(ctx, x, target, weight || 0, reduction),
-    poly_tensor_nll_loss: (ctx, x, target, weight, ignore_index, reduction) =>
-      Module._poly_tensor_nll_loss(ctx, x, target, weight || 0, ignore_index || 0, reduction),
-    poly_tensor_log1p: (ctx, src) =>
-      Module._poly_tensor_log1p(ctx, src),
-    poly_tensor_expm1: (ctx, src) =>
-      Module._poly_tensor_expm1(ctx, src),
     poly_tensor_prod: (ctx, src, axes, n_axes, keepdim) =>
       callWithInt64(Module._poly_tensor_prod, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
     poly_tensor_logsumexp: (ctx, src, axes, n_axes, keepdim) =>
       callWithInt64(Module._poly_tensor_logsumexp, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
-    poly_tensor_normalize: (ctx, src, p, axis, eps) =>
-      Module._poly_tensor_normalize(ctx, src, p, axis, eps),
-    poly_tensor_logcumsumexp: (ctx, src, axis) =>
-      Module._poly_tensor_logcumsumexp(ctx, src, axis),
-    poly_tensor_gelu_exact: (ctx, src) =>
-      Module._poly_tensor_gelu_exact(ctx, src),
-    poly_tensor_diag: (ctx, src) =>
-      Module._poly_tensor_diag(ctx, src),
-    poly_tensor_diagonal: (ctx, src, offset, dim1, dim2) =>
-      Module._poly_tensor_diagonal(ctx, src, BigInt(offset), dim1, dim2),
-    poly_tensor_unfold: (ctx, src, dim, size, step) =>
-      Module._poly_tensor_unfold(ctx, src, dim, BigInt(size), BigInt(step)),
-    poly_tensor_argmin: (ctx, src, axis, keepdim) =>
-      Module._poly_tensor_argmin(ctx, src, axis, (keepdim ? 1 : 0)),
     poly_tensor_pad_mode: (ctx, src, pairs, ndim, mode) =>
       callWithInt64(Module._poly_tensor_pad_mode, ctx, src, pairs, ndim, mode),
-    poly_tensor_gelu: (ctx, src) =>
-      Module._poly_tensor_gelu(ctx, src),
-    poly_tensor_relu: (ctx, src) => Module._poly_tensor_relu(ctx, src),
-    poly_tensor_ceil: (ctx, src) => Module._poly_tensor_ceil(ctx, src),
-    poly_tensor_floor: (ctx, src) => Module._poly_tensor_floor(ctx, src),
-    poly_tensor_mish: (ctx, src) => Module._poly_tensor_mish(ctx, src),
-    poly_tensor_hardswish: (ctx, src) => Module._poly_tensor_hardswish(ctx, src),
-    poly_tensor_sigmoid: (ctx, src) => Module._poly_tensor_sigmoid(ctx, src),
-    poly_tensor_abs: (ctx, src) => Module._poly_tensor_abs(ctx, src),
-    poly_tensor_sign: (ctx, src) => Module._poly_tensor_sign(ctx, src),
-    poly_tensor_square: (ctx, src) => Module._poly_tensor_square(ctx, src),
-    poly_tensor_rsqrt: (ctx, src) => Module._poly_tensor_rsqrt(ctx, src),
-    poly_tensor_round: (ctx, src) => Module._poly_tensor_round(ctx, src),
-    poly_tensor_isnan: (ctx, src) => Module._poly_tensor_isnan(ctx, src),
-    poly_tensor_relu6: (ctx, src) => Module._poly_tensor_relu6(ctx, src),
-    poly_tensor_silu: (ctx, src) => Module._poly_tensor_silu(ctx, src),
-    poly_tensor_logical_not: (ctx, src) => Module._poly_tensor_logical_not(ctx, src),
-    poly_tensor_neg: (ctx, src) => Module._poly_tensor_neg(ctx, src),
-    poly_tensor_ge: (ctx, src, rhs) => Module._poly_tensor_ge(ctx, src, rhs),
-    poly_tensor_le: (ctx, src, rhs) => Module._poly_tensor_le(ctx, src, rhs),
-    poly_tensor_triu_tensor: (ctx, src, diagonal) => Module._poly_tensor_triu_tensor(ctx, src, diagonal),
-    poly_tensor_tril_tensor: (ctx, src, diagonal) => Module._poly_tensor_tril_tensor(ctx, src, diagonal),
     poly_tensor_repeat: (ctx, src, repeats) => callWithInt64(Module._poly_tensor_repeat, ctx, src, repeats, repeats.length),
-    poly_tensor_repeat_interleave: (ctx, src, repeats, dim) => Module._poly_tensor_repeat_interleave(ctx, src, repeats, dim),
-    poly_tensor_elu_tensor: (ctx, src, arg) => Module._poly_tensor_elu_tensor(ctx, src, arg),
-    poly_tensor_logaddexp: (ctx, src, arg) => Module._poly_tensor_logaddexp(ctx, src, arg),
-    poly_tensor_eq: (ctx, src, arg) => Module._poly_tensor_eq(ctx, src, arg),
-    poly_tensor_triu: (ctx, src, arg) => Module._poly_tensor_triu(ctx, src, arg),
-    poly_tensor_tril: (ctx, src, arg) => Module._poly_tensor_tril(ctx, src, arg),
-    poly_tensor_softplus_tensor: (ctx, src, a, b) => Module._poly_tensor_softplus_tensor(ctx, src, a, b),
-    poly_tensor_clamp: (ctx, src, a, b) => Module._poly_tensor_clamp(ctx, src, a, b),
-    poly_tensor_hardsigmoid: (ctx, src, a, b) => Module._poly_tensor_hardsigmoid(ctx, src, a, b),
-    poly_tensor_isinf_flags: (ctx, src, a, b) => Module._poly_tensor_isinf_flags(ctx, src, +!!a, +!!b),
-    poly_tensor_leaky_relu_tensor: (ctx, src, slope) => Module._poly_tensor_leaky_relu_tensor(ctx, src, slope),
     poly_tensor_stack: (ctx, inputs, dim) => {
       const ptr = writePtrArray(inputs)
       try { return Module._poly_tensor_stack(ctx, ptr, inputs.length, dim) }
@@ -1353,64 +1170,25 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_cat(ctx, ptr, inputs.length, dim) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_bitwise_not: (ctx, src) => Module._poly_tensor_bitwise_not(ctx, src),
-    poly_tensor_sparse_categorical_crossentropy: (ctx, x, target, ignoreIndex, smoothing, reduction) =>
-      Module._poly_tensor_sparse_categorical_crossentropy(ctx, x, target, BigInt(ignoreIndex), smoothing, reduction),
-    poly_tensor_quick_gelu: (ctx, src) =>
-      Module._poly_tensor_quick_gelu(ctx, src),
-    poly_tensor_detach: (ctx, src) =>
-      Module._poly_tensor_detach(ctx, src),
-    poly_tensor_contiguous_backward: (ctx, src) =>
-      Module._poly_tensor_contiguous_backward(ctx, src),
-    poly_tensor_sum: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_sum, ctx, src, axes, len, keepdim ? 1 : 0),
-    poly_tensor_mean: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_mean, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_sum_dtype_by_id: (ctx, src, axes, len, keepdim, dtypeId) =>
       callWithInt64(
         Module._poly_tensor_sum_dtype_by_id,
         ctx, src, axes, len, keepdim ? 1 : 0, dtypeId
       ),
-    poly_tensor_max: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_max, ctx, src, axes, len, keepdim ? 1 : 0),
-    poly_tensor_min: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_min, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_all: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_all, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_any: (ctx, src, axes, len, keepdim) =>
       callWithInt64(Module._poly_tensor_any, ctx, src, axes, len, keepdim ? 1 : 0),
-    poly_tensor_cumsum: (ctx, src, axis) => Module._poly_tensor_cumsum(ctx, src, axis),
-    poly_tensor_cumprod: (ctx, src, axis) => Module._poly_tensor_cumprod(ctx, src, axis),
     poly_tensor_cummax: (ctx, src, axis) =>
       callUopPair(Module._poly_tensor_cummax, [ctx, src, axis], 'poly_tensor_cummax'),
     poly_tensor_cummin: (ctx, src, axis) =>
       callUopPair(Module._poly_tensor_cummin, [ctx, src, axis], 'poly_tensor_cummin'),
-    poly_tensor_argmax: (ctx, src, axis, keepdim) =>
-      Module._poly_tensor_argmax(ctx, src, axis, keepdim ? 1 : 0),
-    poly_tensor_minimum: (ctx, a, b) =>
-      Module._poly_tensor_minimum(ctx, a, b),
-    poly_tensor_dot: (ctx, src, weight) =>
-      Module._poly_tensor_dot(ctx, src, weight),
-    poly_tensor_dot_dtype_by_id: (ctx, src, weight, dtypeId) =>
-      Module._poly_tensor_dot_dtype_by_id(ctx, src, weight, dtypeId),
     poly_tensor_qr_ex: (ctx, src, mode) =>
       callUopPair(
         Module._poly_tensor_qr_ex,
         [ctx, src, mode],
         'poly_tensor_qr_ex'
       ),
-    poly_tensor_triangular_solve: (ctx, a, b, upper, transposeA, unitDiagonal) =>
-      Module._poly_tensor_triangular_solve(
-        ctx, a, b, upper ? 1 : 0, transposeA ? 1 : 0, unitDiagonal ? 1 : 0
-      ),
-    poly_tensor_cholesky: (ctx, src, upper) =>
-      Module._poly_tensor_cholesky(ctx, src, upper ? 1 : 0),
-    poly_tensor_cholesky_solve: (ctx, chol, b, upper) =>
-      Module._poly_tensor_cholesky_solve(ctx, chol, b, upper ? 1 : 0),
-    poly_tensor_solve: (ctx, a, b) =>
-      Module._poly_tensor_solve(ctx, a, b),
-    poly_tensor_lstsq: (ctx, a, b) =>
-      Module._poly_tensor_lstsq(ctx, a, b),
     poly_tensor_scatter: (ctx, self, dim, index, src, reduce) => {
       const reducePtr = allocString(reduce)
       const result = Module._poly_tensor_scatter(ctx, self, dim, index, src, reducePtr)
@@ -1470,26 +1248,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_batchnorm_apply(ctx, x, w || 0, b || 0, mean || 0, variance || 0, batches || 0, training ? 1 : 0, eps, momentum),
     poly_tensor_instancenorm_apply: (ctx, x, w, b, features, eps) =>
       Module._poly_tensor_instancenorm_apply(ctx, x, w || 0, b || 0, features, eps),
-    poly_tensor_softmax: (ctx, src, axis) =>
-      Module._poly_tensor_softmax(ctx, src, axis),
-    poly_tensor_log_softmax: (ctx, src, axis) =>
-      Module._poly_tensor_log_softmax(ctx, src, axis),
-    poly_tensor_cast_by_id: (ctx, tensor, dtypeId) =>
-      Module._poly_tensor_cast_by_id(ctx, tensor, dtypeId),
-    poly_tensor_bitcast_by_id: (ctx, tensor, dtypeId) =>
-      Module._poly_tensor_bitcast_by_id(ctx, tensor, dtypeId),
-    poly_tensor_contiguous: (ctx, tensor) =>
-      Module._poly_tensor_contiguous(ctx, tensor),
-    poly_tensor_reshape: (ctx, tensor, shape, len) =>
-      callWithInt64(Module._poly_tensor_reshape, ctx, tensor, shape, len),
-    poly_tensor_expand: (ctx, tensor, shape, len) =>
-      callWithInt64(Module._poly_tensor_expand, ctx, tensor, shape, len),
-    poly_tensor_permute: (ctx, tensor, order, len) =>
-      callWithInt64(Module._poly_tensor_permute, ctx, tensor, order, len),
     poly_tensor_shrink: (ctx, tensor, flat, npairs) =>
       callWithInt64(Module._poly_tensor_shrink, ctx, tensor, flat, npairs),
-    poly_tensor_flip: (ctx, tensor, axes, len) =>
-      callWithInt64(Module._poly_tensor_flip, ctx, tensor, axes, len),
     poly_tensor_pad_value_bool: (ctx, tensor, flat, npairs, value) =>
       callWithInt64(Module._poly_tensor_pad_value_bool, ctx, tensor, flat, npairs, value),
     poly_tensor_pad_value_int: (ctx, tensor, flat, npairs, value) =>
@@ -1604,12 +1364,6 @@ function createWasmCoreFromModule(Module, device) {
         if (axesPtr) Module._free(axesPtr)
       }
     },
-    poly_tensor_one_hot: (ctx, tensor, numClasses) =>
-      Module._poly_tensor_one_hot(ctx, tensor, BigInt(numClasses)),
-    poly_tensor_gather_dim: (ctx, tensor, dim, index) =>
-      Module._poly_tensor_gather_dim(ctx, tensor, dim, index),
-    poly_tensor_index_select: (ctx, tensor, dim, index) =>
-      Module._poly_tensor_index_select(ctx, tensor, dim, index),
     poly_tensor_getitem: (ctx, tensor, kinds, starts, sizes, steps, indices, n) => {
       const ptrs = []
       try {
@@ -1632,12 +1386,6 @@ function createWasmCoreFromModule(Module, device) {
         return Module._poly_tensor_setitem(ctx, tensor, ...ptrs, n, value)
       } finally { for (const ptr of ptrs) if (ptr) Module._free(ptr) }
     },
-    poly_tensor_clone_into: (ctx, target, source) =>
-      Module._poly_tensor_clone_into(ctx, target, source),
-    poly_tensor_clone: (ctx, source, device) => Module._poly_tensor_clone(ctx, source, device),
-    poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
-    poly_tensor_uop_logical: (tensor) => Module._poly_tensor_uop_logical(tensor),
-    poly_tensor_uop_physical: (tensor) => Module._poly_tensor_uop_physical(tensor),
     poly_tensor_logical_policy: (tensor) => Module._poly_tensor_logical_policy(tensor),
     poly_tensor_logical_state: (tensor) => Module._poly_tensor_logical_state(tensor),
     poly_tensor_set_logical_policy: (ctx, tensor, policy) =>
@@ -1782,7 +1530,6 @@ function createWasmCoreFromModule(Module, device) {
     poly_schedule_cache_clear: (ctx) => Module._poly_schedule_cache_clear(ctx),
     poly_ctx_stats: readCtxStats,
     poly_ctx_reset_counters: (ctx) => Module._poly_ctx_reset_counters(ctx),
-    poly_uop_grad: Module._poly_uop_grad,
     poly_uop_grad_many: (ctx, loss, initialGrad, targets) => {
       const n = targets.length
       const wrtsPtr = malloc(n * 4)
@@ -1821,10 +1568,6 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(presentPtr)
       return { grads, present }
     },
-    poly_uop_detach: Module._poly_uop_detach,
-    poly_uop_cast_by_id: Module._poly_uop_cast_by_id,
-
-    // Shape-on-UOp accessors
     poly_uop_ndim: (ctx, uop) => Module._poly_uop_ndim(ctx, uop),
     poly_uop_max_shape_dims: readUopShape,
 
@@ -1929,19 +1672,8 @@ function createWasmCoreFromModule(Module, device) {
     },
 
     // Shape-on-UOp: C computes shapes internally, JS passes bare UOp pointers.
-    poly_uop_max_reduce: Module._poly_uop_max_reduce,
-    poly_uop_mean_reduce: Module._poly_uop_mean_reduce,
-    poly_uop_var_reduce: Module._poly_uop_var_reduce,
-    poly_uop_one_hot: (ctx, x, numClasses) =>
-      Module._poly_uop_one_hot(ctx, x, BigInt(numClasses)),
-    poly_uop_index_select: Module._poly_uop_index_select,
-    poly_uop_softmax: Module._poly_uop_softmax,
-    poly_uop_log_softmax: Module._poly_uop_log_softmax,
-    poly_uop_dot: Module._poly_uop_dot,
     poly_uop_qr: (ctx, uop) => callUopPair(Module._poly_uop_qr, [ctx, uop], 'poly_uop_qr'),
     poly_uop_qr_ex: (ctx, uop, mode) => callUopPair(Module._poly_uop_qr_ex, [ctx, uop, mode], 'poly_uop_qr_ex'),
-    poly_uop_cross_entropy: Module._poly_uop_cross_entropy,
-    poly_uop_gather_dim: Module._poly_uop_gather_dim,
     poly_uop_scatter: (ctx, self, dim, index, src, reduce) => {
       const reducePtr = allocString(reduce || '')
       const result = Module._poly_uop_scatter(ctx, self, dim, index, src, reducePtr)
@@ -1954,9 +1686,6 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(reducePtr)
       return result
     },
-    poly_uop_argmax: (ctx, uop, axis, keepdim) =>
-      Module._poly_uop_argmax(ctx, uop, axis, keepdim ? 1 : 0),
-    poly_uop_argsort: Module._poly_uop_argsort,
     poly_uop_sort: (ctx, uop, dim, descending) =>
       callUopPair(Module._poly_uop_sort, [ctx, uop, dim, descending ? 1 : 0], 'poly_uop_sort'),
     poly_uop_topk: (ctx, uop, k, dim, largest, sorted) =>
@@ -2017,57 +1746,6 @@ function createWasmCoreFromModule(Module, device) {
     },
 
     // Composed elementwise ops
-    poly_uop_exp: Module._poly_uop_exp,
-    poly_uop_log: Module._poly_uop_log,
-    poly_uop_log1p: Module._poly_uop_log1p,
-    poly_uop_expm1: Module._poly_uop_expm1,
-    poly_uop_sin: Module._poly_uop_sin,
-    poly_uop_cos: Module._poly_uop_cos,
-    poly_uop_tan: Module._poly_uop_tan,
-    poly_uop_erf: Module._poly_uop_erf,
-    poly_uop_erfc: Module._poly_uop_erfc,
-    poly_uop_erfinv: Module._poly_uop_erfinv,
-    poly_uop_ndtri: Module._poly_uop_ndtri,
-    poly_uop_digamma: Module._poly_uop_digamma,
-    poly_uop_lgamma: Module._poly_uop_lgamma,
-    poly_uop_sigmoid: Module._poly_uop_sigmoid,
-    poly_uop_tanh: Module._poly_uop_tanh,
-    poly_uop_abs: Module._poly_uop_abs,
-    poly_uop_sign: Module._poly_uop_sign,
-    poly_uop_square: Module._poly_uop_square,
-    poly_uop_rsqrt: Module._poly_uop_rsqrt,
-    poly_uop_ceil: Module._poly_uop_ceil,
-    poly_uop_floor: Module._poly_uop_floor,
-    poly_uop_round: Module._poly_uop_round,
-    poly_uop_isinf: Module._poly_uop_isinf,
-    poly_uop_isnan: Module._poly_uop_isnan,
-
-    // Activations
-    poly_uop_relu: Module._poly_uop_relu,
-    poly_uop_relu6: Module._poly_uop_relu6,
-    poly_uop_leaky_relu: Module._poly_uop_leaky_relu,
-    poly_uop_gelu: Module._poly_uop_gelu,
-    poly_uop_quick_gelu: Module._poly_uop_quick_gelu,
-    poly_uop_silu: Module._poly_uop_silu,
-    poly_uop_elu: Module._poly_uop_elu,
-    poly_uop_softplus: Module._poly_uop_softplus,
-    poly_uop_mish: Module._poly_uop_mish,
-    poly_uop_hardtanh: Module._poly_uop_hardtanh,
-    poly_uop_hardswish: Module._poly_uop_hardswish,
-    poly_uop_hardsigmoid: Module._poly_uop_hardsigmoid,
-
-    // Comparisons
-    poly_uop_eq: Module._poly_uop_eq,
-    poly_uop_ne: Module._poly_uop_ne,
-    poly_uop_gt: Module._poly_uop_gt,
-    poly_uop_ge: Module._poly_uop_ge,
-    poly_uop_le: Module._poly_uop_le,
-    poly_uop_where: Module._poly_uop_where,
-    poly_uop_maximum: Module._poly_uop_maximum,
-    poly_uop_minimum: Module._poly_uop_minimum,
-    poly_uop_clamp: Module._poly_uop_clamp,
-
-    // Creation
     poly_uop_rand: (ctx, shape, ndim, seed) => {
       const shPtr = writeInt64Array(shape)
       const result = Module._poly_uop_rand(ctx, shPtr, ndim, BigInt(seed))
@@ -2080,24 +1758,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(shPtr)
       return result
     },
-    poly_uop_arange: Module._poly_uop_arange,
-    poly_uop_eye: Module._poly_uop_eye,
-    poly_uop_linspace: Module._poly_uop_linspace,
     poly_uop_full: Module._poly_uop_full,
     // Shape-on-UOp: C reads shape from UOp internally.
-    poly_uop_tril: Module._poly_uop_tril,
-    poly_uop_triu: Module._poly_uop_triu,
-    poly_uop_cholesky: Module._poly_uop_cholesky,
-    poly_uop_cholesky_solve: Module._poly_uop_cholesky_solve,
-    poly_uop_triangular_solve: Module._poly_uop_triangular_solve,
-    poly_uop_solve: Module._poly_uop_solve,
-    poly_uop_lstsq: Module._poly_uop_lstsq,
-
-    // Reduction (non-shape-returning)
-    poly_uop_sum_reduce: Module._poly_uop_sum_reduce,
-    poly_uop_logsumexp: Module._poly_uop_logsumexp,
-
-    // ABI
     poly_abi_version: Module._poly_abi_version,
     poly_op_count: Module._poly_op_count
   }

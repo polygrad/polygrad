@@ -987,7 +987,7 @@ test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Rele
 	PYTHONPATH=py POLY_LIB=$(abspath build/libpolygrad.so) \
 		$(PYTHON) test/test_model_interchange.py --cores native,wasm $(MODEL_INTERCHANGE_ARGS)
 
-js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c
+js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c js/napi_generated.h js/napi_generated_exports.h
 	cd js && npm run build:native
 
 test-js-native-cpu: verify-source-mirrors js/build/Release/polygrad_napi.node

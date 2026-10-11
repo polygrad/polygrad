@@ -16,6 +16,35 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('dtype', ['int32', 'float32'])
+@pytest.mark.parametrize('correction', [0, 1, 3, 4])
+def test_core_variance_matches_tensor_graph(dtype, correction):
+    with Runtime(device='CPU') as rt:
+        x = rt.Tensor(np.array([[1, 2, 3], [2, 4, 7]], dtype=dtype)).realize()
+        raw = _ffi._lib.poly_uop_var_reduce(x._ctx, x.uop.raw, 1, 0, correction)
+        expected = x.var(axis=1, correction=correction)
+        assert raw == expected.uop.raw
+        values = expected.numpy()
+        if correction >= 3:
+            assert np.isinf(values).all()
+        else:
+            data = x.numpy().astype(np.float32)
+            squares = (data - data.mean(axis=1, keepdims=True)) ** 2
+            # The pin accumulates using the input dtype even for integer variance.
+            numerator = squares.astype(dtype).sum(axis=1)
+            np.testing.assert_allclose(values, numerator / (3 - correction), rtol=1e-6)
+
+
+@pytest.mark.parametrize('count', [1, 2, 3, 4])
+def test_variance_uses_bound_extent(count):
+    with Runtime(device='INTERP') as rt:
+        n = rt.Variable('variance_batch', 1, 4).bind(count)
+        data = np.arange(12, dtype=np.float32).reshape(4, 3)
+        x = rt.Tensor(data)[:n]
+        actual = x.var(axis=0, correction=0).numpy()
+        np.testing.assert_allclose(actual, data[:count].var(axis=0), rtol=1e-6)
+
+
 @pytest.mark.parametrize('dtype', ['int32', 'int64', 'float32', 'float64'])
 @pytest.mark.parametrize('name', ['sigmoid', 'abs', 'sign', 'round', 'isinf', 'isnan', 'silu', 'softplus', 'triu', 'tril'])
 def test_remaining_core_composites_match_frontend(dtype, name):
@@ -3528,7 +3557,7 @@ class TestReduce:
                 si for si, so in zip(x.shape, reduced_shape) if si != so
             ], dtype=np.int64).item()
             reduced = squares.sum(axis=axis, keepdim=keepdim)
-            return reduced.div((reduced.const_like(n) - correction).relu())
+            return reduced.div(max(n - correction, 0))
 
         for axis, keepdim, correction in [
             (1, False, 1),

@@ -2673,6 +2673,29 @@ for _method in ('clamp', 'hardsigmoid', 'elu', 'softplus', 'logaddexp', 'eq', 'g
         CASES[f'composite_{_method}_{_variant}'] = ('tensor', lambda m=_method, v=_variant: parameter_composite_graph(m, v))
 
 
+def variance_graph(dtype, axis, correction):
+    x = typed_realized_empty(dtype)
+    out = x.var(axis=axis, correction=correction)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+def bounded_variance_graph():
+    n = UOp.variable('variance_batch', 1, 4).bind(3) if ENGINE == 'tinygrad' else Variable('variance_batch', 1, 4).bind(3)
+    x = Tensor.empty(n, 3, dtype='float32', device='CPU')
+    out = x.var(axis=0)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+CASES['core_var_bounded'] = ('tensor', bounded_variance_graph)
+
+
+for _dtype in ('int32', 'int64', 'float16', 'float32', 'float64'):
+    for _axis in (None, 1, (0, 1)):
+        for _correction in (0, 1, 4, 0.5):
+            CASES[f'core_var_{_dtype}_{_axis}_{_correction}'] = (
+                'tensor', lambda d=_dtype, a=_axis, c=_correction: variance_graph(d, a, c))
+
+
 def repeat_one_graph(interleave=False, zero=False):
     x = typed_realized_empty('float32')
     out = x.repeat_interleave(0 if zero else 1, dim=1) if interleave else x.repeat(1, 0 if zero else 2)

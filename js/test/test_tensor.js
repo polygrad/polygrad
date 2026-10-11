@@ -110,6 +110,40 @@ async function runTensorTests(pg, createRuntime) {
 
   console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
+  await test('generated pointer/scalar ABI is complete on this backend', async () => {
+    const generated = require('../src/core/generated')({})
+    for (const name of Object.keys(generated)) {
+      assert(typeof pg._core.ffi[name] === 'function', `missing shared ABI: ${name}`)
+    }
+    Tensor.manualSeed(7)
+    const a = Tensor.rand(4)
+    Tensor.manual_seed(7)
+    const b = Tensor.rand(4)
+    try { assertClose(await a.toArray(), await b.toArray(), 0) }
+    finally { a.dispose(); b.dispose(); Tensor.manualSeed(0) }
+  })
+
+  await test('graph logsumexp returns a graph handle on every backend', () => {
+    const x = new Tensor([[1, 2, 3], [2, 4, 7]])
+    try {
+      const ffi = pg._core.ffi
+      const root = ffi.poly_uop_logsumexp(x._ctx, ffi.poly_tensor_uop_physical(x._tensor), 1, 0)
+      assert(ffi.poly_uop_ndim(x._ctx, root) === 1)
+    } finally { x.dispose() }
+  })
+
+  await test('shared variance preserves correction and integer accumulation', async () => {
+    for (const dtype of ['float32', 'int32']) {
+      const x = new Tensor([[1, 2, 3], [2, 4, 7]], { dtype })
+      const v = x.var(1, false, 0)
+      const excessive = x.var(1, false, 3)
+      try {
+        assertClose(await v.toArray(), dtype === 'int32' ? [2 / 3, 4] : [2 / 3, 38 / 9], 1e-5)
+        assert((await excessive.toArray()).every(v => v === Infinity))
+      } finally { x.dispose(); v.dispose(); excessive.dispose() }
+    }
+  })
+
   await testIf(pg.device === 'cuda', 'CUDA compiled QR releases graph scratch', isolatedRuntime(async rt => {
     for (let iteration = 0; iteration < 3; iteration++) {
       const outputs = new Set()
@@ -691,11 +725,13 @@ async function runTensorTests(pg, createRuntime) {
       const view = pg.uop.wrap(raw)
       const prefix = new Tensor(view)
       const total = prefix.sum()
+      const variance = prefix.var(null, false, 0)
       const flipped = prefix.flip(0)
       const first = flipped.shrink([[0, 1]]).sum()
       assertClose(await total.toArray(), [size * (size + 1) / 2], 0)
+      assertClose(await variance.toArray(), [(size * size - 1) / 12], 1e-6)
       assertClose(await first.toArray(), [size], 0)
-      for (const value of [first, flipped, total, prefix, view, root, bound, source]) await value.dispose()
+      for (const value of [first, flipped, variance, total, prefix, view, root, bound, source]) await value.dispose()
     }
     await zero.dispose(); await n.dispose()
   })
@@ -3723,8 +3759,10 @@ async function runTensorTests(pg, createRuntime) {
         const squares = x.sub(x.mean(axis, true)).square()
         const reducedShape = squares.sum(axis, true).shape
         const n = x.shape.filter((si, i) => si !== reducedShape[i]).reduce((a, b) => a * b, 1)
-        const reduced = squares.sum(axis, keepdim)
-        return reduced.div(reduced.constLike(n).sub(correction).relu())
+        // This fixture's input is int32; the pin casts squares to the
+        // input's accumulator dtype before summing, then returns float32.
+        const reduced = squares.cast('int32').sum(axis, keepdim)
+        return reduced.div(Math.max(n - correction, 0)).cast('float32')
       }
       for (const [axis, keepdim, correction] of [
         [1, false, 1], [0, true, 0], [null, false, 1], [[0, 1], false, 1], [1, false, 3]

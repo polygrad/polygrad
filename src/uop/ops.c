@@ -2881,9 +2881,43 @@ char *poly_uop_str(PolyUOp *u) {
 }
 
 char *poly_uop_graph_str(PolyUOp *root) {
-  /* Simple: just print the root node for now */
-  /* A full graph print would need toposort, but that needs a ctx */
-  return poly_uop_str(root);
+  int count = 0;
+  PolyUOp **nodes = poly_uop_toposort_alloc(NULL, root, &count);
+  if (!nodes) return NULL;
+  char *text = NULL;
+  size_t capacity = 0;
+  /* The owned toposort needs no arena. Print shared subgraphs once, with
+   * addresses connecting sources to their definitions in this diagnostic. */
+  for (int pass = 0; pass < 2; pass++) {
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+      int written = uop_snprintf(text, pos, capacity, "%p: ", (void *)nodes[i]);
+      if (written < 0) goto fail;
+      pos += (size_t)written;
+      if (!uop_print_one(nodes[i], text, &pos, capacity)) goto fail;
+      for (int j = 0; j < nodes[i]->n_src; j++) {
+        written =
+            uop_snprintf(text, pos, capacity, "%s%p", j ? ", " : " <- ", (void *)nodes[i]->src[j]);
+        if (written < 0) goto fail;
+        pos += (size_t)written;
+      }
+      written = uop_snprintf(text, pos, capacity, "\n");
+      if (written < 0 || pos > SIZE_MAX - (size_t)written - 1) goto fail;
+      pos += (size_t)written;
+    }
+    if (pass == 0) {
+      capacity = pos + 1;
+      text = malloc(capacity);
+      if (!text) goto fail;
+    } else
+      text[pos] = '\0';
+  }
+  free(nodes);
+  return text;
+fail:
+  free(nodes);
+  free(text);
+  return NULL;
 }
 
 /* Recursive indented tree dump to a FILE*. Used by debug paths in

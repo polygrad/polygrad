@@ -31,6 +31,32 @@
 #include "../src/codegen/codegen.h"
 #include "../src/utils.h"
 
+TEST(tensor, gradient_target_admission_is_context_and_graph_scoped) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  poly_ctx_set_preferred_device(other, POLY_DEVICE_INTERP);
+  float value = 3;
+  int32_t integer = 3;
+  PolyTensor *x = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
+  PolyTensor *unused = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
+  PolyTensor *foreign = poly_tensor_from_host(other, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
+  PolyTensor *i = poly_tensor_from_host(ctx, &integer, sizeof(integer), POLY_INT32, NULL, 0);
+  PolyTensor *loss = poly_tensor_alu2(ctx, POLY_OP_MUL, x, x);
+  ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, x) == poly_tensor_uop_physical(x));
+  ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, unused) == NULL);
+  ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, foreign) == NULL);
+  ASSERT_TRUE(poly_tensor_gradient_target(ctx, i, i) == NULL);
+  ASSERT_TRUE(poly_tensor_gradient_target(NULL, loss, x) == NULL);
+  poly_tensor_release(loss);
+  poly_tensor_release(i);
+  poly_tensor_release(foreign);
+  poly_tensor_release(unused);
+  poly_tensor_release(x);
+  poly_ctx_destroy(other);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, extension_resolver_uses_current_core) {
   ASSERT_TRUE(poly_get_proc_address(NULL) == NULL);
   ASSERT_TRUE(poly_get_proc_address("not_a_polygrad_symbol") == NULL);
@@ -132,6 +158,27 @@ TEST(tensor, execution_scalar_reduction_axes) {
            !poly_uop_log_softmax(ctx, x, 1);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(valid);
+  PASS();
+}
+
+TEST(tensor, bitwise_float_operands_fail_in_core) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {2};
+  PolyTensor *f = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *i = poly_tensor_empty(ctx, POLY_INT32, shape, 1, POLY_DEVICE_CPU);
+  PolyOps ops[] = {POLY_OP_AND, POLY_OP_OR, POLY_OP_XOR, POLY_OP_SHL, POLY_OP_SHR};
+  bool ok = true;
+  for (int j = 0; j < 5; j++) {
+    PolyTensor *a = poly_tensor_alu2(ctx, ops[j], f, i);
+    PolyTensor *b = poly_tensor_alu2(ctx, ops[j], i, f);
+    ok &= !a && !b;
+    poly_tensor_release(a);
+    poly_tensor_release(b);
+  }
+  poly_tensor_release(f);
+  poly_tensor_release(i);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
   PASS();
 }
 

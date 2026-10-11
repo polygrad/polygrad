@@ -1166,19 +1166,16 @@ class Tensor:
         """
         targets = []
         stale_refs = []
-        root_raw = Tensor._core_uop_raw(self._tensor)
-        root = _uop_wrap(self._ctx, root_raw)
         ctx_key = _ptr_value(self._ctx)
         for tref in list(all_tensors):
             t = tref()
             if t is None:
                 stale_refs.append(tref)
                 continue
-            if _ptr_value(t._ctx) != ctx_key or not dtypes.is_float(t.dtype):
+            if _ptr_value(t._ctx) != ctx_key:
                 continue
-            current_raw = Tensor._core_uop_raw(t._tensor)
-            if (current_raw and int(_ffi._lib.poly_uop_device(current_raw)) != 0 and
-                    _ffi._lib.poly_uop_reachable(self._ctx, root, current_raw)):
+            current_raw = _ffi._lib.poly_tensor_gradient_target(self._ctx, self._tensor, t._tensor)
+            if current_raw:
                 targets.append((t, current_raw))
         for tref in stale_refs:
             all_tensors.pop(tref, None)
@@ -1210,40 +1207,13 @@ class Tensor:
             return []
         ctx_key = _ptr_value(ctx)
         lib = _ffi._lib
-        topo, seen, stack = [], set(), [(root_raw, False)]
-        while stack:
-            node, expanded = stack.pop()
-            node_key = _ptr_value(node)
-            if expanded:
-                topo.append(node)
-                continue
-            if not node_key or node_key in seen:
-                continue
-            seen.add(node_key)
-            stack.append((node, True))
-            for i in range(lib.poly_uop_n_src(node) - 1, -1, -1):
-                src = lib.poly_uop_src(node, i)
-                if src:
-                    stack.append((src, False))
-
+        outputs = lib.poly_uop_custom_gradient_outputs(ctx, root_raw)
+        if not outputs:
+            raise RuntimeError('custom gradient discovery failed')
         by_call = {}
-        for after in topo:
-            if lib.poly_uop_op(after) != _ffi.OPS.get('AFTER') or lib.poly_uop_n_src(after) != 2:
-                continue
-            data, call = lib.poly_uop_src(after, 0), lib.poly_uop_src(after, 1)
-            if not call or lib.poly_uop_op(call) != _ffi.OPS.get('CALL'):
-                continue
-            body = lib.poly_uop_src(call, 0)
-            if not body or lib.poly_uop_op(body) != _ffi.OPS.get('SINK'):
-                continue
-            arg = None
-            for i in range(1, lib.poly_uop_n_src(call)):
-                candidate = lib.poly_uop_src(call, i)
-                if _ptr_value(candidate) == _ptr_value(data):
-                    arg = candidate
-                    break
-            if not arg:
-                continue
+        for i in range(lib.poly_uop_n_src(outputs)):
+            after = lib.poly_uop_src(outputs, i)
+            arg, call = lib.poly_uop_src(after, 0), lib.poly_uop_src(after, 1)
             call_key = _ptr_value(call)
             rec_active = by_call.get(call_key)
             if rec_active is None:
@@ -2857,17 +2827,13 @@ class Tensor:
         return self._reduce(_ffi._lib.poly_tensor_mean, axis, keepdim)
 
     def var(self, axis=None, keepdim=False, correction=1):
-        # Pinned Tensor.var is this exact lazy Tensor expression
-        # (mixin/__init__.py:608-635), including tuple axes and RELU on the
-        # denominator. Every constituent operation is C-owned.
-        squares = (self - self.mean(axis=axis, keepdim=True)).square()
-        reduced_shape = squares.sum(axis=axis, keepdim=True).shape
-        n = _prod(
-            si for si, so in zip(self.shape, reduced_shape) if int(si) != int(so)
-        )
-        reduced = squares.sum(axis=axis, keepdim=keepdim)
-        denominator = reduced.const_like(n) - correction
-        return reduced.div(denominator.relu())
+        axes = tuple(range(self.ndim)) if axis is None else (
+            (self._resolve_dim(int(axis)),) if isinstance(axis, int) else
+            tuple(self._resolve_dim(int(a)) for a in axis))
+        arr, n = _int64_array(axes)
+        correction = self._ensure_tensor(correction)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_var_axes(
+            self._ctx, self._tensor, arr, n, bool(keepdim), correction._tensor), None)
 
     def std(self, axis=None, keepdim=False, correction=1):
         return self.var(axis=axis, keepdim=keepdim, correction=correction).sqrt()

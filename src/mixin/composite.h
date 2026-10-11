@@ -64,6 +64,14 @@ PolyUOp *poly_uop_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 PolyUOp *poly_uop_mean_axes(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim);
 
 PolyUOp *poly_uop_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction);
+PolyUOp *poly_uop_var_axes(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim,
+    PolyUOp *correction
+);
 
 PolyUOp *poly_uop_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 

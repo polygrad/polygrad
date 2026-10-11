@@ -15,6 +15,28 @@
 #include "../src/uop/ops.h"
 #include "../src/tensor.h"
 
+TEST(autograd, custom_output_discovery_deduplicates_in_dependency_order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop_const_float(ctx, 1);
+  PolyUOp *body = poly_uop_sink_n(ctx, &x, 1);
+  PolyUOp *call = poly_uop_call(ctx, body, &x, 1);
+  PolyUOp *first = poly_uop2(ctx, POLY_OP_AFTER, x->dtype, x, call, poly_arg_none());
+  PolyUOp *second_call = poly_uop_call(ctx, body, &first, 1);
+  PolyUOp *second =
+      poly_uop2(ctx, POLY_OP_AFTER, first->dtype, first, second_call, poly_arg_none());
+  PolyUOp *root = poly_uop_add(ctx, second, first);
+  PolyUOp *outputs = poly_uop_custom_gradient_outputs(ctx, root);
+  ASSERT_NOT_NULL(outputs);
+  ASSERT_EQ(outputs->n_src, 2);
+  ASSERT_TRUE(outputs->src[0] == first && outputs->src[1] == second);
+  PolyUOp *empty = poly_uop_custom_gradient_outputs(ctx, x);
+  ASSERT_NOT_NULL(empty);
+  ASSERT_EQ(empty->n_src, 0);
+  ASSERT_TRUE(poly_uop_custom_gradient_outputs(ctx, NULL) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* Autograd e2e tests compile concrete scheduled kernels, not the earlier
  * pre-codegen kernel graph returned by poly_get_kernel_graph(). */
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {

@@ -3514,6 +3514,25 @@ TEST(uop, print_const) {
   PASS();
 }
 
+TEST(uop, print_graph_includes_shared_dependencies_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop_const_int(ctx, 7);
+  PolyUOp *sum = poly_uop_add(ctx, x, x);
+  char *text = poly_uop_graph_str(sum);
+  bool complete =
+      text && strstr(text, "UOp(CONST,") && strstr(text, "UOp(ADD,") && strstr(text, " <- ");
+  int lines = 0;
+  if (text)
+    for (const char *p = text; *p; p++)
+      lines += *p == '\n';
+  free(text);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(complete);
+  ASSERT_EQ(lines, 2);
+  ASSERT_TRUE(poly_uop_graph_str(NULL) == NULL);
+  PASS();
+}
+
 TEST(uop, print_float_arg_round_trips_double) {
   /* Pinned tinygrad UOp.argstr uses Python's round-trippable float repr
    * (uop/ops.py:166-171). Diagnostic serialization must not collapse distinct

@@ -504,44 +504,13 @@ function createBoundTensorClass(runtime) {
   const customGradRecordsFor = (ctx, root) => {
     const rootRaw = rawUop(root)
     if (!rootRaw) return []
-    const topo = []
-    const seen = new Set()
-    const stack = [{ node: rootRaw, expanded: false }]
-    while (stack.length) {
-      const { node, expanded } = stack.pop()
-      const key = uopKey(node)
-      if (expanded) {
-        topo.push(node)
-        continue
-      }
-      if (!node || seen.has(key)) continue
-      seen.add(key)
-      stack.push({ node, expanded: true })
-      for (let i = Number(ffi.poly_uop_n_src(node)) - 1; i >= 0; i--) {
-        const src = ffi.poly_uop_src(node, i)
-        if (src) stack.push({ node: src, expanded: false })
-      }
-    }
-
+    const outputs = ffi.poly_uop_custom_gradient_outputs(ctx, rootRaw)
+    if (!outputs) throw new Error('custom gradient discovery failed')
     const byCall = new Map()
-    for (const after of topo) {
-      if (Number(ffi.poly_uop_op(after)) !== ops.AFTER || Number(ffi.poly_uop_n_src(after)) !== 2) {
-        continue
-      }
-      const data = ffi.poly_uop_src(after, 0)
+    for (let i = 0; i < Number(ffi.poly_uop_n_src(outputs)); i++) {
+      const after = ffi.poly_uop_src(outputs, i)
+      const arg = ffi.poly_uop_src(after, 0)
       const call = ffi.poly_uop_src(after, 1)
-      if (!call || Number(ffi.poly_uop_op(call)) !== ops.CALL) continue
-      const body = ffi.poly_uop_src(call, 0)
-      if (!body || Number(ffi.poly_uop_op(body)) !== ops.SINK) continue
-      let arg = null
-      for (let i = 1; i < Number(ffi.poly_uop_n_src(call)); i++) {
-        const candidate = ffi.poly_uop_src(call, i)
-        if (uopKey(candidate) === uopKey(data)) {
-          arg = candidate
-          break
-        }
-      }
-      if (!arg) continue
       const callKey = uopKey(call)
       let entry = byCall.get(callKey)
       if (!entry) {
@@ -1023,18 +992,13 @@ function createBoundTensorClass(runtime) {
     }
 
     _liveGradTargets() {
-      if (!ffi.poly_uop_reachable) {
-        throw new Error('poly_uop_reachable is required for tinygrad-style backward')
-      }
-      const root = this._currentUopRaw()
       const targets = []
       /* Pinned tensor.py:527-543 discovers targets only through the current
        * Tensor.uop. Polygrad's corresponding root is mandatory physical. */
       for (const t of liveTensorSnapshot()) {
-        if (!t || t._ctx !== this._ctx || !t._tensor || !isFloatDtype(t.dtype)) continue
-        const current = t._currentUopRaw()
-        if (current && Number(ffi.poly_uop_device(current)) !== deviceId('auto') &&
-            ffi.poly_uop_reachable(this._ctx, root, current)) {
+        if (!t || t._ctx !== this._ctx || !t._tensor) continue
+        const current = ffi.poly_tensor_gradient_target(this._ctx, this._tensor, t._tensor)
+        if (current) {
           targets.push({ tensor: t, root: current })
         }
       }
@@ -2716,15 +2680,10 @@ function createBoundTensorClass(runtime) {
     var(axis, keepdim, correction) {
       if (keepdim === undefined) keepdim = false
       if (correction === undefined) correction = 1
-      // Pinned Tensor.var is this exact lazy Tensor expression
-      // (mixin/__init__.py:608-635), including tuple axes and RELU on the
-      // denominator. Every constituent operation is C-owned.
-      const squares = this.sub(this.mean(axis, true)).square()
-      const reducedShape = squares.sum(axis, true).shape
-      const n = product(this.shape.filter((si, i) => Number(si) !== Number(reducedShape[i])))
-      const reduced = squares.sum(axis, keepdim)
-      const denominator = reduced.constLike(n).sub(correction)
-      return reduced.div(denominator.relu())
+      const axes = axis == null ? this.shape.map((_, i) => i)
+        : (Array.isArray(axis) ? axis : [axis]).map(a => this._resolveDim(Number(a)))
+      return this._withTensorOperands([correction], c => this._makeResultFromCore(
+        ffi.poly_tensor_var_axes(this._ctx, this._tensor, axes, axes.length, Boolean(keepdim), c._tensor)))
     }
 
     std(axis, keepdim, correction) {
@@ -3585,6 +3544,8 @@ function createBoundTensorClass(runtime) {
       if (!tensor) throw new Error('C-owned Tensor.arange construction failed')
       return new Tensor(null, {_ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device})
     }
+
+    static manualSeed(seed = 0) { return Tensor.manual_seed(seed) }
 
     static manual_seed(seed = 0) {
       // Pinned tinygrad tensor.py:475-504 resets all per-device RNG versions.

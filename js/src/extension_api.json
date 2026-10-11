@@ -3113,6 +3113,46 @@
     "ownership": "borrowed",
     "cleanup": false
   },
+  "poly_tensor_var_axes": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "src"
+      ],
+      [
+        "int64_t *",
+        "axes"
+      ],
+      [
+        "int",
+        "n_axes"
+      ],
+      [
+        "_Bool",
+        "keepdim"
+      ],
+      [
+        "PolyTensor *",
+        "correction"
+      ]
+    ],
+    "arrays": [
+      [
+        2,
+        3,
+        8,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
   "poly_uop_ndim": {
     "return": "int",
     "args": [
