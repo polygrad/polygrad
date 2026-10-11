@@ -4615,6 +4615,23 @@ async function runTensorTests(pg, createRuntime) {
     assert(!a.uop.hasBufferIdentity(), 'assign before realize should be an effect graph')
   })
 
+  await test('assign realized source to unrealized target preserves independent storage', async () => {
+    const source = await new Tensor(new Float32Array([3, 4, 5, 6])).realize()
+    const target = Tensor.zeros([4]).add(1)
+    const alias = target.reshape([1, 4])
+    target.assign(source)
+    await target.realize()
+    assertClose(await target.toArray(), [3, 4, 5, 6])
+    assertClose(await alias.toArray(), [1, 1, 1, 1])
+    target.assign(target.add(10))
+    await target.realize()
+    assertClose(await source.toArray(), [3, 4, 5, 6])
+    source.assign(source.mul(0))
+    await source.realize()
+    assertClose(await target.toArray(), [13, 14, 15, 16])
+    source.dispose(); target.dispose(); alias.dispose()
+  })
+
   await test('assign realized targets reuse current buffer', async () => {
     const a = new Tensor([1])
     await a.realize()

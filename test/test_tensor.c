@@ -1820,6 +1820,40 @@ TEST(tensor, slice_iadd_keeps_same_owner_roots) {
   PASS();
 }
 
+TEST(tensor, realized_source_assignment_materializes_independent_target) {
+  bool ok = true;
+  for (int policy = POLY_LOGICAL_NEVER; policy <= POLY_LOGICAL_UNTIL_REALIZE; policy++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, policy);
+    poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+    float values[] = {3, 4, 5, 6}, got[4];
+    PolyTensor *source =
+        poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_INTERP);
+    ok &= source && poly_buffer_write(ctx, source->uop_physical, values, sizeof(values)) == 0;
+    PolyTensor *one = poly_tensor_const_like_float(ctx, source, 1);
+    PolyTensor *target = poly_tensor_alu2(ctx, POLY_OP_ADD, source, one);
+    PolyTensor *alias = poly_tensor_reshape(ctx, target, (int64_t[]){1, 4}, 2);
+    ok &= target && poly_tensor_assign(ctx, target, source);
+    ok &= read_tensor_bytes(ctx, target, got, sizeof(got)) == 0;
+    for (int i = 0; ok && i < 4; i++)
+      ok &= got[i] == values[i];
+    ok &= poly_uop_has_buffer_identity(target->uop_physical) &&
+          poly_uop_get_buffer_identity(target->uop_physical) !=
+              poly_uop_get_buffer_identity(source->uop_physical);
+    ok &= read_tensor_bytes(ctx, alias, got, sizeof(got)) == 0;
+    for (int i = 0; ok && i < 4; i++)
+      ok &= got[i] == values[i] + 1;
+    ok &= poly_tensor_assign(ctx, target, poly_tensor_alu2(ctx, POLY_OP_ADD, target, one)) != NULL;
+    ok &= read_tensor_bytes(ctx, target, got, sizeof(got)) == 0;
+    ok &= read_tensor_bytes(ctx, source, got, sizeof(got)) == 0;
+    for (int i = 0; ok && i < 4; i++)
+      ok &= got[i] == values[i];
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(tensor, chained_assignment_requires_buffer_identity) {
   bool valid = true;
   for (int policy = POLY_LOGICAL_NEVER; policy <= POLY_LOGICAL_UNTIL_REALIZE; policy++) {

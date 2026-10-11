@@ -1432,8 +1432,7 @@ static PolyUOp *poly_transform_to_call_materialize_contiguous(
     PolyUOp **out_replacement
 ) {
   if (out_replacement) *out_replacement = NULL;
-  if (!ctx || !u || !tctx || u->op != POLY_OP_CONTIGUOUS || u->n_src != 1 ||
-      poly_uop_has_buffer_identity(u->src[0]) || !out_replacement)
+  if (!ctx || !u || !tctx || u->op != POLY_OP_CONTIGUOUS || u->n_src != 1 || !out_replacement)
     return NULL;
 
   PolyShape shape = poly_uop_max_shape_cached(ctx, u);
@@ -1671,7 +1670,10 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
       poly_transform_to_call_after_store_assign(ret, &assign_target, &assign_store) &&
       ret->src[1] == assign_store && assign_store->n_src == 2 &&
       !poly_transform_to_call_after_result_buffer(ctx, ret)) {
-    /* Pinned callify.py:54-57 carries the assignment AFTER's provenance tuple
+    /* PG-DIV-023: a realized RHS still needs independent destination storage
+     * and publication of the assignment's tag. Eliding this materialization
+     * loses the tag in the pin and leaves the unrealized target unreadable.
+     * Pinned tensor.py carries the assignment AFTER's provenance tuple
      * onto this synthetic CONTIGUOUS. Distinct originals may share the exact
      * STORE value; preserving the tag keeps their rewrite occurrences
      * distinct until finalize consumes the surviving provenance. */

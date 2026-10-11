@@ -5437,6 +5437,33 @@ class TestMaterializationParity:
         np.testing.assert_allclose(y1.numpy(), [2.0])
         np.testing.assert_allclose(y2.numpy(), [5.0])
 
+    @pytest.mark.parametrize('view', [False, True])
+    def test_assign_realized_source_to_unrealized_target(self, view):
+        source = Tensor([3., 4., 5., 6.]).realize()
+        rhs = source[1:3] if view else source
+        target = Tensor.zeros(*rhs.shape) + 1
+        alias = target.reshape(1, -1)
+        target.assign(rhs).realize()
+        np.testing.assert_array_equal(target.numpy(), [4., 5.] if view else [3., 4., 5., 6.])
+        np.testing.assert_array_equal(alias.numpy(), np.ones((1, rhs.numel())))
+        # Assignment creates destination storage, not an alias of its source.
+        target.assign(target + 10).realize()
+        np.testing.assert_array_equal(source.numpy(), [3., 4., 5., 6.])
+        source.assign(source * 0).realize()
+        np.testing.assert_array_equal(target.numpy(), [14., 15.] if view else [13., 14., 15., 16.])
+
+    def test_assign_realized_array_to_unrealized_parameter(self):
+        # A multidimensional resident RHS retains movement wrappers; this is
+        # the parameter-initialization case that also loses publication in the pin.
+        values = np.arange(36, dtype=np.float32).reshape(2, 2, 3, 3)
+        source = Tensor(values).realize()
+        parameter = Tensor.zeros(*values.shape) + 1
+        parameter.assign(source).realize()
+        np.testing.assert_array_equal(parameter.numpy(), values)
+        parameter.assign(parameter + 1).realize()
+        np.testing.assert_array_equal(source.numpy(), values)
+        np.testing.assert_array_equal(parameter.numpy(), values + 1)
+
     def test_assign_realized_targets_reuse_current_buffer(self):
         a = Tensor([1.0]).realize()
         a_buf = a.uop.buffer

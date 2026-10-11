@@ -336,6 +336,18 @@
       "close_when": "The pinned reference adopts equivalent final comparison; this allowance affects only BEAM-enabled schedule selection."
     },
     {
+      "id": "PG-DIV-023",
+      "status": "approved",
+      "stages": ["callify", "realize"],
+      "area": "assignment of resident data into an unrealized expression",
+      "tinygrad": "replace_store_after_with_contig calls src.contiguous(tag=u.tag). With a resident multidimensional array source this can drop assignment provenance: realize returns without publishing destination storage and readback fails with must be BUFFER Ops.ADD. The simple one-dimensional control succeeds.",
+      "polygrad": "Materialize the synthetic assignment CONTIGUOUS even when its source already has storage. Publish independent destination storage under the original assignment tag. Ordinary contiguous on resident tensors remains a no-op; realized assignment targets retain their existing storage.",
+      "rationale": "Parameter initialization must leave a readable value without making later source or destination writes alias. The defect is shared with the pin, not an allocation-only porting difference.",
+      "approval": "User 2026-10-11: Fix and document the shared defect.",
+      "evidence": ["src/engine/realize.c:poly_transform_to_call_materialize_contiguous", "references/tinygrad_latest/tinygrad/tensor.py:replace_store_after_with_contig", "py/tests/test_tensor.py:test_assign_realized_source_to_unrealized_target", "py/tests/test_tensor.py:test_assign_realized_array_to_unrealized_parameter", "test/test_tensor.c:realized_source_assignment_materializes_independent_target", "js/test/test_tensor.js", "temp/model-coverage-20261011/assignment-regression-red.log", "temp/model-coverage-20261011/assignment-pin-matrix.log"],
+      "close_when": "The pinned reference preserves assignment provenance and independent destination storage for a resident RHS assigned to an unrealized expression."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],
