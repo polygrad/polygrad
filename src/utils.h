@@ -16,6 +16,9 @@
 bool poly_ptr_eq(const void *a, const void *b);
 uint32_t poly_ptr_hash(const void *p);
 
+/* Owned formatted string, sized from the complete output; NULL on failure. */
+char *poly_strfmt(const char *format, ...) __attribute__((format(printf, 1, 2)));
+
 /* Tinygrad-style env helpers */
 int poly_getenv_int(const char *key, int default_value);
 bool poly_getenv_flag(const char *key);

@@ -3781,6 +3781,52 @@ TEST(codegen, render_range_names_preserve_full_argument_tuple) {
   PASS();
 }
 
+TEST(codegen, render_long_range_names_without_truncation) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t extra[80];
+  for (int i = 0; i < 80; i++)
+    extra[i] = 123456789;
+  PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyArg arg = poly_arg_range_ex(1, POLY_AXIS_LOOP, extra, 80);
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, arg);
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, idx, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, range, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, range, bound, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, add, poly_arg_none());
+  PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, range, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+  PolyUOp *linear[] = {out, bound, range, idx, load, cast, add, store, end, sink};
+  char *sources[] = {
+      poly_render_c(ctx, linear, 10, "long_range"),
+      poly_render_cuda(ctx, linear, 10, "long_range", 1),
+      poly_render_wgsl(ctx, linear, 10, "long_range"),
+#ifdef POLY_HAS_HIP
+      poly_render_hip(ctx, linear, 10, "long_range", 1, "gfx1100"),
+#endif
+  };
+  char *suffix = poly_uop_range_str(range->arg);
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++) {
+    correct &= sources[i] != NULL;
+    int uses = 0;
+    for (const char *p = sources[i]; p && (p = strstr(p, "Lidx")); p += 4) {
+      uses++;
+      if (strncmp(p + 4, suffix, strlen(suffix)) != 0) {
+        fprintf(stderr, "renderer %zu truncated range reference\n", i);
+        correct = false;
+      }
+    }
+    correct &= uses >= 7;
+    free(sources[i]);
+  }
+  free(suffix);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, render_sparse_param_slots_use_compact_call_abi) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

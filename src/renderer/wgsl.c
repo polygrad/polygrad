@@ -216,40 +216,40 @@ static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned
 }
 
 /* Pinned packed_load: field width and signed extension follow the LOAD dtype. */
-static bool wgsl_make_packed_load_expr(
+static char *wgsl_make_packed_load_expr(
     PolyCtx *ctx,
     WgslStrMap *names,
     PolyUOp *load,
-    PolyUOp *idx_uop,
-    char *out,
-    size_t out_sz
+    PolyUOp *idx_uop
 ) {
-  if (!idx_uop || !wgsl_is_packed(ctx, load)) return false;
+  if (!idx_uop || !wgsl_is_packed(ctx, load)) return NULL;
 
   int itemsize = 0, elems = 0;
   unsigned mask = 0;
-  if (!wgsl_packed_params(load->dtype, &itemsize, &elems, &mask)) return false;
+  if (!wgsl_packed_params(load->dtype, &itemsize, &elems, &mask)) return NULL;
 
   char *buf_s = wsm_get(names, idx_uop->src[0]);
   char *idx_s = wsm_get(names, idx_uop->src[1]);
-  if (!buf_s || !idx_s) return false;
+  if (!buf_s || !idx_s) return NULL;
 
-  char raw[512];
-  snprintf(
-      raw, sizeof(raw), "((atomicLoad(&%s[(%s/%d)]) >> ((u32(%s)%%%du)*%du)) & 0x%Xu)", buf_s,
-      idx_s, elems, idx_s, elems, 8u * (unsigned)itemsize, mask
+  char *raw = poly_strfmt(
+      "((atomicLoad(&%s[(%s/%d)]) >> ((u32(%s)%%%du)*%du)) & 0x%Xu)", buf_s, idx_s, elems, idx_s,
+      elems, 8u * (unsigned)itemsize, mask
   );
+  if (!raw) return NULL;
 
+  char *out;
   PolyDType scalar = load->dtype;
   if (poly_dtype_is_bool(scalar)) {
-    snprintf(out, out_sz, "(%s != 0u)", raw);
+    out = poly_strfmt("(%s != 0u)", raw);
   } else if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
     int sext = (itemsize == 1) ? 24 : 16;
-    snprintf(out, out_sz, "((i32(%s)<<%d)>>%d)", raw, sext, sext);
+    out = poly_strfmt("((i32(%s)<<%d)>>%d)", raw, sext, sext);
   } else {
-    snprintf(out, out_sz, "%s", raw);
+    return raw;
   }
-  return true;
+  free(raw);
+  return out;
 }
 
 /* Pinned packed_store and string_rewrite: select field width from the value,
@@ -274,11 +274,8 @@ static bool wgsl_emit_packed_store(
   char *idx_s = wsm_get(names, idx_uop->src[1]);
   if (!buf_s || !idx_s || !val) return false;
 
-  char val_u32[512];
-  if (poly_dtype_is_bool(value_dt))
-    snprintf(val_u32, sizeof(val_u32), "select(0u, 1u, %s)", val);
-  else
-    snprintf(val_u32, sizeof(val_u32), "u32(%s)", val);
+  char *val_u32 = poly_strfmt(poly_dtype_is_bool(value_dt) ? "select(0u, 1u, %s)" : "u32(%s)", val);
+  if (!val_u32) return false;
 
   unsigned shift_bits = 8u * (unsigned)itemsize;
   for (int d = 0; d < depth; d++)
@@ -294,6 +291,7 @@ static bool wgsl_emit_packed_store(
       body, "atomicAdd(&%s[(%s/%d)], ((%s & 0x%Xu) << ((u32(%s)%%%du)*%uu)));\n", buf_s, idx_s,
       elems, val_u32, mask, idx_s, elems, shift_bits
   );
+  free(val_u32);
   return true;
 }
 
@@ -424,9 +422,7 @@ static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
 
 /* WGSL ALU expression */
 
-static void render_alu_wgsl(
-    char *buf,
-    int cap,
+static char *render_alu_wgsl(
     PolyOps op,
     PolyDType dtype,
     const char *s0,
@@ -439,90 +435,64 @@ static void render_alu_wgsl(
     if (poly_dtype_is_bool(dtype))
       /* Raw NEG(bool) is typed bool identity after arithmetic negation and
        * bool conversion. Standard logical NOT is CMPNE(x,true). */
-      snprintf(buf, cap, "(%s)", s0);
+      return poly_strfmt("(%s)", s0);
     else if (poly_dtype_is_unsigned(dtype))
       /* WGSL doesn't support unary minus on unsigned (tinygrad wgsl.py:69) */
-      snprintf(buf, cap, "(0-%s)", s0);
+      return poly_strfmt("(0-%s)", s0);
     else
-      snprintf(buf, cap, "(-%s)", s0);
-    break;
+      return poly_strfmt("(-%s)", s0);
   case POLY_OP_SQRT:
-    snprintf(buf, cap, "sqrt(%s)", s0);
-    break;
+    return poly_strfmt("sqrt(%s)", s0);
   case POLY_OP_TRUNC:
-    snprintf(buf, cap, "trunc(%s)", s0);
-    break;
+    return poly_strfmt("trunc(%s)", s0);
   case POLY_OP_EXP2:
-    snprintf(buf, cap, "exp2(%s)", s0);
-    break;
+    return poly_strfmt("exp2(%s)", s0);
   case POLY_OP_LOG2:
-    snprintf(buf, cap, "log2(%s)", s0);
-    break;
+    return poly_strfmt("log2(%s)", s0);
   case POLY_OP_SIN:
-    snprintf(buf, cap, "sin(%s)", s0);
-    break;
+    return poly_strfmt("sin(%s)", s0);
   case POLY_OP_RECIPROCAL:
-    snprintf(buf, cap, "(1.0/%s)", s0);
-    break;
+    return poly_strfmt("(1.0/%s)", s0);
   /* binary */
   case POLY_OP_ADD:
-    snprintf(buf, cap, "(%s+%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s+%s)", s0, s1);
   case POLY_OP_SUB:
-    snprintf(buf, cap, "(%s-%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s-%s)", s0, s1);
   case POLY_OP_MUL:
-    snprintf(buf, cap, "(%s*%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s*%s)", s0, s1);
   case POLY_OP_FDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_IDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_MOD:
-    snprintf(buf, cap, "(%s%%%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s%%%s)", s0, s1);
   case POLY_OP_SHL:
-    snprintf(buf, cap, "(%s<<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<<%s)", s0, s1);
   case POLY_OP_SHR:
-    snprintf(buf, cap, "(%s>>%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s>>%s)", s0, s1);
   case POLY_OP_AND:
-    snprintf(buf, cap, "(%s&%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s&%s)", s0, s1);
   case POLY_OP_OR:
-    snprintf(buf, cap, "(%s|%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s|%s)", s0, s1);
   case POLY_OP_XOR:
-    snprintf(buf, cap, "(%s^%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s^%s)", s0, s1);
   case POLY_OP_CMPLT:
-    snprintf(buf, cap, "(%s<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<%s)", s0, s1);
   case POLY_OP_CMPNE:
-    snprintf(buf, cap, "(%s!=%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s!=%s)", s0, s1);
   case POLY_OP_CMPEQ:
-    snprintf(buf, cap, "(%s==%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s==%s)", s0, s1);
   case POLY_OP_MAX:
-    snprintf(buf, cap, "max(%s,%s)", s0, s1);
-    break;
+    return poly_strfmt("max(%s,%s)", s0, s1);
   case POLY_OP_POW:
-    snprintf(buf, cap, "pow(%s,%s)", s0, s1);
-    break;
+    return poly_strfmt("pow(%s,%s)", s0, s1);
   /* ternary */
   case POLY_OP_WHERE:
-    snprintf(buf, cap, "select(%s,%s,%s)", s2, s1, s0);
-    break;
+    return poly_strfmt("select(%s,%s,%s)", s2, s1, s0);
   case POLY_OP_MULACC:
-    snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2);
-    break;
+    return poly_strfmt("((%s*%s)+%s)", s0, s1, s2);
   default:
-    snprintf(buf, cap, "/* unknown op %d */0", op);
-    break;
+    return poly_strfmt("/* unknown op %d */0", op);
   }
 }
 
@@ -664,9 +634,9 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = wsm_get(&names, u->src[0]);
       char *idx_s = wsm_get(&names, u->src[1]);
-      char expr[256];
-      snprintf(expr, sizeof(expr), "%s[%s]", buf_s, idx_s);
-      wsm_set(&names, u, strdup(expr));
+      char *expr = poly_strfmt("%s[%s]", buf_s, idx_s);
+      if (!expr) goto fail;
+      wsm_set(&names, u, expr);
       continue;
     }
 
@@ -674,9 +644,9 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     if (u->op == POLY_OP_SHRINK) {
       char *buf_s = wsm_get(&names, u->src[0]);
       char *idx_s = wsm_get(&names, u->src[1]);
-      char expr[256];
-      snprintf(expr, sizeof(expr), "%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
-      wsm_set(&names, u, strdup(expr));
+      char *expr = poly_strfmt("%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      if (!expr) goto fail;
+      wsm_set(&names, u, expr);
       continue;
     }
 
@@ -760,11 +730,13 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       char *bidx = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
       PolyUOp *idx_uop = poly_as_index(u->src[0]);
-      char packed_load[512];
+      char *packed_load = NULL;
       const char *load_expr = bidx;
-      if (idx_uop &&
-          wgsl_make_packed_load_expr(ctx, &names, u, idx_uop, packed_load, sizeof(packed_load)))
+      if (idx_uop && wgsl_is_packed(ctx, u)) {
+        packed_load = wgsl_make_packed_load_expr(ctx, &names, u, idx_uop);
+        if (!packed_load) goto fail;
         load_expr = packed_load;
+      }
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
 
@@ -820,6 +792,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       } else {
         wsb_printf(&body, "%s = %s;\n", name, load_expr);
       }
+      free(packed_load);
       continue;
     }
 
@@ -854,7 +827,9 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       char *val = wsm_get(&names, u->src[1]);
 
       PolyUOp *store_idx = poly_as_index(u->src[0]);
-      if (!wgsl_emit_packed_store(ctx, &body, &names, u, store_idx, val, depth)) {
+      if (store_idx && wgsl_is_packed(ctx, u)) {
+        if (!wgsl_emit_packed_store(ctx, &body, &names, u, store_idx, val, depth)) goto fail;
+      } else {
         for (int d = 0; d < depth; d++)
           wsb_puts(&body, "  ");
         wsb_printf(&body, "%s = %s;\n", target, val);
@@ -882,36 +857,37 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       PolyDType dst_s = u->dtype;
       PolyDType src_dt = u->src[0]->dtype;
 
-      char expr[256];
+      char *expr;
       if (u->op == POLY_OP_BITCAST) {
         /* BITCAST specializations matching tinygrad wgsl.py:76-84 */
         if (dst_s.priority == POLY_FLOAT16.priority && dst_s.bitsize == POLY_FLOAT16.bitsize) {
-          snprintf(expr, sizeof(expr), "bitcast<vec2<f16>>(%s)[0]", src_s);
+          expr = poly_strfmt("bitcast<vec2<f16>>(%s)[0]", src_s);
         } else if (dst_s.priority == POLY_UINT8.priority && dst_s.bitsize == 8) {
-          snprintf(expr, sizeof(expr), "bitcast<u32>(%s&0xFF)", src_s);
+          expr = poly_strfmt("bitcast<u32>(%s&0xFF)", src_s);
         } else if (dst_s.priority == POLY_INT8.priority && dst_s.bitsize == 8) {
-          snprintf(expr, sizeof(expr), "((i32(%s&0xFF)<<24)>>24)", src_s);
+          expr = poly_strfmt("((i32(%s&0xFF)<<24)>>24)", src_s);
         } else if (dst_s.priority == POLY_UINT16.priority && dst_s.bitsize == 16) {
           if (src_dt.priority == POLY_FLOAT16.priority && src_dt.bitsize == POLY_FLOAT16.bitsize)
-            snprintf(expr, sizeof(expr), "bitcast<u32>(vec2<f16>(%s,0))", src_s);
+            expr = poly_strfmt("bitcast<u32>(vec2<f16>(%s,0))", src_s);
           else
-            snprintf(expr, sizeof(expr), "bitcast<u32>(%s&0xFFFF)", src_s);
+            expr = poly_strfmt("bitcast<u32>(%s&0xFFFF)", src_s);
         } else if (dst_s.priority == POLY_INT16.priority && dst_s.bitsize == 16) {
           if (src_dt.priority == POLY_FLOAT16.priority && src_dt.bitsize == POLY_FLOAT16.bitsize)
-            snprintf(expr, sizeof(expr), "bitcast<i32>(vec2<f16>(%s,0))", src_s);
+            expr = poly_strfmt("bitcast<i32>(vec2<f16>(%s,0))", src_s);
           else
-            snprintf(expr, sizeof(expr), "((i32(%s&0xFFFF)<<16)>>16)", src_s);
+            expr = poly_strfmt("((i32(%s&0xFFFF)<<16)>>16)", src_s);
         } else {
-          snprintf(expr, sizeof(expr), "bitcast<%s>(%s)", tn, src_s);
+          expr = poly_strfmt("bitcast<%s>(%s)", tn, src_s);
         }
       } else {
         /* PG-DIV-008: u32(float) clamps negatives before masking. Narrow
          * integer conversions stage through i32 so signed values can wrap. */
         bool narrow_float =
             poly_dtype_is_float(src_dt) && poly_dtype_is_int(dst_s) && dst_s.bitsize < 32;
-        snprintf(expr, sizeof(expr), "%s(%s)", narrow_float ? "i32" : tn, src_s);
+        expr = poly_strfmt("%s(%s)", narrow_float ? "i32" : tn, src_s);
       }
 
+      if (!expr) goto fail;
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
@@ -920,6 +896,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         wgsl_emit_typed_expr(&body, u->dtype, expr);
       else
         wsb_puts(&body, expr);
+      free(expr);
       wsb_puts(&body, ";\n");
       continue;
     }
@@ -936,11 +913,11 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
     /* --- ALU ops: arithmetic expressions ----------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      char expr[512];
       const char *s0 = (u->n_src > 0) ? wsm_get(&names, u->src[0]) : "";
       const char *s1 = (u->n_src > 1) ? wsm_get(&names, u->src[1]) : "";
       const char *s2 = (u->n_src > 2) ? wsm_get(&names, u->src[2]) : "";
-      render_alu_wgsl(expr, sizeof(expr), u->op, u->dtype, s0, s1, s2);
+      char *expr = render_alu_wgsl(u->op, u->dtype, s0, s1, s2);
+      if (!expr) goto fail;
 
       char name[32];
       snprintf(name, sizeof(name), "alu%d", c_alu++);
@@ -952,6 +929,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         wsb_puts(&body, "  ");
       wsb_printf(&body, "%s = ", name);
       wgsl_emit_typed_expr(&body, u->dtype, expr);
+      free(expr);
       wsb_puts(&body, ";\n");
       continue;
     }

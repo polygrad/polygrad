@@ -156,19 +156,13 @@ static void hip_render_ctype(PolyDType dtype, int lanes, char *buf, int cap) {
 /* Pinned CStyleLanguage.render_access (renderer/cstyle.py:179-184).  The
  * scalar base type stays on BUFFER; a width-changing INDEX/SHRINK is accessed
  * by casting its address to the vector pointer type and dereferencing it. */
-static void hip_render_access_expr(
-    char *buf,
-    int cap,
-    const char *address,
-    PolyDType value_dtype,
-    int lanes
-) {
+static char *hip_render_access_expr(const char *address, PolyDType value_dtype, int lanes) {
   if (lanes > 1) {
     char value_type[128];
     hip_render_ctype(value_dtype, lanes, value_type, sizeof(value_type));
-    snprintf(buf, cap, "*((%s*)(%s))", value_type, address ? address : "0");
+    return poly_strfmt("*((%s*)(%s))", value_type, address ? address : "0");
   } else {
-    snprintf(buf, cap, "*%s", address ? address : "0");
+    return poly_strfmt("*%s", address ? address : "0");
   }
 }
 
@@ -271,9 +265,7 @@ static char *hip_render_const_literal(PolyUOp *c, PolyDType dtype) {
   return strdup(val);
 }
 
-static void hip_render_alu(
-    char *buf,
-    int cap,
+static char *hip_render_alu(
     PolyOps op,
     PolyDType dtype,
     const char *s0,
@@ -283,102 +275,70 @@ static void hip_render_alu(
   switch (op) {
   case POLY_OP_NEG:
     /* Pinned CStyleLanguage/HIPRenderer inherits arithmetic NEG. */
-    snprintf(buf, cap, "(-%s)", s0);
-    break;
+    return poly_strfmt("(-%s)", s0);
   case POLY_OP_SQRT:
-    snprintf(
-        buf, cap,
+    return poly_strfmt(
         poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_sqrt_f64(%s)" : "__ocml_sqrt_f32(%s)", s0
     );
-    break;
   case POLY_OP_TRUNC:
-    snprintf(
-        buf, cap,
+    return poly_strfmt(
         poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_trunc_f64(%s)" : "__ocml_trunc_f32(%s)", s0
     );
-    break;
   case POLY_OP_EXP2:
-    snprintf(
-        buf, cap,
+    return poly_strfmt(
         poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_exp2_f64(%s)" : "__ocml_exp2_f32(%s)", s0
     );
-    break;
   case POLY_OP_LOG2:
-    snprintf(
-        buf, cap,
+    return poly_strfmt(
         poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_log2_f64(%s)" : "__ocml_log2_f32(%s)", s0
     );
-    break;
   case POLY_OP_SIN:
-    snprintf(
-        buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_sin_f64(%s)" : "__ocml_sin_f32(%s)",
-        s0
+    return poly_strfmt(
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_sin_f64(%s)" : "__ocml_sin_f32(%s)", s0
     );
-    break;
   case POLY_OP_RECIPROCAL:
-    snprintf(buf, cap, "(1/%s)", s0);
-    break;
+    return poly_strfmt("(1/%s)", s0);
   case POLY_OP_ADD:
-    snprintf(buf, cap, "(%s+%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s+%s)", s0, s1);
   case POLY_OP_SUB:
-    snprintf(buf, cap, "(%s-%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s-%s)", s0, s1);
   case POLY_OP_MUL:
-    snprintf(buf, cap, "(%s*%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s*%s)", s0, s1);
   case POLY_OP_FDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_IDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_MOD:
-    snprintf(buf, cap, "(%s%%%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s%%%s)", s0, s1);
   case POLY_OP_SHL:
-    snprintf(buf, cap, "(%s<<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<<%s)", s0, s1);
   case POLY_OP_SHR:
-    snprintf(buf, cap, "(%s>>%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s>>%s)", s0, s1);
   case POLY_OP_AND:
-    snprintf(buf, cap, "(%s&%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s&%s)", s0, s1);
   case POLY_OP_OR:
-    snprintf(buf, cap, "(%s|%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s|%s)", s0, s1);
   case POLY_OP_XOR:
-    snprintf(buf, cap, "(%s^%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s^%s)", s0, s1);
   case POLY_OP_CMPLT:
-    snprintf(buf, cap, "(%s<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<%s)", s0, s1);
   case POLY_OP_CMPNE:
-    snprintf(buf, cap, "(%s!=%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s!=%s)", s0, s1);
   case POLY_OP_CMPEQ:
-    snprintf(buf, cap, "(%s==%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s==%s)", s0, s1);
   case POLY_OP_MAX:
-    snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
-    break;
+    return poly_strfmt("((%s>%s)?%s:%s)", s0, s1, s0, s1);
   case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
-    break;
+    return poly_strfmt(poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
   case POLY_OP_WHERE:
-    snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
-    break;
+    return poly_strfmt("(%s?%s:%s)", s0, s1, s2);
   case POLY_OP_MULACC:
-    snprintf(
-        buf, cap,
+    return poly_strfmt(
         poly_dtype_eq(dtype, POLY_FLOAT64) ? "__builtin_fma(%s,%s,%s)" : "__builtin_fmaf(%s,%s,%s)",
         s0, s1, s2
     );
-    break;
   default:
-    snprintf(buf, cap, "/* unknown op %d */0", op);
-    break;
+    return poly_strfmt("/* unknown op %d */0", op);
   }
 }
 
@@ -754,12 +714,13 @@ char *poly_render_hip(
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = hsmap_get(&names, u->src[0]);
       char *idx_s = hsmap_get(&names, u->src[1]);
-      char expr[256];
+      char *expr;
       if (poly_is_program_memory_base(u->src[0]))
-        snprintf(expr, sizeof(expr), "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        expr = poly_strfmt("(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
       else
-        snprintf(expr, sizeof(expr), "%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
-      hsmap_set(&names, u, strdup(expr));
+        expr = poly_strfmt("%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      if (!expr) goto fail;
+      hsmap_set(&names, u, expr);
       continue;
     }
 
@@ -767,9 +728,9 @@ char *poly_render_hip(
     if (u->op == POLY_OP_SHRINK) {
       char *buf_s = hsmap_get(&names, u->src[0]);
       char *idx_s = hsmap_get(&names, u->src[1]);
-      char expr[256];
-      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
-      hsmap_set(&names, u, strdup(expr));
+      char *expr = poly_strfmt("(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      if (!expr) goto fail;
+      hsmap_set(&names, u, expr);
       continue;
     }
 
@@ -925,9 +886,9 @@ char *poly_render_hip(
       hsmap_set(&names, u, strdup(name));
 
       char *bidx = hsmap_get(&names, u->src[0]);
-      char access[512];
       int lanes = (int)poly_uop_max_numel(ctx, u);
-      hip_render_access_expr(access, sizeof(access), bidx, u->dtype, lanes);
+      char *access = hip_render_access_expr(bidx, u->dtype, lanes);
+      if (!access) goto fail;
       {
         char ctype[128];
         hip_render_ctype(u->dtype, lanes, ctype, sizeof(ctype));
@@ -951,6 +912,7 @@ char *poly_render_hip(
       } else {
         hsb_printf(&body, "%s = %s;\n", name, access);
       }
+      free(access);
       continue;
     }
 
@@ -958,14 +920,14 @@ char *poly_render_hip(
     if (u->op == POLY_OP_STORE) {
       char *target = hsmap_get(&names, u->src[0]);
       char *val = hsmap_get(&names, u->src[1]);
-      char access[512];
       int lanes = u->src[1] ? (int)poly_uop_max_numel(ctx, u->src[1]) : 1;
-      hip_render_access_expr(
-          access, sizeof(access), target, u->src[1] ? u->src[1]->dtype : POLY_VOID, lanes
-      );
+      char *access =
+          hip_render_access_expr(target, u->src[1] ? u->src[1]->dtype : POLY_VOID, lanes);
+      if (!access) goto fail;
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = %s;\n", access, val);
+      free(access);
       continue;
     }
 
@@ -1047,11 +1009,11 @@ char *poly_render_hip(
 
     /* --- ALU ---------------------------------------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      char expr[512];
       const char *s0 = (u->n_src > 0) ? hsmap_get(&names, u->src[0]) : "";
       const char *s1 = (u->n_src > 1) ? hsmap_get(&names, u->src[1]) : "";
       const char *s2 = (u->n_src > 2) ? hsmap_get(&names, u->src[2]) : "";
-      hip_render_alu(expr, sizeof(expr), u->op, u->dtype, s0, s1, s2);
+      char *expr = hip_render_alu(u->op, u->dtype, s0, s1, s2);
+      if (!expr) goto fail;
 
       char name[32];
       snprintf(name, sizeof(name), "alu%d", c_alu++);
@@ -1065,6 +1027,7 @@ char *poly_render_hip(
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = %s;\n", name, expr);
+      free(expr);
       continue;
     }
 
@@ -1297,6 +1260,15 @@ char *poly_render_hip(
   hsmap_destroy(&names);
 
   return out.buf;
+fail:
+  for (int i = 0; i < n_params; i++) {
+    free(param_types[i]);
+    free(param_names[i]);
+  }
+  free(decls.buf);
+  free(body.buf);
+  hsmap_destroy(&names);
+  return NULL;
 }
 
 #endif /* POLY_HAS_HIP */

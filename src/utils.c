@@ -7,6 +7,23 @@ _Thread_local double poly_compile_deadline_ms;
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+char *poly_strfmt(const char *format, ...) {
+  va_list args, copy;
+  va_start(args, format);
+  va_copy(copy, args);
+  int size = vsnprintf(NULL, 0, format, args);
+  va_end(args);
+  char *out = size < 0 ? NULL : malloc((size_t)size + 1);
+  if (out && vsnprintf(out, (size_t)size + 1, format, copy) != size) {
+    free(out);
+    out = NULL;
+  }
+  va_end(copy);
+  return out;
+}
 #ifndef __EMSCRIPTEN__
 #include <time.h>
 #endif
