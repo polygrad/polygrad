@@ -6007,6 +6007,96 @@ TEST(model, inline_forward_copies_prefixed_weights) {
   PASS();
 }
 
+TEST(model, inline_preserves_output_shape_across_repeated_calls) {
+  for (int ndim = 0; ndim <= 3; ndim++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int64_t shape[] = {2, 3, 4};
+    PolyModel *child = poly_model_new(ctx, NULL);
+    PolyTensor *x = poly_model_input(child, "x", POLY_FLOAT32, shape, ndim);
+    PolyTensor *weight = poly_model_param(child, "w", POLY_FLOAT32, shape, ndim);
+    PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_MUL, x, weight);
+    ASSERT_EQ(poly_model_output(child, "y", y), 0);
+    const char *inputs[] = {"x"}, *outputs[] = {"y"};
+    ASSERT_EQ(poly_model_entrypoint(child, "forward", inputs, 1, outputs, 1, NULL), 0);
+    ASSERT_EQ(poly_model_build(child, NULL), 0);
+    int len = 0;
+    uint8_t *ir = poly_model_export_ir(child, &len);
+    ASSERT_NOT_NULL(ir);
+    PolyModel *loaded = poly_model_from_ir(ir, len, NULL, 0);
+    ASSERT_NOT_NULL(loaded);
+    for (int imported = 0; imported < 2; imported++) {
+      PolyModel *parent = poly_model_new(ctx, NULL);
+      PolyTensor *input = poly_model_input(parent, "x", POLY_FLOAT32, shape, ndim);
+      PolyTensor *shared = poly_model_param(parent, "shared.w", POLY_FLOAT32, shape, ndim);
+      PolyTensor *value = input;
+      PolyModelInlineOutput out[1];
+      for (int step = 0; step < 3; step++) {
+        PolyModelInlineBinding bindings[] = {{"x", value}, {"w", shared}};
+        int count = 0;
+        ASSERT_EQ(
+            poly_model_inline_entrypoint(
+                parent, imported ? loaded : child, "forward", "child.", bindings, 2, false, out, 1,
+                &count
+            ),
+            0
+        );
+        ASSERT_EQ(count, 1);
+        value = out[0].tensor;
+        PolyUOp *roots[] = {value->uop_logical, value->uop_physical};
+        for (int r = 0; r < 2; r++) {
+          ASSERT_EQ(poly_uop_ndim(ctx, roots[r]), ndim);
+          for (int d = 0; d < ndim; d++) {
+            int64_t extent = 0;
+            ASSERT_EQ(poly_uop_const_i64(poly_uop_shape_dim(ctx, roots[r], d), &extent), 0);
+            ASSERT_EQ(extent, shape[d]);
+          }
+        }
+      }
+      ASSERT_EQ(poly_model_output(parent, "y", value), 0);
+      ASSERT_EQ(poly_model_entrypoint(parent, "forward", inputs, 1, outputs, 1, NULL), 0);
+      ASSERT_EQ(poly_model_build(parent, NULL), 0);
+      ASSERT_EQ(poly_model_param_count(parent), 1);
+      int n = 1;
+      for (int d = 0; d < ndim; d++)
+        n *= (int)shape[d];
+      float data[24], actual[24], weights[24];
+      for (int i = 0; i < n; i++)
+        data[i] = (float)(i + 1);
+      for (int i = 0; i < n; i++)
+        weights[i] = 2;
+      ASSERT_EQ(
+          poly_model_write_buf(
+              parent, test_find_model_buf(parent, "shared.w"), weights, (size_t)n * sizeof(float)
+          ),
+          0
+      );
+      PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", data, POLY_FLOAT32);
+      io.nbytes = (size_t)n * sizeof(float);
+      int status = poly_model_forward(parent, &io, 1);
+      if (status != 0)
+        fprintf(
+            stderr, "inline rank=%d imported=%d: %s\n", ndim, imported,
+            poly_model_last_error(parent)->message
+        );
+      ASSERT_EQ(status, 0);
+      ASSERT_EQ(
+          poly_model_read_buf(
+              parent, test_find_model_buf(parent, "y"), actual, (size_t)n * sizeof(float)
+          ),
+          0
+      );
+      for (int i = 0; i < n; i++)
+        ASSERT_FLOAT_EQ(actual[i], 8 * data[i], 0.0);
+      poly_model_free(parent);
+    }
+    poly_model_free(loaded);
+    free(ir);
+    poly_model_free(child);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(model, inline_frozen_submodel_not_updated_by_parent_train) {
   int child_ir_len = 0;
   uint8_t *child_ir = make_train_ir(4, &child_ir_len);

@@ -6495,6 +6495,19 @@ int poly_model_inline_entrypoint(
     PolyUOp *logical_value = clone_uop_into_ctx(dst_ctx, logical_memo, store->src[1]);
     PolyUOp *physical_value = clone_uop_into_ctx(dst_ctx, physical_memo, physical_value_src);
     if (!logical_value || !physical_value) goto done;
+    /* Entrypoint STOREs use flat storage; composition returns the declared
+     * Tensor shape, including scalar and symbolic dimensions, not that ABI view. */
+    PolyUOp *logical_dims[POLY_IR_MAX_DIMS], *physical_dims[POLY_IR_MAX_DIMS];
+    for (int d = 0; d < out_buf->ndim; d++) {
+      PolyUOp *dim = model_signature_dim(child->ctx, out_buf, d);
+      logical_dims[d] = clone_uop_into_ctx(dst_ctx, logical_memo, dim);
+      physical_dims[d] = clone_uop_into_ctx(dst_ctx, physical_memo, dim);
+      if (!logical_dims[d] || !physical_dims[d]) goto done;
+    }
+    logical_value = poly_uop_reshape_symbolic(dst_ctx, logical_value, logical_dims, out_buf->ndim);
+    physical_value =
+        poly_uop_reshape_symbolic(dst_ctx, physical_value, physical_dims, out_buf->ndim);
+    if (!logical_value || !physical_value) goto done;
     PolyDevice device = poly_ctx_get_preferred_device(dst_ctx);
     if (!poly_device_can_execute(device)) device = poly_device_default();
     PolyTensor *value = poly_tensor_create_with_roots(

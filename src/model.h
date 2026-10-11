@@ -594,7 +594,9 @@ int64_t poly_model_buf_numel_named(const PolyModel *inst, const char *name);
 /* Imported-model composition. Inlines a value entrypoint from `child` into
  * a building parent under `prefix`. Input/target buffers are replaced by
  * exact parent Tensor occurrences; child state and returned values preserve
- * both the portable logical graph and stored physical template. */
+ * both the portable logical graph and stored physical template. Returned
+ * Tensors have their declared shapes and own references; bindings are borrowed.
+ * Rebind state explicitly to share parameters across repeated child calls. */
 typedef struct {
   const char *name;
   PolyTensor *tensor;
