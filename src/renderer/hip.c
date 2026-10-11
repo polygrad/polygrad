@@ -72,9 +72,11 @@ typedef struct {
   PolyUOp **keys;
   char **vals;
   int cap;
+  bool failed;
 } HipStrMap;
 
 static void hsmap_init(HipStrMap *m, int n) {
+  m->failed = false;
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
   m->vals = calloc(m->cap, sizeof(char *));
@@ -87,15 +89,22 @@ static void hsmap_set(HipStrMap *m, PolyUOp *key, char *val) {
   if (m->keys[h] == key) free(m->vals[h]);
   m->keys[h] = key;
   m->vals[h] = val;
+  if (!val) m->failed = true;
 }
 
 static char *hsmap_get(HipStrMap *m, PolyUOp *key) {
   uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
-    if (m->keys[h] == key) return m->vals[h];
+    if (m->keys[h] == key && m->vals[h]) return m->vals[h];
+    if (m->keys[h] == key) break;
     h = (h + 1) % m->cap;
   }
-  return NULL;
+  if (!m->failed)
+    fprintf(stderr, "polygrad: renderer operand has no expression (%s)\n", poly_op_name(key->op));
+  m->failed = true;
+  /* Keep formatting safe while unwinding; failed maps can never publish source.
+   * Unlike a zero fallback, this sentinel is not a rendered value. */
+  return "";
 }
 
 static void hsmap_destroy(HipStrMap *m) {
@@ -160,9 +169,9 @@ static char *hip_render_access_expr(const char *address, PolyDType value_dtype, 
   if (lanes > 1) {
     char value_type[128];
     hip_render_ctype(value_dtype, lanes, value_type, sizeof(value_type));
-    return poly_strfmt("*((%s*)(%s))", value_type, address ? address : "0");
+    return poly_strfmt("*((%s*)(%s))", value_type, address);
   } else {
-    return poly_strfmt("*%s", address ? address : "0");
+    return poly_strfmt("*%s", address);
   }
 }
 
@@ -338,7 +347,7 @@ static char *hip_render_alu(
         s0, s1, s2
     );
   default:
-    return poly_strfmt("/* unknown op %d */0", op);
+    return NULL;
   }
 }
 
@@ -660,6 +669,7 @@ char *poly_render_hip(
   }
 
   for (int i = 0; i < n; i++) {
+    if (names.failed) goto fail;
     PolyUOp *u = uops[i];
 
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
@@ -716,9 +726,9 @@ char *poly_render_hip(
       char *idx_s = hsmap_get(&names, u->src[1]);
       char *expr;
       if (poly_is_program_memory_base(u->src[0]))
-        expr = poly_strfmt("(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        expr = poly_strfmt("(%s+%s)", buf_s, idx_s);
       else
-        expr = poly_strfmt("%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        expr = poly_strfmt("%s[%s]", buf_s, idx_s);
       if (!expr) goto fail;
       hsmap_set(&names, u, expr);
       continue;
@@ -728,7 +738,7 @@ char *poly_render_hip(
     if (u->op == POLY_OP_SHRINK) {
       char *buf_s = hsmap_get(&names, u->src[0]);
       char *idx_s = hsmap_get(&names, u->src[1]);
-      char *expr = poly_strfmt("(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      char *expr = poly_strfmt("(%s+%s)", buf_s, idx_s);
       if (!expr) goto fail;
       hsmap_set(&names, u, expr);
       continue;
@@ -1055,13 +1065,13 @@ char *poly_render_hip(
 
       if (u->n_src == 1) {
         char *s = hsmap_get(&names, u->src[0]);
-        hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype, s ? s : "0");
+        hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype, s);
       } else {
         hsb_printf(&body, "%s = (%s){", name, ctype);
         for (int j = 0; j < u->n_src; j++) {
           if (j) hsb_puts(&body, ", ");
           char *s = hsmap_get(&names, u->src[j]);
-          hsb_puts(&body, s ? s : "0");
+          hsb_puts(&body, s);
         }
         hsb_puts(&body, "};\n");
       }
@@ -1070,6 +1080,7 @@ char *poly_render_hip(
 
     /* --- WMMA: matrix multiply-accumulate ----------------------------- */
     if (u->op == POLY_OP_WMMA) {
+      if (u->n_src != 3) goto fail;
       char name[32];
       snprintf(name, sizeof(name), "wmma%d", c_alu++);
       hsmap_set(&names, u, strdup(name));
@@ -1081,15 +1092,12 @@ char *poly_render_hip(
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
 
-      char *a_s = (u->n_src > 0) ? hsmap_get(&names, u->src[0]) : "0";
-      char *b_s = (u->n_src > 1) ? hsmap_get(&names, u->src[1]) : "0";
-      char *c_s = (u->n_src > 2) ? hsmap_get(&names, u->src[2]) : "0";
+      char *a_s = hsmap_get(&names, u->src[0]);
+      char *b_s = hsmap_get(&names, u->src[1]);
+      char *c_s = hsmap_get(&names, u->src[2]);
       char helper[128];
       if (!poly_wmma_name(u, helper, sizeof(helper))) return NULL;
-      hsb_printf(
-          &body, "%s = __%s(%s, %s, %s", name, helper, a_s ? a_s : "0", b_s ? b_s : "0",
-          c_s ? c_s : "0"
-      );
+      hsb_printf(&body, "%s = __%s(%s, %s, %s", name, helper, a_s, b_s, c_s);
       if (hip_is_cdna(arch)) {
         if (u->arg.tensor_core.dims[2] == 128) {
           int fp8 = poly_dtype_eq(u->arg.tensor_core.dtype_in, POLY_FP8E5M2) ? 1 : 0;
@@ -1124,6 +1132,7 @@ char *poly_render_hip(
   hip_scan_used_funcs(ctx, uops, n, &used);
 
   /* Build complete HIP source */
+  if (names.failed) goto fail;
   HipStrBuf out;
   hsb_init(&out);
 

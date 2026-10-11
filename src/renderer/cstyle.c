@@ -81,9 +81,11 @@ typedef struct {
   PolyUOp **keys;
   char **vals;
   int cap;
+  bool failed;
 } StrMap;
 
 static void smap_init(StrMap *m, int n) {
+  m->failed = false;
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
   m->vals = calloc(m->cap, sizeof(char *));
@@ -96,15 +98,22 @@ static void smap_set(StrMap *m, PolyUOp *key, char *val) {
   if (m->keys[h] == key) free(m->vals[h]); /* replace existing */
   m->keys[h] = key;
   m->vals[h] = val;
+  if (!val) m->failed = true;
 }
 
 static char *smap_get(StrMap *m, PolyUOp *key) {
   uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
-    if (m->keys[h] == key) return m->vals[h];
+    if (m->keys[h] == key && m->vals[h]) return m->vals[h];
+    if (m->keys[h] == key) break;
     h = (h + 1) % m->cap;
   }
-  return NULL;
+  if (!m->failed)
+    fprintf(stderr, "polygrad: renderer operand has no expression (%s)\n", poly_op_name(key->op));
+  m->failed = true;
+  /* Keep formatting safe while unwinding; failed maps can never publish source.
+   * Unlike a zero fallback, this sentinel is not a rendered value. */
+  return "";
 }
 
 static void smap_destroy(StrMap *m) {
@@ -684,43 +693,10 @@ static int render_uop_lanes(PolyCtx *ctx, const PolyUOp *u) {
   return 1;
 }
 
-static bool render_index_lane_ptr(StrMap *names, PolyUOp *ptr_uop, int lane, char *buf, int cap) {
-  PolyUOp *idx = poly_as_memory_slice(ptr_uop);
-  if (!idx || idx->n_src < 2) return false;
-  char *base = smap_get(names, idx->src[0]);
-  char *idx_s = smap_get(names, idx->src[1]);
-  if (lane == 0)
-    snprintf(buf, cap, "(%s+%s)", base ? base : "0", idx_s ? idx_s : "0");
-  else
-    snprintf(buf, cap, "(%s+(%s)+%d)", base ? base : "0", idx_s ? idx_s : "0", lane);
-  return true;
-}
-
-static void render_vector_load_expr(
-    StrBuf *body,
-    StrMap *names,
-    PolyUOp *ptr_uop,
-    int lanes,
-    const char *dtype_s
-) {
-  sb_printf(body, "((%s){", dtype_s);
-  for (int lane = 0; lane < lanes; lane++) {
-    char lane_ptr[512];
-    if (lane) sb_puts(body, ",");
-    if (render_index_lane_ptr(names, ptr_uop, lane, lane_ptr, sizeof(lane_ptr)))
-      sb_printf(body, "(*%s)", lane_ptr);
-    else
-      sb_puts(body, "0");
-  }
-  sb_puts(body, "})");
-}
-
 /* Render an ALU expression.
  * For vec4 types, GCC vector extensions handle +, -, *, /, <<, >>, &, |, ^,
  * <, !=, == natively. WHERE/MAX need special handling. */
-static void render_alu(
-    char *buf,
-    int cap,
+static char *render_alu(
     PolyOps op,
     PolyDType dtype,
     int lanes,
@@ -735,40 +711,31 @@ static void render_alu(
   case POLY_OP_NEG:
     /* Pinned CStyleLanguage.code_for_op renders every NEG as arithmetic -x
      * (renderer/cstyle.py:128-130). Assignment to bool normalizes the result. */
-    snprintf(buf, cap, "(-%s)", s0); /* works on vectors */
-    break;
+    return poly_strfmt("(-%s)", s0); /* works on vectors */
   case POLY_OP_SQRT:
     if (is_vec) {
       /* Vec SQRT: per-element via initializer (no vec builtin) */
       char vt[128];
       render_ctype(dtype, lanes, vt, sizeof(vt));
       const char *fn = poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt" : "__builtin_sqrtf";
-      snprintf(
-          buf, cap, "((%s){%s(%s[0]),%s(%s[1]),%s(%s[2]),%s(%s[3])})", vt, fn, s0, fn, s0, fn, s0,
-          fn, s0
+      return poly_strfmt(
+          "((%s){%s(%s[0]),%s(%s[1]),%s(%s[2]),%s(%s[3])})", vt, fn, s0, fn, s0, fn, s0, fn, s0
       );
     } else {
-      snprintf(
-          buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)",
-          s0
+      return poly_strfmt(
+          poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)", s0
       );
     }
-    break;
   case POLY_OP_TRUNC:
-    snprintf(
-        buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)",
-        s0
+    return poly_strfmt(
+        poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)", s0
     );
-    break;
   case POLY_OP_EXP2:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "exp2(%s)" : "exp2f(%s)", s0);
-    break;
+    return poly_strfmt(poly_dtype_eq(sdt, POLY_FLOAT64) ? "exp2(%s)" : "exp2f(%s)", s0);
   case POLY_OP_LOG2:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "log2(%s)" : "log2f(%s)", s0);
-    break;
+    return poly_strfmt(poly_dtype_eq(sdt, POLY_FLOAT64) ? "log2(%s)" : "log2f(%s)", s0);
   case POLY_OP_SIN:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "sin(%s)" : "sinf(%s)", s0);
-    break;
+    return poly_strfmt(poly_dtype_eq(sdt, POLY_FLOAT64) ? "sin(%s)" : "sinf(%s)", s0);
   case POLY_OP_RECIPROCAL:
     if (is_vec) {
       /* Vec RECIPROCAL: (type){1.0f,...} / x */
@@ -776,54 +743,39 @@ static void render_alu(
       render_ctype(dtype, lanes, vt, sizeof(vt));
       char one[128];
       render_ctype(dtype, lanes, one, sizeof(one));
-      snprintf(buf, cap, "((%s){1.0f,1.0f,1.0f,1.0f}/%s)", vt, s0);
+      return poly_strfmt("((%s){1.0f,1.0f,1.0f,1.0f}/%s)", vt, s0);
     } else {
-      snprintf(buf, cap, "(1/%s)", s0);
+      return poly_strfmt("(1/%s)", s0);
     }
-    break;
   /* binary — +, -, *, /, <<, >>, &, |, ^, <, !=, == all work on GCC vectors */
   case POLY_OP_ADD:
-    snprintf(buf, cap, "(%s+%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s+%s)", s0, s1);
   case POLY_OP_SUB:
-    snprintf(buf, cap, "(%s-%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s-%s)", s0, s1);
   case POLY_OP_MUL:
-    snprintf(buf, cap, "(%s*%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s*%s)", s0, s1);
   case POLY_OP_FDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_IDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s/%s)", s0, s1);
   case POLY_OP_MOD:
-    snprintf(buf, cap, "(%s%%%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s%%%s)", s0, s1);
   case POLY_OP_SHL:
-    snprintf(buf, cap, "(%s<<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<<%s)", s0, s1);
   case POLY_OP_SHR:
-    snprintf(buf, cap, "(%s>>%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s>>%s)", s0, s1);
   case POLY_OP_AND:
-    snprintf(buf, cap, "(%s&%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s&%s)", s0, s1);
   case POLY_OP_OR:
-    snprintf(buf, cap, "(%s|%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s|%s)", s0, s1);
   case POLY_OP_XOR:
-    snprintf(buf, cap, "(%s^%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s^%s)", s0, s1);
   case POLY_OP_CMPLT:
-    snprintf(buf, cap, "(%s<%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s<%s)", s0, s1);
   case POLY_OP_CMPNE:
-    snprintf(buf, cap, "(%s!=%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s!=%s)", s0, s1);
   case POLY_OP_CMPEQ:
-    snprintf(buf, cap, "(%s==%s)", s0, s1);
-    break;
+    return poly_strfmt("(%s==%s)", s0, s1);
   case POLY_OP_MAX:
     if (is_vec) {
       /* vec MAX: bitwise select using comparison mask.
@@ -833,17 +785,15 @@ static void render_alu(
       render_ctype(idt, lanes, int_type, sizeof(int_type));
       char dst_type[128];
       render_ctype(dtype, lanes, dst_type, sizeof(dst_type));
-      snprintf(
-          buf, cap, "((%s)(((%s)(%s>%s) & (%s)%s) | (~(%s)(%s>%s) & (%s)%s)))", dst_type, int_type,
-          s0, s1, int_type, s0, int_type, s0, s1, int_type, s1
+      return poly_strfmt(
+          "((%s)(((%s)(%s>%s) & (%s)%s) | (~(%s)(%s>%s) & (%s)%s)))", dst_type, int_type, s0, s1,
+          int_type, s0, int_type, s0, s1, int_type, s1
       );
     } else {
-      snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
+      return poly_strfmt("((%s>%s)?%s:%s)", s0, s1, s0, s1);
     }
-    break;
   case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
-    break;
+    return poly_strfmt(poly_dtype_eq(sdt, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
   /* ternary */
   case POLY_OP_WHERE:
     if (is_vec) {
@@ -854,20 +804,16 @@ static void render_alu(
       render_ctype(idt, lanes, int_type, sizeof(int_type));
       char dst_type[128];
       render_ctype(dtype, lanes, dst_type, sizeof(dst_type));
-      snprintf(
-          buf, cap, "((%s)((%s & (%s)%s) | (~%s & (%s)%s)))", dst_type, s0, int_type, s1, s0,
-          int_type, s2
+      return poly_strfmt(
+          "((%s)((%s & (%s)%s) | (~%s & (%s)%s)))", dst_type, s0, int_type, s1, s0, int_type, s2
       );
     } else {
-      snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
+      return poly_strfmt("(%s?%s:%s)", s0, s1, s2);
     }
-    break;
   case POLY_OP_MULACC:
-    snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2);
-    break;
+    return poly_strfmt("((%s*%s)+%s)", s0, s1, s2);
   default:
-    snprintf(buf, cap, "/* unknown op %d */0", op);
-    break;
+    return NULL;
   }
 }
 
@@ -1029,6 +975,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   }
 
   for (int i = 0; i < n; i++) {
+    if (names.failed) goto fail;
     PolyUOp *u = uops[i];
 
     /* --- SINK: skip ------------------------------------------------- */
@@ -1100,7 +1047,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_STACK) {
       if (u->n_src == 1) {
         char *s = smap_get(&names, u->src[0]);
-        smap_set(&names, u, strdup(s ? s : "0"));
+        smap_set(&names, u, strdup(s));
         continue;
       }
       char dtype_s[128];
@@ -1112,7 +1059,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
         for (int j = 0; j < u->n_src; j++) {
           if (j) sb_puts(&vexpr, ",");
           char *s = smap_get(&names, u->src[j]);
-          sb_puts(&vexpr, s ? s : "0");
+          sb_puts(&vexpr, s);
         }
       } else if (u->arg.kind == POLY_ARG_INT_TUPLE) {
         for (int j = 0; j < u->arg.int_tuple.n; j++) {
@@ -1132,9 +1079,9 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       StrBuf expr;
       sb_init(&expr);
       if (poly_is_program_memory_base(u->src[0]))
-        sb_printf(&expr, "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        sb_printf(&expr, "(%s+%s)", buf_s, idx_s);
       else
-        sb_printf(&expr, "(%s[%s])", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        sb_printf(&expr, "(%s[%s])", buf_s, idx_s);
       smap_set(&names, u, expr.buf);
       continue;
     }
@@ -1145,7 +1092,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       char *idx_s = smap_get(&names, u->src[1]);
       StrBuf expr;
       sb_init(&expr);
-      sb_printf(&expr, "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      sb_printf(&expr, "(%s+%s)", buf_s, idx_s);
       smap_set(&names, u, expr.buf);
       continue;
     }
@@ -1292,7 +1239,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
           if (poly_as_memory_slice(u->src[0]))
             sb_printf(&body, "(*((%s*)(%s)))", dtype_s, bidx);
           else
-            render_vector_load_expr(&body, &names, u->src[0], lanes, dtype_s);
+            goto fail; /* No addressable vector slice: never invent zero lanes. */
           sb_printf(&body, "; else %s = %s;\n", name, alt_s);
         } else {
           sb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
@@ -1306,7 +1253,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
           if (poly_as_memory_slice(u->src[0]))
             sb_printf(&body, "(*((%s*)(%s)))", dtype_s, bidx);
           else
-            render_vector_load_expr(&body, &names, u->src[0], lanes, dtype_s);
+            goto fail; /* No addressable vector slice: never invent zero lanes. */
           sb_printf(&body, "; else memset(&%s, 0, sizeof(%s));\n", name, name);
         } else {
           sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
@@ -1476,17 +1423,10 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
         }
       }
       const char *s0 = sources[0], *s1 = sources[1], *s2 = sources[2];
-      size_t expr_cap = strlen(s0 ? s0 : "") + strlen(s1 ? s1 : "") + strlen(s2 ? s2 : "") + 1024;
-      char *expr = malloc(expr_cap);
-      if (!expr)
-        expr = strdup("0");
-      else
-        render_alu(
-            expr, (int)expr_cap, u->op, u->dtype, render_uop_lanes(ctx, u), s0 ? s0 : "",
-            s1 ? s1 : "", s2 ? s2 : ""
-        );
+      char *expr = render_alu(u->op, u->dtype, render_uop_lanes(ctx, u), s0, s1, s2);
       for (int j = 0; j < 3; j++)
         free(stripped[j]);
+      if (!expr) goto fail;
 
       /* Pinned cstyle.py:232-237 keeps WHERE materialized but directly embeds
        * a one-use ALU expression in its consumer by default. */
@@ -1582,6 +1522,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   }
 
   /* Build complete source */
+  if (names.failed) goto fail;
   StrBuf out;
   sb_init(&out);
   sb_puts(&out, "#include <math.h>\n");

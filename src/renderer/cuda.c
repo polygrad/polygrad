@@ -64,9 +64,11 @@ typedef struct {
   PolyUOp **keys;
   char **vals;
   int cap;
+  bool failed;
 } CudaStrMap;
 
 static void csmap_init(CudaStrMap *m, int n) {
+  m->failed = false;
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
   m->vals = calloc(m->cap, sizeof(char *));
@@ -79,15 +81,22 @@ static void csmap_set(CudaStrMap *m, PolyUOp *key, char *val) {
   if (m->keys[h] == key) free(m->vals[h]);
   m->keys[h] = key;
   m->vals[h] = val;
+  if (!val) m->failed = true;
 }
 
 static char *csmap_get(CudaStrMap *m, PolyUOp *key) {
   uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
-    if (m->keys[h] == key) return m->vals[h];
+    if (m->keys[h] == key && m->vals[h]) return m->vals[h];
+    if (m->keys[h] == key) break;
     h = (h + 1) % m->cap;
   }
-  return NULL;
+  if (!m->failed)
+    fprintf(stderr, "polygrad: renderer operand has no expression (%s)\n", poly_op_name(key->op));
+  m->failed = true;
+  /* Keep formatting safe while unwinding; failed maps can never publish source.
+   * Unlike a zero fallback, this sentinel is not a rendered value. */
+  return "";
 }
 
 static void csmap_destroy(CudaStrMap *m) {
@@ -244,9 +253,9 @@ static char *cuda_render_access_expr(PolyCtx *ctx, const char *address, const Po
   if (lanes > 1) {
     char value_type[128];
     cuda_render_ctype_nonptr(index->dtype, lanes, value_type, sizeof(value_type));
-    return poly_strfmt("*((%s*)(%s))", value_type, address ? address : "0");
+    return poly_strfmt("*((%s*)(%s))", value_type, address);
   } else {
-    return poly_strfmt("*%s", address ? address : "0");
+    return poly_strfmt("*%s", address);
   }
 }
 
@@ -395,13 +404,13 @@ static char *cuda_render_vector_expr(PolyCtx *ctx, CudaStrMap *names, PolyUOp *u
   csb_init(&expr);
   if (u->n_src == 1) {
     char *s = csmap_get(names, u->src[0]);
-    csb_printf(&expr, "(%s)(%s)", ctype, s ? s : "0");
+    csb_printf(&expr, "(%s)(%s)", ctype, s);
   } else if (u->n_src > 1) {
     csb_printf(&expr, "make_%s(", ctype);
     for (int j = 0; j < u->n_src; j++) {
       if (j) csb_puts(&expr, ", ");
       char *s = csmap_get(names, u->src[j]);
-      csb_puts(&expr, s ? s : "0");
+      csb_puts(&expr, s);
     }
     csb_puts(&expr, ")");
   } else if (u->arg.kind == POLY_ARG_INT_TUPLE) {
@@ -570,8 +579,8 @@ static char *cuda_render_alu(
     );
     break;
   default:
-    csb_printf(&out, "/* unknown op %d */0", op);
-    break;
+    free(out.buf);
+    return NULL;
   }
   return out.buf;
 }
@@ -698,6 +707,7 @@ char *poly_render_cuda(
   if (param_capacity && (!param_types || !param_names || !param_order)) goto cleanup;
 
   for (int i = 0; i < n; i++) {
+    if (names.failed) goto cleanup;
     PolyUOp *u = uops[i];
 
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
@@ -756,9 +766,9 @@ char *poly_render_cuda(
       if (poly_is_program_memory_base(u->src[0]))
         expr = poly_strfmt("(%s+%s)", buf_s, idx_s);
       else if (u->src[1] && u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT)
-        expr = poly_strfmt("%s.%s", buf_s ? buf_s : "0", cuda_lane_name((int)u->src[1]->arg.i));
+        expr = poly_strfmt("%s.%s", buf_s, cuda_lane_name((int)u->src[1]->arg.i));
       else
-        expr = poly_strfmt("((&(%s).x)[%s])", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+        expr = poly_strfmt("((&(%s).x)[%s])", buf_s, idx_s);
       if (!expr) goto cleanup;
       csmap_set(&names, u, expr);
       continue;
@@ -768,7 +778,7 @@ char *poly_render_cuda(
     if (u->op == POLY_OP_SHRINK) {
       char *buf_s = csmap_get(&names, u->src[0]);
       char *idx_s = csmap_get(&names, u->src[1]);
-      char *expr = poly_strfmt("(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      char *expr = poly_strfmt("(%s+%s)", buf_s, idx_s);
       if (!expr) goto cleanup;
       csmap_set(&names, u, expr);
       continue;
@@ -1156,6 +1166,7 @@ char *poly_render_cuda(
   }
 
   /* Build complete CUDA source */
+  if (names.failed) goto cleanup;
   csb_init(&out);
 
   /* Prefix: CUDA-specific defines and helpers */

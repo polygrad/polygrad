@@ -3783,17 +3783,18 @@ TEST(codegen, render_range_names_preserve_full_argument_tuple) {
 
 TEST(codegen, render_long_range_names_without_truncation) {
   PolyCtx *ctx = poly_ctx_new();
-  int64_t extra[80];
-  for (int i = 0; i < 80; i++)
+  int64_t extra[160];
+  for (int i = 0; i < 160; i++)
     extra[i] = 123456789;
   PolyUOp *out = poly_test_uop_param(ctx, POLY_INT32, -1, 0, POLY_ADDR_GLOBAL);
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
-  PolyArg arg = poly_arg_range_ex(1, POLY_AXIS_LOOP, extra, 80);
+  PolyArg arg = poly_arg_range_ex(1, POLY_AXIS_LOOP, extra, 160);
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, arg);
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, range, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, idx, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, range, poly_arg_none());
-  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, range, bound, poly_arg_none());
+  /* MAX repeats its operands: summing their lengths once is not a size bound. */
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_MAX, POLY_INT32, range, bound, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, add, poly_arg_none());
   PolyUOp *end = poly_uop2(ctx, POLY_OP_END, POLY_VOID, store, range, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
@@ -3824,6 +3825,41 @@ TEST(codegen, render_long_range_names_without_truncation) {
   free(suffix);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, render_missing_operands_fail_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *missing = poly_test_uop_param(ctx, POLY_INT32, -1, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *cases[] = {
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, missing, zero, poly_arg_none()),
+      poly_uop1(ctx, POLY_OP_STACK, POLY_INT32, missing, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, missing, zero, poly_arg_none()),
+  };
+  bool rejected = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    PolyUOp *linear[] = {zero, cases[i]};
+    char *sources[] = {
+        poly_render_c(ctx, linear, 2, "missing_operand"),
+        poly_render_cuda(ctx, linear, 2, "missing_operand", 1),
+        poly_render_wgsl(ctx, linear, 2, "missing_operand"),
+#ifdef POLY_HAS_HIP
+        poly_render_hip(ctx, linear, 2, "missing_operand", 1, "gfx1100"),
+#endif
+    };
+    for (size_t j = 0; j < sizeof(sources) / sizeof(sources[0]); j++) {
+      if (sources[j]) {
+        fprintf(
+            stderr, "renderer %zu accepted missing operand for %s\n", j, poly_op_name(cases[i]->op)
+        );
+        rejected = false;
+      }
+      free(sources[j]);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
   PASS();
 }
 

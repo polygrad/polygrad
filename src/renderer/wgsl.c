@@ -86,9 +86,11 @@ typedef struct {
   PolyUOp **keys;
   char **vals;
   int cap;
+  bool failed;
 } WgslStrMap;
 
 static void wsm_init(WgslStrMap *m, int n) {
+  m->failed = false;
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
   m->vals = calloc(m->cap, sizeof(char *));
@@ -101,15 +103,22 @@ static void wsm_set(WgslStrMap *m, PolyUOp *key, char *val) {
   if (m->keys[h] == key) free(m->vals[h]);
   m->keys[h] = key;
   m->vals[h] = val;
+  if (!val) m->failed = true;
 }
 
 static char *wsm_get(WgslStrMap *m, PolyUOp *key) {
   uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
-    if (m->keys[h] == key) return m->vals[h];
+    if (m->keys[h] == key && m->vals[h]) return m->vals[h];
+    if (m->keys[h] == key) break;
     h = (h + 1) % m->cap;
   }
-  return NULL;
+  if (!m->failed)
+    fprintf(stderr, "polygrad: renderer operand has no expression (%s)\n", poly_op_name(key->op));
+  m->failed = true;
+  /* Keep formatting safe while unwinding; failed maps can never publish source.
+   * Unlike a zero fallback, this sentinel is not a rendered value. */
+  return "";
 }
 
 static void wsm_destroy(WgslStrMap *m) {
@@ -492,7 +501,7 @@ static char *render_alu_wgsl(
   case POLY_OP_MULACC:
     return poly_strfmt("((%s*%s)+%s)", s0, s1, s2);
   default:
-    return poly_strfmt("/* unknown op %d */0", op);
+    return NULL;
   }
 }
 
@@ -557,6 +566,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
   /* Main render loop */
 
   for (int i = 0; i < n; i++) {
+    if (names.failed) goto fail;
     PolyUOp *u = uops[i];
 
     /* --- SINK/NOOP/GROUP: skip ---------------------------------------- */
@@ -644,7 +654,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
     if (u->op == POLY_OP_SHRINK) {
       char *buf_s = wsm_get(&names, u->src[0]);
       char *idx_s = wsm_get(&names, u->src[1]);
-      char *expr = poly_strfmt("%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      char *expr = poly_strfmt("%s[%s]", buf_s, idx_s);
       if (!expr) goto fail;
       wsm_set(&names, u, expr);
       continue;
@@ -801,7 +811,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       if (u->n_src == 1) {
         /* Single source: alias */
         char *s = wsm_get(&names, u->src[0]);
-        wsm_set(&names, u, strdup(s ? s : "0"));
+        wsm_set(&names, u, strdup(s));
       } else if (u->n_src > 1) {
         /* Multi-source: vec constructor. Shouldn't appear for scalar WGSL
          * (supports_float4=false), but handle for robustness. */
@@ -811,7 +821,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         wsb_printf(&vexpr, "vec%d<%s>(", u->n_src, tn);
         for (int j = 0; j < u->n_src; j++) {
           char *s = wsm_get(&names, u->src[j]);
-          wsb_printf(&vexpr, "%s%s", j > 0 ? "," : "", s ? s : "0");
+          wsb_printf(&vexpr, "%s%s", j > 0 ? "," : "", s);
         }
         wsb_puts(&vexpr, ")");
         wsm_set(&names, u, vexpr.buf);
@@ -936,6 +946,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
   }
 
   /* Build complete source */
+  if (names.failed) goto fail;
   WgslStrBuf out;
   wsb_init(&out);
 
