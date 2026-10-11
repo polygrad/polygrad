@@ -2365,7 +2365,7 @@ class Tensor:
 
         Logits must be finite floating-point values. top_k=0 keeps all values; otherwise all ties at
         the kth logit remain eligible. Temperature is scalar, clamped to 1e-12.
-        Top-k currently uses sorting; this is not a constant-cost selection op.
+        Small vocabularies use rank counts; larger ones select a top-k threshold.
         """
         if not isinstance(top_k, (int, np.integer)):
             raise TypeError('top_k must be an integer')

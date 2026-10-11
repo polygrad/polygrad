@@ -4881,6 +4881,24 @@ async function runTensorTests(pg, createRuntime) {
     for (const tensor of [logits, firstTensor, repeat, next]) tensor.dispose()
   })
 
+  await test('sampleLogits rank and threshold selection match sorting with identical noise', async () => {
+    for (const width of [17, 1024, 1025]) {
+      const k = Math.min(40, width - 1)
+      const logits = new Tensor([Array.from({ length: width }, (_, i) => (i * 13 % 17) - 8)], { dtype: 'float32' })
+      Tensor.manual_seed(913)
+      const actual = logits.sampleLogits({ temperature: 0.7, topK: k })
+      const values = Array.from(await actual.toArray())
+      Tensor.manual_seed(913)
+      const u = Tensor.rand(1, width).maximum(1e-12)
+      const [sorted, indices] = logits.topk(k)
+      const threshold = sorted.shrink([[0, 1], [k - 1, k]])
+      const scores = logits.div(0.7).sub(u.log().neg().log())
+      const expected = logits.ge(threshold).where(scores, -Infinity).argmax(-1)
+      assertClose(Array.from(await expected.toArray()), values, 0)
+      for (const tensor of [logits, actual, u, sorted, indices, threshold, scores, expected]) tensor.dispose()
+    }
+  })
+
   await test('sampleLogits preserves transformer Gumbel formula', async () => {
     const logits = new Tensor(Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => (i * 8 + j) / 16)))
     Tensor.manual_seed(42)

@@ -842,7 +842,7 @@ function create({ polygrad: pg }) {
 | Tensor creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange`, `empty` |
 | Tensor math | `add`, `sub`, `mul`, `div`, `exp`, `log`, `sqrt`, `relu`, `gelu`, `silu`, `softmax` |
 | Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
-| Sampling | `logits.sampleLogits({temperature: 1, topK: 0, keepdim: false})` returns int32 last-axis indices; finite logits, captured runtime RNG, all top-k threshold ties remain eligible (`0` keeps all). Top-k currently uses sorting. |
+| Sampling | `logits.sampleLogits({temperature: 1, topK: 0, keepdim: false})` returns int32 last-axis indices; finite logits, captured runtime RNG, all top-k threshold ties remain eligible (`0` keeps all). |
 | Movement/indexing | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `stack`, `gather`, `takeAlongAxis`, `scatter`, `scatterReduce` |
 | Linalg | `dot`, `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq` |
 | Data/readback | `realize`, `realizeAsync`, `toArray`, `toArrayAsync`, `toTypedArray`, `toTypedArrayAsync`, `toTypedArrays`, `toTypedArraysAsync`, `copyFrom`, `updateFrom` |

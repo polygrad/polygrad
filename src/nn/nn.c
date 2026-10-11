@@ -858,6 +858,62 @@ PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int train
   return out;
 }
 
+static PolyUOp *sample_topk_values(PolyCtx *ctx, PolyUOp *x, int k) {
+  int ndim = poly_uop_ndim(ctx, x);
+  int64_t shape[POLY_MAX_DIMS];
+  memcpy(shape, poly_uop_max_shape_dims(ctx, x), (size_t)ndim * sizeof(*shape));
+  int64_t width = shape[ndim - 1];
+  /* Any global top-k value occurs among its block's top-k. Retain only those
+   * candidates, recursively, then find the threshold. Apply the final mask to
+   * the original logits: tied values discarded locally remain eligible. */
+  /* Below this crossover, merging block candidates adds more dispatches than
+   * it saves. Keep ordinary top-k for medium vocabularies and large k. */
+  if (width > 65536 && k < 256 && ndim < POLY_MAX_DIMS) {
+    int64_t blocks = (width + 4095) / 4096;
+    int64_t pads[POLY_MAX_DIMS][2] = {{0}};
+    pads[ndim - 1][1] = blocks * 4096 - width;
+    x = poly_uop_pad_value(ctx, x, pads, ndim, -INFINITY);
+    shape[ndim - 1] = blocks;
+    shape[ndim] = 4096;
+    x = poly_uop_reshape(ctx, x, shape, ndim + 1);
+    PolyUOp *values = NULL, *indices = NULL;
+    if (poly_uop_topk(ctx, x, k, -1, 1, 1, &values, &indices)) return NULL;
+    shape[ndim - 1] = blocks * k;
+    x = poly_uop_reshape(ctx, values, shape, ndim);
+    return sample_topk_values(ctx, x, k);
+  }
+  PolyUOp *values = NULL, *indices = NULL;
+  return poly_uop_topk(ctx, x, k, -1, 1, 1, &values, &indices) ? NULL : values;
+}
+
+static PolyUOp *sample_topk_mask(PolyCtx *ctx, PolyUOp *x, int k) {
+  int ndim = poly_uop_ndim(ctx, x);
+  int64_t shape[POLY_MAX_DIMS];
+  memcpy(shape, poly_uop_max_shape_dims(ctx, x), (size_t)ndim * sizeof(*shape));
+  int64_t width = shape[ndim - 1];
+  if (width <= 1024 && ndim < POLY_MAX_DIMS) {
+    /* Strictly greater counts implement the inclusive kth threshold even at
+     * ties. Bound the quadratic comparison axis; never use it for LLM vocabularies. */
+    shape[ndim] = 1;
+    PolyUOp *left = poly_uop_reshape(ctx, x, shape, ndim + 1);
+    shape[ndim - 1] = 1;
+    shape[ndim] = width;
+    PolyUOp *right = poly_uop_reshape(ctx, x, shape, ndim + 1);
+    PolyUOp *rank = poly_uop_sum_reduce(
+        ctx, poly_uop_cast(ctx, poly_uop_gt(ctx, right, left), POLY_INT32), -1, 0
+    );
+    return poly_uop_gt(ctx, poly_uop_const_int(ctx, k), rank);
+  }
+  PolyUOp *values = sample_topk_values(ctx, x, k);
+  if (!values) return NULL;
+  int64_t pairs[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    pairs[i][0] = i == ndim - 1 ? k - 1 : 0;
+    pairs[i][1] = i == ndim - 1 ? k : shape[i];
+  }
+  return poly_uop_ge(ctx, x, poly_uop_shrink(ctx, values, pairs, ndim));
+}
+
 static PolyUOp *sample_logits(
     PolyCtx *ctx,
     PolyUOp *logits,
@@ -878,18 +934,9 @@ static PolyUOp *sample_logits(
   int ndim = poly_uop_ndim(ctx, logits);
   const int64_t *dims = poly_uop_max_shape_dims(ctx, logits);
   if (top_k && top_k < dims[ndim - 1]) {
-    PolyUOp *values = NULL, *indices = NULL;
-    if (poly_uop_topk(ctx, logits, top_k, -1, 1, 1, &values, &indices)) return NULL;
-    int64_t pairs[POLY_MAX_DIMS][2];
-    for (int i = 0; i < ndim; i++) {
-      pairs[i][0] = i == ndim - 1 ? top_k - 1 : 0;
-      pairs[i][1] = i == ndim - 1 ? top_k : dims[i];
-    }
-    PolyUOp *threshold = poly_uop_shrink(ctx, values, pairs, ndim);
-    scores = poly_uop_where(
-        ctx, poly_uop_ge(ctx, logits, threshold), scores,
-        poly_uop_const_typed(ctx, POLY_FLOAT32, -INFINITY)
-    );
+    PolyUOp *mask = sample_topk_mask(ctx, logits, top_k);
+    if (!mask) return NULL;
+    scores = poly_uop_where(ctx, mask, scores, poly_uop_const_typed(ctx, POLY_FLOAT32, -INFINITY));
   }
   return poly_uop_cast(ctx, poly_uop_argmax(ctx, scores, -1, keepdim), POLY_INT32);
 }

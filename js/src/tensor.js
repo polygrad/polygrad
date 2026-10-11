@@ -2735,7 +2735,7 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)))
     }
 
-    // Threshold ties stay eligible. The existing topk implementation sorts.
+    // Threshold ties stay eligible, including when selection discards tied candidates.
     sampleLogits({ temperature = 1, topK = 0, keepdim = false } = {}) {
       this._requireLive()
       if (_runtime._activeAsync > 0 || _runtime._closing) throw new Error('polygrad runtime has active async work')

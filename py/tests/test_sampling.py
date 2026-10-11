@@ -18,6 +18,33 @@ def test_sample_logits_threshold_ties_and_rng():
     assert np.all((counts[:3] > 260) & (counts[:3] < 420))
 
 
+def test_sample_logits_small_vocab_avoids_sort_network():
+    result = Tensor.empty(1, 1024).sample_logits(top_k=40)
+    seen, todo = set(), [result.uop]
+    while todo:
+        node = todo.pop()
+        if node.raw in seen:
+            continue
+        seen.add(node.raw)
+        todo.extend(node.src)
+    assert len(seen) < 400, 'small-vocabulary sampling expanded a sorting network'
+
+
+@pytest.mark.parametrize('width,k', [(17, 1), (17, 16), (1024, 40), (1025, 40), (4097, 40), (1025, 512), (65537, 40)])
+def test_sample_logits_matches_sort_with_identical_noise(width, k):
+    # Quantization deliberately puts ties within and across selection blocks.
+    values = np.random.default_rng(22).integers(-8, 9, (2, width)).astype(np.float32)
+    logits = Tensor(values)
+    Tensor.manual_seed(913)
+    actual = logits.sample_logits(temperature=0.7, top_k=k).numpy()
+    Tensor.manual_seed(913)
+    u = Tensor.rand(2, width).maximum(1e-12)
+    threshold = logits.topk(k)[0][..., -1:]
+    scores = logits / 0.7 - (-u.log()).log()
+    expected = (logits >= threshold).where(scores, float('-inf')).argmax(-1).numpy()
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_sample_logits_matches_existing_transformer_formula():
     logits = Tensor(np.arange(64, dtype=np.float32).reshape(8, 8) / 16)
     Tensor.manual_seed(42)
