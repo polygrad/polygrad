@@ -174,9 +174,9 @@ async function runTensorTests(pg, createRuntime) {
   })
 
   await test('reduction ABI accepts full rank and rejects invalid axes arrays', async () => {
-    const x = Tensor.ones(Array(17).fill(1))
+    const x = Tensor.ones(Array(64).fill(1))
     const ffi = pg._core.ffi
-    const axes = Array.from({length: 17}, (_, i) => i)
+    const axes = Array.from({length: 64}, (_, i) => i)
     try {
       for (const name of ['prod', 'logsumexp', 'all', 'any', 'sum_dtype_by_id']) {
         const call = (values, count) => ffi[`poly_tensor_${name}`](
