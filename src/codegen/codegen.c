@@ -1715,6 +1715,9 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     }
 
     if (reduce_is_addend && second_covers_first) {
+      int n_globals = 0;
+      for (int i = 0; i < s.n_rngs; i++)
+        n_globals += s.types[i] == POLY_AXIS_GLOBAL;
       for (int global_idx = 0; global_idx < s.n_rngs; global_idx++) {
         if (s.types[global_idx] != POLY_AXIS_GLOBAL) continue;
         int64_t global_size = s.shape[global_idx];
@@ -1726,12 +1729,22 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
          * UOp equality is identity, not a symbolic divisibility predicate. */
         if (global_size <= 0 || global_size % block != 0) continue;
 
-        if (mv_threads_per_row > 1)
-          sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, mv_threads_per_row);
-        if (mv_blocksize > 1)
-          sched_require_int_opt(&s, caps, POLY_OPT_LOCAL, global_idx, mv_blocksize);
-        if (mv_rows_per_thread > 1)
-          sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, global_idx, mv_rows_per_thread);
+        int threads = mv_threads_per_row, blocksize = mv_blocksize, rows = mv_rows_per_thread;
+        /* PG-DIV-024: expose more workgroups for small FP32 WebGPU GEMVs. Large
+         * row-major outputs regress with this tile; short reductions cannot
+         * amortize it. Keep pinned eligibility and all explicit knob overrides. */
+        if (caps.device && !strcmp(caps.device, "WEBGPU") &&
+            poly_dtype_eq(mul->dtype, POLY_FLOAT32) && n_globals == 1 && global_size <= 1024 &&
+            s.shape[first_reduce] >= 256 && !getenv("MV_BLOCKSIZE") &&
+            !getenv("MV_THREADS_PER_ROW") && !getenv("MV_ROWS_PER_THREAD") &&
+            poly_uop_divides(ctx, s.rngs[first_reduce]->src[0], 16)) {
+          threads = 16;
+          blocksize = 2;
+          rows = 1;
+        }
+        if (threads > 1) sched_apply_int_opt(&s, caps, POLY_OPT_GROUP, 0, threads);
+        if (blocksize > 1) sched_require_int_opt(&s, caps, POLY_OPT_LOCAL, global_idx, blocksize);
+        if (rows > 1) sched_require_int_opt(&s, caps, POLY_OPT_UPCAST, global_idx, rows);
         poly_uop_toposort_free(topo);
         PolyUOp *out = s.failed ? NULL : s.ast;
         sched_destroy(&s);
@@ -2736,11 +2749,12 @@ static bool beam_cache_key(
   key->data = poly_uop_key(ctx, sink, &key->size);
   if (!key->data) goto failed;
   PolyRendererCaps c = opts.caps;
+  bool webgpu_compare = poly_get_beam_compare() && beam_device(opts) == POLY_DEVICE_WEBGPU;
   int fields[] = {
       POLYGRAD_ABI_VERSION,
       width,
       poly_getenv_flag_default("BEAM_ESTIMATE", true),
-      poly_get_beam_compare() ? 3 : 0, /* Versioned sustained-timing policy. */
+      poly_get_beam_compare() ? (webgpu_compare ? 4 : 3) : 0,
       poly_get_noopt(),
       opts.opt_policy,
       beam_device(opts),
@@ -2778,6 +2792,18 @@ static bool beam_cache_key(
   const char *envs[] = {"CC", "POLY_OPT", "POLY_CPU_ARCH"};
   for (size_t i = 0; i < sizeof(envs) / sizeof(envs[0]); i++)
     if (!beam_key_string(key, getenv(envs[i]))) goto failed;
+  /* Cache hits skip comparison. A winner measured against the old WebGPU
+   * heuristic (or different explicit knobs) is not a comparison against this
+   * policy. Leave pinned-search and other-backend cache identities unchanged. */
+  if (webgpu_compare) {
+    const char *mv_envs[] = {"MV", "MV_BLOCKSIZE", "MV_THREADS_PER_ROW", "MV_ROWS_PER_THREAD"};
+    for (size_t i = 0; i < sizeof(mv_envs) / sizeof(mv_envs[0]); i++) {
+      const char *value = getenv(mv_envs[i]);
+      int present = value != NULL; /* An empty explicit knob also retains the pinned tile. */
+      if (!beam_key_append(key, &present, sizeof(present)) || !beam_key_string(key, value))
+        goto failed;
+    }
+  }
   for (int i = 0; i < c.n_tensor_cores; i++) {
     const PolyTensorCore *tc = &c.tensor_cores[i];
     int tc_fields[] = {

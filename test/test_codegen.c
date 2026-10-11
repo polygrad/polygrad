@@ -1532,6 +1532,124 @@ TEST(codegen, scheduler_matvec_visits_all_addends) {
   PASS();
 }
 
+static bool webgpu_matvec_policy_matches_dtype(
+    int k,
+    int n,
+    const char *device,
+    bool extra_global,
+    int block,
+    int threads,
+    int rows,
+    PolyDType dtype
+) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *g = poly_uop_range(ctx, n, extra_global ? 1 : 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r = poly_uop_range(ctx, k, 2, POLY_AXIS_REDUCE);
+  PolyUOp *h = extra_global ? poly_uop_range(ctx, 2, 0, POLY_AXIS_GLOBAL) : NULL;
+  PolyUOp *oi =
+      h ? poly_uop_alu2(
+              ctx, POLY_OP_ADD, poly_uop_alu2(ctx, POLY_OP_MUL, h, poly_uop_const_int(ctx, n)), g
+          )
+        : g;
+  PolyUOp *wi = poly_uop_alu2(
+      ctx, POLY_OP_ADD, poly_uop_alu2(ctx, POLY_OP_MUL, oi, poly_uop_const_int(ctx, k)), r
+  );
+  PolyUOp *x = poly_test_program_param(ctx, dtype, k, 0);
+  PolyUOp *w = poly_test_program_param(ctx, dtype, (int64_t)k * n * (h ? 2 : 1), 1);
+  PolyUOp *out = poly_test_program_param(ctx, dtype, n * (h ? 2 : 1), 2);
+  PolyUOp *xv = poly_uop2(ctx, POLY_OP_INDEX, dtype, x, r, poly_arg_none());
+  PolyUOp *wv = poly_uop2(ctx, POLY_OP_INDEX, dtype, w, wi, poly_arg_none());
+  PolyUOp *value = poly_uop2(
+      ctx, POLY_OP_REDUCE, dtype, poly_uop_alu2(ctx, POLY_OP_MUL, xv, wv), r,
+      poly_arg_reduce(POLY_OP_ADD, 0)
+  );
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &oi, 1), value, poly_arg_none()
+  );
+  PolyUOp *ends[] = {store, g, h};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, ends, h ? 3 : 2, poly_arg_none());
+  PolyUOp *sink = poly_test_kernel_sink(ctx, &end, 1, "webgpu_matvec");
+  PolyRendererCaps caps = {.device = device, .has_local = true, .shared_max = 16384};
+  PolyOpt opts[] = {
+      {.op = block ? POLY_OPT_GROUP : POLY_OPT_GROUPTOP,
+       .has_axis = true,
+       .axis = 0,
+       .arg_kind = POLY_OPT_ARG_INT,
+       .arg = threads},
+      {.op = POLY_OPT_LOCAL,
+       .has_axis = true,
+       .axis = extra_global ? 1 : 0,
+       .arg_kind = POLY_OPT_ARG_INT,
+       .arg = block},
+      {.op = POLY_OPT_UPCAST,
+       .has_axis = true,
+       .axis = extra_global ? 1 : 0,
+       .arg_kind = POLY_OPT_ARG_INT,
+       .arg = rows}};
+  bool ok = policy_matches(ctx, sink, caps, opts, block ? (rows > 1 ? 3 : 2) : 1);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static bool webgpu_matvec_policy_matches(
+    int k,
+    int n,
+    const char *device,
+    bool extra_global,
+    int block,
+    int threads,
+    int rows
+) {
+  return webgpu_matvec_policy_matches_dtype(
+      k, n, device, extra_global, block, threads, rows, POLY_FLOAT32
+  );
+}
+
+TEST(codegen, scheduler_webgpu_small_matvec_policy_scope) {
+  const char *keys[] = {"MV", "MV_BLOCKSIZE", "MV_THREADS_PER_ROW", "MV_ROWS_PER_THREAD"};
+  char *saved[4];
+  for (int i = 0; i < 4; i++) {
+    saved[i] = getenv(keys[i]) ? strdup(getenv(keys[i])) : NULL;
+    unsetenv(keys[i]);
+  }
+  bool ok = true;
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", false, 2, 16, 1);
+  ok &= webgpu_matvec_policy_matches(32000, 768, "WEBGPU", false, 2, 16, 1);
+  ok &= webgpu_matvec_policy_matches(256, 1024, "WEBGPU", false, 2, 16, 1);
+  /* Preserve the pin outside the measured one-output-axis region. */
+  const int outputs[] = {1040, 2048, 4096, 32000};
+  for (int i = 0; i < 4; i++)
+    ok &= webgpu_matvec_policy_matches(256, outputs[i], "WEBGPU", false, 4, 8, 4);
+  const int reductions[] = {16, 64, 248, 264};
+  for (int i = 0; i < 4; i++)
+    ok &= webgpu_matvec_policy_matches(reductions[i], 768, "WEBGPU", false, 4, 8, 4);
+  ok &= webgpu_matvec_policy_matches(256, 770, "WEBGPU", false, 0, 16, 1);
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", true, 4, 8, 4);
+  ok &= webgpu_matvec_policy_matches(256, 384, "CUDA", false, 4, 8, 4);
+  ok &= webgpu_matvec_policy_matches_dtype(256, 384, "WEBGPU", false, 4, 8, 4, POLY_FLOAT16);
+  ok &= webgpu_matvec_policy_matches_dtype(256, 384, "WEBGPU", false, 4, 8, 4, POLY_INT32);
+  /* A single explicit override retains pinned defaults for the other knobs. */
+  setenv(keys[1], "2", 1);
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", false, 2, 8, 4);
+  setenv(keys[1], "", 1);
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", false, 4, 8, 4);
+  unsetenv(keys[1]);
+  setenv(keys[2], "16", 1);
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", false, 4, 16, 4);
+  unsetenv(keys[2]);
+  setenv(keys[3], "2", 1);
+  ok &= webgpu_matvec_policy_matches(256, 384, "WEBGPU", false, 4, 8, 2);
+  for (int i = 0; i < 4; i++) {
+    if (saved[i])
+      setenv(keys[i], saved[i], 1);
+    else
+      unsetenv(keys[i]);
+    free(saved[i]);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(codegen, scheduler_copy_survives_parent_and_sibling_disposal) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 8);
@@ -2197,6 +2315,47 @@ TEST(codegen, beam_cache_key_covers_comparison_policy) {
   free(saved);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(pinned != compared);
+  PASS();
+}
+
+TEST(codegen, beam_webgpu_comparison_cache_tracks_matvec_policy) {
+  const char *keys[] = {"MV", "MV_BLOCKSIZE", "MV_THREADS_PER_ROW", "MV_ROWS_PER_THREAD"};
+  char *saved[4];
+  for (int i = 0; i < 4; i++) {
+    saved[i] = getenv(keys[i]) ? strdup(getenv(keys[i])) : NULL;
+    unsetenv(keys[i]);
+  }
+  int compare = poly_get_beam_compare();
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 384);
+  bool ok = true;
+  for (int enabled = 0; enabled <= 1; enabled++) {
+    poly_set_beam_compare(enabled);
+    uint64_t webgpu = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_WEBGPU);
+    uint64_t cpu = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU);
+    for (int i = 0; i < 4; i++) {
+      setenv(keys[i], i ? "4" : "0", 1);
+      uint64_t changed = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_WEBGPU);
+      ok &= webgpu && cpu && changed && (enabled ? changed != webgpu : changed == webgpu);
+      ok &= poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU) == cpu;
+      setenv(keys[i], "", 1);
+      uint64_t empty = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_WEBGPU);
+      ok &= empty && (enabled ? empty != webgpu : empty == webgpu);
+      ok &= poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU) == cpu;
+      unsetenv(keys[i]);
+      ok &= poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_WEBGPU) == webgpu;
+    }
+  }
+  poly_set_beam_compare(compare);
+  poly_ctx_destroy(ctx);
+  for (int i = 0; i < 4; i++) {
+    if (saved[i])
+      setenv(keys[i], saved[i], 1);
+    else
+      unsetenv(keys[i]);
+    free(saved[i]);
+  }
+  ASSERT_TRUE(ok);
   PASS();
 }
 

@@ -348,6 +348,18 @@
       "close_when": "The pinned reference preserves assignment provenance and independent destination storage for a resident RHS assigned to an unrealized expression."
     },
     {
+      "id": "PG-DIV-024",
+      "status": "approved",
+      "stages": ["codegen", "optimization"],
+      "area": "shape-scoped WebGPU matrix-vector default tile",
+      "tinygrad": "Pinned matvec heuristic defaults to MV_BLOCKSIZE=4, MV_THREADS_PER_ROW=8, MV_ROWS_PER_THREAD=4. These originated in 0ba75c437, alongside a Metal matvec benchmark, and carry a TODO to tune by matrix shape.",
+      "polygrad": "For WEBGPU FP32 only, after the unchanged matvec eligibility test, use 2/16/1 when there is one GLOBAL output axis of at most 1024 elements and a static reduction of at least 256 elements divisible by 16. Otherwise retain the pinned defaults. Setting any MV tile variable disables this default substitution; unspecified knobs keep pinned defaults. WebGPU comparison-enabled BEAM cache identity includes this policy and MV settings.",
+      "rationale": "More workgroups improve measured small-output kernels. A flat replacement regressed large row-major matrices; even an output<4096 guard regressed N2048/3072. Short reductions also regressed. The narrower rule preserves those schedules. Measurements are from an NVIDIA RTX3060Laptop, not a cross-adapter performance guarantee.",
+      "approval": "User 2026-10-11 approved investigation followed by a measured size-based update recorded as a divergence, explicitly requiring large LLM shapes before implementation.",
+      "evidence": ["src/codegen/codegen.c:poly_apply_opts_heuristic", "test/test_codegen.c:scheduler_webgpu_small_matvec_policy_scope", "references/tinygrad_latest/tinygrad/codegen/opt/heuristic.py", "temp/webgpu-default-schedule-20261011/report.txt", "temp/webgpu-default-schedule-20261011/large-report.txt", "temp/webgpu-default-schedule-20261011/policy-red.log"],
+      "close_when": "Pinned tinygrad adopts equivalent shape-dependent matvec selection, or broader matched adapter/model evidence supersedes this scoped tile policy. No allowance changes Tensor graphs, values, non-WebGPU default scheduling or explicit tuning settings."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],
