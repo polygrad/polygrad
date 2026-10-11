@@ -61,6 +61,14 @@ TEST(model, input_requirements_reject_before_writes_and_survive_ir) {
   ASSERT_EQ(poly_model_require(m, "forward", "positive sum required", check), POLY_STATUS_OK);
   ASSERT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_INTERP);
   poly_model_free(check); /* Parent owns an independent copy. */
+  PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
+  ASSERT_NOT_NULL(capture);
+  PolyIOBinding captured_input = {.name = "x", .tensor = x};
+  PolyTensor *captured_output = NULL;
+  ASSERT_TRUE(poly_model_call_tensors(m, "forward", &captured_input, 1, &captured_output, 1) != 0);
+  ASSERT_TRUE(captured_output == NULL);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "input requirements") != NULL);
+  poly_tensor_capture_end(capture);
   int len = 0;
   uint8_t *ir = poly_model_export_ir(m, &len);
   ASSERT_NOT_NULL(ir);
@@ -401,6 +409,69 @@ TEST(model, capture_restores_author_and_retains_explicit_effects) {
   poly_tensor_release(x);
   poly_tensor_release(one);
   poly_tensor_release(state);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(model, captured_calls_share_bindings_without_executing_child) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  int64_t dims[] = {2};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, dims, 1, POLY_DEVICE_INTERP);
+  PolyTensor *w = poly_tensor_full_float_by_id(
+      ctx, dims, 1, 2, poly_dtype_id_by_name("float32"), POLY_DEVICE_INTERP, true, false
+  );
+  PolyTensor *y = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  PolyBindingSpec bindings[] = {
+      {"x", POLY_ROLE_INPUT, x, 0}, {"w", POLY_ROLE_PARAM, w, 0}, {"y", POLY_ROLE_OUTPUT, y, 0}};
+  const char *inputs[] = {"x"}, *names[] = {"y"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = names, .n_outputs = 1};
+  PolyModel *child = poly_model_from_bindings(ctx, bindings, 3, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(child);
+  /* Placing another Model may change the Runtime default, not this child. */
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
+  PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
+  ASSERT_NOT_NULL(capture);
+  PolyTensor *value = poly_tensor_retain(x);
+  size_t artifacts = ctx->runtime_cache_misses;
+  for (int i = 0; i < 3; i++) {
+    PolyIOBinding io = {.name = "x", .tensor = value};
+    PolyTensor *next = NULL;
+    ASSERT_EQ(poly_model_call_tensors(child, "forward", &io, 1, &next, 1), 0);
+    ASSERT_NOT_NULL(next);
+    ASSERT_EQ(poly_tensor_device(next), POLY_DEVICE_INTERP);
+    poly_tensor_release(value);
+    value = next;
+  }
+  ASSERT_EQ(ctx->runtime_cache_misses, artifacts);
+  PolyTensor *state = poly_tensor_capture_binding(capture, 0);
+  ASSERT_NOT_NULL(state);
+  ASSERT_EQ(poly_tensor_device(state), POLY_DEVICE_INTERP);
+  ASSERT_TRUE(poly_tensor_capture_binding(capture, 1) == NULL);
+  poly_model_free(child);
+  PolyTensor *wrapped = NULL;
+  int immutable = 0;
+  ASSERT_EQ(poly_tensor_capture_wrap(capture, &state, &immutable, 1, &value, 1, &wrapped), 0);
+  poly_tensor_capture_end(capture);
+  bindings[1].tensor = state;
+  bindings[2].tensor = wrapped;
+  PolyModel *parent = poly_model_from_bindings(ctx, bindings, 3, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(parent);
+  float data[] = {1, 1}, result[2];
+  PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", data, POLY_FLOAT32);
+  ASSERT_EQ(poly_model_call(parent, "forward", &io, 1), 0);
+  ASSERT_EQ(poly_model_read_buf_named(parent, "y", result, sizeof(result)), 0);
+  ASSERT_FLOAT_EQ(result[0], 8, 0.0);
+  ASSERT_FLOAT_EQ(result[1], 8, 0.0);
+  poly_model_free(parent);
+  poly_tensor_release(wrapped);
+  poly_tensor_release(value);
+  poly_tensor_release(state);
+  poly_tensor_release(y);
+  poly_tensor_release(w);
+  poly_tensor_release(x);
   poly_ctx_destroy(ctx);
   PASS();
 }

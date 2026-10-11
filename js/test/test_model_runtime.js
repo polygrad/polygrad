@@ -2196,6 +2196,96 @@ async function checkModelDispatch(pg, Model) {
   finally { await lazy.dispose() }
 }
 
+async function checkModelCapturedCalls(pg) {
+  const {Tensor, Model} = pg
+  const x = Tensor.empty([1, 4]), w = new Tensor([[2,0,0,0],[0,2,0,0],[0,0,2,0],[0,0,0,2]], {dtype:'float32'})
+  let child, parent, restored
+  try {
+    child = await Model.fromCallableAsync(({x}) => x.dot(w), {inputs:{x},params:{w}})
+    const bytes = await child.saveAsync()
+    await child.dispose()
+    child = Model.load(bytes)
+    await child.placeAsync(String(pg.device).toUpperCase())
+    const author = ({x}) => {
+      x = x.add(child.forward({x:Tensor.zeros([1,4], {dtype:'float32',buffer:false})}).output)
+      for (let i=0;i<3;i++) x = child.forward({x}).output
+      return x.shrink([[0,1],[0,2]])
+    }
+    let rejected = false
+    try { await Model.fromCallableAsync(({x}) => { child.forward({x}); throw new Error('abort composition') }, {inputs:{x}}) }
+    catch(e) { rejected = /abort composition/.test(e.message) }
+    assert(rejected, 'failed composition was not reported')
+    parent = await Model.fromCallableAsync(author, {inputs:{x}})
+    assert(parent.paramCount === 1, 'child weights duplicated across calls')
+    await child.writeBufferAsync('w', new Float32Array(16))
+    assertClose((await parent.forwardAsync({x:new Float32Array([1,1,1,1])})).output,[8,8],0)
+    const diagonal = new Float32Array(16)
+    for (let i=0;i<4;i++) diagonal[i*5]=3
+    await parent.writeBufferAsync('__model.0', diagonal)
+    assertClose((await child.forwardAsync({x:new Float32Array([1,1,1,1])})).output,[0,0,0,0],0)
+    for (let i=0;i<4;i++) diagonal[i*5]=2
+    await parent.writeBufferAsync('__model.0', diagonal)
+    await child.dispose(); child = null
+    assertClose((await parent.forwardAsync({x:new Float32Array([1,1,1,1])})).output,[8,8],0)
+    restored = Model.load(await parent.saveAsync())
+    assertClose((await restored.forwardAsync({x:new Float32Array([2,2,2,2])})).output,[16,16],0)
+  } finally {
+    await restored?.dispose(); await parent?.dispose(); await child?.dispose()
+    x.dispose(); w.dispose()
+  }
+}
+
+async function checkModelCapturedDevice(pg) {
+  const {Tensor, Model} = pg
+  const x = Tensor.empty([2], {device:'INTERP'})
+  const w = new Tensor([2,3], {dtype:'float32',device:'INTERP'})
+  let child, sibling, parent
+  try {
+    child = await Model.fromCallableAsync(({x}) => x.mul(w), {inputs:{x},params:{w}})
+    await child.placeAsync('INTERP')
+    sibling = await Model.fromCallableAsync(({x}) => x.add(1), {inputs:{x}})
+    // A sibling's placement changes the default, not the child's storage.
+    await sibling.placeAsync(String(pg.device).toUpperCase())
+    parent = await Model.fromCallableAsync(({x}) => {
+      const value = child.forward({x}).output
+      return {value, token:value.sampleLogits({topK:2})}
+    }, {inputs:{x}})
+    assert(parent.bindings().some(b => b.name === '__rng.interp.seed'), 'composed sampling used the Runtime default instead of the child device')
+    await child.dispose(); child = null
+    const result = await parent.forwardAsync({x:new Float32Array([1,1])})
+    assertClose(result.value,[2,3],0)
+    assert(result.token[0] === 0 || result.token[0] === 1, 'invalid sampled code')
+  } finally {
+    await parent?.dispose(); await sibling?.dispose(); await child?.dispose()
+    x.dispose(); w.dispose()
+  }
+}
+
+async function checkModelCapturedOnnx(pg) {
+  const item = onnxFixture.cases.find(row => row.name === 'mlp')
+  const source = Uint8Array.from(atob(item.onnx), c => c.charCodeAt(0))
+  const x = pg.Tensor.empty(item.inputs.x.shape)
+  let child, parent
+  try {
+    child = pg.Model.fromONNX(source, {dimensions:item.dimensions})
+    await child.placeAsync(String(pg.device).toUpperCase())
+    parent = await pg.Model.fromCallableAsync(({x}) => {
+      const logits = child.forward({x}).y
+      return {scores:logits.add(1), token:logits.sampleLogits({topK:1})}
+    }, {inputs:{x}})
+    await child.dispose(); child = null
+    const result = await parent.forwardAsync({x:Float32Array.from(item.inputs.x.values)})
+    assertClose(result.scores, item.outputs.y.values.map(v=>v+1), 2e-5)
+    const width = item.outputs.y.shape.at(-1)
+    const expected = []
+    for (let i=0;i<item.outputs.y.values.length;i+=width) {
+      const row=item.outputs.y.values.slice(i,i+width)
+      expected.push(row.indexOf(Math.max(...row)))
+    }
+    assertClose(result.token, expected, 0)
+  } finally { await parent?.dispose(); await child?.dispose(); x.dispose() }
+}
+
 async function checkModelUsability(pg, Model) {
   const x = pg.Tensor.empty([1])
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
@@ -2391,6 +2481,9 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
+  await test('Model captured calls share weights and own imported graphs', () => checkModelCapturedCalls(pg))
+  await test('Model captured ONNX calls compose on-device sampling', () => checkModelCapturedOnnx(pg))
+  await test('Model captured calls preserve the child device', () => checkModelCapturedDevice(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model copied storage exact writes and objective selection', () => checkModelStorageObjectives(pg, Model))
@@ -3178,6 +3271,9 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
+  await test('Model captured calls share weights and own imported graphs', () => checkModelCapturedCalls(pg))
+  await test('Model captured ONNX calls compose on-device sampling', () => checkModelCapturedOnnx(pg))
+  await test('Model captured calls preserve the child device', () => checkModelCapturedDevice(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))
   await test('Model composition factories share C construction', () => checkCompositionFactories(pg))
   await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))

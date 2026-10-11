@@ -591,7 +591,11 @@ float *poly_model_buf_data_named(PolyModel *inst, const char *name, int64_t *num
 /* Get numel for a named buffer. Returns 0 if not found. */
 int64_t poly_model_buf_numel_named(const PolyModel *inst, const char *name);
 
-/* Imported-model composition. Inlines a value entrypoint from `child` into
+/* Tensor calls during authoring capture inline static value entrypoints and
+ * register shared immutable state with poly_tensor_capture_binding. They do
+ * not execute the child. Internal writes, controls and requirements fail closed.
+ *
+ * Imported-model composition. Inlines a value entrypoint from `child` into
  * a building parent under `prefix`. Input/target buffers are replaced by
  * exact parent Tensor occurrences; child state and returned values preserve
  * both the portable logical graph and stored physical template. Returned

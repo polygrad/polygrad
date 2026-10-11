@@ -639,6 +639,15 @@ static PolyModel *model_from_spec(
 static PolyUOp *model_binding_on_device(PolyCtx *ctx, PolyUOp *logical, PolyDevice device);
 
 static int model_add_requirement(PolyModel *inst, const PolyIrRequirement *requirement);
+static int model_capture_call(
+    PolyModel *inst,
+    int ep,
+    PolyIOBinding *io,
+    int n_io,
+    int n_controls,
+    PolyTensor **outputs,
+    int n_outputs
+);
 
 static const char *model_stage_name(PolyModelStage stage) {
   switch (stage) {
@@ -5392,6 +5401,8 @@ int poly_model_call_tensors_with_controls(
   poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
   if (!model_weights_ready(inst)) return -1;
   if (ep < 0 || inst->entrypoints[ep].n_outputs != n_outputs) return -1;
+  if (inst->ctx->tensor_capture)
+    return model_capture_call(inst, ep, io, n_io, n_controls, outputs, n_outputs);
   ModelInvocation inv = {0};
   if (bind_model_io(inst, &inst->entrypoints[ep], io, n_io, controls, n_controls, &inv) != 0) {
     model_invocation_free(&inv);
@@ -6484,7 +6495,7 @@ static PolyUOp *entrypoint_store_value(PolyUOp *sink, PolyUOp *buffer) {
   return NULL;
 }
 
-int poly_model_inline_entrypoint(
+static int model_inline_entrypoint(
     PolyModel *parent,
     const PolyModel *child,
     const char *entrypoint,
@@ -6497,16 +6508,17 @@ int poly_model_inline_entrypoint(
     int *out_n_outputs
 ) {
   if (out_n_outputs) *out_n_outputs = 0;
-  if (!parent || parent->stage != POLY_MODEL_BUILDING || !parent->ctx || !child || !entrypoint ||
+  if ((parent && (parent->stage != POLY_MODEL_BUILDING || !parent->ctx)) || !child || !entrypoint ||
       !outputs || max_outputs < 0)
     return -1;
   if (child->n_requirements) {
     poly_model_set_error(
-        parent, POLY_STATUS_INVALID, __func__, "cannot inline a Model with input requirements"
+        parent ? parent : (PolyModel *)child, POLY_STATUS_INVALID, __func__,
+        "cannot inline a Model with input requirements"
     );
     return -1;
   }
-  PolyCtx *dst_ctx = parent->ctx;
+  PolyCtx *dst_ctx = parent ? parent->ctx : child->ctx;
   int ep_idx = find_entrypoint(child, entrypoint);
   if (ep_idx < 0) return -1;
   PolyUOp *logical_sink = child->entrypoints[ep_idx].logical_sink;
@@ -6514,7 +6526,7 @@ int poly_model_inline_entrypoint(
    * portable IR import has no such product and must inline its current root,
    * which has already crossed explicit placement.  Never substitute the
    * unplaced logical root as executable state merely because capture is absent. */
-  bool use_capture = child->has_physical_capture;
+  bool use_capture = parent && child->has_physical_capture;
   PolyUOp *physical_sink =
       use_capture ? child->entrypoints[ep_idx].capture_sink : child->entrypoints[ep_idx].sink;
   if (!logical_sink || logical_sink->op != POLY_OP_SINK || !physical_sink ||
@@ -6532,6 +6544,7 @@ int poly_model_inline_entrypoint(
   InlineAlias *aliases = calloc((size_t)child->n_bufs, sizeof(InlineAlias));
   int n_aliases = 0;
   int rc = -1;
+  int n_outputs = 0;
 
   for (int i = 0; i < child->n_bufs; i++) {
     const NamedBuf *b = &child->bufs[i];
@@ -6543,7 +6556,7 @@ int poly_model_inline_entrypoint(
     if (!logical_reachable && !physical_reachable) continue;
     const PolyModelInlineBinding *binding = find_inline_binding(bindings, n_bindings, b->name);
     PolyTensor *replacement = binding ? binding->tensor : NULL;
-    if (!replacement)
+    if (!replacement && parent)
       replacement =
           register_inline_tensor(parent, b, prefix, trainable, aliases, &n_aliases, child->n_bufs);
     if (!replacement || !replacement->uop_logical || !replacement->uop_physical) goto done;
@@ -6557,7 +6570,6 @@ int poly_model_inline_entrypoint(
     );
   }
 
-  int n_outputs = 0;
   for (int i = 0; i < logical_sink->n_src; i++) {
     PolyUOp *store = logical_sink->src[i];
     if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
@@ -6583,7 +6595,10 @@ int poly_model_inline_entrypoint(
     physical_value =
         poly_uop_reshape_symbolic(dst_ctx, physical_value, physical_dims, out_buf->ndim);
     if (!logical_value || !physical_value) goto done;
-    PolyDevice device = poly_ctx_get_preferred_device(dst_ctx);
+    /* Follow the substituted graph, not a default changed by another Model.
+     * Tensor operations such as sampling allocate state using this label. */
+    PolyDevice device = poly_uop_device(physical_value);
+    if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(dst_ctx);
     if (!poly_device_can_execute(device)) device = poly_device_default();
     PolyTensor *value = poly_tensor_create_with_roots(
         dst_ctx, logical_value, physical_value, POLY_TENSOR_VALUE, device
@@ -6597,10 +6612,183 @@ int poly_model_inline_entrypoint(
   rc = 0;
 
 done:
+  if (rc) {
+    for (int i = 0; i < n_outputs; i++) {
+      poly_tensor_release(outputs[i].tensor);
+      outputs[i].tensor = NULL;
+    }
+  }
   free(aliases);
   poly_map_destroy(logical_memo);
   poly_map_destroy(physical_memo);
   return rc;
+}
+
+int poly_model_inline_entrypoint(
+    PolyModel *parent,
+    const PolyModel *child,
+    const char *entrypoint,
+    const char *prefix,
+    const PolyModelInlineBinding *bindings,
+    int n_bindings,
+    bool trainable,
+    PolyModelInlineOutput *outputs,
+    int max_outputs,
+    int *out_n_outputs
+) {
+  if (!parent) return -1;
+  return model_inline_entrypoint(
+      parent, child, entrypoint, prefix, bindings, n_bindings, trainable, outputs, max_outputs,
+      out_n_outputs
+  );
+}
+
+static int model_capture_call(
+    PolyModel *inst,
+    int ep,
+    PolyIOBinding *io,
+    int n_io,
+    int n_controls,
+    PolyTensor **outputs,
+    int n_outputs
+) {
+  RuntimeEntrypoint *entry = &inst->entrypoints[ep];
+  const char *error = NULL;
+  if (inst->n_requirements)
+    error = "Model composition does not yet support input requirements";
+  else if (entry->writes_state)
+    error = "Model composition requires explicit state inputs/outputs, not internal writes";
+  else if (inst->n_controls || n_controls)
+    error = "Model composition does not yet support integer controls";
+  else if (n_io != entry->n_inputs || (n_io && !io))
+    error = "Model composition requires every declared input exactly once";
+  if (error) goto invalid;
+  /* Named-state classification alone is insufficient for a captured lazy
+   * initializer: its assignment may still target the producer's storage.
+   * Value inlining must not retain hidden writes or discard sibling effects. */
+  int n_nodes = 0;
+  PolyUOp **nodes =
+      poly_uop_toposort_ex_alloc(inst->ctx, entry->sink, &n_nodes, model_effect_gate, false);
+  if (!nodes) return -1;
+  for (int i = 0; i < n_nodes; i++) {
+    PolyUOp *node = nodes[i];
+    if (node->op != POLY_OP_STORE) continue;
+    const PolyUOp *identity = node->n_src == 2 ? poly_uop_get_buffer_identity(node->src[0]) : NULL;
+    const NamedBuf *target = NULL;
+    for (int j = 0; j < inst->n_bufs; j++)
+      if (identity == inst->bufs[j].buffer) target = &inst->bufs[j];
+    bool output = false;
+    for (int j = 0; j < entry->sink->n_src; j++)
+      output |= node == entry->sink->src[j];
+    if (!output || !target || target->role != POLY_ROLE_OUTPUT) {
+      error = "Model composition requires explicit state inputs/outputs, not internal writes";
+      break;
+    }
+  }
+  poly_uop_toposort_free(nodes);
+  if (error) goto invalid;
+  for (int i = 0; i < n_io; i++) {
+    int bi = io[i].name ? find_buf_by_name(inst, io[i].name) : -1;
+    bool declared = false;
+    for (int j = 0; j < entry->n_inputs; j++)
+      declared |= io[i].name && !strcmp(entry->inputs[j], io[i].name);
+    for (int j = 0; j < i; j++)
+      if (io[i].name && io[j].name && !strcmp(io[i].name, io[j].name)) declared = false;
+    PolyTensor *t = io[i].tensor;
+    if (bi < 0 || !declared || !t || t->owner_ctx != inst->ctx || !t->uop_logical ||
+        !t->uop_physical) {
+      error = "Model composition requires live Tensor inputs from the same Runtime";
+      goto invalid;
+    }
+    NamedBuf *b = &inst->bufs[bi];
+    PolyDevice device = poly_uop_device(t->uop_physical);
+    /* Device-free constant expressions can inline without placement. A
+     * missing device on actual storage is still an admission failure. */
+    if ((device != POLY_DEVICE_AUTO && device != poly_uop_device(b->buffer)) ||
+        poly_tensor_root_has_unplaced_buffer(inst->ctx, t->uop_physical)) {
+      error =
+          "Model composition requires inputs and child on the same device; place the child first";
+      goto invalid;
+    }
+    PolyShape shape = poly_uop_max_shape_cached(inst->ctx, t->uop_physical);
+    if (b->dynamic || shape.ndim != b->ndim ||
+        !poly_dtype_eq(t->uop_physical->dtype, b->buffer->dtype)) {
+      error = "Model composition input dtype/shape mismatch or unsupported symbolic shape";
+      goto invalid;
+    }
+    for (int d = 0; d < b->ndim; d++) {
+      PolyUOp *extent = poly_uop_shape_dim(inst->ctx, t->uop_physical, d);
+      if (!extent || extent->op != POLY_OP_CONST || extent->arg.kind != POLY_ARG_INT) {
+        error = "Model composition does not yet support symbolic shape inputs";
+        goto invalid;
+      }
+      if (shape.dims[d] != b->shape[d]) {
+        error = "Model composition input shape mismatch";
+        goto invalid;
+      }
+    }
+  }
+  PolyModelInlineBinding *bindings = calloc((size_t)inst->n_bufs, sizeof(*bindings));
+  PolyModelInlineOutput *result = calloc((size_t)n_outputs, sizeof(*result));
+  if (!bindings || !result) {
+    free(bindings);
+    free(result);
+    return -1;
+  }
+  int rc = -1, count = 0;
+  for (int i = 0; i < inst->n_bufs; i++) {
+    NamedBuf *b = &inst->bufs[i];
+    bindings[i].name = b->name;
+    for (int j = 0; j < n_io; j++)
+      if (!strcmp(b->name, io[j].name)) bindings[i].tensor = poly_tensor_retain(io[j].tensor);
+    if (bindings[i].tensor) continue;
+    if (b->role == POLY_ROLE_INPUT || b->role == POLY_ROLE_TARGET) continue;
+    if (b->dynamic) {
+      poly_model_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "Model composition requires static shapes"
+      );
+      goto cleanup;
+    }
+    PolyUOp *logical = model_binding_source(inst->ctx, b);
+    PolyTensor *tensor = poly_tensor_create_with_roots(
+        inst->ctx, logical, b->buffer, POLY_TENSOR_VALUE, poly_uop_device(b->buffer)
+    );
+    if (!tensor) goto cleanup;
+    /* Capture owns the storage roots, not the child Model. This permits child
+     * disposal and deduplicates tied weights across repeated calls. Output
+     * targets are substituted but never registered as parent parameters. */
+    if (b->role == POLY_ROLE_OUTPUT)
+      bindings[i].tensor = tensor;
+    else {
+      bindings[i].tensor = poly_tensor_capture_bind(inst->ctx->tensor_capture, tensor);
+      poly_tensor_release(tensor);
+    }
+    if (!bindings[i].tensor) goto cleanup;
+  }
+  rc = model_inline_entrypoint(
+      NULL, inst, entry->name, NULL, bindings, inst->n_bufs, false, result, n_outputs, &count
+  );
+  if (!rc && count != n_outputs) rc = -1;
+  if (!rc)
+    for (int i = 0; i < n_outputs; i++) {
+      for (int j = 0; j < count; j++)
+        if (!strcmp(entry->outputs[i], result[j].name)) {
+          outputs[i] = result[j].tensor;
+          result[j].tensor = NULL;
+          break;
+        }
+    }
+cleanup:
+  for (int i = 0; i < inst->n_bufs; i++)
+    poly_tensor_release(bindings[i].tensor);
+  for (int i = 0; i < n_outputs; i++)
+    poly_tensor_release(result[i].tensor);
+  free(bindings);
+  free(result);
+  return rc;
+invalid:
+  poly_model_set_error(inst, POLY_STATUS_INVALID, __func__, "%s", error);
+  return -1;
 }
 
 int poly_model_copy_prefixed_weights(PolyModel *dst, PolyModel *src, const char *prefix) {

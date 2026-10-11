@@ -570,7 +570,7 @@ class Model:
         if not capture:
             lib.poly_ctx_set_logical_policy(ctx, policy)
             raise RuntimeError('Model capture requires an idle Runtime outside another capture')
-        owned, rng = [], {}
+        owned, rng, children = [], {}, {}
         _capture_contexts.add(_ptr_value(ctx))
         try:
             result, losses, initial_params = None, None, None
@@ -607,7 +607,22 @@ class Model:
                         for handle in handles:
                             if handle: lib.poly_tensor_release(handle)
                     index += 1
-                states = list(params.values()) + list(rng.values())
+                index = 0
+                while True:
+                    handle = lib.poly_tensor_capture_binding(capture, index)
+                    if not handle: break
+                    name = f'__model.{index}'
+                    if name in params or name in rng:
+                        lib.poly_tensor_release(handle)
+                        raise ValueError(f'{name!r} is reserved for composed Model state')
+                    if name not in children:
+                        children[name] = Tensor(_ctx=ctx, _tensor=handle)
+                        owned.append(children[name])
+                    else: lib.poly_tensor_release(handle)
+                    index += 1
+                if children and loss is not None:
+                    raise ValueError('Model composition currently supports inference capture only')
+                states = list(params.values()) + list(rng.values()) + list(children.values())
                 handles = (_ffi._ptr * len(states))(*(t._tensor for t in states))
                 mutable = (ctypes.c_int * len(states))(*(not t.is_param for t in states))
                 tensors = [_require_tensor(name,t) for name,t in values.items()]
@@ -636,7 +651,7 @@ class Model:
             lib.poly_ctx_set_logical_policy(ctx, policy)
         try:
             return Model.from_tensors(inputs=inputs, targets=targets, outputs=result,
-                                      losses=losses, params={**params, **rng}, entrypoints=entrypoints,
+                                      losses=losses, params={**params, **rng, **children}, entrypoints=entrypoints,
                                       controls=controls)
         finally:
             for tensor in owned: tensor.dispose()
@@ -1171,7 +1186,8 @@ class Model:
     def call(self, entrypoint, inputs=None, *, controls=None, **kwargs):
         """Run an entrypoint. Tensor inputs select owned, device-resident Tensor outputs.
 
-        Results are eager snapshots, not differentiable calls through the Model.
+        Outside authoring capture, results are eager snapshots, not differentiable
+        calls through the Model. During capture, Tensor calls inline value graphs.
         Their Runtime must remain alive; subsequent calls and Model disposal do
         not change them. Array-only inputs retain the NumPy output contract.
         With readback=False, return {} without collecting outputs; state and
@@ -1193,6 +1209,10 @@ class Model:
         if inputs is not None and kwargs:
             raise TypeError('Model.call accepts either an input mapping or keyword inputs')
         io = dict(inputs or kwargs)
+        if _model_capture_active(self._ctx):
+            from .tensor import Tensor
+            if not readback or not io or not all(isinstance(value, Tensor) for value in io.values()):
+                raise ValueError('Model composition requires Tensor inputs and returned outputs')
         bindings, n = self._make_bindings(io)
         control_rows = []
         for name, value in (controls or {}).items():

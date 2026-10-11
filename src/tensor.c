@@ -203,6 +203,10 @@ struct PolyTensorCapture {
   TensorCaptureRoot *roots;
   int n_roots, cap_roots;
   PolyMap *indices, *saved_rng;
+  struct {
+    PolyTensor *source, *bound;
+  } * bindings;
+  int n_bindings;
   uint64_t saved_seed;
   uint32_t saved_device_count;
   bool failed;
@@ -5841,6 +5845,51 @@ static void capture_rng_by_device(const void *key, void *value, void *userdata) 
     states[state->seed->device] = state;
 }
 
+PolyTensor *poly_tensor_capture_bind(PolyTensorCapture *capture, PolyTensor *tensor) {
+  if (!capture || capture->failed || !tensor || tensor->owner_ctx != capture->ctx ||
+      !tensor->uop_logical || !tensor->uop_physical)
+    return NULL;
+  for (int i = 0; i < capture->n_bindings; i++) {
+    PolyTensor *source = capture->bindings[i].source;
+    if (source->uop_logical == tensor->uop_logical && source->uop_physical == tensor->uop_physical)
+      return poly_tensor_retain(capture->bindings[i].bound);
+  }
+  void *bindings =
+      realloc(capture->bindings, ((size_t)capture->n_bindings + 1) * sizeof(*capture->bindings));
+  if (!bindings) {
+    capture->failed = true;
+    return NULL;
+  }
+  capture->bindings = bindings;
+  /* A fresh portable identity makes sealing snapshot the child's current
+   * storage once. Reusing its identity would also reuse its placed buffer,
+   * coupling later parent and child writes. No bytes are copied during capture. */
+  PolyShape shape = poly_uop_max_shape_cached(capture->ctx, tensor->uop_physical);
+  int64_t numel = poly_shape_numel_checked(shape.dims, shape.ndim);
+  PolyUOp *logical =
+      numel < 0 ? NULL
+                : poly_uop_new_logical_buffer(capture->ctx, tensor->uop_physical->dtype, numel);
+  if (logical) logical = poly_uop_reshape(capture->ctx, logical, shape.dims, shape.ndim);
+  PolyTensor *bound =
+      logical ? poly_tensor_create_with_roots(
+                    capture->ctx, logical, tensor->uop_physical, POLY_TENSOR_VALUE, tensor->device
+                )
+              : NULL;
+  if (!bound) {
+    capture->failed = true;
+    return NULL;
+  }
+  capture->bindings[capture->n_bindings].source = poly_tensor_retain(tensor);
+  capture->bindings[capture->n_bindings++].bound = bound;
+  return poly_tensor_retain(bound);
+}
+
+PolyTensor *poly_tensor_capture_binding(PolyTensorCapture *capture, int index) {
+  return capture && index >= 0 && index < capture->n_bindings
+             ? poly_tensor_retain(capture->bindings[index].bound)
+             : NULL;
+}
+
 int poly_tensor_capture_rng(
     PolyTensorCapture *capture,
     int index,
@@ -5998,6 +6047,11 @@ void poly_tensor_capture_end(PolyTensorCapture *capture) {
   tensor_capture_restore(capture);
   /* Stop journaling before releasing private RNG owners and saved roots. */
   ctx->tensor_capture = NULL;
+  for (int i = 0; i < capture->n_bindings; i++) {
+    poly_tensor_release(capture->bindings[i].source);
+    poly_tensor_release(capture->bindings[i].bound);
+  }
+  free(capture->bindings);
   poly_tensor_manual_seed(ctx, (int64_t)capture->saved_seed);
   poly_map_destroy(ctx->rng_states);
   ctx->rng_states = capture->saved_rng;

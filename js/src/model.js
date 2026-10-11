@@ -357,7 +357,7 @@ function createBoundModelClass(runtime) {
       const ffi = _runtime._core.ffi, Tensor = _runtime.Tensor
       const mode = Tensor.training, capture = ffi.poly_tensor_capture_begin(_runtime._core.ctx)
       if (!capture) throw new Error('Model capture requires an idle Runtime outside another capture')
-      const owned = [], rng = {}
+      const owned = [], rng = {}, children = {}
       let result, losses, initialParams
       _runtime._modelCapture = {failed:false}
       try {
@@ -394,7 +394,22 @@ function createBoundModelClass(runtime) {
               }
             } finally { for (const handle of state.tensors) if (handle) ffi.poly_tensor_release(handle) }
           }
-          const states = [...Object.values(params),...Object.values(rng)]
+          for (let index=0; ; index++) {
+            const handle = ffi.poly_tensor_capture_binding(capture,index)
+            if (!handle) break
+            const name = `__model.${index}`
+            if (name in params || name in rng) {
+              ffi.poly_tensor_release(handle)
+              throw new Error(`${name} is reserved for composed Model state`)
+            }
+            if (!(name in children)) {
+              children[name] = new Tensor(null,{_ctx:_runtime._core.ctx,_tensor:handle})
+              owned.push(children[name])
+            } else ffi.poly_tensor_release(handle)
+          }
+          if (Object.keys(children).length && loss != null)
+            throw new Error('Model composition currently supports inference capture only')
+          const states = [...Object.values(params),...Object.values(rng),...Object.values(children)]
           const tensors = Object.entries(named).map(([name,tensor]) => requireTensor(name,tensor))
           const handles = ffi.poly_tensor_capture_wrap(capture, states.map(t=>t._tensor),
             states.map(t=>Number(!t.isParam)), tensors.map(t=>t._tensor))
@@ -409,7 +424,7 @@ function createBoundModelClass(runtime) {
           if (training && loss != null) losses = completed
           else result = completed
         }
-        return {inputs,targets,outputs:result,losses,params:{...params,...rng},entrypoints,controls:options.controls,
+        return {inputs,targets,outputs:result,losses,params:{...params,...rng,...children},entrypoints,controls:options.controls,
           [captureOwners]:owned}
       } catch(error) {
         for (const tensor of owned) tensor.dispose()
@@ -1234,12 +1249,16 @@ function createBoundModelClass(runtime) {
     }
 
     call(entrypoint, io, { controls = null, readback = true } = {}) {
-      this._requireSync('call()', 'callAsync()')
+      const capture = Boolean(this._rt._modelCapture)
+      if (capture) this._requireOpen()
+      else this._requireSync('call()', 'callAsync()')
       const controlRows = controlEntries(controls)
       const { names, arrays, tensors } = normalizeBindings(io, this._rt)
+      if (capture && (!readback || !names.length || !Object.values(io).every(value => value instanceof this._rt.Tensor)))
+        throw new Error('Model composition requires Tensor inputs and returned outputs')
       if (tensors && readback) {
         return this._wrapTensorOutputs(String(entrypoint),
-          this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays, controlRows))
+          this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays, controlRows, capture))
       }
       const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays, controlRows)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')

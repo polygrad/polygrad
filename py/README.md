@@ -252,6 +252,13 @@ supports fixed-shape state and explicit entrypoint writes; see the
   the same state. The callable runs twice during construction, never during
   execution. Without a loss, capture uses the current `TRAINING` value;
   changing it later does not recapture the graph.
+- Inside an author function, `child.forward(x=x)` with Tensor inputs inlines
+  an existing Model. Fixed Python loops share its weights; slicing and sampling
+  can stay in the combined graph. Import children before capture, on the same
+  runtime/device. Inference capture supports static value entrypoints and explicit
+  state inputs/outputs; internal writes, integer controls and input checks are
+  rejected. The parent owns one weight copy, independent of later child writes or disposal;
+  both copies occupy memory until the child is disposed.
 - Set the seed before construction. BatchNorm/RNG updates affect Model-owned
   state. Authoring Tensor roots and training mode are restored even on failure;
   arbitrary Python side effects are not. Capture rejects parameter/input

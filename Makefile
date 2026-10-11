@@ -251,6 +251,10 @@ test: build/polygrad_test
 test-fast: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test --fast
 
+.PHONY: test-model-c
+test-model-c: build/polygrad_test
+	$(SAN_RUN) ./build/polygrad_test model
+
 # Full C suite routed through the selected backend. Backend portability failures
 # must remain visible; do not replace this with a small positive allowlist.
 test-common: build/polygrad_test

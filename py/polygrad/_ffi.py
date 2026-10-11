@@ -867,6 +867,8 @@ def _declare_signatures(lib):
     lib.poly_tensor_capture_rng.argtypes = [_ptr, ctypes.c_int, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr)]
     lib.poly_tensor_capture_end.restype = None
     lib.poly_tensor_capture_end.argtypes = [_ptr]
+    lib.poly_tensor_capture_binding.restype = _ptr
+    lib.poly_tensor_capture_binding.argtypes = [_ptr, ctypes.c_int]
 
     lib.poly_tensor_to_device.restype = _ptr
     lib.poly_tensor_to_device.argtypes = [_ptr, _ptr, ctypes.c_int]

@@ -124,7 +124,10 @@ function installWebGpuAsyncTestAdapter(pg) {
     iProto.bufData = iProto.bufDataAsync
     iProto.exportWeights = iProto.exportWeightsAsync
     iProto.saveBundle = iProto.saveBundleAsync
-    iProto.forward = iProto.forwardAsync
+    const forward = iProto.forward
+    iProto.forward = function(io) {
+      return this._rt._modelCapture ? forward.call(this, io) : this.forwardAsync(io)
+    }
     iProto.trainStep = iProto.trainStepAsync
     iProto.__polyWebGpuTestAsyncPatched = true
   }

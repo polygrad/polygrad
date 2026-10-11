@@ -1189,6 +1189,7 @@ function createWasmCoreFromModule(Module, device) {
         return {device, tensors:[heap32()[ptr>>>2], heap32()[(ptr>>>2)+1]]}
       } finally { Module._free(ptr) }
     },
+    poly_tensor_capture_binding: (capture, index) => Module._poly_tensor_capture_binding(capture, index),
     poly_tensor_capture_wrap: (capture, states, mutable, outputs) => {
       if (states.length !== mutable.length || states.length >= 65535 || !outputs.length || outputs.length > 65535)
         throw new Error('invalid Model capture arity')
@@ -2786,7 +2787,7 @@ function createWasmCoreFromModule(Module, device) {
       finally { Module._free(entryPtr); Module._free(namePtr) }
     },
 
-    call(instPtr, entrypoint, names, arrays, controls = [], tensorOutputs = false) {
+    call(instPtr, entrypoint, names, arrays, controls = [], tensorOutputs = false, capture = false) {
       const n = names.length
       const bindings = packModelBindings(names, arrays)
       const bindingPtr = bindings.ptr
@@ -2813,7 +2814,7 @@ function createWasmCoreFromModule(Module, device) {
       const symbol = tensorOutputs ? 'poly_model_call_tensors_with_controls' : 'poly_model_call_with_controls'
       const args = [instPtr, entrypointPtr, bindingPtr, n, controlPtr, controls.length]
       if (tensorOutputs) args.push(outputPtr, count)
-      if (deviceName === 'webgpu' && Module.ccall) {
+      if (!capture && deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
           return Module.ccall(
             symbol,
@@ -2832,8 +2833,8 @@ function createWasmCoreFromModule(Module, device) {
       } finally { cleanup() }
     },
 
-    callTensors(instPtr, entrypoint, names, arrays, controls = []) {
-      return this.call(instPtr, entrypoint, names, arrays, controls, true)
+    callTensors(instPtr, entrypoint, names, arrays, controls = [], capture = false) {
+      return this.call(instPtr, entrypoint, names, arrays, controls, true, capture)
     },
 
     forward(instPtr, names, arrays) {

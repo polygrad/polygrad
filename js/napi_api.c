@@ -1765,6 +1765,25 @@ static napi_value napi_poly_tensor_capture_rng(napi_env env, napi_callback_info 
   return result;
 }
 
+static napi_value napi_poly_tensor_capture_binding(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  int32_t index;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &index));
+  PolyTensor *tensor = poly_tensor_capture_binding(get_external(env, argv[0]), index);
+  if (!tensor) {
+    napi_get_null(env, &result);
+    return result;
+  }
+  if (napi_create_external(env, tensor, NULL, NULL, &result) != napi_ok) {
+    poly_tensor_release(tensor);
+    napi_throw_error(env, NULL, "Model capture binding allocation failed");
+    return NULL;
+  }
+  return result;
+}
+
 static napi_value napi_poly_tensor_capture_wrap(napi_env env, napi_callback_info info) {
   napi_value argv[4], result = NULL, value;
   size_t argc = 4;
@@ -7596,6 +7615,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_capture_end", napi_poly_tensor_capture_end),
       DECLARE_NAPI_METHOD("poly_tensor_capture_wrap", napi_poly_tensor_capture_wrap),
       DECLARE_NAPI_METHOD("poly_tensor_capture_rng", napi_poly_tensor_capture_rng),
+      DECLARE_NAPI_METHOD("poly_tensor_capture_binding", napi_poly_tensor_capture_binding),
       DECLARE_NAPI_METHOD("poly_tensor_create_result_like", napi_poly_tensor_create_result_like),
       DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),

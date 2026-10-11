@@ -468,6 +468,40 @@
     "ownership": "owned",
     "cleanup": false
   },
+  "poly_tensor_capture_bind": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyTensorCapture *",
+        "capture"
+      ],
+      [
+        "PolyTensor *",
+        "tensor"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_capture_binding": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyTensorCapture *",
+        "capture"
+      ],
+      [
+        "int",
+        "index"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
   "poly_tensor_capture_end": {
     "return": "void",
     "args": [

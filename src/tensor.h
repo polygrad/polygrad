@@ -845,6 +845,11 @@ int poly_tensor_capture_rng(
 
 void poly_tensor_capture_end(PolyTensorCapture *capture);
 
+/* Capture-owned immutable bindings. Repeated occurrences of the same pair of
+ * roots share one owner. Accessors return owned handles; no execution occurs. */
+PolyTensor *poly_tensor_capture_bind(PolyTensorCapture *capture, PolyTensor *tensor);
+PolyTensor *poly_tensor_capture_binding(PolyTensorCapture *capture, int index);
+
 bool poly_tensor_capture_allows_realize(PolyCtx *ctx, PolyTensor **inputs, int n);
 
 /* Find a live PolyTensor representative for this storage identity, preferring

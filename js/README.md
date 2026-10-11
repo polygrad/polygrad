@@ -279,6 +279,14 @@ entrypoint writes through the shared
   optimizer updates parameters. Without a loss, capture uses the current
   `Tensor.training`; changing it later does not recapture the graph.
 - On WebGPU, construct with `await pg.Model.fromCallableAsync(author, options)`.
+- Inside the synchronous author, `child.forward({x})` with Tensor inputs inlines
+  an existing Model. Fixed JS loops share its weights, and subsequent slicing
+  or sampling stays in the combined graph. Import children first; on WebGPU,
+  `await child.placeAsync('WEBGPU')` before capture. Children must share the
+  runtime/device. Inference capture supports static value entrypoints and explicit
+  state inputs/outputs; internal state writes, integer controls and input checks are
+  rejected. The parent owns one weight copy, independent of later child writes or disposal;
+  both copies occupy memory until the child is disposed.
   The author must remain synchronous and must not start async reads or execution.
 - Inputs may have bounded dimensions, including `[N, N]` and independent
   `[N, M]` axes. State shapes remain fixed.
