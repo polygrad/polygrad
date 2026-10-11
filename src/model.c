@@ -2780,8 +2780,8 @@ static int model_validate_checkpoint_views(
     for (int j = 0; j < i; j++)
       if (strcmp(views[i].name, views[j].name) == 0) return -1;
     int bi = find_buf_by_name(inst, views[i].name);
-    if (bi >= 0 && (inst->bufs[bi].flags & POLY_BIND_F_TRANSIENT_ZERO)) return -1;
-    if (bi >= 0 && !model_checkpoint_row_matches(&inst->bufs[bi], &views[i])) return -1;
+    if (bi < 0 || (inst->bufs[bi].flags & POLY_BIND_F_TRANSIENT_ZERO)) return -1;
+    if (!model_checkpoint_row_matches(&inst->bufs[bi], &views[i])) return -1;
   }
   if (!require_state) return 0;
   for (int i = 0; i < inst->n_bufs; i++) {
@@ -3658,17 +3658,19 @@ uint8_t *poly_model_export_weights(PolyModel *inst, int *out_len) {
 
 int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
   if (!inst || inst->stage != POLY_MODEL_BUILT) return -1;
-  model_mutated(inst, false);
 
   int n_views = 0;
   char *metadata = NULL;
   PolySafetensorViewEx *views = poly_safetensors_decode_ex(data, len, &n_views, &metadata);
   if (!views) return -1;
-  if (model_validate_checkpoint_views(inst, views, n_views, false) != 0) {
+  if (model_validate_checkpoint_views(inst, views, n_views, true) != 0) {
     model_free_safetensor_views(views, n_views);
     free(metadata);
     return -1;
   }
+  /* Admission is complete before invalidating training state or writing any
+   * buffer. Partial updates use the explicit named-buffer API instead. */
+  model_mutated(inst, false);
 
   typedef struct {
     int bi;
@@ -3715,10 +3717,6 @@ int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len) {
   int rc = 0;
   for (int i = 0; i < n_views; i++) {
     int bi = find_buf_by_name(inst, views[i].name);
-    if (bi < 0) {
-      fprintf(stderr, "poly_model_import_weights: unknown tensor '%s'\n", views[i].name);
-      continue;
-    }
     size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
     if (nbytes > 0 &&
         poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, views[i].raw_data, nbytes) != 0) {

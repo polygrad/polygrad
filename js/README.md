@@ -304,6 +304,8 @@ Saved bundles preserve auxiliary/RNG and optional optimizer state. To replace
 weights, use `model.importWeights(bytes)` on synchronous backends or
 `await model.importWeightsAsync(bytes)` on WebGPU. The latter snapshots the
 supplied bytes and reads current device state for rollback.
+Weight imports require every persistent parameter, with matching names, shapes
+and dtypes; missing or unknown names are errors. Use `writeBuffer` for partial updates.
 
 ### Minibatches
 

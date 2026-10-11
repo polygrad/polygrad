@@ -318,6 +318,9 @@ Newer releases load older portable models; files saved by a newer release may
 require that release or later. Check the changelog when exchanging models.
 
 Bundles preserve auxiliary/RNG and optional optimizer state.
+`model.import_weights(data)` requires every persistent parameter, with matching
+names, shapes and dtypes. Missing or unknown names are errors; use `write_buffer`
+for partial updates.
 `include_optimizer=False` omits optimizer state, not training entrypoints.
 To resume training, reapply the optimizer configuration after loading.
 See [export products](https://github.com/polygrad/polygrad#export-products)

@@ -352,7 +352,9 @@ size_t poly_model_buf_nbytes(const PolyModel *inst, int i);
 uint8_t *poly_model_export_weights(PolyModel *inst, int *out_len);
 uint8_t *poly_model_export_weights_ex(PolyModel *inst, int *out_len, uint32_t flags);
 
-/* Import weights from safetensors. Matches by name. Returns 0 on success. */
+/* Import a complete checkpoint by name. Reject unknown/missing required names,
+ * dtype/shape mismatches before writes. For partial updates use write_buf_named.
+ * Returns 0 on success. */
 int poly_model_import_weights(PolyModel *inst, const uint8_t *data, int len);
 
 /* IR Export */

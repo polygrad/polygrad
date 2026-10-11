@@ -4207,8 +4207,19 @@ TEST(model, checkpoint_validation_is_shape_exact_and_transactional) {
   ASSERT_FLOAT_EQ(poly_model_param_data(inst, 1, NULL)[0], 2.0f, 0.0f);
 
   free(checkpoint);
+  rows[1].shape = shape;
+  rows[1].name = "misspelled_b";
+  checkpoint = poly_safetensors_encode(rows, 2, NULL, &checkpoint_len);
+  int unknown_rc = poly_model_import_weights(inst, checkpoint, checkpoint_len);
+  free(checkpoint);
+  checkpoint = poly_safetensors_encode(rows, 1, NULL, &checkpoint_len);
+  int missing_rc = poly_model_import_weights(inst, checkpoint, checkpoint_len);
+  free(checkpoint);
+  bool unchanged = poly_model_param_data(inst, 0, NULL)[0] == 1.0f &&
+                   poly_model_param_data(inst, 1, NULL)[0] == 2.0f;
   poly_model_free(inst);
   poly_ctx_destroy(ctx);
+  ASSERT_TRUE(unknown_rc < 0 && missing_rc < 0 && unchanged);
   PASS();
 }
 
