@@ -1002,11 +1002,17 @@ test-js-native-interp: verify-source-mirrors js/build/Release/polygrad_napi.node
 ifeq ($(HAS_CUDA), 1)
 test-js-native-cuda: verify-source-mirrors js/build/Release/polygrad_napi.node
 	POLY_DEV=cuda $(NODE) js/test/test_native.js
+else
+test-js-native-cuda:
+	@echo 'CUDA backend not built; cannot run requested native tests' >&2; exit 1
 endif
 
 ifeq ($(HAS_HIP), 1)
 test-js-native-hip: verify-source-mirrors js/build/Release/polygrad_napi.node
 	POLY_DEV=hip $(NODE) js/test/test_native.js
+else
+test-js-native-hip:
+	@echo 'HIP backend not built; cannot run requested native tests' >&2; exit 1
 endif
 
 # Browser/Playwright coverage should be invoked through Make so the wasm

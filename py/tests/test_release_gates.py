@@ -15,6 +15,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('backend', ['cuda', 'hip'])
+def test_requested_native_backend_without_build_support_fails(backend):
+    result = subprocess.run(
+        ['make', f'HAS_{backend.upper()}=0', f'test-js-native-{backend}'],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, result.stdout
+    assert 'not built' in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize('target', ['test-py', 'test-readme'])
 def test_python_docs_build_wasm(target):
     rule = next(line for line in (ROOT / 'Makefile').read_text(encoding='utf-8').splitlines()
