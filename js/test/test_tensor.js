@@ -132,6 +132,47 @@ async function runTensorTests(pg, createRuntime) {
     } finally { x.dispose() }
   })
 
+  await test('integer ABI rejects lossy scalars and dimensions', () => {
+    const x = new Tensor([1], { dtype: 'int64' })
+    const ffi = pg._core.ffi
+    const rejected = fn => {
+      let threw = false
+      try {
+        const result = fn()
+        if (result) ffi.poly_tensor_release(result)
+      } catch (_) { threw = true }
+      assert(threw, 'invalid integer accepted by ABI')
+    }
+    try {
+      for (const value of [1.5, NaN, Infinity, 2 ** 53, -(2 ** 53), '1', 1n << 63n, -(1n << 63n) - 1n]) {
+        rejected(() => ffi.poly_tensor_const_like_int(x._ctx, x._tensor, value))
+      }
+      for (const value of [1.5, NaN, Infinity, 2 ** 53, '1']) {
+        rejected(() => ffi.poly_tensor_reshape(x._ctx, x._tensor, [value], 1))
+      }
+    } finally { x.dispose() }
+  })
+
+  await test('integer ABI preserves BigInt values and dimension arrays', async () => {
+    const x = new Tensor([0], { dtype: 'int64' })
+    const ffi = pg._core.ffi
+    try {
+      for (const value of [-(1n << 63n), (1n << 63n) - 1n, 9007199254740993n]) {
+        const raw = ffi.poly_tensor_const_like_int(x._ctx, x._tensor, value)
+        const result = x._makeResultFromCore(raw)
+        try { assert((await result.toArray())[0] === value, 'int64 precision lost') }
+        finally { result.dispose() }
+      }
+      // Both scratch (<=8) and allocated (>8) marshalling paths.
+      for (const rank of [1, 9]) {
+        const dims = Array(rank).fill(1n)
+        const raw = ffi.poly_tensor_reshape(x._ctx, x._tensor, dims, rank)
+        assert(raw, 'BigInt dimensions rejected')
+        ffi.poly_tensor_release(raw)
+      }
+    } finally { x.dispose() }
+  })
+
   await test('shared variance preserves correction and integer accumulation', async () => {
     for (const dtype of ['float32', 'int32']) {
       const x = new Tensor([[1, 2, 3], [2, 4, 7]], { dtype })

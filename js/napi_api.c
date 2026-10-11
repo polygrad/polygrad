@@ -157,14 +157,21 @@ done:
   napi_close_handle_scope(env, scope);
 }
 
+static bool generated_read_int64_t(napi_env env, napi_value value, int64_t *out);
+
 static int read_int64_array(napi_env env, napi_value arr, int64_t *out, int max_len) {
   uint32_t len = 0;
-  napi_get_array_length(env, arr, &len);
-  if ((int)len > max_len) len = (uint32_t)max_len;
+  bool is_array = false;
+  if (napi_is_array(env, arr, &is_array) != napi_ok || !is_array ||
+      napi_get_array_length(env, arr, &len) != napi_ok || len > (uint32_t)max_len) {
+    napi_throw_range_error(env, NULL, "invalid dimension array");
+    return -1;
+  }
   for (uint32_t i = 0; i < len; i++) {
     napi_value elem;
-    napi_get_element(env, arr, i, &elem);
-    napi_get_value_int64(env, elem, &out[i]);
+    if (napi_get_element(env, arr, i, &elem) != napi_ok ||
+        !generated_read_int64_t(env, elem, &out[i]))
+      return -1;
   }
   return (int)len;
 }
@@ -1521,7 +1528,7 @@ static napi_value napi_poly_tensor_sum_dtype_by_id(napi_env env, napi_callback_i
   int32_t n_axes = 0, dtype_id = -1;
   bool keepdim = false;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[2], axes, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &n_axes);
   napi_get_value_bool(env, argv[4], &keepdim);
   napi_get_value_int32(env, argv[5], &dtype_id);
@@ -1540,7 +1547,7 @@ static napi_value napi_poly_tensor_all(napi_env env, napi_callback_info info) {
   int32_t n_axes = 0;
   bool keepdim = false;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[2], axes, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &n_axes);
   napi_get_value_bool(env, argv[4], &keepdim);
   return make_external(
@@ -1556,7 +1563,7 @@ static napi_value napi_poly_tensor_any(napi_env env, napi_callback_info info) {
   int32_t n_axes = 0;
   bool keepdim = false;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[2], axes, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &n_axes);
   napi_get_value_bool(env, argv[4], &keepdim);
   return make_external(
@@ -1843,7 +1850,7 @@ static napi_value napi_poly_tensor_shrink(napi_env env, napi_callback_info info)
   PolyTensor *tensor = get_external(env, argv[1]);
   int64_t flat[POLY_MAX_DIMS * 2];
   int32_t ndim = 0;
-  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &ndim);
   return make_external(env, poly_tensor_shrink(ctx, tensor, (int64_t(*)[2])flat, ndim));
 }
@@ -1857,7 +1864,7 @@ static napi_value napi_poly_tensor_pad_value_bool(napi_env env, napi_callback_in
   int64_t flat[POLY_MAX_DIMS * 2];
   int32_t ndim = 0;
   bool value = false;
-  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &ndim);
   napi_get_value_bool(env, argv[4], &value);
   return make_external(
@@ -1874,7 +1881,7 @@ static napi_value napi_poly_tensor_pad_value_int(napi_env env, napi_callback_inf
   int64_t flat[POLY_MAX_DIMS * 2];
   int32_t ndim = 0;
   int64_t value = 0;
-  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &ndim);
   napi_get_value_int64(env, argv[4], &value);
   return make_external(
@@ -1891,7 +1898,7 @@ static napi_value napi_poly_tensor_pad_value_float(napi_env env, napi_callback_i
   int64_t flat[POLY_MAX_DIMS * 2];
   int32_t ndim = 0;
   double value = 0.0;
-  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &ndim);
   napi_get_value_double(env, argv[4], &value);
   return make_external(
@@ -1905,10 +1912,10 @@ static napi_value napi_poly_tensor_pool(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
   int32_t n_kernel = 0;
-  read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &n_kernel);
-  read_int64_array(env, argv[4], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[4], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS) < 0) return NULL;
   return make_external(
       env,
       poly_tensor_pool(
@@ -1924,11 +1931,11 @@ static napi_value napi_tensor_pool2d(napi_env env, napi_callback_info info, bool
   int64_t kernel[POLY_MAX_DIMS], stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS];
   int64_t padding[2 * POLY_MAX_DIMS];
   int32_t n_kernel = 0, n_padding = 0;
-  read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[2], kernel, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &n_kernel);
-  read_int64_array(env, argv[4], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS);
-  read_int64_array(env, argv[6], padding, 2 * POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[4], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[5], dilation, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[7], &n_padding);
   bool ceil_mode = false, option = false;
   NAPI_CALL(env, napi_get_value_bool(env, argv[8], &ceil_mode));
@@ -1965,11 +1972,11 @@ static napi_value napi_poly_tensor_max_unpool2d(napi_env env, napi_callback_info
   NAPI_CALL(env, napi_get_value_int32(env, argv[4], &nk));
   NAPI_CALL(env, napi_get_value_int32(env, argv[8], &np));
   NAPI_CALL(env, napi_get_value_int32(env, argv[10], &no));
-  read_int64_array(env, argv[3], kernel, POLY_MAX_DIMS);
-  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
-  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
-  read_int64_array(env, argv[9], output, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[3], kernel, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[5], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[9], output, POLY_MAX_DIMS) < 0) return NULL;
   return make_external(
       env, poly_tensor_max_unpool2d(
                get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
@@ -2010,10 +2017,10 @@ static napi_value napi_poly_tensor_conv_transpose2d(napi_env env, napi_callback_
   NAPI_CALL(env, napi_get_value_int32(env, argv[4], &groups));
   NAPI_CALL(env, napi_get_value_int32(env, argv[8], &n_padding));
   NAPI_CALL(env, napi_get_value_int32(env, argv[10], &n_output_padding));
-  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
-  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
-  read_int64_array(env, argv[9], output_padding, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[5], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[9], output_padding, POLY_MAX_DIMS) < 0) return NULL;
   return make_external(
       env, poly_tensor_conv_transpose2d(
                get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
@@ -2051,9 +2058,9 @@ static napi_value napi_poly_tensor_conv2d(napi_env env, napi_callback_info info)
   int64_t stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS], padding[2 * POLY_MAX_DIMS];
   int32_t groups = 0, n_padding = 0;
   napi_get_value_int32(env, argv[4], &groups);
-  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
-  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[5], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[8], &n_padding);
   return make_external(
       env, poly_tensor_conv2d(
@@ -2070,9 +2077,9 @@ static napi_value napi_poly_tensor_conv2d_dtype_by_id(napi_env env, napi_callbac
   int64_t stride[POLY_MAX_DIMS], dilation[POLY_MAX_DIMS], padding[2 * POLY_MAX_DIMS];
   int32_t groups = 0, n_padding = 0, dtype_id = -1;
   napi_get_value_int32(env, argv[4], &groups);
-  read_int64_array(env, argv[5], stride, POLY_MAX_DIMS);
-  read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS);
-  read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[5], stride, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], dilation, POLY_MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[7], padding, 2 * POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[8], &n_padding);
   napi_get_value_int32(env, argv[9], &dtype_id);
   return make_external(
@@ -2090,7 +2097,7 @@ static napi_value napi_poly_tensor_batchnorm(napi_env env, napi_callback_info in
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   int64_t axes[POLY_MAX_DIMS];
   int32_t n_axes = 0;
-  read_int64_array(env, argv[6], axes, POLY_MAX_DIMS);
+  if (read_int64_array(env, argv[6], axes, POLY_MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[7], &n_axes);
   return make_external(
       env, poly_tensor_batchnorm(
@@ -3285,7 +3292,7 @@ static napi_value napi_poly_uop_expand(napi_env env, napi_callback_info info) {
   int64_t dims[MAX_DIMS];
   int32_t nd;
   napi_get_value_int32(env, argv[3], &nd);
-  read_int64_array(env, argv[2], dims, MAX_DIMS);
+  if (read_int64_array(env, argv[2], dims, MAX_DIMS) < 0) return NULL;
   return make_external(env, poly_uop_expand(ctx, uop, dims, nd));
 }
 
@@ -3298,7 +3305,7 @@ static napi_value napi_poly_uop_permute(napi_env env, napi_callback_info info) {
   int64_t order[MAX_DIMS];
   int32_t nd;
   napi_get_value_int32(env, argv[3], &nd);
-  read_int64_array(env, argv[2], order, MAX_DIMS);
+  if (read_int64_array(env, argv[2], order, MAX_DIMS) < 0) return NULL;
   return make_external(env, poly_uop_permute(ctx, uop, order, nd));
 }
 
@@ -3311,7 +3318,7 @@ static napi_value napi_poly_uop_flip(napi_env env, napi_callback_info info) {
   int64_t axes[MAX_DIMS];
   int32_t naxes;
   napi_get_value_int32(env, argv[3], &naxes);
-  read_int64_array(env, argv[2], axes, MAX_DIMS);
+  if (read_int64_array(env, argv[2], axes, MAX_DIMS) < 0) return NULL;
   return make_external(env, poly_uop_flip(ctx, uop, axes, naxes));
 }
 
@@ -3324,7 +3331,7 @@ static napi_value napi_poly_uop_shrink(napi_env env, napi_callback_info info) {
   int64_t flat[MAX_DIMS * 2];
   int32_t npairs;
   napi_get_value_int32(env, argv[3], &npairs);
-  read_int64_array(env, argv[2], flat, MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, MAX_DIMS * 2) < 0) return NULL;
   /* poly_uop_shrink expects int64_t (*)[2] -- flat layout is compatible */
   return make_external(env, poly_uop_shrink(ctx, uop, (int64_t(*)[2])flat, npairs));
 }
@@ -3360,7 +3367,7 @@ static napi_value napi_poly_uop_pad(napi_env env, napi_callback_info info) {
   int64_t flat[MAX_DIMS * 2];
   int32_t npairs;
   napi_get_value_int32(env, argv[3], &npairs);
-  read_int64_array(env, argv[2], flat, MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, MAX_DIMS * 2) < 0) return NULL;
   return make_external(env, poly_uop_pad(ctx, uop, (int64_t(*)[2])flat, npairs));
 }
 
@@ -3373,7 +3380,7 @@ static napi_value napi_poly_uop_pad_value(napi_env env, napi_callback_info info)
   int64_t flat[MAX_DIMS * 2];
   int32_t npairs;
   double value;
-  read_int64_array(env, argv[2], flat, MAX_DIMS * 2);
+  if (read_int64_array(env, argv[2], flat, MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &npairs);
   napi_get_value_double(env, argv[4], &value);
   return make_external(env, poly_uop_pad_value(ctx, uop, (int64_t(*)[2])flat, npairs, value));
@@ -3387,10 +3394,10 @@ static napi_value napi_poly_uop_pool(napi_env env, napi_callback_info info) {
   PolyUOp *uop = get_external(env, argv[1]);
   int64_t k[MAX_DIMS], stride[MAX_DIMS], dilation[MAX_DIMS];
   int32_t nk;
-  read_int64_array(env, argv[2], k, MAX_DIMS);
+  if (read_int64_array(env, argv[2], k, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &nk);
-  read_int64_array(env, argv[4], stride, MAX_DIMS);
-  read_int64_array(env, argv[5], dilation, MAX_DIMS);
+  if (read_int64_array(env, argv[4], stride, MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[5], dilation, MAX_DIMS) < 0) return NULL;
   return make_external(env, poly_uop_pool(ctx, uop, k, nk, stride, dilation));
 }
 
@@ -3402,11 +3409,11 @@ static napi_value napi_poly_uop_max_pool2d(napi_env env, napi_callback_info info
   PolyUOp *x = get_external(env, argv[1]);
   int64_t k[MAX_DIMS], stride[MAX_DIMS], dilation[MAX_DIMS], padding[MAX_DIMS * 2];
   int32_t nk, npadding;
-  read_int64_array(env, argv[2], k, MAX_DIMS);
+  if (read_int64_array(env, argv[2], k, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[3], &nk);
-  read_int64_array(env, argv[4], stride, MAX_DIMS);
-  read_int64_array(env, argv[5], dilation, MAX_DIMS);
-  read_int64_array(env, argv[6], padding, MAX_DIMS * 2);
+  if (read_int64_array(env, argv[4], stride, MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[5], dilation, MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], padding, MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[7], &npadding);
   return make_external(
       env, poly_uop_max_pool2d(ctx, x, k, nk, stride, dilation, padding, npadding)
@@ -3424,9 +3431,9 @@ static napi_value napi_poly_uop_conv2d(napi_env env, napi_callback_info info) {
   int32_t groups, npadding;
   int64_t stride[MAX_DIMS], dilation[MAX_DIMS], padding[MAX_DIMS * 2];
   napi_get_value_int32(env, argv[4], &groups);
-  read_int64_array(env, argv[5], stride, MAX_DIMS);
-  read_int64_array(env, argv[6], dilation, MAX_DIMS);
-  read_int64_array(env, argv[7], padding, MAX_DIMS * 2);
+  if (read_int64_array(env, argv[5], stride, MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[6], dilation, MAX_DIMS) < 0) return NULL;
+  if (read_int64_array(env, argv[7], padding, MAX_DIMS * 2) < 0) return NULL;
   napi_get_value_int32(env, argv[8], &npadding);
   return make_external(
       env, poly_uop_conv2d(ctx, x, weight, bias, groups, stride, dilation, padding, npadding)
@@ -3445,7 +3452,7 @@ static napi_value napi_poly_uop_batchnorm(napi_env env, napi_callback_info info)
   PolyUOp *invstd = get_external(env, argv[5]);
   int64_t axes[MAX_DIMS];
   int32_t naxes;
-  read_int64_array(env, argv[6], axes, MAX_DIMS);
+  if (read_int64_array(env, argv[6], axes, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[7], &naxes);
   return make_external(env, poly_uop_batchnorm(ctx, x, weight, bias, mean, invstd, axes, naxes));
 }
@@ -3461,7 +3468,7 @@ static napi_value napi_poly_uop_reduce_axis(napi_env env, napi_callback_info inf
   int64_t axes[MAX_DIMS];
   int32_t naxes;
   napi_get_value_int32(env, argv[4], &naxes);
-  read_int64_array(env, argv[3], axes, MAX_DIMS);
+  if (read_int64_array(env, argv[3], axes, MAX_DIMS) < 0) return NULL;
   return make_external(env, poly_uop_reduce_axis(ctx, (PolyOps)op, uop, axes, naxes));
 }
 
@@ -3486,7 +3493,7 @@ static napi_value napi_poly_uop_rand(napi_env env, napi_callback_info info) {
   PolyCtx *ctx = get_external(env, argv[0]);
   int64_t shape[MAX_DIMS];
   int32_t ndim;
-  read_int64_array(env, argv[1], shape, MAX_DIMS);
+  if (read_int64_array(env, argv[1], shape, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[2], &ndim);
   int64_t seed;
   napi_get_value_int64(env, argv[3], &seed);
@@ -3500,7 +3507,7 @@ static napi_value napi_poly_uop_randn(napi_env env, napi_callback_info info) {
   PolyCtx *ctx = get_external(env, argv[0]);
   int64_t shape[MAX_DIMS];
   int32_t ndim;
-  read_int64_array(env, argv[1], shape, MAX_DIMS);
+  if (read_int64_array(env, argv[1], shape, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[2], &ndim);
   int64_t seed;
   napi_get_value_int64(env, argv[3], &seed);
@@ -3514,7 +3521,7 @@ static napi_value napi_poly_uop_full(napi_env env, napi_callback_info info) {
   PolyCtx *ctx = get_external(env, argv[0]);
   int64_t shape[MAX_DIMS];
   int32_t ndim;
-  read_int64_array(env, argv[1], shape, MAX_DIMS);
+  if (read_int64_array(env, argv[1], shape, MAX_DIMS) < 0) return NULL;
   napi_get_value_int32(env, argv[2], &ndim);
   double fill;
   napi_get_value_double(env, argv[3], &fill);
@@ -5674,8 +5681,13 @@ static bool generated_read_int64_t(napi_env env, napi_value value, int64_t *out)
   bool lossless = false;
   if (type == napi_bigint) {
     if (napi_get_value_bigint_int64(env, value, out, &lossless) == napi_ok && lossless) return true;
-  } else if (type == napi_number && napi_get_value_int64(env, value, out) == napi_ok) {
-    return true;
+  } else if (type == napi_number) {
+    double number;
+    if (napi_get_value_double(env, value, &number) == napi_ok &&
+        fabs(number) <= 9007199254740991.0 && floor(number) == number) {
+      *out = (int64_t)number;
+      return true;
+    }
   }
   napi_throw_type_error(env, NULL, "expected an int64 scalar");
   return false;

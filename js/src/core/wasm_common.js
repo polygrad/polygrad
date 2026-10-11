@@ -100,6 +100,10 @@ function createWasmCoreFromModule(Module, device) {
     for (let i = 0; i < arr.length; i++) {
       const base = (ptr >>> 2) + i * 2
       const val = arr[i]
+      if (typeof val === 'bigint') {
+        new DataView(heap32().buffer).setBigInt64(ptr + i * 8, val, true)
+        continue
+      }
       heap32()[base] = val & 0xFFFFFFFF
       // Preserve the high word; floor also gives two's-complement negatives.
       heap32()[base + 1] = Math.floor(val / 0x100000000)
@@ -111,6 +115,10 @@ function createWasmCoreFromModule(Module, device) {
     for (let i = 0; i < arr.length; i++) {
       const base = (_scratchAxisPtr >>> 2) + i * 2
       const val = arr[i]
+      if (typeof val === 'bigint') {
+        new DataView(heap32().buffer).setBigInt64(_scratchAxisPtr + i * 8, val, true)
+        continue
+      }
       heap32()[base] = val & 0xFFFFFFFF
       heap32()[base + 1] = Math.floor(val / 0x100000000)
     }
