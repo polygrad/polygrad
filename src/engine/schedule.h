@@ -34,7 +34,8 @@ typedef struct {
   PolyUOp *compiled_binary;
   bool wait;
   double elapsed_us; /* Device timestamps when wait is requested; otherwise unused. */
-  int timing_repeats; /* Scratch-buffer timing only; zero means one execution. */
+  int timing_repeats; /* Scratch timing: 0=once, positive=burst, -1=adaptive with rotated storage.
+                       */
   int grid[3];
   int block[3];
   PolyUOp *grid_exprs[3];

@@ -45,27 +45,34 @@ async function checkHostCopies(address) {
   assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_wasm', 'dst,handle,nbytes', env)(address, 1, 4), 0)
 }
 
-async function checkWebgpu(address, timed, validationError = false, repeats = 1) {
+async function checkWebgpu(address, timed, validationError = false, repeats = 1, sampleUs = 200, failRound = 1) {
   const args = address, valuePtr = address + 64, elapsed = address + 128
   const HEAPU32 = {[args >>> 2]: 1, [(args >>> 2) + 1]: valuePtr >>> 0}
   const HEAP32 = {[valuePtr >>> 2]: -17}, HEAPF64 = {}
-  let submits = 0, dispatches = 0, uniform
-  const buffer = () => ({destroy() {}, unmap() {}, async mapAsync() {},
-    getMappedRange() { return new BigUint64Array([1000n, 7000n]).buffer }})
+  const adaptive = timed && repeats < 0
+  let submits = 0, dispatches = 0, passDispatches = 0, uniform
+  const allocated = [], groups = new Set()
+  const buffer = () => {
+    const b = {destroy() { this.destroyed = true }, unmap() {}, async mapAsync() {},
+      getMappedRange() { return new BigUint64Array([1000n, 1000n + (adaptive ? BigInt(passDispatches * sampleUs * 1000) : 6000n)]).buffer }}
+    allocated.push(b)
+    return b
+  }
   const output = buffer()
   const device = {
     limits: {maxComputeWorkgroupsPerDimension: 65535},
     pushErrorScope() {},
-    async popErrorScope() { return validationError ? new Error('injected dispatch validation') : null; },
+    async popErrorScope() { return validationError && submits === failRound ? new Error('injected dispatch validation') : null; },
     features: new Set(['timestamp-query']),
     createBuffer: buffer, createQuerySet: buffer,
     createBindGroup({entries}) {
-      assert.equal(entries[1].resource.buffer, output)
+      if (!adaptive) assert.equal(entries[1].resource.buffer, output)
+      groups.add(entries[1].resource.buffer)
       return {}
     },
     createCommandEncoder() {
-      return {beginComputePass() { return {setPipeline() {}, setBindGroup() {},
-        dispatchWorkgroups() { dispatches++ }, end() {}} }, resolveQuerySet() {}, copyBufferToBuffer() {}, finish() { return {} }}
+      return {beginComputePass() { passDispatches = 0; return {setPipeline() {}, setBindGroup() {},
+        dispatchWorkgroups() { dispatches++; passDispatches++ }, end() {}} }, resolveQuerySet() {}, copyBufferToBuffer() {}, finish() { return {} }}
     },
     queue: {submit() { submits++ }, writeBuffer(buf, offset, values) { uniform = values[0] }},
   }
@@ -77,11 +84,17 @@ async function checkWebgpu(address, timed, validationError = false, repeats = 1)
       Asyncify: {state: 0, State: {Rewinding: 2}, handleAsync: fn => fn()},
       GPUBufferUsage: {}, GPUMapMode: {READ: 1}, console,
     })
-  assert.equal(await dispatch(1, args, 2, 1, 1, 1, 1, 0, timed ? elapsed : 0, repeats), validationError ? -1 : 0)
+  const failed = validationError || (adaptive && sampleUs === 0)
+  assert.equal(await dispatch(1, args, 2, 1, 1, 1, 1, 0, timed ? elapsed : 0, repeats), failed ? -1 : 0)
   assert.equal(uniform, -17, 'integer values stay signed; only addresses are unsigned')
-  assert.equal(submits, 1)
-  assert.equal(dispatches, timed ? repeats : 1, 'repeat only disposable timing calls')
-  if (timed) assert.equal(HEAPF64[elapsed >>> 3], validationError ? undefined : 6 / repeats)
+  const rounds = adaptive ? (failed ? (validationError ? failRound : 1) : 3) : 1
+  assert.equal(submits, rounds)
+  const calibrated = Math.max(1, Math.min(128, Math.ceil(4000 / sampleUs)))
+  assert.equal(dispatches, adaptive ? 1 + (rounds - 1) * calibrated : timed ? repeats : 1, 'repeat only disposable timing calls')
+  if (timed) assert.equal(HEAPF64[elapsed >>> 3], failed ? undefined : adaptive ? sampleUs : 6 / repeats)
+  if (adaptive) assert.equal(groups.size, 16, 'rotate disposable storage rather than reusing one cache-hot buffer')
+  assert(!output.destroyed, 'caller storage must survive timing')
+  assert(allocated.slice(1).every(b => b.destroyed), 'timing scratch must be released on success and failure')
 }
 
 function checkWasm(address, count) {
@@ -112,7 +125,13 @@ function checkWasm(address, count) {
     await checkWebgpu(address, true, false, 128)
     await checkWebgpu(address, false, false, 128)
     await checkWebgpu(address, true, true, 128)
+    await checkWebgpu(address, true, false, -1)
+    await checkWebgpu(address, true, true, -1)
+    await checkWebgpu(address, true, true, -1, 200, 3)
+    await checkWebgpu(address, true, false, -1, 0)
+    await checkWebgpu(address, true, false, -1, 1)
+    await checkWebgpu(address, true, false, -1, 10000)
     for (let count = 0; count <= 9; count++) checkWasm(address, count)
   }
-  console.log('Wasm addresses and timing: 66 passed')
+  console.log('Wasm addresses and timing: 84 passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })

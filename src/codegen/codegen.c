@@ -2639,6 +2639,8 @@ static int beam_prepare_candidate(
     poly_compile_deadline_ms = previous > 0 && previous < deadline ? previous : deadline;
   }
   int rc = beam_prepare_candidate_impl(ctx, sink, opts, runner);
+  if (rc == 0 && beam_device(opts) == POLY_DEVICE_WEBGPU && poly_get_beam_compare())
+    runner->timing_repeats = -1;
   bool timed_out = poly_compile_timed_out();
   poly_compile_deadline_ms = previous;
   if (timed_out) {
@@ -2738,7 +2740,7 @@ static bool beam_cache_key(
       POLYGRAD_ABI_VERSION,
       width,
       poly_getenv_flag_default("BEAM_ESTIMATE", true),
-      poly_get_beam_compare() ? 2 : 0, /* Versioned sustained-timing policy. */
+      poly_get_beam_compare() ? 3 : 0, /* Versioned sustained-timing policy. */
       poly_get_noopt(),
       opts.opt_policy,
       beam_device(opts),
@@ -3082,9 +3084,9 @@ static const double *beam_compare_test_times;
 /* PG-DIV-022: compare with the ordinary schedule before caching. Use the same
  * buffers and full launch dimensions, alternate order, and discard warm-up.
  * Median samples limit transient timing noise; this is not a speed guarantee.
- * Unlike historical Tinygrad BEAM_COMPARE, these are warm-cache measurements.
- * WebGPU queues repeated scratch-buffer dispatches: isolated round trips let
- * laptop GPUs idle between samples and rank different clock states instead. */
+ * Unlike historical Tinygrad BEAM_COMPARE, this does not explicitly clear L2.
+ * WebGPU queues adaptively sized dispatch bursts with rotated scratch storage:
+ * isolated round trips rank idle clocks, while one repeated buffer favors L2. */
 static bool beam_compare_default(
     PolyCtx *ctx,
     PolyUOp *sink,
@@ -3095,7 +3097,13 @@ static bool beam_compare_default(
 ) {
   PolyUOp *heuristic = beam_default_schedule(ctx, sink, opts);
   if (!heuristic) return false;
-  if (heuristic == winner->sched.ast) return true;
+  bool identical = heuristic == winner->sched.ast;
+#ifdef POLY_TESTING
+  /* Fault injection must reach comparison even when noisy search timings
+   * happen to select the heuristic itself. Ordinary execution still skips it. */
+  if (beam_compare_test_times) identical = false;
+#endif
+  if (identical) return true;
   if (poly_uop_retain(ctx, heuristic) != 0) return false;
   PolyDevice device = beam_device(opts);
   PolyRunner runners[2];
@@ -3104,10 +3112,6 @@ static bool beam_compare_default(
   double samples[2][7];
   for (int i = 0; i < 2; i++) {
     ready[i] = beam_prepare_candidate(ctx, asts[i], opts, &runners[i]) == 0;
-    /* Isolated WebGPU dispatches can leave a laptop GPU at idle clocks even
-     * with device timestamps. Compare sustained work on disposable buffers;
-     * normal inference and the pinned opt-out still execute exactly once. */
-    if (ready[i] && device == POLY_DEVICE_WEBGPU) runners[i].timing_repeats = 128;
   }
   for (int round = 0; round < 8; round++)
     for (int order = 0; order < 2; order++) {

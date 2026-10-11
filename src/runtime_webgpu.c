@@ -509,6 +509,9 @@ EM_JS(
       const tempUniforms = [];
       const tempCopies = [];
       let querySet = null, queryBuffer = null, queryReadback = null;
+      const adaptiveTiming = elapsed_us && timing_repeats < 0;
+      let repeats = adaptiveTiming ? 1 : Math.max(1, timing_repeats);
+      let timingGroups = null;
       let deferredCleanup = false;
       // -2 is POLY_RUNNER_NOT_STARTED. Scratch copies do not modify model state.
       let submitted = false;
@@ -632,20 +635,42 @@ EM_JS(
       if (st.batch && !st.batch.flush()) throw new Error('WebGPU batch flush failed');
 
       const encoder = st.device.createCommandEncoder();
+      if (adaptiveTiming && !timingGroups) {
+        timingGroups = [bindGroup];
+        const bytes = bgEntries.slice(1, n_params + 1).reduce((n, e) => n + e.resource.size, 0);
+        // WebGPU exposes no L2 size. Rotate up to 32 MiB (at most 16 banks)
+        // on disposable BEAM storage, not model weights. This limits cache-hot
+        // bias for small matrices without allocating proportional to repeats.
+        const banks = bytes > 0 ? Math.min(16, Math.ceil((32 * 1024 * 1024) / bytes)) : 1;
+        for (let bank = 1; bank < banks; bank++) {
+          const entries = bgEntries.map((entry, i) => {
+            if (i === 0 || i > n_params) return entry;
+            const src = entry.resource;
+            const buffer = st.device.createBuffer({size: src.size,
+              usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST});
+            tempCopies.push(buffer);
+            encoder.copyBufferToBuffer(src.buffer, src.offset || 0, buffer, 0, src.size);
+            return {binding: entry.binding, resource: {buffer, offset: 0, size: src.size}};
+          });
+          timingGroups.push(st.device.createBindGroup({layout: rec.bindGroupLayout, entries}));
+        }
+      }
       const passDescriptor = {};
-      if (elapsed_us) {
+      if (elapsed_us && !querySet) {
         querySet = st.device.createQuerySet({type: 'timestamp', count: 2});
         queryBuffer = st.device.createBuffer({size: 16,
           usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC});
         queryReadback = st.device.createBuffer({size: 16,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
-        passDescriptor.timestampWrites = {querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1};
       }
+      if (elapsed_us) passDescriptor.timestampWrites = {querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1};
       const pass = encoder.beginComputePass(passDescriptor);
       pass.setPipeline(rec.pipeline);
       pass.setBindGroup(0, bindGroup);
-      for (let i = 0; i < (elapsed_us ? Math.max(1, timing_repeats) : 1); i++)
+      for (let i = 0; i < (elapsed_us ? repeats : 1); i++) {
+        if (timingGroups) pass.setBindGroup(0, timingGroups[i % timingGroups.length]);
         pass.dispatchWorkgroups(gx, gy, gz);
+      }
       pass.end();
       if (elapsed_us) {
         encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0);
@@ -664,6 +689,9 @@ EM_JS(
           try {
             if (st.batch && !st.batch.flush()) throw new Error('WebGPU batch flush failed');
             if (debug_level >= 8) await dumpInputs();
+            // Calibrate once, then refine at loaded clocks. Each timed sample
+            // targets 4 ms, capped at 128 dispatches; slow kernels still run once.
+            for (let round = 0; round < (adaptiveTiming ? 3 : 1); round++) {
             st.device.pushErrorScope('internal');
             st.device.pushErrorScope('out-of-memory');
             st.device.pushErrorScope('validation');
@@ -677,8 +705,12 @@ EM_JS(
             if (elapsed_us) {
               await queryReadback.mapAsync(GPUMapMode.READ);
               const times = new BigUint64Array(queryReadback.getMappedRange());
-              HEAPF64[elapsed_us >>> 3] = Number(times[1] - times[0]) / (1000 * Math.max(1, timing_repeats));
+              const measured = Number(times[1] - times[0]) / (1000 * repeats);
               queryReadback.unmap();
+              if (!(measured > 0) || !Number.isFinite(measured)) throw new Error('invalid WebGPU timing sample');
+              if (!adaptiveTiming || round === 2) HEAPF64[elapsed_us >>> 3] = measured;
+              if (adaptiveTiming) repeats = Math.max(1, Math.min(128, Math.ceil(4000 / measured)));
+            }
             }
             return 0;
           } catch (error) {
