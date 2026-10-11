@@ -37,58 +37,84 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include "utils.h"
+
+typedef struct {
+  int value;
+  bool initialized;
+} CompilerSetting;
+
+/* Settings remain process-wide (per module in Wasm). Protect publication of
+ * value+initialized together; otherwise independent contexts can race even
+ * on NOOPT's first read. This does not make overlapping frontend scopes local. */
+static atomic_flag compiler_setting_lock = ATOMIC_FLAG_INIT;
+
+static void compiler_setting_acquire(void) {
+  while (atomic_flag_test_and_set_explicit(&compiler_setting_lock, memory_order_acquire)) {
+  }
+}
+
+static int compiler_setting_get(
+    CompilerSetting *setting,
+    const char *name,
+    int fallback,
+    bool cache
+) {
+  compiler_setting_acquire();
+  int value = setting->initialized ? setting->value : poly_getenv_int(name, fallback);
+  if (cache && !setting->initialized) {
+    setting->value = value;
+    setting->initialized = true;
+  }
+  atomic_flag_clear_explicit(&compiler_setting_lock, memory_order_release);
+  return value;
+}
+
+static void compiler_setting_set(CompilerSetting *setting, int value) {
+  compiler_setting_acquire();
+  setting->value = value;
+  setting->initialized = true;
+  atomic_flag_clear_explicit(&compiler_setting_lock, memory_order_release);
+}
 
 /* C storage for Tinygrad's NOOPT ContextVar. A Wasm module has its own copy;
  * native contexts share it, just as Tinygrad contexts share compiler policy. */
-static int noopt_value;
-static bool noopt_initialized;
+static CompilerSetting noopt;
 
 int poly_get_noopt(void) {
-  if (!noopt_initialized) {
-    noopt_value = poly_getenv_int("NOOPT", 0);
-    noopt_initialized = true;
-  }
-  return noopt_value;
+  return compiler_setting_get(&noopt, "NOOPT", 0, true);
 }
 
 void poly_set_noopt(int value) {
-  noopt_value = value;
-  noopt_initialized = true;
+  compiler_setting_set(&noopt, value);
 }
 
 /* helpers.BEAM: explicit frontend scopes override the environment. Native
  * contexts share this policy; each Wasm module has independent C storage. */
-static int beam_value;
-static bool beam_initialized;
+static CompilerSetting beam;
 int poly_get_beam(void) {
-  return beam_initialized ? beam_value : poly_getenv_int("BEAM", 0);
+  return compiler_setting_get(&beam, "BEAM", 0, false);
 }
 void poly_set_beam(int value) {
-  beam_value = value;
-  beam_initialized = true;
+  compiler_setting_set(&beam, value);
 }
 
 /* helpers.IGNORE_BEAM_CACHE shares BEAM's frontend-independent scope. */
-static int ignore_beam_cache_value;
-static bool ignore_beam_cache_initialized;
+static CompilerSetting ignore_beam_cache;
 int poly_get_ignore_beam_cache(void) {
-  return ignore_beam_cache_initialized ? ignore_beam_cache_value
-                                       : poly_getenv_int("IGNORE_BEAM_CACHE", 0);
+  return compiler_setting_get(&ignore_beam_cache, "IGNORE_BEAM_CACHE", 0, false);
 }
 void poly_set_ignore_beam_cache(int value) {
-  ignore_beam_cache_value = value;
-  ignore_beam_cache_initialized = true;
+  compiler_setting_set(&ignore_beam_cache, value);
 }
 
-static int beam_compare_value;
-static bool beam_compare_initialized;
+static CompilerSetting beam_compare;
 int poly_get_beam_compare(void) {
-  return beam_compare_initialized ? beam_compare_value : poly_getenv_int("BEAM_COMPARE", 1);
+  return compiler_setting_get(&beam_compare, "BEAM_COMPARE", 1, false);
 }
 void poly_set_beam_compare(int value) {
-  beam_compare_value = value;
-  beam_compare_initialized = true;
+  compiler_setting_set(&beam_compare, value);
 }
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.

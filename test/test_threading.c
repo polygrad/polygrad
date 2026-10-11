@@ -12,6 +12,44 @@
 #include <pthread.h>
 #include <unistd.h>
 
+static void *threading_policy_worker(void *opaque) {
+  pthread_barrier_wait(opaque);
+  for (int i = 0; i < 1000; i++) {
+    poly_set_noopt(i & 1);
+    if ((unsigned)poly_get_noopt() > 1) return NULL;
+    poly_set_beam(i & 1);
+    if ((unsigned)poly_get_beam() > 1) return NULL;
+    poly_set_ignore_beam_cache(i & 1);
+    if ((unsigned)poly_get_ignore_beam_cache() > 1) return NULL;
+    poly_set_beam_compare(i & 1);
+    if ((unsigned)poly_get_beam_compare() > 1) return NULL;
+  }
+  return (void *)(uintptr_t)1;
+}
+
+TEST(threading, compiler_policy_publication) {
+  int previous[] = {
+      poly_get_noopt(), poly_get_beam(), poly_get_ignore_beam_cache(), poly_get_beam_compare()};
+  pthread_barrier_t barrier;
+  ASSERT_INT_EQ(pthread_barrier_init(&barrier, NULL, 4), 0);
+  pthread_t threads[4];
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(pthread_create(&threads[i], NULL, threading_policy_worker, &barrier), 0);
+  bool ok = true;
+  for (int i = 0; i < 4; i++) {
+    void *result = NULL;
+    ASSERT_INT_EQ(pthread_join(threads[i], &result), 0);
+    ok &= result != NULL;
+  }
+  pthread_barrier_destroy(&barrier);
+  poly_set_noopt(previous[0]);
+  poly_set_beam(previous[1]);
+  poly_set_ignore_beam_cache(previous[2]);
+  poly_set_beam_compare(previous[3]);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 static void *threading_compile_worker(void *opaque) {
   pthread_barrier_t *barrier = opaque;
   pthread_barrier_wait(barrier);
