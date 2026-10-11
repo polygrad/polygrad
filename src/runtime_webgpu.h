@@ -13,6 +13,10 @@ extern "C" {
 bool poly_webgpu_supports_float16(void);
 
 #ifdef __EMSCRIPTEN__
+/* Nested scopes share an encoder. The outer end submits or discards pending
+ * commands and reports validation errors before callers publish results. */
+void poly_webgpu_batch_begin(void);
+int poly_webgpu_batch_end(int success);
 int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes);
 uintptr_t poly_webgpu_create_buffer_view(uintptr_t base_handle, size_t byte_offset, size_t nbytes);
 

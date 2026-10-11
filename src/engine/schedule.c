@@ -4638,14 +4638,6 @@ fail:
 }
 #endif
 
-static void fail_linear_outputs(
-    PolyCtx *ctx,
-    PolyUOp *linear,
-    int n_calls,
-    PolyUOp **inputs,
-    int n_inputs
-);
-
 /* C control body for current Tinygrad run_linear; the public wrapper below
  * scopes deferred residency collection across every early return. */
 static int run_linear_impl(
@@ -4664,6 +4656,10 @@ static int run_linear_impl(
   if (!poly_uop_explicit_devices_supported(ctx, linear)) return -1;
   PolyUOp *executable = jit ? linear : poly_compile_linear(ctx, linear, -1);
   if (!executable || executable->op != POLY_OP_LINEAR) return -1;
+#ifdef __EMSCRIPTEN__
+  /* Submission is a backend detail; LINEAR remains the execution order. */
+  poly_webgpu_batch_begin();
+#endif
   bool debug = poly_debug_at_least(7);
   int attempted_calls = 0;
 
@@ -4766,13 +4762,22 @@ static int run_linear_impl(
       goto failed;
     }
   }
+#ifdef __EMSCRIPTEN__
+  if (poly_webgpu_batch_end(1) != 0) {
+    poly_fail_linear_outputs(ctx, executable, attempted_calls, input_uops, n_input_uops);
+    return -1;
+  }
+#endif
   return 0;
 failed:
-  fail_linear_outputs(ctx, executable, attempted_calls, input_uops, n_input_uops);
+#ifdef __EMSCRIPTEN__
+  poly_webgpu_batch_end(0);
+#endif
+  poly_fail_linear_outputs(ctx, executable, attempted_calls, input_uops, n_input_uops);
   return -1;
 }
 
-static void fail_linear_outputs(
+void poly_fail_linear_outputs(
     PolyCtx *ctx,
     PolyUOp *linear,
     int n_calls,
@@ -4788,7 +4793,7 @@ static void fail_linear_outputs(
     if (body->op == POLY_OP_CUSTOM_FUNCTION && body->n_src > 0 &&
         body->src[0]->op == POLY_OP_LINEAR) {
       /* Graph PARAMs use the same invocation inputs as exec_graph. */
-      fail_linear_outputs(ctx, body->src[0], body->src[0]->n_src, inputs, n_inputs);
+      poly_fail_linear_outputs(ctx, body->src[0], body->src[0]->n_src, inputs, n_inputs);
       continue;
     }
     const PolyProgramInfo *info = body->op == POLY_OP_PROGRAM ? poly_program_info(ctx, body) : NULL;

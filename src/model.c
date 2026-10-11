@@ -22,6 +22,7 @@
 #include "engine/realize.h"
 #include "engine/schedule.h"
 #include "device.h"
+#include "runtime_webgpu.h"
 #include "codegen/codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
 #include <stdlib.h>
 #include <string.h>
@@ -5180,6 +5181,35 @@ cleanup:
   return ret;
 }
 
+static int model_end_webgpu_batch(
+    PolyModel *inst,
+    PolyUOp *linear,
+    PolyIOBinding *io,
+    int n_io,
+    int status
+) {
+#ifdef __EMSCRIPTEN__
+  int rc = poly_webgpu_batch_end(status == 0);
+  if (status == 0 && rc != 0) {
+    /* Delayed validation covers input copies as well as the entrypoint.
+     * Do not publish result Tensors or leave potentially unwritten storage
+     * readable. Earlier synchronous failures already mark their own prefix. */
+    for (int i = 0; i < n_io; i++) {
+      int bi = find_buf_by_name(inst, io[i].name);
+      if (bi >= 0) poly_buffer_fail(poly_buffer_get(inst->ctx, inst->bufs[bi].buffer));
+    }
+    if (linear) poly_fail_linear_outputs(inst->ctx, linear, linear->n_src, NULL, 0);
+    return -1;
+  }
+#else
+  (void)inst;
+  (void)linear;
+  (void)io;
+  (void)n_io;
+#endif
+  return status;
+}
+
 static int run_model_sink_bound(
     PolyModel *inst,
     const RuntimeEntrypoint *entry,
@@ -5198,7 +5228,11 @@ static int run_model_sink_bound(
     );
     fflush(stderr);
   }
-  if (prepare_model_io(inst, io, n_io, inv) != 0) return -1;
+#ifdef __EMSCRIPTEN__
+  poly_webgpu_batch_begin();
+#endif
+  if (prepare_model_io(inst, io, n_io, inv) != 0)
+    return model_end_webgpu_batch(inst, NULL, io, n_io, -1);
   double t_attach = timing ? poly_now_ms() : 0.0;
   /* Model entrypoints and train/value-grad combined graphs already own
    * their output/effect storage. Skip tensor output allocation, but retain the
@@ -5217,7 +5251,7 @@ static int run_model_sink_bound(
       if (cached_executable) {
         if (model_publish_cached_executable(inst, cached_executable, &built) != 0) {
           cached_executable_clear(&built);
-          return -1;
+          return model_end_webgpu_batch(inst, NULL, io, n_io, -1);
         }
         executable = cached_executable;
       } else {
@@ -5245,6 +5279,7 @@ static int run_model_sink_bound(
         inst->ctx, executable->linear, effective, n_effective, NULL, 0, true, true, false
     );
   free(effective);
+  ret = model_end_webgpu_batch(inst, executable->linear, io, n_io, ret);
   if (!cached_executable) cached_executable_clear(&local);
   /* Match Tensor's already-backed realization boundary: replay alone does
    * not justify a scan, but a retired storage owner must be reclaimed even
@@ -5382,12 +5417,18 @@ int poly_model_call_tensors_with_controls(
   }
   if (inst->entrypoints[ep].writes_state)
     model_mutated(inst, inst->entrypoints[ep].writes_transient);
-  if (run_model_sink_bound(
-          inst, &inst->entrypoints[ep], inst->entrypoints[ep].sink, io, n_io,
-          &inst->entry_executables[ep], &inv
-      ) != 0 ||
-      model_run_copies(inst->ctx, stores, n_outputs) != 0)
-    goto cleanup;
+#ifdef __EMSCRIPTEN__
+  /* One invocation includes binding, compute and owned-result publication. */
+  poly_webgpu_batch_begin();
+#endif
+  int call_status = run_model_sink_bound(
+      inst, &inst->entrypoints[ep], inst->entrypoints[ep].sink, io, n_io,
+      &inst->entry_executables[ep], &inv
+  );
+  if (call_status == 0) call_status = model_run_copies(inst->ctx, stores, n_outputs);
+  call_status =
+      model_end_webgpu_batch(inst, inst->entry_executables[ep].linear, io, n_io, call_status);
+  if (call_status != 0) goto cleanup;
   for (int i = 0; i < n_outputs; i++) {
     outputs[i] = result[i];
     result[i] = NULL;

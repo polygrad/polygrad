@@ -430,6 +430,140 @@ async function runTensorTests(pg, createRuntime) {
     } finally { pg.ignoreBeamCache = old }
   })
 
+  await testIf(pg.device === 'webgpu', 'execution WebGPU pipeline validation rejects without caching', isolatedRuntime(async rt => {
+    const x = new rt.Tensor(new Float32Array([1, 2, 3, 4]));
+    await x.realizeAsync();
+    const state = rt._core.Module.__polygradWebGpuState;
+    const device = state.device;
+    const y = x.mul(7.375).add(2.625);
+    const root = y.uop.key;
+    const count = state.pipelines.size;
+    const create = device.createComputePipeline;
+    let rejected = false, attempts = 0;
+    device.createComputePipeline = function(desc) {
+      attempts++;
+      // A real validation error returns an invalid object, not a JS exception.
+      return create.call(this, {...desc, compute: {...desc.compute, entryPoint: 'missing_entry'}});
+    };
+    try { await y.realizeAsync(); } catch (_) { rejected = true; }
+    finally { device.createComputePipeline = create; }
+    assert(attempts > 0, 'pipeline validation injection was bypassed');
+    assert(rejected, 'invalid WebGPU pipeline was accepted');
+    assert(state.pipelines.size === count, 'invalid pipeline entered the cache');
+    assert(y.uop.key === root, 'validation failure changed the pending root');
+    assertClose(await y.toArrayAsync(), [10, 17.375, 24.75, 32.125]);
+    x.dispose(); y.dispose();
+  }));
+
+  await testIf(pg.device === 'webgpu', 'execution WebGPU batches dependent kernels and rejects invalid dispatch', isolatedRuntime(async rt => {
+    const x = new rt.Tensor(new Float32Array([1, 2, 3, 4]));
+    await x.realizeAsync();
+    const state = rt._core.Module.__polygradWebGpuState, device = state.device;
+    const create = device.createCommandEncoder, submit = device.queue.submit;
+    let passes = 0, dispatches = 0, submits = 0, inject = false;
+    device.createCommandEncoder = function(...args) {
+      const encoder = create.apply(this, args), begin = encoder.beginComputePass;
+      encoder.beginComputePass = function(...args) {
+        passes++;
+        const pass = begin.apply(this, args), dispatch = pass.dispatchWorkgroups;
+        pass.dispatchWorkgroups = function(...args) {
+          dispatches++;
+          return dispatch.apply(this, inject && dispatches === 2 ? [0x7fffffff, 1, 1] : args);
+        };
+        return pass;
+      };
+      return encoder;
+    };
+    device.queue.submit = function(...args) { submits++; return submit.apply(this, args); };
+    let a, y, b, z;
+    try {
+      a = x.mul(3.125).contiguous(); y = a.add(1.625);
+      await y.realizeAsync();
+      assert(dispatches === 2, 'probe did not execute both dependent kernels');
+      assert(passes === 1 && submits === 1, `expected one pass/submission, got ${passes}/${submits}`);
+      assertClose(await y.toArrayAsync(), [4.75, 7.875, 11, 14.125]);
+      passes = dispatches = submits = 0; inject = true;
+      b = x.mul(3.125).contiguous(); z = b.add(1.625);
+      let failed = false;
+      try { await z.realizeAsync(); } catch (_) { failed = true; }
+      assert(dispatches === 2 && failed, 'invalid dispatch returned success');
+      inject = false;
+      // These outputs have no in-place mutation: realization can restore the
+      // producer roots and recompute. A retry must not return unwritten bytes.
+      assertClose(await z.toArrayAsync(), [4.75, 7.875, 11, 14.125]);
+      assertClose(await x.toArrayAsync(), [1, 2, 3, 4]);
+    } finally {
+      device.createCommandEncoder = create; device.queue.submit = submit;
+      for (const tensor of [x, a, y, b, z]) if (tensor) tensor.dispose();
+    }
+  }));
+
+  await testIf(pg.device === 'webgpu', 'execution WebGPU rejects invalid first bind group', isolatedRuntime(async rt => {
+    const x = new rt.Tensor(new Float32Array([1, 2, 3, 4]));
+    await x.realizeAsync();
+    const device = rt._core.Module.__polygradWebGpuState.device;
+    const create = device.createBindGroup;
+    let attempts = 0, rejected = false, uncaptured = 0;
+    const onError = event => { event.preventDefault(); uncaptured++; };
+    device.addEventListener('uncapturederror', onError);
+    device.createBindGroup = function(desc) {
+      attempts++;
+      return create.call(this, {...desc, entries: []});
+    };
+    const y = x.mul(6.125);
+    try { await y.realizeAsync(); } catch (_) { rejected = true; }
+    finally { device.createBindGroup = create; }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    device.removeEventListener('uncapturederror', onError);
+    assert(attempts > 0 && rejected, 'invalid first bind group returned success');
+    assert(uncaptured === 0, 'first bind-group validation escaped the batch scope');
+    assertClose(await y.toArrayAsync(), [6.125, 12.25, 18.375, 24.5]);
+    assertClose(await x.toArrayAsync(), [1, 2, 3, 4]);
+    x.dispose(); y.dispose();
+  }));
+
+  await testIf(pg.device === 'webgpu', 'execution WebGPU rejects workgroup limits before pipeline creation', isolatedRuntime(async rt => {
+    const x = new rt.Tensor(new Float32Array(64).fill(1)).reshape(1, 64);
+    const w = new rt.Tensor(new Float32Array(4096).fill(1)).reshape(64, 64);
+    await x.realizeAsync(); await w.realizeAsync();
+    const state = rt._core.Module.__polygradWebGpuState, device = state.device;
+    assert(device.limits.maxComputeInvocationsPerWorkgroup === state.adapter.limits.maxComputeInvocationsPerWorkgroup,
+      'adapter workgroup limit was not requested');
+    const limits = device.limits, create = device.createComputePipeline;
+    let attempts = 0, rejected = false;
+    // Model a device with a smaller budget without changing compiler heuristics.
+    Object.defineProperty(device, 'limits', {configurable: true, value: new Proxy(limits, {
+      get(target, key) { return key === 'maxComputeInvocationsPerWorkgroup' ? 1 : Reflect.get(target, key, target); }
+    })});
+    device.createComputePipeline = function(...args) { attempts++; return create.apply(this, args); };
+    const y = x.matmul(w);
+    try { await y.realizeAsync(); } catch (_) { rejected = true; }
+    finally { delete device.limits; device.createComputePipeline = create; }
+    assert(rejected && attempts === 0, 'over-limit kernel reached pipeline creation');
+    assertClose(await y.toArrayAsync(), new Array(64).fill(64));
+    x.dispose(); w.dispose(); y.dispose();
+  }));
+
+  await testIf(pg.device === 'webgpu', 'execution WebGPU discards batch when a later pipeline fails', isolatedRuntime(async rt => {
+    const x = new rt.Tensor(new Float32Array([1, 2, 3, 4]));
+    await x.realizeAsync();
+    const state = rt._core.Module.__polygradWebGpuState, device = state.device;
+    const create = device.createComputePipeline, submit = device.queue.submit;
+    let attempts = 0, submits = 0, rejected = false;
+    device.createComputePipeline = function(desc) {
+      attempts++;
+      return create.call(this, attempts === 2 ? {...desc, compute: {...desc.compute, entryPoint: 'missing_entry'}} : desc);
+    };
+    device.queue.submit = function(...args) { submits++; return submit.apply(this, args); };
+    const a = x.mul(4.125).contiguous(), y = a.sub(1.625);
+    try { await y.realizeAsync(); } catch (_) { rejected = true; }
+    finally { device.createComputePipeline = create; device.queue.submit = submit; }
+    assert(attempts === 2 && rejected, 'later pipeline validation failure was not reported');
+    assert(submits === 0, 'failed batch submitted its pending prefix');
+    assertClose(await x.toArrayAsync(), [1, 2, 3, 4]);
+    x.dispose(); a.dispose(); y.dispose();
+  }));
+
   await test('execution BEAM policy reaches core and computes values', async () => {
     const before = pg.beam
     const beforeCache = pg.ignoreBeamCache

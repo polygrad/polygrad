@@ -492,7 +492,12 @@ function createWasmCoreFromModule(Module, device) {
           maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
           maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
           maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
-          maxBufferSize: adapter.limits.maxBufferSize
+          maxBufferSize: adapter.limits.maxBufferSize,
+          maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+          maxComputeWorkgroupSizeX: adapter.limits.maxComputeWorkgroupSizeX,
+          maxComputeWorkgroupSizeY: adapter.limits.maxComputeWorkgroupSizeY,
+          maxComputeWorkgroupSizeZ: adapter.limits.maxComputeWorkgroupSizeZ,
+          maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize
         }
       })
 

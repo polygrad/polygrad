@@ -26,6 +26,79 @@ typedef struct {
 
 /* Embedded JavaScript is not C; keep its operators out of clang-format. */
 // clang-format off
+EM_JS(void, poly_webgpu_batch_begin, (), {
+  const st = Module.__polygradWebGpuState;
+  if (!st || !st.device) return;
+  if (!st.batch) st.batch = {
+    depth: 0, encoder: null, pass: null, retired: [], failed: false, scoped: false, dispatches: 0,
+    closePass() { if (this.pass) { this.pass.end(); this.pass = null; } },
+    flush(commit = true) {
+      try {
+        this.closePass();
+        if (this.encoder && commit && !this.failed)
+          st.device.queue.submit([this.encoder.finish()]);
+      } catch (error) {
+        console.error('polygrad: WebGPU batch submission failed:', error);
+        this.failed = true;
+      } finally {
+        this.encoder = null;
+        this.dispatches = 0;
+        for (const buffer of this.retired) buffer.destroy();
+        this.retired = [];
+      }
+      return !this.failed;
+    },
+    ensureScope() {
+      if (!this.scoped) {
+        st.device.pushErrorScope('internal');
+        st.device.pushErrorScope('out-of-memory');
+        st.device.pushErrorScope('validation');
+        this.scoped = true;
+      }
+    },
+    computePass() {
+      this.ensureScope();
+      // Submit bounded chunks so GPU execution can overlap further encoding.
+      // Keep the call's error scopes open: earlier chunks may have written
+      // state when a later chunk fails, but no result is published unchecked.
+      if (this.dispatches >= 64) this.flush();
+      if (!this.encoder) this.encoder = st.device.createCommandEncoder();
+      if (!this.pass) this.pass = this.encoder.beginComputePass();
+      this.dispatches++;
+      return this.pass;
+    }
+  };
+  if (st.batch.depth++ === 0) {
+    st.batch.failed = false;
+  }
+});
+
+EM_JS(int, poly_webgpu_batch_end, (int success), {
+  if (Asyncify.state === Asyncify.State.Rewinding)
+    return Asyncify.handleAsync(() => {});
+  const st = Module.__polygradWebGpuState, batch = st && st.batch;
+  if (!batch || !batch.depth) return success ? 0 : -1;
+  if (!success) batch.failed = true;
+  if (--batch.depth) return batch.failed ? -1 : 0;
+  batch.flush(success);
+  const failed = batch.failed;
+  batch.failed = false;
+  // A Wasm/INTERP LINEAR in a module which also has WebGPU must stay synchronous.
+  if (!batch.scoped) return failed ? -1 : 0;
+  batch.scoped = false;
+  const checks = [st.device.popErrorScope(), st.device.popErrorScope(), st.device.popErrorScope()];
+  return Asyncify.handleAsync(async () => {
+    try {
+      const error = (await Promise.all(checks)).find(error => error);
+      if (error) console.error('polygrad: WebGPU batch validation failed:', error.message);
+      return failed || error ? -1 : 0;
+    } catch (error) {
+      console.error('polygrad: WebGPU batch validation failed:', error);
+      return -1;
+    }
+  });
+});
+
 EM_JS(int, js_webgpu_supports_float16, (), {
   const st = Module.__polygradWebGpuState;
   return st && st.hasShaderF16 ? 1 : 0;
@@ -132,7 +205,11 @@ EM_JS(void, js_webgpu_destroy_buffer, (uintptr_t handle), {
   if (!st) return;
   const buf = st.buffers.get(handle);
   const isView = st.bufferViews && st.bufferViews.has(handle);
-  if (buf && !isView) buf.destroy();
+  if (buf && !isView) {
+    // Encoded commands retain resources only after submission.
+    if (st.batch && st.batch.encoder) st.batch.retired.push(buf);
+    else buf.destroy();
+  }
   st.buffers.delete(handle);
   st.bufferSizes.delete(handle);
   if (st.bufferOffsets) st.bufferOffsets.delete(handle);
@@ -178,6 +255,7 @@ EM_JS(int, js_webgpu_write_buffer_from_wasm, (uintptr_t handle, const uint8_t *s
   const data = new Uint8Array(writeBytes);
   data.set(HEAPU8.subarray(src >>> 0, (src >>> 0) + logical));
   const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+  if (st.batch && !st.batch.flush()) return -1;
   st.device.queue.writeBuffer(buf, dstOffset, data);
   return 0;
 })
@@ -198,6 +276,7 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   const data = new Uint8Array(writeBytes);
   data.set(new Uint8Array(src.buffer, src.byteOffset, copyBytes));
   const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+  if (st.batch && !st.batch.flush()) return -1;
   st.device.queue.writeBuffer(buf, dstOffset, data);
   return 0;
 })
@@ -206,6 +285,7 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer_to_wasm, (uint8_t * dst, uintptr_t handle
   const st = await Module.__polygradEnsureWebGPU();
   const src = st.buffers.get(handle);
   if (!src) return -1;
+  if (st.batch && !st.batch.flush()) return -1;
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
@@ -234,6 +314,7 @@ EM_ASYNC_JS(
       const map = Module.__polygradHostBuffers;
       const dst = map && map.get(String(dst_key >>> 0));
       if (!src || !dst) return -1;
+      if (st.batch && !st.batch.flush()) return -1;
       const logical = Math.max(0, nbytes | 0);
       if (logical === 0) return 0;
       const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
@@ -263,6 +344,7 @@ EM_JS(
       const dst = st && st.buffers.get(dst_handle);
       const src = st && st.buffers.get(src_handle);
       if (!dst || !src) return -1;
+      if (st.batch && !st.batch.flush()) return -1;
       const logical = Math.max(0, nbytes | 0);
       if (logical === 0) return 0;
       const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
@@ -287,6 +369,7 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
   const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   /* Zero the rounded allocation. Later copy/read calls may use rounded WebGPU
    * transfer sizes even when the logical tensor byte count is smaller. */
+  if (st.batch && !st.batch.flush()) return -1;
   st.device.queue.writeBuffer(buf, dstOffset, new Uint8Array(writeBytes));
   return 0;
 })
@@ -294,8 +377,11 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
 EM_JS(
     uintptr_t,
     js_webgpu_get_or_create_pipeline,
-    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level, int cache),
+    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level, int cache,
+     int lx, int ly, int lz),
     {
+      if (Asyncify.state === Asyncify.State.Rewinding)
+        return Asyncify.handleAsync(() => {});
       const t0 = performance.now();
       const st = Module.__polygradWebGpuState;
       if (!st || !st.device) {
@@ -313,6 +399,12 @@ EM_JS(
         }
         return cached;
       }
+      const limits = st.device.limits;
+      if (lx < 1 || ly < 1 || lz < 1 ||
+          lx > limits.maxComputeWorkgroupSizeX || ly > limits.maxComputeWorkgroupSizeY ||
+          lz > limits.maxComputeWorkgroupSizeZ || lx * ly * lz > limits.maxComputeInvocationsPerWorkgroup ||
+          n_params > limits.maxStorageBuffersPerShaderStage ||
+          n_args - n_params + 1 > limits.maxUniformBuffersPerShaderStage) return 0;
       if (debug_level >= 7) {
         console.log(
       `[polygrad:webgpu:pipeline] miss entry=${entry} wgsl=${wgsl.length} ` +
@@ -322,6 +414,14 @@ EM_JS(
       let shaderModule;
       let bindGroupLayout;
       let pipeline;
+      // Synchronous creation can return an invalid object without throwing.
+      // Await its error scopes before registration or any dispatch, including
+      // BEAM timing. Pop every scope before yielding so scopes cannot overlap.
+      return Asyncify.handleAsync(async () => {
+      let failure = null;
+      st.device.pushErrorScope('internal');
+      st.device.pushErrorScope('out-of-memory');
+      st.device.pushErrorScope('validation');
       try {
         shaderModule = st.device.createShaderModule({code : wgsl});
         const entries =
@@ -340,9 +440,16 @@ EM_JS(
             {layout : pipelineLayout, compute : {module : shaderModule, entryPoint : entry}}
         );
       } catch (err) {
+        failure = err;
+      }
+      const errors = await Promise.all([
+        st.device.popErrorScope(), st.device.popErrorScope(), st.device.popErrorScope()
+      ]).catch(error => [error]);
+      failure = failure || errors.find(error => error);
+      if (failure) {
         console.log(
             '[polygrad:webgpu:pipeline] failed entry=' + entry + ' : ' +
-            (err && err.message ? err.message : String(err))
+            (failure.message || String(failure))
         );
         if (debug_level >= 4)
           console.log(
@@ -360,6 +467,7 @@ EM_JS(
       `ms=${(performance.now() - t0).toFixed(3)}`);
       }
       return id;
+      });
     }
 )
 
@@ -389,8 +497,13 @@ EM_JS(
       if (!st || !st.device) return -2;
       const rec = st.pipelines.get(pipeline_id);
       if (!rec) return -2;
+      const maxGrid = st.device.limits.maxComputeWorkgroupsPerDimension;
+      if (gx < 1 || gy < 1 || gz < 1 || gx > maxGrid || gy > maxGrid || gz > maxGrid) return -2;
       // Pinned WebGPU wait uses device timestamps, not queue wall time.
       if (elapsed_us && !st.device.features.has('timestamp-query')) return -2;
+      // Bind-group and temporary-buffer validation belongs to this batch too,
+      // including the first dispatch, before a compute pass exists.
+      if (st.batch && st.batch.depth) st.batch.ensureScope();
 
       const bgEntries = [ {binding : 0, resource : {buffer : st.infinityBuf}} ];
       const tempUniforms = [];
@@ -405,8 +518,10 @@ EM_JS(
         if (querySet) querySet.destroy();
         // WebGPU defers reclamation until already-submitted uses complete
         // (spec section Buffer Destruction). No queue fence is needed here.
-        for (const buf of tempUniforms) buf.destroy();
-        for (const buf of tempCopies) buf.destroy();
+        for (const buf of [...tempUniforms, ...tempCopies]) {
+          if (st.batch && st.batch.encoder) st.batch.retired.push(buf);
+          else buf.destroy();
+        }
       };
       try {
       // wasm32 addresses above 2 GiB must stay unsigned when indexing heap views.
@@ -421,6 +536,7 @@ EM_JS(
         let offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
         let size = st.bufferSizes.get(handle) || 0;
         if (i > 0 && handle === outHandle) {
+          if (st.batch && !st.batch.flush()) return -2;
           const copyBuf = st.device.createBuffer({
             size,
             usage : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
@@ -504,6 +620,17 @@ EM_JS(
       const bindGroup =
           st.device.createBindGroup({layout : rec.bindGroupLayout, entries : bgEntries});
 
+      if (!elapsed_us && debug_level < 8 && st.batch && st.batch.depth) {
+        if (st.batch.failed) throw new Error('earlier WebGPU batch submission failed');
+        const pass = st.batch.computePass();
+        pass.setPipeline(rec.pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(gx, gy, gz);
+        submitted = true;
+        return;
+      }
+      if (st.batch && !st.batch.flush()) throw new Error('WebGPU batch flush failed');
+
       const encoder = st.device.createCommandEncoder();
       const passDescriptor = {};
       if (elapsed_us) {
@@ -534,8 +661,18 @@ EM_JS(
         deferredCleanup = true;
         return Asyncify.handleAsync(async () => {
           try {
+            if (st.batch && !st.batch.flush()) throw new Error('WebGPU batch flush failed');
             if (debug_level >= 8) await dumpInputs();
-            submit();
+            st.device.pushErrorScope('internal');
+            st.device.pushErrorScope('out-of-memory');
+            st.device.pushErrorScope('validation');
+            let failure = null;
+            try { submit(); } catch (error) { failure = error; }
+            const errors = await Promise.all([
+              st.device.popErrorScope(), st.device.popErrorScope(), st.device.popErrorScope()
+            ]);
+            failure = failure || errors.find(error => error);
+            if (failure) throw failure;
             if (elapsed_us) {
               await queryReadback.mapAsync(GPUMapMode.READ);
               const times = new BigUint64Array(queryReadback.getMappedRange());
@@ -769,7 +906,8 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
       fflush(stderr);
     }
     wh->pipeline_id = js_webgpu_get_or_create_pipeline(
-        wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level(), !runner->capture_binary
+        wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level(), !runner->capture_binary,
+        runner->block[0], runner->block[1], runner->block[2]
     );
     wh->n_bindings = n_args;
     if (!wh->pipeline_id) return POLY_RUNNER_NOT_STARTED;

@@ -1259,6 +1259,18 @@ async function checkModelTensorIO(pg) {
     owned.push(second)
     assertClose(await first.toArrayAsync(), [3,7,5,9], 0)
     assertClose(await second.toArrayAsync(), [6,14,10,18], 0)
+    const beforeKernels = pg.stats().coreStats.kernelCount
+    const queue = gpu && pg._core.Module.__polygradWebGpuState.device.queue
+    const submit = queue && queue.submit
+    let submissions = 0, third
+    if (queue) queue.submit = function(...args) { submissions++; return submit.apply(this, args) }
+    try { third = (await model.forwardAsync({x:first, y:new Float32Array(4)})).prediction }
+    finally { if (queue) queue.submit = submit }
+    if (gpu) assert(submissions === 1, `Model binding/compute/output split into ${submissions} submissions`)
+    owned.push(third)
+    assert(pg.stats().coreStats.kernelCount - beforeKernels === 3,
+      'disjoint realized Tensor input must not take a preliminary snapshot')
+    assertClose(await third.toArrayAsync(), [6,14,10,18], 0)
     const before = await model.readBufferAsync('x')
     let shapeRejected = false
     try {
@@ -1311,6 +1323,54 @@ async function checkModelTensorIO(pg) {
   } finally {
     await model.dispose()
     for (const tensor of owned) await tensor.dispose()
+  }
+}
+
+async function checkModelBatchFailure(pg, chunked = false) {
+  if (String(pg.device).toLowerCase() !== 'webgpu') return
+  const input = new pg.Tensor(new Float32Array([1,2,3,4]))
+  const placeholder = pg.Tensor.empty([4])
+  const model = await pg.Model.fromCallableAsync(({x}) => {
+    if (!chunked) return {y:x.mul(2).contiguous().add(3)}
+    for (let i = 0; i < 80; i++) x = x.add(1).contiguous()
+    return {y:x}
+  },
+    {inputs:{x:placeholder}})
+  let previous
+  try {
+    previous = (await model.forwardAsync({x:input})).y
+    const device = pg._core.Module.__polygradWebGpuState.device
+    const create = device.createCommandEncoder
+    const submit = device.queue.submit
+    let dispatches = 0, submissionsBeforeFailure = 0, failed = false, result
+    const failAt = chunked ? 70 : 2
+    device.queue.submit = function(...args) {
+      if (dispatches < failAt) submissionsBeforeFailure++
+      return submit.apply(this,args)
+    }
+    device.createCommandEncoder = function(...args) {
+      const encoder = create.apply(this,args), begin = encoder.beginComputePass
+      encoder.beginComputePass = function(...args) {
+        const pass = begin.apply(this,args), dispatch = pass.dispatchWorkgroups
+        pass.dispatchWorkgroups = function(...args) {
+          return dispatch.apply(this, ++dispatches === failAt ? [0x7fffffff,1,1] : args)
+        }
+        return pass
+      }
+      return encoder
+    }
+    try { result = await model.forwardAsync({x:input}) } catch (_) { failed = true }
+    finally { device.createCommandEncoder = create; device.queue.submit = submit }
+    assert(failed && !result && dispatches > 1, 'Model published outputs from an invalid batch')
+    if (chunked) assert(submissionsBeforeFailure > 0, 'No earlier chunk was submitted before failure')
+    failed = false
+    try { await model.readBufferAsync('y') } catch (_) { failed = true }
+    assert(failed, 'Model exposed its unwritten named output')
+    assertClose(await previous.toArrayAsync(), chunked ? [81,82,83,84] : [5,7,9,11], 0)
+    assertClose(await input.toArrayAsync(), [1,2,3,4], 0)
+  } finally {
+    if (previous) await previous.dispose()
+    await model.dispose(); await placeholder.dispose(); await input.dispose()
   }
 }
 
@@ -2357,6 +2417,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
+  await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
+  await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
@@ -3133,6 +3195,8 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
+  await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
+  await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))

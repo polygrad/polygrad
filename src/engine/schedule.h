@@ -161,6 +161,15 @@ const PolyBackendDesc *poly_backend_get(PolyDevice device);
 int poly_backend_ensure_open(PolyDevice device);
 bool poly_device_is_host_addressable(PolyDevice device);
 
+/* A delayed backend error invalidates only the attempted execution's writes. */
+void poly_fail_linear_outputs(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    int n_calls,
+    PolyUOp **inputs,
+    int n_inputs
+);
+
 #ifdef POLY_TESTING
 PolyUOp *poly_test_resolve_linear_param(PolyCtx *ctx, PolyUOp *uop, PolyUOp **inputs, int n_inputs);
 int poly_test_linear_lane_vars(
