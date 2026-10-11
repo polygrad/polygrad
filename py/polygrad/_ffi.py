@@ -1586,6 +1586,8 @@ def _declare_signatures(lib):
     lib.poly_model_train_step.argtypes = [_ptr, ctypes.c_char_p, ctypes.POINTER(PolyIOBinding), ctypes.c_int, _fp]
 
     lib.poly_model_set_optimizer.restype = ctypes.c_int
+    lib.poly_model_set_learning_rate.restype = ctypes.c_int
+    lib.poly_model_set_learning_rate.argtypes = [_ptr, ctypes.c_float]
     lib.poly_model_set_optimizer.argtypes = [_ptr, ctypes.c_int,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float]

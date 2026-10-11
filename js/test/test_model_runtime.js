@@ -1813,7 +1813,7 @@ async function checkTiedAdamCheckpoint(pg) {
     model.setOptimizer(pg.OPTIM_ADAM, .1)
     assertClose([await model.trainStepAsync({})], [4], 0)
     assertClose(await model.readBufferAsync('w'), [.9], 1e-6)
-    const names = ['optim.adam.b1_t', 'optim.adam.b2_t', 'optim.adam.m.w', 'optim.adam.v.w']
+    const names = ['optim.lr', 'optim.adam.b1_t', 'optim.adam.b2_t', 'optim.adam.m.w', 'optim.adam.v.w']
     const weights = await model.exportWeightsAsync()
     const optimizerNames = bytes => [...safetensorNames(bytes)].filter(n => n.startsWith('optim.')).sort().join(',')
     assert(optimizerNames(weights) === [...names].sort().join(','), 'duplicated tied optimizer state')
@@ -2397,6 +2397,44 @@ async function checkRuntimeImports(pg, Model, createRuntime) {
   }
 }
 
+async function checkTabularTraining(pg) {
+  const model = await pg.models.TabMAsync({layers:[1,1],n_ensemble:2,batch_size:4,loss:'mse'})
+  try {
+    await model.writeBufferAsync('output.weight',new Float32Array([1,3]))
+    await model.writeBufferAsync('output.bias',new Float32Array(2))
+    const x = new Float32Array([1,1]), y = new Float32Array(2)
+    assertClose((await model.forwardAsync({x})).output,[2,2],1e-6)
+    assertClose((await model.callAsync('members',{x})).members,[1,3,1,3],1e-6)
+    assertClose((await model.callAsync('loss',{x,y})).loss,[5],1e-6)
+    model.setOptimizer('adam',.1)
+    await model.trainStepAsync({x,y})
+    const moment = await model.readBufferAsync('optim.adam.m.output.weight')
+    await model.setLearningRateAsync(.01)
+    assertClose(await model.readBufferAsync('optim.adam.m.output.weight'),moment,0)
+    await model.trainStepAsync({x,y})
+    const before = await model.readBufferAsync('output.weight')
+    await model.setLearningRateAsync(0)
+    await model.trainStepAsync({x,y})
+    assertClose(await model.readBufferAsync('output.weight'),before,0)
+    let rejected = false
+    try { await model.setLearningRateAsync(-1) } catch { rejected = true }
+    assert(rejected,'negative learning rate accepted')
+  } finally { await model.dispose() }
+  for (const [family,spec] of [['MLP',{layers:[1,2]}],['TabM',{layers:[1,2],n_ensemble:2}],
+                              ['NAM',{n_features:1,hidden_sizes:[],n_outputs:2}]]) {
+    const model = await pg.models[family+'Async']({...spec,batch_size:2,loss:'pinball',quantiles:[.25,.75]})
+    try {
+      const losses = await model.fitAsync({x:new Float32Array([1,2,3]),y:new Float32Array([0,1,2])},
+        {batchSize:2,remainder:'keep',optimizer:'adam',lr:.01})
+      assert(losses.length===2 && losses.every(Number.isFinite),'partial-batch quantile training')
+      const saved = await model.saveAsync(), restored = pg.Model.load(saved)
+      try { assertClose((await restored.forwardAsync({x:[2]})).output,
+                        (await model.forwardAsync({x:[2]})).output,1e-6) }
+      finally { await restored.dispose() }
+    } finally { await model.dispose() }
+  }
+}
+
 async function checkFamilyRuntimeOwnership(pg) {
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const live = new pg.Tensor([19], {dtype:'float32'})
@@ -2504,6 +2542,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model usability summary and capture failures', () => checkModelUsability(pg, Model))
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
+  await test('Tabular member objectives partial batches and learning rate', () => checkTabularTraining(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
@@ -3290,6 +3329,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model runtime imports isolation and failure', () => checkRuntimeImports(pg, Model, createRuntime))
   await test('Model family runtime ownership', () => checkFamilyRuntimeOwnership(pg))
   await test('Llama family reference and shared import', () => checkLlamaFamily(pg))
+  await test('Tabular member objectives partial batches and learning rate', () => checkTabularTraining(pg))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))

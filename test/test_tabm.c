@@ -27,18 +27,16 @@ TEST(tabm, create_simple) {
   );
   ASSERT_NOT_NULL(inst);
 
-  /* 2 layers * 4 params = 8 params (weight + r + s + b per layer) */
-  ASSERT_INT_EQ(poly_model_param_count(inst), 8);
+  /* One BatchEnsemble block plus an independent weight/bias head. */
+  ASSERT_INT_EQ(poly_model_param_count(inst), 6);
 
   /* Check param names */
   ASSERT_STR_EQ(poly_model_param_name(inst, 0), "layers.0.weight");
   ASSERT_STR_EQ(poly_model_param_name(inst, 1), "layers.0.r");
   ASSERT_STR_EQ(poly_model_param_name(inst, 2), "layers.0.s");
   ASSERT_STR_EQ(poly_model_param_name(inst, 3), "layers.0.b");
-  ASSERT_STR_EQ(poly_model_param_name(inst, 4), "layers.1.weight");
-  ASSERT_STR_EQ(poly_model_param_name(inst, 5), "layers.1.r");
-  ASSERT_STR_EQ(poly_model_param_name(inst, 6), "layers.1.s");
-  ASSERT_STR_EQ(poly_model_param_name(inst, 7), "layers.1.b");
+  ASSERT_STR_EQ(poly_model_param_name(inst, 4), "output.weight");
+  ASSERT_STR_EQ(poly_model_param_name(inst, 5), "output.bias");
 
   /* Check param shapes */
   int64_t shape[8];
@@ -87,12 +85,13 @@ TEST(tabm, init_values) {
   );
   ASSERT_NOT_NULL(inst);
 
-  /* r should be initialized to ones */
+  /* First-block signs break member symmetry. */
   int64_t numel;
   float *r = poly_model_param_data(inst, 1, &numel);
   ASSERT_NOT_NULL(r);
   for (int64_t i = 0; i < numel; i++)
-    ASSERT_TRUE(r[i] == 1.0f);
+    ASSERT_TRUE(r[i] == 1.0f || r[i] == -1.0f);
+  ASSERT_TRUE(memcmp(r, r + 2, 2 * sizeof(float)) != 0);
 
   /* s should be initialized to ones */
   float *s = poly_model_param_data(inst, 2, &numel);
@@ -100,15 +99,15 @@ TEST(tabm, init_values) {
   for (int64_t i = 0; i < numel; i++)
     ASSERT_TRUE(s[i] == 1.0f);
 
-  /* b should be initialized to zeros */
+  /* Hidden biases start equal across members, within the Linear bound. */
   float *b = poly_model_param_data(inst, 3, &numel);
   ASSERT_NOT_NULL(b);
   for (int64_t i = 0; i < numel; i++)
-    ASSERT_TRUE(b[i] == 0.0f);
+    ASSERT_TRUE(b[i] == b[i % 4] && fabsf(b[i]) <= 1.0f / sqrtf(2));
 
   /* weight should have Kaiming init (bounded) */
   float *w = poly_model_param_data(inst, 0, &numel);
-  float bound = sqrtf(6.0f / 2.0f); /* fan_in = 2 */
+  float bound = 1.0f / sqrtf(2.0f); /* fan_in = 2 */
   for (int64_t i = 0; i < numel; i++)
     ASSERT_TRUE(w[i] >= -bound && w[i] <= bound);
 

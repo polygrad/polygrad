@@ -71,6 +71,97 @@ int model_init_param(
   return rc;
 }
 
+PolyUOp *model_batch_dim(PolyCtx *ctx, int max_batch) {
+  if (max_batch == 1) return poly_uop_const_int(ctx, 1);
+  PolyUOp *var = poly_uop_variable(
+      ctx, "batch", poly_arg_int(1), poly_arg_int(max_batch), POLY_WEAKINT, 1, false
+  );
+  return var ? poly_uop_bind(ctx, var, max_batch) : NULL;
+}
+
+PolyStatus model_tabular_loss(
+    PolyModel *model,
+    PolyTensor *prediction,
+    PolyUOp *batch,
+    int outputs,
+    int members,
+    const char *loss,
+    const cJSON *quantiles,
+    PolyModelError *err
+) {
+  bool pinball = loss && !strcmp(loss, "pinball");
+  if (quantiles && !pinball) {
+    model_factory_error(err, "quantiles", "requires loss=pinball");
+    return POLY_STATUS_INVALID;
+  }
+  if (!loss || !strcmp(loss, "none")) return POLY_STATUS_OK;
+  PolyCtx *ctx = poly_model_ctx(model);
+  PolyTensor *levels = NULL;
+  if (pinball) {
+    if (!cJSON_IsArray(quantiles) || cJSON_GetArraySize(quantiles) != outputs) {
+      model_factory_error(err, "quantiles", "expected one level per output");
+      return POLY_STATUS_INVALID;
+    }
+    float *values = malloc((size_t)outputs * sizeof(float));
+    if (!values) return POLY_STATUS_INVALID;
+    double previous = 0;
+    for (int i = 0; i < outputs; i++) {
+      const cJSON *v = cJSON_GetArrayItem(quantiles, i);
+      if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble) || v->valuedouble <= previous ||
+          v->valuedouble >= 1 || (float)v->valuedouble <= (float)previous ||
+          (float)v->valuedouble >= 1) {
+        free(values);
+        model_factory_error(
+            err, "quantiles", "expected increasing levels strictly between 0 and 1"
+        );
+        return POLY_STATUS_INVALID;
+      }
+      previous = v->valuedouble;
+      values[i] = (float)previous;
+    }
+    int64_t shape[] = {outputs};
+    levels = poly_model_aux_from_host(
+        model, "quantiles", POLY_FLOAT32, shape, 1, values, (size_t)outputs * sizeof(float)
+    );
+    free(values);
+    if (!levels) return POLY_STATUS_INVALID;
+  }
+  PolyUOp *shape[] = {batch, poly_uop_const_int(ctx, pinball ? 1 : outputs)};
+  PolyTensor *target = poly_model_target_uop(model, "y", POLY_FLOAT32, shape, 2);
+  if (!target) return POLY_STATUS_INVALID;
+  if (members) {
+    PolyUOp *view[] = {batch, poly_uop_const_int(ctx, 1), shape[1]};
+    target = poly_tensor_reshape_uop(ctx, target, view, 3);
+    view[1] = poly_uop_const_int(ctx, members);
+    if (target) target = poly_tensor_expand_uop(ctx, target, view, 3);
+  }
+  if (!target) return POLY_STATUS_INVALID;
+  PolyTensor *objective = NULL;
+  if (pinball) {
+    /* Average samples, members and levels, never average predictions first. */
+    PolyTensor *error = poly_tensor_alu2(ctx, POLY_OP_SUB, target, prediction);
+    PolyTensor *one = poly_tensor_full_from_value(
+        ctx, poly_uop_const_typed(ctx, POLY_FLOAT32, 1), NULL, 0, POLY_DEVICE_AUTO, POLY_FLOAT32,
+        true, false
+    );
+    PolyTensor *lower = poly_tensor_alu2(ctx, POLY_OP_SUB, levels, one);
+    PolyTensor *a = error ? poly_tensor_alu2(ctx, POLY_OP_MUL, error, levels) : NULL;
+    PolyTensor *b = error && lower ? poly_tensor_alu2(ctx, POLY_OP_MUL, error, lower) : NULL;
+    objective = a && b ? poly_tensor_alu2(ctx, POLY_OP_MAX, a, b) : NULL;
+    int64_t axes[] = {0, 1, 2};
+    if (objective) objective = poly_tensor_mean(ctx, objective, axes, members ? 3 : 2, false);
+  } else if (!strcmp(loss, "mse")) {
+    objective = poly_tensor_mse_loss(ctx, prediction, target);
+  } else if (!strcmp(loss, "cross_entropy")) {
+    objective = poly_tensor_cross_entropy(ctx, prediction, target, -1, 2, 0);
+  }
+  if (!objective || poly_model_output(model, "loss", objective) != POLY_STATUS_OK)
+    return POLY_STATUS_INVALID;
+  const char *inputs[] = {"x", "y"}, *result[] = {"loss"};
+  PolyEntrypointOptions options = {.objective = "loss"};
+  return poly_model_entrypoint(model, "loss", inputs, 2, result, 1, &options);
+}
+
 PolyTensor *poly_model_aux_from_host(
     PolyModel *model,
     const char *name,

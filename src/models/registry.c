@@ -170,7 +170,7 @@ bool model_config_choice(
 bool model_config_training(const cJSON *root, PolyModelError *err) {
   return model_config_integer(root, "batch_size", 1, INT_MAX, false, err) &&
          model_config_integer(root, "seed", 0, INT64_C(9007199254740991), false, err) &&
-         model_config_choice(root, "loss", "|none|mse|cross_entropy|", err);
+         model_config_choice(root, "loss", "|none|mse|cross_entropy|pinball|", err);
 }
 
 static const PolyModelType model_types[] = {

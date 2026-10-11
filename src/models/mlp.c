@@ -36,7 +36,12 @@ MLPConfig poly_mlp_config_default(void) {
 
 /* MLP Builder (config struct) */
 
-static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *err) {
+static PolyModel *mlp_build(
+    PolyCtx *ctx,
+    const MLPConfig *cfg,
+    const cJSON *quantiles,
+    PolyModelError *err
+) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS) return NULL;
 
   int n_linear = cfg->n_layers - 1;
@@ -50,8 +55,9 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *
   if (!inst) return NULL;
 
   /* Declare I/O buffers on the staged model. */
-  int64_t x_shape[] = {batch_size, in_dim};
-  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyUOp *batch = model_batch_dim(ctx, batch_size);
+  PolyUOp *x_shape[] = {batch, poly_uop_const_int(ctx, in_dim)};
+  PolyTensor *x_tensor = poly_model_input_uop(inst, "x", POLY_FLOAT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   /* Forward: chain of linear + activation. */
@@ -72,26 +78,8 @@ static PolyModel *mlp_build(PolyCtx *ctx, const MLPConfig *cfg, PolyModelError *
       POLY_STATUS_OK)
     goto fail_pre_build;
 
-  /* Loss graph. */
-  int has_loss =
-      loss_type && (strcmp(loss_type, "mse") == 0 || strcmp(loss_type, "cross_entropy") == 0);
-  if (has_loss) {
-    int64_t y_shape[] = {batch_size, out_dim};
-    PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
-    if (!y_tensor) goto fail_pre_build;
-
-    PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
-                                  ? poly_tensor_mse_loss(ctx, x, y_tensor)
-                                  : poly_tensor_cross_entropy(ctx, x, y_tensor, 1, 2, 0);
-    if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
-      goto fail_pre_build;
-    const char *loss_inputs[] = {"x", "y"};
-    const char *loss_outputs[] = {"loss"};
-    PolyEntrypointOptions loss_opts = {.objective = "loss"};
-    if (poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
-        POLY_STATUS_OK)
-      goto fail_pre_build;
-  }
+  if (model_tabular_loss(inst, x, batch, out_dim, 0, loss_type, quantiles, err) != POLY_STATUS_OK)
+    goto fail_pre_build;
 
   if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);
@@ -117,7 +105,7 @@ fail_pre_build:
 PolyModel *poly_mlp_into(PolyCtx *ctx, const MLPConfig *cfg, PolyDevice device) {
   PolyModelFactoryScope scope;
   if (!model_factory_begin(&scope, ctx, device)) return NULL;
-  return model_factory_end(&scope, mlp_build(scope.ctx, cfg, NULL));
+  return model_factory_end(&scope, mlp_build(scope.ctx, cfg, NULL, NULL));
 }
 
 /* FFI wrapper (JSON -> config -> build) */
@@ -143,5 +131,5 @@ PolyModel *model_mlp_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
   cfg.n_layers = cJSON_GetArraySize(layers);
   for (int i = 0; i < cfg.n_layers; i++)
     cfg.layers[i] = cJSON_GetArrayItem(layers, i)->valueint;
-  return mlp_build(ctx, &cfg, err);
+  return mlp_build(ctx, &cfg, cJSON_GetObjectItemCaseSensitive(root, "quantiles"), err);
 }

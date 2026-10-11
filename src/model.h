@@ -545,6 +545,9 @@ int poly_model_train_step(
     float *loss_out
 );
 
+/* Change only the learning rate; retain moments, beta powers and cached graphs.
+ * Requires a configured optimizer. Finite nonnegative rates, including zero. */
+int poly_model_set_learning_rate(PolyModel *inst, float lr);
 /* Configure optimizer. Call before first train_step. */
 int poly_model_set_optimizer(
     PolyModel *inst,

@@ -741,7 +741,7 @@ def test_tabm_factory_does_not_inherit_mlp_fixed_layer_limit():
     from polygrad.models import TabM
     model = TabM({'layers': [1] * 34, 'n_ensemble': 1})
     try:
-        assert model.param_count == 33 * 4
+        assert model.param_count == 32 * 4 + 2
     finally:
         model.dispose()
 
@@ -2317,7 +2317,7 @@ class TestModelConstructors:
             model.set_optimizer(OPTIM_ADAM, lr=.1)
             assert model.train_step() == 4.0
             np.testing.assert_allclose(model.read_buffer('w'), [.9], atol=1e-6)
-            names = {'optim.adam.b1_t', 'optim.adam.b2_t',
+            names = {'optim.lr', 'optim.adam.b1_t', 'optim.adam.b2_t',
                      'optim.adam.m.w', 'optim.adam.v.w'}
             weights = model.export_weights()
             assert {n for n in safetensor_names(weights) if n.startswith('optim.')} == names
@@ -2505,9 +2505,11 @@ class TestMLPCreate:
             try:
                 x = np.array([[.25, -.5]], dtype=np.float32)
                 y = np.array([[0., 1.]], dtype=np.float32)
-                prediction = model.forward(x=x)['output']
-                p, t = rt.Tensor(prediction.reshape(1, 2)), rt.Tensor(y)
-                expected = (p-t).square().mean() if loss == 'mse' else p.cross_entropy(t)
+                prediction = (model.call('members', x=x)['members'] if family == 'TabM'
+                              else model.forward(x=x)['output'])
+                target = np.broadcast_to(y[:, None, :], prediction.shape).copy() if family == 'TabM' else y
+                p, t = rt.Tensor(prediction), rt.Tensor(target)
+                expected = (p-t).square().mean() if loss == 'mse' else p.cross_entropy(t, axis=-1)
                 np.testing.assert_allclose(model.call('loss', x=x, y=y)['loss'],
                                            expected.numpy(), rtol=1e-5, atol=1e-6)
             finally:

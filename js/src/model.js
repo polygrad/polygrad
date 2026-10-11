@@ -1208,6 +1208,23 @@ function createBoundModelClass(runtime) {
       return this
     }
 
+    setLearningRate(lr) {
+      this._requireSync('setLearningRate()', 'setLearningRateAsync()')
+      if (this._rt._core.model.setLearningRate(this._handle, lr) !== 0)
+        throw new Error('learning rate requires a configured optimizer and a finite nonnegative value')
+      return this
+    }
+
+    setLearningRateAsync(lr) {
+      this._requireOpen()
+      const run = async () => {
+        if (await this._rt._core.model.setLearningRate(this._handle, lr) !== 0)
+          throw new Error('learning rate requires a configured optimizer and a finite nonnegative value')
+        return this
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
+    }
+
     resetTransient() {
       this._requireSync('resetTransient()', 'resetTransientAsync()')
       if (this._rt._core.model.resetTransient(this._handle) !== 0) throw this._error('transient reset failed')

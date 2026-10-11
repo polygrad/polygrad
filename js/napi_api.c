@@ -6183,6 +6183,24 @@ static napi_value napi_poly_model_from_bundle_into(napi_env env, napi_callback_i
   return make_external(env, inst);
 }
 
+static napi_value napi_poly_model_set_learning_rate(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "expected Model and learning rate");
+    return NULL;
+  }
+  double lr;
+  NAPI_CALL(env, napi_get_value_double(env, argv[1], &lr));
+  NAPI_CALL(
+      env, napi_create_int32(
+               env, poly_model_set_learning_rate(get_external(env, argv[0]), (float)lr), &result
+           )
+  );
+  return result;
+}
+
 static napi_value napi_poly_model_set_optimizer(napi_env env, napi_callback_info info) {
   napi_value argv[10];
   size_t argc = 10;
@@ -7935,6 +7953,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_model_save_bundle", napi_poly_model_save_bundle),
       DECLARE_NAPI_METHOD("poly_model_from_bundle_into", napi_poly_model_from_bundle_into),
       DECLARE_NAPI_METHOD("poly_model_set_optimizer", napi_poly_model_set_optimizer),
+      DECLARE_NAPI_METHOD("poly_model_set_learning_rate", napi_poly_model_set_learning_rate),
       DECLARE_NAPI_METHOD("poly_model_forward", napi_poly_model_forward),
       DECLARE_NAPI_METHOD("poly_model_call", napi_poly_model_call),
       DECLARE_NAPI_METHOD("poly_model_control", napi_poly_model_control),

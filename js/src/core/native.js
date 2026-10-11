@@ -250,6 +250,7 @@ function createNativeCore(device) {
     tokenizerVocabSize(tokPtr) { return binding.poly_tokenizer_vocab_size(tokPtr) },
     tokenizerBosId(tokPtr) { return binding.poly_tokenizer_bos_id(tokPtr) },
     tokenizerEosId(tokPtr) { return binding.poly_tokenizer_eos_id(tokPtr) },
+    setLearningRate(inst, lr) { return binding.poly_model_set_learning_rate(inst, lr) },
     setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
       return binding.poly_model_set_optimizer(
         inst, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic

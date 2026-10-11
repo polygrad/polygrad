@@ -38,6 +38,18 @@ PolyTensor *model_activation(PolyCtx *ctx, PolyTensor *x, const char *name);
 /* fan_in > 0 selects the existing seed/name-keyed Kaiming initializer;
  * fan_in == 0 fills a constant. Publish through Model writes on any placement. */
 int model_init_param(PolyModel *model, const char *name, uint64_t seed, int64_t fan_in, float fill);
+/* Tabular templates use batch_size as an upper bound, not a padding request. */
+PolyUOp *model_batch_dim(PolyCtx *ctx, int max_batch);
+PolyStatus model_tabular_loss(
+    PolyModel *model,
+    PolyTensor *prediction,
+    PolyUOp *batch,
+    int outputs,
+    int members,
+    const char *loss,
+    const cJSON *quantiles,
+    PolyModelError *err
+);
 /* Private family callbacks share a parsed, validated JSON object and a scoped
  * context. They publish one ordinary Model, not an execution wrapper. */
 PolyModel *model_mlp_from_config(PolyCtx *, const cJSON *, PolyModelError *);

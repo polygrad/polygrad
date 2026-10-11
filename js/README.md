@@ -312,6 +312,29 @@ in order; there is no implicit shuffling or padding. An incomplete last batch
 is rejected unless `remainder: 'drop'` skips it or `remainder: 'keep'` processes
 a smaller extent allowed by the Model's input bounds. On WebGPU, use `fitAsync`.
 
+### Tabular Models
+
+For numerical tabular data, `pg.models.MLP`, `NAM` and `TabM` accept
+`batch_size` as an upper bound; smaller batches work with `remainder: 'keep'`.
+Use their `Async` constructors on WebGPU. TabM trains individual members and
+averages them for regression. With `loss: 'cross_entropy'`, its `output` is
+log mean member probabilities; apply softmax to obtain probabilities.
+`await model.callAsync('members', {x})` returns raw member predictions with
+shape `[batch, members, outputs]`. This numerical template does not include
+TabM's optional feature embeddings or dropout recipe.
+Cross-entropy targets are class probabilities or one-hot rows, not integer IDs.
+
+For quantile regression, set `loss: 'pinball'`, `quantiles: [0.1, 0.5, 0.9]`
+and three output units (the last `layers` entry, or NAM's `n_outputs`). Targets
+have shape `[batch, 1]`. Levels must be strictly increasing and between zero
+and one; the loss averages samples, levels and (for TabM) members. It does not
+constrain quantile crossing or perform calibration.
+
+After configuring an optimizer, `model.setLearningRate(lr)` changes its rate
+without rebuilding the training graph or resetting moments. On WebGPU use
+`await model.setLearningRateAsync(lr)`. Use Tensor-level optimizer groups for
+parameter-specific schedules.
+
 ### Saving And Loading
 
 `Model.load` uses the default runtime; use `pg.Model.load(...)` for an explicit

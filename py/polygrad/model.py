@@ -1166,6 +1166,12 @@ class Model:
         if ret != 0:
             raise RuntimeError(f'set_optimizer failed (ret={ret})')
 
+    def set_learning_rate(self, lr):
+        """Update a configured optimizer's rate without resetting state or graphs."""
+        if _get_lib().poly_model_set_learning_rate(self._ptr, float(lr)) != 0:
+            raise ValueError('learning rate requires a configured optimizer and a finite nonnegative value')
+        return self
+
     def reset_transient(self):
         """Zero declared transient state without changing parameters or ordinary AUX."""
         if _get_lib().poly_model_reset_transient(self._ptr) != 0:

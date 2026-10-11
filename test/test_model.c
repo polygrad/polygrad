@@ -29,6 +29,53 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, tabm_member_loss_batch_and_learning_rate) {
+  PolyCtx *ctx = poly_ctx_new();
+  const char *json = "{\"layers\":[1,1],\"n_ensemble\":2,\"batch_size\":4,\"loss\":\"mse\"}";
+  PolyModel *m =
+      poly_model_from_config(ctx, "tabm", json, (int)strlen(json), POLY_DEVICE_INTERP, NULL);
+  ASSERT_NOT_NULL(m);
+  float weights[] = {1, 3}, biases[] = {0, 0}, x[] = {1, 1}, y[] = {0, 0};
+  ASSERT_EQ(poly_model_write_buf_named(m, "output.weight", weights, sizeof(weights)), 0);
+  ASSERT_EQ(poly_model_write_buf_named(m, "output.bias", biases, sizeof(biases)), 0);
+  int64_t shape[] = {2, 1};
+  PolyIOBinding io[] = {
+      {.name = "x",
+       .data = x,
+       .nbytes = sizeof(x),
+       .dtype_id = poly_dtype_id_by_name("float32"),
+       .shape = shape,
+       .ndim = 2},
+      {.name = "y",
+       .data = y,
+       .nbytes = sizeof(y),
+       .dtype_id = poly_dtype_id_by_name("float32"),
+       .shape = shape,
+       .ndim = 2},
+  };
+  float loss;
+  ASSERT_EQ(poly_model_value_and_grad(m, "loss", io, 2, &loss), 0);
+  ASSERT_FLOAT_EQ(loss, 5, 1e-6);
+  ASSERT_EQ(poly_model_set_optimizer(m, POLY_OPTIM_SGD, .1f, .9f, .999f, 1e-8f, 0), 0);
+  ASSERT_EQ(poly_model_train_step(m, "loss", io, 2, &loss), 0);
+  ASSERT_EQ(poly_model_read_buf_named(m, "output.weight", weights, sizeof(weights)), 0);
+  ASSERT_FLOAT_EQ(weights[0], .9f, 1e-6);
+  ASSERT_FLOAT_EQ(weights[1], 2.7f, 1e-6);
+  PolyUOp *training_graph = poly_model_test_execution(m, true, false);
+  ASSERT_EQ(poly_model_set_learning_rate(m, 0), 0);
+  ASSERT_EQ(poly_model_train_step(m, "loss", io, 2, &loss), 0);
+  ASSERT_TRUE(poly_model_test_execution(m, true, false) == training_graph);
+  float unchanged[2];
+  ASSERT_EQ(poly_model_read_buf_named(m, "output.weight", unchanged, sizeof(unchanged)), 0);
+  ASSERT_EQ(memcmp(weights, unchanged, sizeof(weights)), 0);
+  ASSERT_EQ(poly_model_set_learning_rate(m, -1), -1);
+  poly_model_free(m);
+  poly_ctx_collect(ctx);
+  ASSERT_EQ(ctx->n_tensors, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, input_requirements_reject_before_writes_and_survive_ir) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
@@ -5514,7 +5561,7 @@ TEST(model, tied_parameter_aliases_share_one_adam_state_family) {
     if (strcmp(name, "optim.adam.v.w0") == 0) has_w0_v = true;
     if (strstr(name, ".w1") != NULL) has_w1_state = true;
   }
-  ASSERT_INT_EQ(optimizer_state, 4); /* b1_t, b2_t, m.w0, v.w0 */
+  ASSERT_INT_EQ(optimizer_state, 5); /* lr, b1_t, b2_t, m.w0, v.w0 */
   /* One named loss, two beta powers, one m/v pair, one tied parameter update. */
   ASSERT_INT_EQ(poly_model_test_execution(inst, true, false)->n_src, 6);
   ASSERT_TRUE(has_w0_m);

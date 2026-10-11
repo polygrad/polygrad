@@ -84,8 +84,9 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
     goto fail_no_instance;
   }
 
-  int64_t x_shape[] = {batch_size, n_features};
-  PolyTensor *x_tensor = poly_model_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyUOp *batch = model_batch_dim(ctx, batch_size);
+  PolyUOp *x_shape[] = {batch, poly_uop_const_int(ctx, n_features)};
+  PolyTensor *x_tensor = poly_model_input_uop(inst, "x", POLY_FLOAT32, x_shape, 2);
   if (!x_tensor) goto fail_pre_build;
 
   /* Register intercept param: (n_outputs,) */
@@ -97,16 +98,17 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
   /* Start with intercept broadcast to (batch_size, n_outputs). */
   int64_t intercept_shape[] = {1, n_outputs};
   PolyTensor *accum = poly_tensor_reshape(ctx, intercept_tensor, intercept_shape, 2);
-  int64_t accum_expanded[] = {batch_size, n_outputs};
-  accum = poly_tensor_expand(ctx, accum, accum_expanded, 2);
+  PolyUOp *accum_expanded[] = {batch, poly_uop_const_int(ctx, n_outputs)};
+  accum = poly_tensor_expand_uop(ctx, accum, accum_expanded, 2);
   if (!accum) goto fail_pre_build;
 
   PolyTensor *x_2d = x_tensor;
 
   /* Process each feature subnet. */
   for (int k = 0; k < n_features; k++) {
-    int64_t shrink_pairs[][2] = {{0, batch_size}, {k, k + 1}};
-    PolyTensor *xk = poly_tensor_shrink(ctx, x_2d, shrink_pairs, 2);
+    PolyUOp *starts[] = {poly_uop_const_int(ctx, 0), poly_uop_const_int(ctx, k)};
+    PolyUOp *sizes[] = {batch, poly_uop_const_int(ctx, 1)};
+    PolyTensor *xk = poly_tensor_shrink_uop(ctx, x_2d, starts, sizes, 2);
     if (!xk) goto fail_pre_build;
 
     for (int l = 0; l < n_linear; l++) {
@@ -132,8 +134,8 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
 
       int64_t b_1d[] = {1, out_dim};
       PolyTensor *b_2d = poly_tensor_reshape(ctx, bias_tensor, b_1d, 2);
-      int64_t b_exp[] = {batch_size, out_dim};
-      b_2d = b_2d ? poly_tensor_expand(ctx, b_2d, b_exp, 2) : NULL;
+      PolyUOp *b_exp[] = {batch, poly_uop_const_int(ctx, out_dim)};
+      b_2d = b_2d ? poly_tensor_expand_uop(ctx, b_2d, b_exp, 2) : NULL;
       xk = xk && b_2d ? poly_tensor_alu2(ctx, POLY_OP_ADD, xk, b_2d) : NULL;
       if (!xk) goto fail_pre_build;
 
@@ -150,12 +152,12 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
           if (poly_model_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
 
           int64_t eu_1d[] = {1, out_dim};
-          int64_t eu_exp[] = {batch_size, out_dim};
+          PolyUOp *eu_exp[] = {batch, poly_uop_const_int(ctx, out_dim)};
 
           PolyTensor *ew = poly_tensor_reshape(ctx, exu_w_tensor, eu_1d, 2);
-          ew = ew ? poly_tensor_expand(ctx, ew, eu_exp, 2) : NULL;
+          ew = ew ? poly_tensor_expand_uop(ctx, ew, eu_exp, 2) : NULL;
           PolyTensor *eb = poly_tensor_reshape(ctx, exu_b_tensor, eu_1d, 2);
-          eb = eb ? poly_tensor_expand(ctx, eb, eu_exp, 2) : NULL;
+          eb = eb ? poly_tensor_expand_uop(ctx, eb, eu_exp, 2) : NULL;
 
           PolyTensor *centered = xk && eb ? poly_tensor_alu2(ctx, POLY_OP_SUB, xk, eb) : NULL;
           PolyTensor *exp_w = ew ? poly_tensor_exp(ctx, ew) : NULL;
@@ -172,8 +174,7 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
     if (!accum) goto fail_pre_build;
   }
 
-  int64_t out_shape[] = {batch_size, n_outputs};
-  PolyTensor *out_tensor = poly_tensor_reshape(ctx, accum, out_shape, 2);
+  PolyTensor *out_tensor = accum;
   if (!out_tensor || poly_model_output(inst, "output", out_tensor) != POLY_STATUS_OK)
     goto fail_pre_build;
   const char *forward_inputs[] = {"x"};
@@ -182,24 +183,11 @@ PolyModel *model_nam_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError
       POLY_STATUS_OK)
     goto fail_pre_build;
 
-  int has_loss =
-      (loss_type && (strcmp(loss_type, "mse") == 0 || strcmp(loss_type, "cross_entropy") == 0));
-  if (has_loss) {
-    int64_t y_shape[] = {batch_size, n_outputs};
-    PolyTensor *y_tensor = poly_model_target(inst, "y", POLY_FLOAT32, y_shape, 2);
-    if (!y_tensor) goto fail_pre_build;
-    PolyTensor *loss_tensor = strcmp(loss_type, "mse") == 0
-                                  ? poly_tensor_mse_loss(ctx, out_tensor, y_tensor)
-                                  : poly_tensor_cross_entropy(ctx, out_tensor, y_tensor, 1, 2, 0);
-    if (!loss_tensor || poly_model_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
-      goto fail_pre_build;
-    const char *loss_inputs[] = {"x", "y"};
-    const char *loss_outputs[] = {"loss"};
-    PolyEntrypointOptions loss_opts = {.objective = "loss"};
-    if (poly_model_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
-        POLY_STATUS_OK)
-      goto fail_pre_build;
-  }
+  if (model_tabular_loss(
+          inst, out_tensor, batch, n_outputs, 0, loss_type,
+          cJSON_GetObjectItemCaseSensitive(root, "quantiles"), err
+      ) != POLY_STATUS_OK)
+    goto fail_pre_build;
 
   if (poly_model_build(inst, err) != POLY_STATUS_OK) {
     poly_model_free(inst);

@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <math.h>
 
 /* Internal types */
 
@@ -1439,10 +1440,10 @@ static bool make_build_snapshot_buffers(
 }
 
 /* C argument adaptation for current Tinygrad UOp.new_buffer. */
-static PolyUOp *model_new_buffer(PolyCtx *ctx, PolyDType dtype, int64_t numel) {
-  PolyDevice device = poly_ctx_get_preferred_device(ctx);
-  if (!poly_device_can_execute(device)) device = poly_device_default();
-  PolyUOp *device_uop = poly_device_uop(ctx, device);
+static PolyUOp *model_new_buffer(PolyCtx *ctx, PolyDType dtype, int64_t numel, PolyUOp *like) {
+  /* Training storage follows the placed graph, not the frontend's default. */
+  const char *device = poly_uop_device_name(ctx, like);
+  PolyUOp *device_uop = device ? poly_device_uop_from_name(ctx, device) : NULL;
   return device_uop
              ? poly_uop_new_buffer(ctx, device_uop, numel, dtype, poly_ctx_next_unique_id(ctx))
              : NULL;
@@ -3258,6 +3259,7 @@ static int ensure_optimizer_state_buffer(
     int ndim,
     bool init_scalar,
     float scalar_value,
+    PolyUOp *like,
     PolyUOp **out
 ) {
   if (out) *out = NULL;
@@ -3276,7 +3278,7 @@ static int ensure_optimizer_state_buffer(
     return 0;
   }
 
-  PolyUOp *buf = model_new_buffer(inst->ctx, POLY_FLOAT32, numel);
+  PolyUOp *buf = model_new_buffer(inst->ctx, POLY_FLOAT32, numel, like);
   if (!buf) return -1;
   if (append_runtime_named_buffer(
           inst, name, POLY_ROLE_AUX, POLY_BIND_F_OPTIM, buf, shape, ndim, false, true, &bi
@@ -5689,6 +5691,17 @@ int poly_model_set_optimizer(
   );
 }
 
+int poly_model_set_learning_rate(PolyModel *inst, float lr) {
+  if (!inst || inst->stage != POLY_MODEL_BUILT || inst->ctx->execution_depth ||
+      inst->ctx->collecting || inst->training.optim.kind == POLY_OPTIM_NONE || !isfinite(lr) ||
+      lr < 0)
+    return -1;
+  int bi = find_buf_by_name(inst, "optim.lr");
+  if (bi >= 0 && poly_model_write_buf(inst, bi, &lr, sizeof(lr)) != 0) return -1;
+  inst->training.optim.lr = lr;
+  return 0;
+}
+
 int poly_model_set_optimizer_ex(
     PolyModel *inst,
     int kind,
@@ -5705,7 +5718,7 @@ int poly_model_set_optimizer_ex(
   /* Model's persisted optimizer configuration/state currently represents
    * SGD/Adam/AdamW only. Reject other nn.optim kinds before replacing it. */
   if (kind != POLY_OPTIM_SGD && kind != POLY_OPTIM_ADAM && kind != POLY_OPTIM_ADAMW) return -1;
-  if (momentum < 0.0f) return -1;
+  if (momentum < 0.0f || !isfinite(lr) || lr < 0) return -1;
 
   OptimState next = {
       .kind = kind,
@@ -5725,6 +5738,11 @@ int poly_model_set_optimizer_ex(
   ModelResidencyRoots prepared_roots = {0};
   if (model_prepare_residency_roots(&candidate, &prepared_roots) != 0) return -1;
 
+  int lr_index = find_buf_by_name(inst, "optim.lr");
+  if (lr_index >= 0 && poly_model_write_buf(inst, lr_index, &lr, sizeof(lr)) != 0) {
+    model_discard_prepared_residency_roots(inst->ctx, &prepared_roots);
+    return -1;
+  }
   TrainState *old_train = inst->training.train;
   inst->training.optim = next;
   inst->training.train = NULL;
@@ -5886,7 +5904,7 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
 
   /* The C diagnostic ABI returns floats. Cast diagnostics in the core graph;
    * never reinterpret narrower/wider loss or gradient storage as host F32. */
-  vag->loss_out_buf = model_new_buffer(inst->ctx, POLY_FLOAT32, 1);
+  vag->loss_out_buf = model_new_buffer(inst->ctx, POLY_FLOAT32, 1, loss_value);
 
   PolyUOp *loss_flat = loss_value;
   if (uop_numel(inst->ctx, loss_value) != 1) {
@@ -5912,7 +5930,7 @@ static int ensure_vag_graph(PolyModel *inst, int loss_ep_idx) {
       vag_free(vag, inst->n_params);
       return -1;
     }
-    PolyUOp *gbuf = model_new_buffer(inst->ctx, POLY_FLOAT32, numel);
+    PolyUOp *gbuf = model_new_buffer(inst->ctx, POLY_FLOAT32, numel, param_bufs[i]);
     vag->grad_out_bufs[i] = gbuf;
 
     /* Flatten gradient if needed */
@@ -6049,7 +6067,7 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
    * objective needs an additional F32 diagnostic buffer for the C return ABI. */
   PolyUOp *named_loss = inst->bufs[vag->objective_buffer_index].buffer;
   bool cast_loss = !poly_dtype_eq(named_loss->dtype, POLY_FLOAT32);
-  ts->loss_out_buf = cast_loss ? model_new_buffer(ctx, POLY_FLOAT32, 1) : named_loss;
+  ts->loss_out_buf = cast_loss ? model_new_buffer(ctx, POLY_FLOAT32, 1, named_loss) : named_loss;
 
   if (!ts->loss_out_buf) {
     train_free(ts, np);
@@ -6105,10 +6123,10 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
     ts->bc1_data = 1.0f;
     ts->bc2_data = 1.0f;
     if (ensure_optimizer_state_buffer(
-            inst, "optim.adam.b1_t", scalar_shape, 1, true, ts->bc1_data, &ts->bc1_buf
+            inst, "optim.adam.b1_t", scalar_shape, 1, true, ts->bc1_data, named_loss, &ts->bc1_buf
         ) != 0 ||
         ensure_optimizer_state_buffer(
-            inst, "optim.adam.b2_t", scalar_shape, 1, true, ts->bc2_data, &ts->bc2_buf
+            inst, "optim.adam.b2_t", scalar_shape, 1, true, ts->bc2_data, named_loss, &ts->bc2_buf
         ) != 0) {
       free(sink_srcs);
       train_free(ts, np);
@@ -6122,12 +6140,13 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
       if (opt_ndim > 0) memcpy(opt_shape, pb->shape, (size_t)opt_ndim * sizeof(int64_t));
       char *m_name = optimizer_param_state_name("adam", "m", pb->name);
       char *v_name = optimizer_param_state_name("adam", "v", pb->name);
+      PolyUOp *param_buffer = pb->buffer;
       if (!m_name || !v_name ||
           ensure_optimizer_state_buffer(
-              inst, m_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]
+              inst, m_name, opt_shape, opt_ndim, false, 0.0f, param_buffer, &ts->m_bufs[i]
           ) != 0 ||
           ensure_optimizer_state_buffer(
-              inst, v_name, opt_shape, opt_ndim, false, 0.0f, &ts->v_bufs[i]
+              inst, v_name, opt_shape, opt_ndim, false, 0.0f, param_buffer, &ts->v_bufs[i]
           ) != 0) {
         free(m_name);
         free(v_name);
@@ -6146,7 +6165,7 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
       if (opt_ndim > 0) memcpy(opt_shape, pb->shape, (size_t)opt_ndim * sizeof(int64_t));
       char *b_name = optimizer_param_state_name("sgd", "b", pb->name);
       if (!b_name || ensure_optimizer_state_buffer(
-                         inst, b_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]
+                         inst, b_name, opt_shape, opt_ndim, false, 0.0f, pb->buffer, &ts->m_bufs[i]
                      ) != 0) {
         free(b_name);
         free(sink_srcs);
@@ -6170,8 +6189,12 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
     m_base = 1;
     param_base = 1 + np;
   }
-  PolyUOp *lr = poly_uop_const_float(ctx, (double)o->lr);
-  if (!lr) {
+  /* The existing optimizer consumes a scalar Tensor, as nn.optim does. A
+   * schedule changes its storage value without rebuilding or resetting state. */
+  PolyUOp *lr = NULL;
+  int64_t lr_shape[] = {1};
+  if (ensure_optimizer_state_buffer(inst, "optim.lr", lr_shape, 1, true, o->lr, named_loss, &lr) !=
+      0) {
     free(sink_srcs);
     train_free(ts, np);
     return -1;

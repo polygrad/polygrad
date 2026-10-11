@@ -2769,6 +2769,7 @@ function createWasmCoreFromModule(Module, device) {
     tokenizerBosId(tokPtr) { return Module._poly_tokenizer_bos_id(tokPtr) },
     tokenizerEosId(tokPtr) { return Module._poly_tokenizer_eos_id(tokPtr) },
 
+    setLearningRate(instPtr, lr) { return Module._poly_model_set_learning_rate(instPtr, lr) },
     setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
       return Module._poly_model_set_optimizer_ex(
         instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)

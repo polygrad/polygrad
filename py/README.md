@@ -287,6 +287,27 @@ CPU identities. Unsupported accelerator ordinals reject without changing the Mod
 - Tensor datasets are sliced on-device without frontend host readback and may
   mix with host inputs.
 
+### Tabular Models
+
+For numerical tabular data, `rt.models.MLP`, `NAM` and `TabM` accept
+`batch_size` as an upper bound; smaller batches work with `remainder='keep'`.
+TabM trains individual members and averages them for regression. With
+`loss='cross_entropy'`, its `output` is log mean member probabilities; apply
+softmax to obtain probabilities. `model.call('members', x=x)['members']`
+returns raw `[batch, members, outputs]` predictions. This numerical template
+does not include TabM's optional feature embeddings or dropout recipe.
+Cross-entropy targets are class probabilities or one-hot rows, not integer IDs.
+
+For quantile regression, set `loss='pinball'`, `quantiles=[0.1, 0.5, 0.9]`
+and three output units (`layers[-1]`, or NAM's `n_outputs`). Targets have shape
+`[batch, 1]`. Levels must be strictly increasing and between zero and one;
+the loss averages samples, levels and (for TabM) members. It does not constrain
+quantile crossing or perform calibration.
+
+After configuring an optimizer, `model.set_learning_rate(lr)` changes its rate
+without rebuilding the training graph or resetting moments. Use Tensor-level
+optimizer groups for parameter-specific schedules.
+
 ### Saving And Loading
 
 `model.save()` returns bundle bytes; `model.save(path)` also writes a file.
