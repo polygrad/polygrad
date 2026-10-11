@@ -2181,6 +2181,57 @@ TEST(codegen, beam_cache_key_covers_width_and_device) {
   PASS();
 }
 
+TEST(codegen, beam_cache_key_covers_comparison_policy) {
+  const char *previous = getenv("BEAM_COMPARE");
+  char *saved = previous ? strdup(previous) : NULL;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_WEAK, 8);
+  setenv("BEAM_COMPARE", "0", 1);
+  uint64_t pinned = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU);
+  setenv("BEAM_COMPARE", "1", 1);
+  uint64_t compared = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU);
+  if (saved)
+    setenv("BEAM_COMPARE", saved, 1);
+  else
+    unsetenv("BEAM_COMPARE");
+  free(saved);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(pinned != compared);
+  PASS();
+}
+
+TEST(codegen, beam_comparison_selects_valid_faster_schedule) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 128);
+  PolyRewriteOpts opts = {.caps = poly_c_renderer_caps()};
+  PolyOpt opt = {
+      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 2};
+  PolyUOp *searched = poly_test_apply_opt(ctx, sink, opts.caps, opt);
+  PolyUOp *heuristic = poly_apply_opts_heuristic_ex(ctx, sink, opts.caps);
+  ASSERT_NOT_NULL(searched);
+  ASSERT_NOT_NULL(heuristic);
+  ASSERT_TRUE(searched != heuristic);
+  /* Compile and execute both real kernels; replace only their timings so
+   * selection and failed-candidate behavior are deterministic in ordinary CI. */
+  ASSERT_TRUE(poly_test_beam_compare(ctx, sink, searched, opts, 400, 200) == heuristic);
+  ASSERT_TRUE(poly_test_beam_compare(ctx, sink, searched, opts, 100, 200) == searched);
+  ASSERT_TRUE(poly_test_beam_compare(ctx, sink, searched, opts, INFINITY, 200) == heuristic);
+  ASSERT_TRUE(poly_test_beam_compare(ctx, sink, searched, opts, 100, INFINITY) == searched);
+  ASSERT_TRUE(poly_test_beam_compare(ctx, sink, searched, opts, INFINITY, INFINITY) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, beam_search_rejects_failed_final_comparison) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 128);
+  PolyUOp *result = poly_test_beam_search_rejected_comparison(ctx, sink);
+  bool rejected = result == NULL;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
 TEST(codegen, beam_cache_key_covers_graph_edges) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop_const_int(ctx, 2), *b = poly_uop_const_int(ctx, 3);

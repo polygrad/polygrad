@@ -416,6 +416,20 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await x.toArrayAsync(), [1, 2, 3, 4])
   }))
 
+  await test('execution BEAM_COMPARE policy reaches core', async () => {
+    const old = pg.beamCompare
+    try {
+      for (const mode of [1, 0, 1]) {
+        pg.beamCompare = mode
+        assert(pg.beamCompare === mode && pg._core.ffi.poly_get_beam_compare() === mode,
+          'BEAM_COMPARE did not reach C')
+      }
+      let rejected = false
+      try { pg.beamCompare = 0.5 } catch (e) { rejected = /int32/.test(e.message) }
+      assert(rejected && pg.beamCompare === 1, 'invalid policy mutated C state')
+    } finally { pg.beamCompare = old }
+  })
+
   await test('execution IGNORE_BEAM_CACHE policy reaches core', async () => {
     const old = pg.ignoreBeamCache
     try {

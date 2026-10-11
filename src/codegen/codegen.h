@@ -153,7 +153,16 @@ PolyUOp *poly_test_add_local_buffers(PolyCtx *ctx, PolyUOp *u, int *next_slot);
 int poly_test_beam_actions(PolyOpt *out, int capacity);
 int poly_test_beam_kernel_action(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
 int poly_test_beam_last_device(void);
+PolyUOp *poly_test_beam_compare(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp *searched,
+    PolyRewriteOpts opts,
+    double search_time,
+    double heuristic_time
+);
 uint64_t poly_test_beam_cache_key(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device);
+PolyUOp *poly_test_beam_search_rejected_comparison(PolyCtx *ctx, PolyUOp *sink);
 int poly_test_beam_cache_write(
     PolyCtx *ctx,
     PolyUOp *sink,

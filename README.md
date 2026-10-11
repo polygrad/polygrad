@@ -430,6 +430,9 @@ times candidates on the selected backend; WebGPU timing requires the adapter's
 optional `timestamp-query` feature. Without it, candidates are not timed and
 the original kernel is kept. Change JS settings while idle and restore them
 after use; existing compiled JIT captures are unchanged.
+Search compares its winner with the default schedule at full size and caches
+the selection. Python `Context(BEAM_COMPARE=0)` or JS `runtime.beamCompare = 0`
+disables this comparison to use the pinned tinygrad search policy.
 
 `Runtime(kernels=True)` in Python or `create({ kernels: true })` in JavaScript
 enables experimental physical kernels for that runtime: AVX2/FMA on CPU,

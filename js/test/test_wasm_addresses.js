@@ -45,15 +45,18 @@ async function checkHostCopies(address) {
   assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_wasm', 'dst,handle,nbytes', env)(address, 1, 4), 0)
 }
 
-async function checkWebgpu(address, timed) {
+async function checkWebgpu(address, timed, validationError = false, repeats = 1) {
   const args = address, valuePtr = address + 64, elapsed = address + 128
   const HEAPU32 = {[args >>> 2]: 1, [(args >>> 2) + 1]: valuePtr >>> 0}
   const HEAP32 = {[valuePtr >>> 2]: -17}, HEAPF64 = {}
-  let submits = 0, uniform
+  let submits = 0, dispatches = 0, uniform
   const buffer = () => ({destroy() {}, unmap() {}, async mapAsync() {},
     getMappedRange() { return new BigUint64Array([1000n, 7000n]).buffer }})
   const output = buffer()
   const device = {
+    limits: {maxComputeWorkgroupsPerDimension: 65535},
+    pushErrorScope() {},
+    async popErrorScope() { return validationError ? new Error('injected dispatch validation') : null; },
     features: new Set(['timestamp-query']),
     createBuffer: buffer, createQuerySet: buffer,
     createBindGroup({entries}) {
@@ -62,22 +65,23 @@ async function checkWebgpu(address, timed) {
     },
     createCommandEncoder() {
       return {beginComputePass() { return {setPipeline() {}, setBindGroup() {},
-        dispatchWorkgroups() {}, end() {}} }, resolveQuerySet() {}, copyBufferToBuffer() {}, finish() { return {} }}
+        dispatchWorkgroups() { dispatches++ }, end() {}} }, resolveQuerySet() {}, copyBufferToBuffer() {}, finish() { return {} }}
     },
     queue: {submit() { submits++ }, writeBuffer(buf, offset, values) { uniform = values[0] }},
   }
   const st = {device, pipelines: new Map([[1, {}]]), buffers: new Map([[1, output]]),
     bufferSizes: new Map([[1, 4]])}
   const dispatch = bridge('runtime_webgpu.c', 'js_webgpu_dispatch',
-    'pipeline_id,args,n_args,n_params,gx,gy,gz,debug_level,elapsed_us', {
+    'pipeline_id,args,n_args,n_params,gx,gy,gz,debug_level,elapsed_us,timing_repeats', {
       Module: {__polygradWebGpuState: st}, HEAPU32, HEAP32, HEAPF64,
       Asyncify: {state: 0, State: {Rewinding: 2}, handleAsync: fn => fn()},
       GPUBufferUsage: {}, GPUMapMode: {READ: 1}, console,
     })
-  assert.equal(await dispatch(1, args, 2, 1, 1, 1, 1, 0, timed ? elapsed : 0), 0)
+  assert.equal(await dispatch(1, args, 2, 1, 1, 1, 1, 0, timed ? elapsed : 0, repeats), validationError ? -1 : 0)
   assert.equal(uniform, -17, 'integer values stay signed; only addresses are unsigned')
   assert.equal(submits, 1)
-  if (timed) assert.equal(HEAPF64[elapsed >>> 3], 6)
+  assert.equal(dispatches, timed ? repeats : 1, 'repeat only disposable timing calls')
+  if (timed) assert.equal(HEAPF64[elapsed >>> 3], validationError ? undefined : 6 / repeats)
 }
 
 function checkWasm(address, count) {
@@ -104,7 +108,11 @@ function checkWasm(address, count) {
   for (const address of [1024, 0x80000400, 0x80000400 | 0]) {
     await checkHostCopies(address)
     for (const timed of [false, true]) await checkWebgpu(address, timed)
+    await checkWebgpu(address, true, true)
+    await checkWebgpu(address, true, false, 128)
+    await checkWebgpu(address, false, false, 128)
+    await checkWebgpu(address, true, true, 128)
     for (let count = 0; count <= 9; count++) checkWasm(address, count)
   }
-  console.log('Wasm addresses: 54 passed')
+  console.log('Wasm addresses and timing: 66 passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })

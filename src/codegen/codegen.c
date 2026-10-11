@@ -80,6 +80,16 @@ void poly_set_ignore_beam_cache(int value) {
   ignore_beam_cache_value = value;
   ignore_beam_cache_initialized = true;
 }
+
+static int beam_compare_value;
+static bool beam_compare_initialized;
+int poly_get_beam_compare(void) {
+  return beam_compare_initialized ? beam_compare_value : poly_getenv_int("BEAM_COMPARE", 1);
+}
+void poly_set_beam_compare(int value) {
+  beam_compare_value = value;
+  beam_compare_initialized = true;
+}
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.
  * Default 4 (SSE). Set to 8 for AVX2.
@@ -2728,6 +2738,9 @@ static bool beam_cache_key(
       POLYGRAD_ABI_VERSION,
       width,
       poly_getenv_flag_default("BEAM_ESTIMATE", true),
+      poly_get_beam_compare() ? 2 : 0, /* Versioned sustained-timing policy. */
+      poly_get_noopt(),
+      opts.opt_policy,
       beam_device(opts),
       c.has_mulacc,
       c.has_max,
@@ -3046,9 +3059,134 @@ static void beam_debug_opts(const OptScheduler *s) {
   fputc(']', stderr);
 }
 
+static PolyUOp *beam_default_schedule(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts) {
+  const PolyKernelInfo *info =
+      sink->arg.kind == POLY_ARG_KERNEL_INFO ? sink->arg.kernel_info : NULL;
+  if (poly_get_noopt() || (info && info->n_applied_opts)) return sink;
+  int n = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
+  if (!topo) return NULL;
+  bool staged = false;
+  for (int i = 0; i < n; i++)
+    staged |= topo[i]->op == POLY_OP_STAGE;
+  poly_uop_toposort_free(topo);
+  if (staged) return sink;
+  return opts.opt_policy == POLY_OPT_TC_ONLY ? poly_apply_tc_opt(ctx, sink, opts.caps)
+                                             : poly_apply_opts_heuristic(ctx, sink, opts.caps);
+}
+
+#ifdef POLY_TESTING
+static const double *beam_compare_test_times;
+#endif
+
+/* PG-DIV-022: compare with the ordinary schedule before caching. Use the same
+ * buffers and full launch dimensions, alternate order, and discard warm-up.
+ * Median samples limit transient timing noise; this is not a speed guarantee.
+ * Unlike historical Tinygrad BEAM_COMPARE, these are warm-cache measurements.
+ * WebGPU queues repeated scratch-buffer dispatches: isolated round trips let
+ * laptop GPUs idle between samples and rank different clock states instead. */
+static bool beam_compare_default(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyRewriteOpts opts,
+    const PolyTimingBuffers *raw,
+    BeamEntry *winner,
+    int debug
+) {
+  PolyUOp *heuristic = beam_default_schedule(ctx, sink, opts);
+  if (!heuristic) return false;
+  if (heuristic == winner->sched.ast) return true;
+  if (poly_uop_retain(ctx, heuristic) != 0) return false;
+  PolyDevice device = beam_device(opts);
+  PolyRunner runners[2];
+  bool ready[2] = {false, false};
+  PolyUOp *asts[2] = {winner->sched.ast, heuristic};
+  double samples[2][7];
+  for (int i = 0; i < 2; i++) {
+    ready[i] = beam_prepare_candidate(ctx, asts[i], opts, &runners[i]) == 0;
+    /* Isolated WebGPU dispatches can leave a laptop GPU at idle clocks even
+     * with device timestamps. Compare sustained work on disposable buffers;
+     * normal inference and the pinned opt-out still execute exactly once. */
+    if (ready[i] && device == POLY_DEVICE_WEBGPU) runners[i].timing_repeats = 128;
+  }
+  for (int round = 0; round < 8; round++)
+    for (int order = 0; order < 2; order++) {
+      int i = (round + order) % 2;
+      double t =
+          ready[i] ? beam_time_candidate(ctx, &runners[i], device, raw, 1, INFINITY, 0) : INFINITY;
+#ifdef POLY_TESTING
+      if (beam_compare_test_times && isfinite(t)) t = beam_compare_test_times[i];
+#endif
+      if (round) samples[i][round - 1] = t;
+      /* One rejected execution disqualifies the candidate, even if earlier
+       * dispatches were fast. Never average a validation failure away. */
+      if (!isfinite(t)) {
+        if (ready[i]) poly_time_call_finish(ctx, &runners[i], device);
+        ready[i] = false;
+      }
+    }
+  for (int i = 0; i < 2; i++) {
+    if (ready[i]) poly_time_call_finish(ctx, &runners[i], device);
+    for (int j = 1; j < 7; j++)
+      for (int k = j; k > 0 && samples[i][k] < samples[i][k - 1]; k--) {
+        double t = samples[i][k];
+        samples[i][k] = samples[i][k - 1];
+        samples[i][k - 1] = t;
+      }
+  }
+  double searched = ready[0] ? samples[0][3] : INFINITY;
+  double baseline = ready[1] ? samples[1][3] : INFINITY;
+  if (debug)
+    fprintf(
+        stderr, "BEAM_COMPARE: search=%.3fus full=%.3fus heuristic=%.3fus selected=%s\n",
+        winner->time_us, searched, baseline, baseline < searched ? "heuristic" : "beam"
+    );
+  if (baseline < searched) {
+    poly_uop_release(ctx, winner->sched.ast);
+    sched_destroy(&winner->sched);
+    sched_init(&winner->sched, ctx, heuristic);
+    winner->time_us = baseline;
+    /* The retained heuristic becomes the winning entry's owner. */
+  } else {
+    winner->time_us = searched;
+    poly_uop_release(ctx, heuristic);
+  }
+  return isfinite(winner->time_us);
+}
+
+#ifdef POLY_TESTING
+PolyUOp *poly_test_beam_compare(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp *searched,
+    PolyRewriteOpts opts,
+    double search_time,
+    double heuristic_time
+) {
+  BeamEntry winner = {.time_us = search_time};
+  sched_init(&winner.sched, ctx, searched);
+  if (poly_uop_retain(ctx, searched) != 0) {
+    sched_destroy(&winner.sched);
+    return NULL;
+  }
+  PolyTimingBuffers raw = {0};
+  double times[2] = {search_time, heuristic_time};
+  bool ok = poly_timing_buffers_init(ctx, sink, beam_device(opts), &raw);
+  beam_compare_test_times = times;
+  if (ok) ok = beam_compare_default(ctx, sink, opts, &raw, &winner, 0);
+  beam_compare_test_times = NULL;
+  PolyUOp *result = ok ? winner.sched.ast : NULL;
+  poly_uop_release(ctx, winner.sched.ast);
+  sched_destroy(&winner.sched);
+  poly_timing_buffers_free(&raw);
+  return result;
+}
+#endif
+
 static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRewriteOpts opts) {
   if (width <= 0) return sink;
   int beam_debug = poly_getenv_int("BEAM_DEBUG", 0);
+  int compare_debug = beam_debug || poly_debug_at_least(2);
   bool search_started = false;
   BeamActions actions;
   beam_actions(&actions);
@@ -3079,6 +3217,16 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     return NULL;
   }
   beam[0].time_us = INFINITY;
+  /* Search replaces its initial entry; comparison still needs the original
+   * graph across compilation/collection safe points. */
+  if (poly_uop_retain(ctx, sink) != 0) {
+    poly_uop_release(ctx, beam[0].sched.ast);
+    sched_destroy(&beam[0].sched);
+    free(beam);
+    free(candidates);
+    free(candidate_roots);
+    return NULL;
+  }
   BeamCacheKey key;
   beam_cache_key(ctx, sink, width, opts, &key);
   if (!poly_get_ignore_beam_cache() && poly_getenv_int("CACHELEVEL", 2) >= 1 &&
@@ -3235,9 +3383,18 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink, int width, PolyRew
     }
     if (exiting) break;
   }
+  /* No admitted search candidate keeps the pinned unoptimized fallback (for
+   * example a BEAM-only UOp budget). It is not a rejected tuned winner. */
+  if (poly_get_beam_compare() && isfinite(beam[0].time_us) &&
+      !beam_compare_default(ctx, sink, opts, &raw, &beam[0], compare_debug)) {
+    /* Neither final candidate executed successfully. Suppressing the cache
+     * alone would still publish the rejected schedule to the caller. */
+    fatal = true;
+    goto done;
+  }
   if (poly_getenv_int("CACHELEVEL", 2) >= 1) beam_cache_save(&key, beam[0].sched.ast);
 done:
-  if (beam_debug && search_started) {
+  if (compare_debug && search_started) {
     fprintf(stderr, "BEAM_SEARCH: final tm=%.3fus, applied_opts=", beam[0].time_us);
     beam_debug_opts(&beam[0].sched);
     if (fatal) fputs(" (failed)", stderr);
@@ -3253,6 +3410,7 @@ done:
     poly_uop_release(ctx, seen[i]);
   free(seen);
   free(key.data);
+  poly_uop_release(ctx, sink);
   PolyUOp *result = fatal ? NULL : beam[0].sched.ast;
   for (int i = 0; i < size; i++) {
     poly_uop_release(ctx, beam[i].sched.ast);
@@ -3262,6 +3420,22 @@ done:
   free(candidates);
   return result;
 }
+
+#ifdef POLY_TESTING
+PolyUOp *poly_test_beam_search_rejected_comparison(PolyCtx *ctx, PolyUOp *sink) {
+  int compare = poly_get_beam_compare(), ignore = poly_get_ignore_beam_cache();
+  const double rejected[] = {INFINITY, INFINITY};
+  poly_set_beam_compare(1);
+  poly_set_ignore_beam_cache(1);
+  beam_compare_test_times = rejected;
+  PolyRewriteOpts opts = {.caps = poly_c_renderer_caps(), .device = POLY_DEVICE_CPU};
+  PolyUOp *result = poly_beam_search(ctx, sink, 1, opts);
+  beam_compare_test_times = NULL;
+  poly_set_beam_compare(compare);
+  poly_set_ignore_beam_cache(ignore);
+  return result;
+}
+#endif
 
 /* tinygrad/codegen/__init__.py:ReduceContext. Failure is C-only: matcher
  * callbacks use NULL for no rewrite, so allocation failure needs a separate
@@ -6571,19 +6745,8 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
         sched_destroy(&scheduler);
       } else if (opts.beam_width > 0) {
         sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
-      } else if (!poly_get_noopt() && (!info || !info->n_applied_opts)) {
-        int n = 0;
-        PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n);
-        if (!topo) return NULL;
-        bool staged = false;
-        for (int i = 0; i < n; i++)
-          staged |= topo[i]->op == POLY_OP_STAGE;
-        poly_uop_toposort_free(topo);
-        if (!staged)
-          sink = opts.opt_policy == POLY_OPT_TC_ONLY
-                     ? poly_apply_tc_opt(ctx, sink, opts.caps)
-                     : poly_apply_opts_heuristic(ctx, sink, opts.caps);
-      }
+      } else
+        sink = beam_default_schedule(ctx, sink, opts);
       POLY_REWRITE_CHECK("schedule options");
       /* get_optimized_ast consumes construction options and seals scheduling;
        * flatten END range expressions before expander consumes them. */

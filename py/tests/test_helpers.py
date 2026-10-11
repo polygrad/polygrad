@@ -217,6 +217,21 @@ def test_context_nests_restores_decorates_and_rejects_unknown_keys():
             pass
 
 
+def test_beam_compare_context_reaches_core_and_restores():
+    from polygrad import _ffi
+    from polygrad.helpers import BEAM_COMPARE
+    old = BEAM_COMPARE.value
+    with Context(BEAM_COMPARE=0):
+        assert _ffi.get_lib().poly_get_beam_compare() == 0
+        with Context(BEAM_COMPARE=1):
+            assert _ffi.get_lib().poly_get_beam_compare() == 1
+        assert BEAM_COMPARE.value == 0
+    assert BEAM_COMPARE.value == old
+    with pytest.raises(ValueError, match='int32'):
+        BEAM_COMPARE.value = 0.5
+    assert BEAM_COMPARE.value == old
+
+
 def test_ignore_beam_cache_context_reaches_core_and_restores():
     from polygrad import _ffi
     with Context(IGNORE_BEAM_CACHE=1):

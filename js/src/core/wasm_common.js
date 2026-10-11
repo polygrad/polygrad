@@ -27,7 +27,7 @@ function createWasmCoreFromModule(Module, device) {
   if (!Module.__polygradEnvInitialized) {
     const env = typeof process !== 'undefined' && process.versions && process.versions.node
       ? process.env : {}
-    const controls = ['BEAM', 'NOOPT'].filter(key => env[key])
+    const controls = ['BEAM', 'NOOPT', 'BEAM_COMPARE'].filter(key => env[key])
     for (const key of controls) {
       const n = Number(env[key])
       if (!/^\s*[+-]?\d+\s*$/.test(env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
@@ -808,6 +808,8 @@ function createWasmCoreFromModule(Module, device) {
     poly_set_beam: Module._poly_set_beam,
     poly_get_ignore_beam_cache: Module._poly_get_ignore_beam_cache,
     poly_set_ignore_beam_cache: Module._poly_set_ignore_beam_cache,
+    poly_get_beam_compare: Module._poly_get_beam_compare,
+    poly_set_beam_compare: Module._poly_set_beam_compare,
     poly_get_default_float: Module._poly_get_default_float,
     poly_get_default_int: Module._poly_get_default_int,
     poly_set_default_float: Module._poly_set_default_float,

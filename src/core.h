@@ -931,6 +931,9 @@ int poly_get_beam(void);
 void poly_set_beam(int value);
 int poly_get_ignore_beam_cache(void);
 void poly_set_ignore_beam_cache(int value);
+/* Compare BEAM with the default schedule; zero selects the pinned policy. */
+int poly_get_beam_compare(void);
+void poly_set_beam_compare(int value);
 
 #ifdef __cplusplus
 }

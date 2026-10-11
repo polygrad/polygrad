@@ -4336,6 +4336,24 @@ static napi_value napi_poly_set_ignore_beam_cache(napi_env env, napi_callback_in
   return out;
 }
 
+static napi_value napi_poly_get_beam_compare(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_get_beam_compare(), &out));
+  return out;
+}
+
+static napi_value napi_poly_set_beam_compare(napi_env env, napi_callback_info info) {
+  napi_value argv[1], out;
+  size_t argc = 1;
+  int32_t value = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[0], &value));
+  poly_set_beam_compare(value);
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
 static napi_value napi_poly_get_default_float(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value out;
@@ -7722,6 +7740,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_set_beam", napi_poly_set_beam),
       DECLARE_NAPI_METHOD("poly_get_ignore_beam_cache", napi_poly_get_ignore_beam_cache),
       DECLARE_NAPI_METHOD("poly_set_ignore_beam_cache", napi_poly_set_ignore_beam_cache),
+      DECLARE_NAPI_METHOD("poly_get_beam_compare", napi_poly_get_beam_compare),
+      DECLARE_NAPI_METHOD("poly_set_beam_compare", napi_poly_set_beam_compare),
       DECLARE_NAPI_METHOD("poly_get_default_float", napi_poly_get_default_float),
       DECLARE_NAPI_METHOD("poly_get_default_int", napi_poly_get_default_int),
       DECLARE_NAPI_METHOD("poly_set_default_float", napi_poly_set_default_float),

@@ -235,6 +235,10 @@ def _declare_signatures(lib):
     lib.poly_get_ignore_beam_cache.argtypes = []
     lib.poly_set_ignore_beam_cache.restype = None
     lib.poly_set_ignore_beam_cache.argtypes = [ctypes.c_int]
+    lib.poly_get_beam_compare.restype = ctypes.c_int
+    lib.poly_get_beam_compare.argtypes = []
+    lib.poly_set_beam_compare.restype = None
+    lib.poly_set_beam_compare.argtypes = [ctypes.c_int]
     for kind in ('float', 'int'):
         getter = getattr(lib, f'poly_get_default_{kind}')
         getter.restype, getter.argtypes = ctypes.c_int, []

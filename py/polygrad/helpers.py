@@ -377,6 +377,20 @@ class _IGNORE_BEAM_CACHE(ContextVar):
         _ffi.get_lib().poly_set_ignore_beam_cache(value)
 
 
+class _BEAM_COMPARE(ContextVar):
+    @property
+    def value(self):
+        from . import _ffi
+        return _ffi.get_lib().poly_get_beam_compare()
+
+    @value.setter
+    def value(self, value):
+        from . import _ffi
+        if not isinstance(value, int) or not -(2**31) <= value <= 2**31 - 1:
+            raise ValueError('BEAM_COMPARE must be an int32')
+        _ffi.get_lib().poly_set_beam_compare(value)
+
+
 class _NOOPT(ContextVar):
     @property
     def value(self):
@@ -436,6 +450,7 @@ IMAGE = _IMAGE("IMAGE", 0)
 DEBUG = ContextVar("DEBUG", 0)
 BEAM = _BEAM("BEAM", 0)
 IGNORE_BEAM_CACHE = _IGNORE_BEAM_CACHE("IGNORE_BEAM_CACHE", 0)
+BEAM_COMPARE = _BEAM_COMPARE("BEAM_COMPARE", 1)
 # Pinned tinygrad/helpers.py:241. Keep the public configuration object rather
 # than exposing a frozen boolean so Context(JIT=...) and environment overrides work.
 JIT = ContextVar("JIT", 2 if OSX and ARCH_X86 else 1)

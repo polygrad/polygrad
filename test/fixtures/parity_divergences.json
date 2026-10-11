@@ -324,6 +324,18 @@
       "close_when": "Pinned ONNX lowering recognizes equivalent regular index grids without enumerating their elements. This grants no Tensor, compiler or runtime parity mismatch."
     },
     {
+      "id": "PG-DIV-022",
+      "status": "approved",
+      "stages": ["codegen", "optimization"],
+      "area": "opt-in BEAM final heuristic comparison",
+      "tinygrad": "Pinned v0.14.0 selects the BEAM winner without comparing the default heuristic. Earlier BEAM_COMPARE performed full-size cache-cleared comparisons; c77cb57454c5b6cede8426cdeeeed7eef4b5b9fc removed it as untested.",
+      "polygrad": "When BEAM is enabled, compare its winner with the ordinary schedule using alternating full-size warm-cache measurements on shared buffers. WebGPU comparison samples queue 128 scratch-buffer dispatches to reduce idle-clock bias. Reject a selected winner when both final candidates fail execution. Cache the selected options with the timing-policy version. BEAM_COMPARE=0 restores pinned selection; both disk and runtime caches distinguish the policy.",
+      "rationale": "Search can choose a slower kernel than the default. Final comparison guards against measured regressions without changing BEAM=0 compilation. Timing noise still prevents an absolute performance guarantee.",
+      "approval": "User 2026-10-10 explicitly requested adding the heuristic comparison and investigating historical BEAM_COMPARE.",
+      "evidence": ["src/codegen/codegen.c:beam_compare_default", "test/test_codegen.c:beam_comparison_selects_valid_faster_schedule", "test/test_codegen.c:beam_cache_key_covers_comparison_policy", "references/tinygrad_latest/tinygrad/codegen/opt/postrange.py", "https://github.com/tinygrad/tinygrad/commit/c77cb57454c5b6cede8426cdeeeed7eef4b5b9fc"],
+      "close_when": "The pinned reference adopts equivalent final comparison; this allowance affects only BEAM-enabled schedule selection."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

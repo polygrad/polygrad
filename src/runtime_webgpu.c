@@ -487,7 +487,7 @@ EM_JS(
      int gy,
      int gz,
      int debug_level,
-     double *elapsed_us),
+     double *elapsed_us, int timing_repeats),
     {
       // Rewinding reenters this import to retrieve its completed result; do not
       // allocate uniforms or submit the timed/debug launch a second time.
@@ -644,7 +644,8 @@ EM_JS(
       const pass = encoder.beginComputePass(passDescriptor);
       pass.setPipeline(rec.pipeline);
       pass.setBindGroup(0, bindGroup);
-      pass.dispatchWorkgroups(gx, gy, gz);
+      for (let i = 0; i < (elapsed_us ? Math.max(1, timing_repeats) : 1); i++)
+        pass.dispatchWorkgroups(gx, gy, gz);
       pass.end();
       if (elapsed_us) {
         encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0);
@@ -676,7 +677,7 @@ EM_JS(
             if (elapsed_us) {
               await queryReadback.mapAsync(GPUMapMode.READ);
               const times = new BigUint64Array(queryReadback.getMappedRange());
-              HEAPF64[elapsed_us >>> 3] = Number(times[1] - times[0]) / 1000;
+              HEAPF64[elapsed_us >>> 3] = Number(times[1] - times[0]) / (1000 * Math.max(1, timing_repeats));
               queryReadback.unmap();
             }
             return 0;
@@ -930,7 +931,7 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
   int ret = js_webgpu_dispatch(
       wh->pipeline_id, (const uintptr_t *)args, n_args, runner->n_params, runner->grid[0],
       runner->grid[1], runner->grid[2], poly_debug_level(),
-      runner->wait ? &runner->elapsed_us : NULL
+      runner->wait ? &runner->elapsed_us : NULL, runner->timing_repeats
   );
   if (timing) {
     double t_done = poly_now_ms();

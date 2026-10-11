@@ -5,7 +5,7 @@ const { PolyAsyncRequired, PolyWasmSyncUnsupported } = require('./errors')
 
 function applyNodeEnv(options) {
   if (typeof process !== 'undefined' && process.env) {
-    for (const key of ['BEAM', 'NOOPT']) {
+    for (const key of ['BEAM', 'NOOPT', 'BEAM_COMPARE']) {
       if (!process.env[key]) continue
       const n = Number(process.env[key])
       if (!/^\s*[+-]?\d+\s*$/.test(process.env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
