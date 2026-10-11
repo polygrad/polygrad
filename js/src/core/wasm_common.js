@@ -1415,6 +1415,7 @@ function createWasmCoreFromModule(Module, device) {
       callUopPair(Module._poly_tensor_lstm_cell, [ctx, x, h || 0, c || 0, wi, wh, bi || 0, bh || 0], 'poly_tensor_lstm_cell'),
     poly_tensor_linear_apply: (ctx, x, w, b) => Module._poly_tensor_linear_apply(ctx, x, w, b || 0),
     poly_tensor_dropout: (ctx, x, p, training) => Module._poly_tensor_dropout(ctx, x, p, training ? 1 : 0),
+    poly_tensor_sample_logits: (ctx, logits, temperature, topK, keepdim) => Module._poly_tensor_sample_logits(ctx, logits, temperature, topK, keepdim),
     poly_tensor_sdpa: (ctx, q, k, v, mask, p, causal, gqa, training) =>
       Module._poly_tensor_sdpa(ctx, q, k, v, mask || 0, p, causal ? 1 : 0, gqa ? 1 : 0, training ? 1 : 0),
     poly_tensor_rmsnorm_apply: (ctx, x, w, eps) => Module._poly_tensor_rmsnorm_apply(ctx, x, w || 0, eps),

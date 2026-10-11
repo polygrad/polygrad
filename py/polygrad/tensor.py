@@ -2360,6 +2360,29 @@ class Tensor:
         core = _ffi._lib.poly_tensor_log_softmax(self._ctx, self._tensor, int(axis))
         return self._make_result_from_core(core, self.shape)
 
+    def sample_logits(self, temperature=1.0, top_k=0, keepdim=False):
+        """Sample int32 last-axis indices using the runtime RNG (capturable by Model).
+
+        Logits must be finite floating-point values. top_k=0 keeps all values; otherwise all ties at
+        the kth logit remain eligible. Temperature is scalar, clamped to 1e-12.
+        Top-k currently uses sorting; this is not a constant-cost selection op.
+        """
+        if not isinstance(top_k, (int, np.integer)):
+            raise TypeError('top_k must be an integer')
+        if not self.shape or not 0 <= top_k <= min(self.shape[-1], 2147483647):
+            raise ValueError('top_k is out of range')
+        if not isinstance(temperature, Tensor) and not math.isfinite(float(temperature)):
+            raise ValueError('temperature must be finite')
+        temp = self._ensure_tensor(temperature)
+        try:
+            if temp.numel() != 1:
+                raise ValueError('temperature must be scalar')
+            return self._make_result_from_core(_ffi._lib.poly_tensor_sample_logits(
+                self._ctx, self._tensor, temp._tensor, int(top_k), int(bool(keepdim))), None)
+        finally:
+            if temp is not temperature:
+                temp.dispose()
+
     def dropout(self, p=0.5):
         if not 0 <= p <= 1:
             raise ValueError(f'p={p} is out of range [0, 1]')

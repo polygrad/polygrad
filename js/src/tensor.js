@@ -2735,6 +2735,25 @@ function createBoundTensorClass(runtime) {
         this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)))
     }
 
+    // Threshold ties stay eligible. The existing topk implementation sorts.
+    sampleLogits({ temperature = 1, topK = 0, keepdim = false } = {}) {
+      this._requireLive()
+      if (_runtime._activeAsync > 0 || _runtime._closing) throw new Error('polygrad runtime has active async work')
+      if (!Number.isInteger(topK) || !this.shape.length || topK < 0 || topK > Math.min(this.shape.at(-1), 2147483647)) {
+        throw new RangeError('topK is out of range')
+      }
+      if (!(temperature instanceof Tensor) && !Number.isFinite(temperature)) throw new TypeError('temperature must be finite')
+      const temp = this._ensureTensor(temperature)
+      try {
+        temp._requireLive()
+        if (temp._ctx !== this._ctx) throw new Error('temperature belongs to another runtime')
+        if (temp.shape.reduce((a, b) => a * b, 1) !== 1) throw new RangeError('temperature must be scalar')
+        return this._makeResultFromCore(ffi.poly_tensor_sample_logits(this._ctx, this._tensor, temp._tensor, topK, keepdim ? 1 : 0), 'int32')
+      } finally {
+        if (temp !== temperature) temp.dispose()
+      }
+    }
+
     dropout(p = 0.5) {
       this._requireLive()
       p = Number(p)

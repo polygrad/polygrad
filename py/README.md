@@ -749,6 +749,7 @@ Use Hugging Face tokenizers for other pipelines. No Unicode dependency is added.
 | Tensor creation | `Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `randint`, `arange`, `linspace`, `eye`, `empty` |
 | Tensor math | `+`, `-`, `*`, `/`, `**`, `exp`, `log`, `sqrt`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu`, `softmax` |
 | Reductions | `sum`, `mean`, `max`, `min`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
+| Sampling | `logits.sample_logits(temperature=1, top_k=0, keepdim=False)` returns int32 indices along the last axis; finite logits, captured runtime RNG, all ties at the top-k threshold remain eligible (`0` keeps all). Top-k currently uses sorting. |
 | Movement/indexing | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
 | Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
 | Data/readback | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |

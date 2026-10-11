@@ -858,6 +858,90 @@ PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int train
   return out;
 }
 
+static PolyUOp *sample_logits(
+    PolyCtx *ctx,
+    PolyUOp *logits,
+    PolyUOp *temperature,
+    PolyUOp *uniform,
+    int top_k,
+    int keepdim
+) {
+  logits = poly_uop_cast(ctx, logits, POLY_FLOAT32);
+  temperature = poly_uop_cast(ctx, temperature, POLY_FLOAT32);
+  PolyUOp *epsilon = poly_uop_const_typed(ctx, POLY_FLOAT32, 1e-12);
+  PolyUOp *u = poly_uop_maximum(ctx, uniform, epsilon);
+  PolyUOp *noise =
+      poly_uop_log(ctx, poly_uop_mul(ctx, poly_uop_log(ctx, u), poly_uop_const_int(ctx, -1)));
+  PolyUOp *scores = poly_uop_sub(
+      ctx, poly_uop_div(ctx, logits, poly_uop_maximum(ctx, temperature, epsilon)), noise
+  );
+  int ndim = poly_uop_ndim(ctx, logits);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, logits);
+  if (top_k && top_k < dims[ndim - 1]) {
+    PolyUOp *values = NULL, *indices = NULL;
+    if (poly_uop_topk(ctx, logits, top_k, -1, 1, 1, &values, &indices)) return NULL;
+    int64_t pairs[POLY_MAX_DIMS][2];
+    for (int i = 0; i < ndim; i++) {
+      pairs[i][0] = i == ndim - 1 ? top_k - 1 : 0;
+      pairs[i][1] = i == ndim - 1 ? top_k : dims[i];
+    }
+    PolyUOp *threshold = poly_uop_shrink(ctx, values, pairs, ndim);
+    scores = poly_uop_where(
+        ctx, poly_uop_ge(ctx, logits, threshold), scores,
+        poly_uop_const_typed(ctx, POLY_FLOAT32, -INFINITY)
+    );
+  }
+  return poly_uop_cast(ctx, poly_uop_argmax(ctx, scores, -1, keepdim), POLY_INT32);
+}
+
+PolyTensor *poly_tensor_sample_logits(
+    PolyCtx *ctx,
+    PolyTensor *logits,
+    PolyTensor *temperature,
+    int top_k,
+    int keepdim
+) {
+  PolyTensor *inputs[] = {logits, temperature};
+  if (!ctx || !logits || !temperature) return NULL;
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 2);
+  if (build_logical < 0 || !poly_dtype_is_float(logits->uop_physical->dtype) || top_k < 0)
+    return NULL;
+  int ndim = poly_uop_ndim(ctx, logits->uop_physical);
+  int64_t dims[POLY_MAX_DIMS];
+  if (ndim < 1 || ndim > POLY_MAX_DIMS) return NULL;
+  for (int i = 0; i < ndim; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, logits->uop_physical, i);
+    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT || dim->arg.i <= 0)
+      return NULL;
+    dims[i] = dim->arg.i;
+  }
+  if (top_k > dims[ndim - 1]) return NULL;
+  int tn = poly_uop_ndim(ctx, temperature->uop_physical);
+  if (tn < 0 || tn > ndim) return NULL;
+  for (int i = 0; i < tn; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, temperature->uop_physical, i);
+    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT || dim->arg.i != 1)
+      return NULL;
+  }
+  PolyDevice device = logits->device;
+  if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+  if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+  /* Exactly one draw supplies both graphs, including Model RNG capture. */
+  PolyTensor *uniform = poly_tensor_rand(ctx, dims, ndim, POLY_FLOAT32, device, 1);
+  if (!uniform) return NULL;
+  PolyUOp *physical = sample_logits(
+      ctx, logits->uop_physical, temperature->uop_physical, uniform->uop_physical, top_k, keepdim
+  );
+  PolyUOp *logical = build_logical ? sample_logits(
+                                         ctx, logits->uop_logical, temperature->uop_logical,
+                                         uniform->uop_logical, top_k, keepdim
+                                     )
+                                   : NULL;
+  PolyTensor *out = nn_tensor_result(ctx, logical, physical, inputs, 2);
+  poly_tensor_release(uniform);
+  return out;
+}
+
 PolyTensor *poly_tensor_sdpa(
     PolyCtx *ctx,
     PolyTensor *q,

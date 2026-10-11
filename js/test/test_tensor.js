@@ -4858,6 +4858,62 @@ async function runTensorTests(pg, createRuntime) {
   // -- Lazy RNG --
   console.log('\n-- Lazy RNG --')
 
+  await test('sampleLogits threshold ties and advancing seeded RNG', async () => {
+    const logits = new Tensor(Array.from({ length: 512 }, () => [2, 2, 2, -20]), { dtype: 'float32' })
+    Tensor.manual_seed(321)
+    const firstTensor = logits.sampleLogits({ topK: 2 })
+    assertShape(firstTensor.shape, [512])
+    const first = Array.from(await firstTensor.toArray())
+    Tensor.manual_seed(321)
+    const repeat = logits.sampleLogits({ topK: 2 })
+    assertClose(Array.from(await repeat.toArray()), first, 0)
+    const next = logits.sampleLogits({ topK: 2 })
+    const second = Array.from(await next.toArray())
+    assert(second.some((value, i) => value !== first[i]), 'RNG must advance')
+    const counts = [0, 0, 0, 0]
+    for (const value of first) counts[value]++
+    assert(counts[3] === 0 && counts.slice(0, 3).every(n => n > 120 && n < 220), `bad counts: ${counts}`)
+    for (const topK of [-1, 5, 1.5]) {
+      let rejected = false
+      try { logits.sampleLogits({ topK }) } catch (_) { rejected = true }
+      assert(rejected, `accepted topK=${topK}`)
+    }
+    for (const tensor of [logits, firstTensor, repeat, next]) tensor.dispose()
+  })
+
+  await test('sampleLogits preserves transformer Gumbel formula', async () => {
+    const logits = new Tensor(Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => (i * 8 + j) / 16)))
+    Tensor.manual_seed(42)
+    const actual = logits.sampleLogits({ temperature: 0.7, keepdim: true })
+    const values = Array.from(await actual.toArray())
+    Tensor.manual_seed(42)
+    const u = Tensor.rand(8, 8).maximum(1e-12)
+    const expected = logits.div(0.7).sub(u.log().neg().log()).argmax(-1, true)
+    assertShape(actual.shape, [8, 1])
+    assertClose(Array.from(await expected.toArray()), values, 0)
+    for (const tensor of [logits, actual, u, expected]) tensor.dispose()
+  })
+
+  await test('sampleLogits Model checkpoint preserves advancing RNG', async () => {
+    Tensor.manual_seed(42)
+    const x = Tensor.empty([32, 8])
+    let model, restored
+    try {
+      model = await pg.Model.fromCallableAsync(({ x }) => x.sampleLogits({ topK: 3 }), { inputs: { x } })
+      const input = new Float32Array(256)
+      const first = (await model.forwardAsync({ x: input })).output
+      restored = pg.Model.load(await model.saveAsync())
+      const second = (await model.forwardAsync({ x: input })).output
+      const resumed = (await restored.forwardAsync({ x: input })).output
+      assertClose(Array.from(second), Array.from(resumed), 0)
+      assert(Array.from(first).some((v, i) => v !== second[i]), 'captured RNG did not advance')
+    } finally {
+      if (restored) await restored.dispose()
+      if (model) await model.dispose()
+      x.dispose()
+    }
+  })
+
   await test('rand uniform [0,1)', async () => {
     Tensor.manual_seed(42)
     const t = Tensor.rand(100)

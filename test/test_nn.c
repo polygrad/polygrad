@@ -30,6 +30,41 @@ static int nn_param_index(PolyModel *inst, const char *name) {
 
 /* Convenience builder tests */
 
+TEST(nn, sample_logits_ownership_and_validation) {
+  PolyCtx *ctx = poly_ctx_new(), *foreign = poly_ctx_new();
+  float data[8] = {1, 2, 3, 4, 4, 3, 2, 1};
+  PolyTensor *x =
+      poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, (int64_t[]){2, 4}, 2);
+  float temperature = 1;
+  PolyTensor *temp = poly_tensor_from_host(
+      ctx, &temperature, sizeof(temperature), POLY_FLOAT32, (int64_t[]){1}, 1
+  );
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(temp);
+  ASSERT_TRUE(poly_tensor_sample_logits(foreign, x, temp, 0, 0) == NULL);
+  ASSERT_TRUE(poly_tensor_sample_logits(ctx, x, temp, -1, 0) == NULL);
+  ASSERT_TRUE(poly_tensor_sample_logits(ctx, x, temp, 5, 0) == NULL);
+  ASSERT_TRUE(poly_tensor_sample_logits(ctx, x, x, 0, 0) == NULL);
+  poly_tensor_manual_seed(ctx, 42);
+  PolyTensor *out = poly_tensor_sample_logits(ctx, x, temp, 2, 0);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out->uop_physical), 1);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, out->uop_physical)[0], 2);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  poly_tensor_release(out);
+  poly_tensor_release(temp);
+  poly_tensor_release(x);
+  poly_tensor_manual_seed(ctx, 0);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.tensor_records, 0);
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, cached_attention_requires_storage_target) {
   PolyCtx *ctx = poly_ctx_new();
   PolyTensor *q =

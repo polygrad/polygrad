@@ -173,6 +173,18 @@ PolyTensor *poly_tensor_cached_sdpa(
 
 /* RandMixin.dropout. Returns an owned reference, including identity results. */
 PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int training);
+
+/* Last-axis Gumbel-max sampling of finite logits, with shared captured RNG.
+ * top_k=0 admits every logit; otherwise include all ties at the kth value.
+ * Temperature is scalar and clamped to 1e-12, as in transformer sampling.
+ * Returns owned int32 indices; concrete nonempty shapes are required. */
+PolyTensor *poly_tensor_sample_logits(
+    PolyCtx *ctx,
+    PolyTensor *logits,
+    PolyTensor *temperature,
+    int top_k,
+    int keepdim
+);
 /* Inference SDPA; Tensor SDPA additionally owns training dropout/RNG. */
 PolyUOp *poly_uop_sdpa(
     PolyCtx *ctx,

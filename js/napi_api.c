@@ -3025,6 +3025,21 @@ static napi_value napi_poly_tensor_lstm_cell(napi_env env, napi_callback_info in
   return make_external_pair(env, h, c);
 }
 
+static napi_value napi_poly_tensor_sample_logits(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  int32_t top_k = 0, keepdim = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &top_k));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[4], &keepdim));
+  return make_external(
+      env, poly_tensor_sample_logits(
+               get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]),
+               top_k, keepdim
+           )
+  );
+}
+
 static napi_value napi_poly_tensor_topk(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
@@ -7667,6 +7682,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_rearrange", napi_poly_tensor_rearrange),
       DECLARE_NAPI_METHOD("poly_tensor_sort", napi_poly_tensor_sort),
       DECLARE_NAPI_METHOD("poly_tensor_topk", napi_poly_tensor_topk),
+      DECLARE_NAPI_METHOD("poly_tensor_sample_logits", napi_poly_tensor_sample_logits),
       DECLARE_NAPI_METHOD("poly_tensor_lstm_cell", napi_poly_tensor_lstm_cell),
       DECLARE_NAPI_METHOD("poly_tensor_linear_apply", napi_poly_tensor_linear_apply),
       DECLARE_NAPI_METHOD("poly_tensor_dropout", napi_poly_tensor_dropout),

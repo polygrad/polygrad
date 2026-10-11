@@ -31,20 +31,7 @@ static int transformer_sampler(PolyModel *m, int vocab, PolyTensor *decode, Poly
   if (!capture) return -1;
   int rc = -1;
   PolyTensor *seed = NULL, *counter = NULL, *wrapped = NULL;
-  PolyTensor *epsilon = poly_tensor_const_like_float(ctx, logits, 1e-12);
-  PolyTensor *uniform = poly_tensor_rand(
-      ctx, (int64_t[]){1, vocab}, 2, POLY_FLOAT32, poly_ctx_get_preferred_device(ctx), 1
-  );
-  PolyTensor *temp = epsilon ? poly_tensor_alu2(ctx, POLY_OP_MAX, temperature, epsilon) : NULL;
-  PolyTensor *u = uniform && epsilon ? poly_tensor_alu2(ctx, POLY_OP_MAX, uniform, epsilon) : NULL;
-  PolyTensor *log_u = u ? poly_tensor_log(ctx, u) : NULL;
-  PolyTensor *minus_one = log_u ? poly_tensor_const_like_int(ctx, log_u, -1) : NULL;
-  PolyTensor *negative = minus_one ? poly_tensor_alu2(ctx, POLY_OP_MUL, log_u, minus_one) : NULL;
-  PolyTensor *noise = negative ? poly_tensor_log(ctx, negative) : NULL;
-  PolyTensor *scaled = temp ? poly_tensor_div(ctx, logits, temp, 0) : NULL;
-  PolyTensor *scores = scaled && noise ? poly_tensor_alu2(ctx, POLY_OP_SUB, scaled, noise) : NULL;
-  PolyTensor *token = scores ? poly_tensor_argmax(ctx, scores, -1, true) : NULL;
-  token = token ? poly_tensor_cast(ctx, token, POLY_INT32) : NULL;
+  PolyTensor *token = poly_tensor_sample_logits(ctx, logits, temperature, 0, true);
   if (!token || poly_tensor_capture_rng(capture, 0, &seed, &counter) < 0) goto done;
   if (poly_tensor_capture_wrap(
           capture, (PolyTensor *[]){seed, counter}, (int[]){0, 1}, 2, &token, 1, &wrapped
@@ -81,6 +68,7 @@ static int transformer_sampler(PolyModel *m, int vocab, PolyTensor *decode, Poly
   if (!ok) goto done;
   rc = 0;
 done:
+  if (token) poly_tensor_release(token);
   poly_tensor_capture_end(capture);
   if (seed) poly_tensor_release(seed);
   if (counter) poly_tensor_release(counter);

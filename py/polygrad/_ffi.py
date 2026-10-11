@@ -1153,6 +1153,8 @@ def _declare_signatures(lib):
     lib.poly_tensor_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_tensor_dropout.restype = _ptr
+    lib.poly_tensor_sample_logits.restype = _ptr
+    lib.poly_tensor_sample_logits.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_dropout.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_int]
     lib.poly_tensor_sdpa.restype = _ptr
     lib.poly_tensor_sdpa.argtypes = [_ptr] * 5 + [ctypes.c_double] + [ctypes.c_int] * 3
