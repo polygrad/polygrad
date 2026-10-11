@@ -36,6 +36,19 @@ static int tabm_init(
 }
 
 PolyModel *model_tabm_from_config(PolyCtx *ctx, const cJSON *root, PolyModelError *err) {
+  /* A misspelled or unsupported recipe option must not silently train a
+   * different model. Keep the accepted keys beside the fields consumed below. */
+  const char *keys[] = {"format", "type",       "layers", "n_ensemble", "batch_size",
+                        "seed",   "activation", "loss",   "quantiles"};
+  for (const cJSON *field = root->child; field; field = field->next) {
+    bool known = false;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+      if (!strcmp(field->string, keys[i])) known = true;
+    if (!known) {
+      model_factory_error(err, field->string, "unsupported TabM option");
+      return NULL;
+    }
+  }
   if (!model_config_training(root, err) ||
       !model_config_sizes(root, "layers", 2, INT_MAX, true, err) ||
       !model_config_integer(root, "n_ensemble", 1, INT_MAX, false, err) ||
