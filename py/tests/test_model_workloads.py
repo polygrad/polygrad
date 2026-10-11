@@ -106,13 +106,30 @@ def test_unet_odd_spatial_work_budget(runtime):
         high = low.conv_transpose2d(up, stride=2, padding=1)
         return x.cat(high, dim=1).conv2d(merge, padding=1).relu()
 
-    got = measure(rt, forward, dict(kernel_count=3, global_ops=19000, global_mem=5000, copies=0))
+    # Pinned cat uses stack/flatten for equal widths, leaving concatenation
+    # fused into the final convolution instead of storing a doubled skip tensor.
+    got = measure(rt, forward, dict(kernel_count=3, global_ops=18594, global_mem=3720, copies=0))
     torch = pytest.importorskip('torch')
     f = torch.nn.functional
     tx, td, tu, tm = [torch.from_numpy(v) for v in values]
     high = f.conv_transpose2d(f.elu(f.conv2d(tx, td, stride=2, padding=1)), tu, stride=2, padding=1)
     expected = f.relu(f.conv2d(torch.cat((tx, high), dim=1), tm, padding=1))
     np.testing.assert_allclose(got, expected.numpy(), atol=1e-7, rtol=1e-4)
+
+
+def test_equal_width_cat_uses_stack_graph(runtime):
+    rt = runtime
+    x = resident(rt, np.arange(12, dtype=np.float32).reshape(2, 2, 3))
+    y = x + 1
+    for dim in (0, 1, -1):
+        axis = dim % 3
+        got = x.cat(y, dim=dim)
+        expected = x.stack(y, dim=axis).flatten(axis, axis + 1)
+        if ENGINE == 'polygrad':
+            assert got.uop.raw == expected.uop.raw
+        else:
+            assert got.uop is expected.uop
+        np.testing.assert_array_equal(got.numpy(), expected.numpy())
 
 
 def test_residual_training_state_stays_bounded(runtime):

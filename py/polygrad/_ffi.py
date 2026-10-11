@@ -1000,6 +1000,8 @@ def _declare_signatures(lib):
     lib.poly_tensor_gelu.restype = _ptr
     lib.poly_tensor_stack.restype = _ptr
     lib.poly_tensor_stack.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_cat.restype = _ptr
+    lib.poly_tensor_cat.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_bitwise_not.restype = _ptr
     lib.poly_tensor_bitwise_not.argtypes = [_ptr, _ptr]
     lib.poly_tensor_sparse_categorical_crossentropy.restype = _ptr

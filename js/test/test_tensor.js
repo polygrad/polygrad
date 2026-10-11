@@ -4615,6 +4615,20 @@ async function runTensorTests(pg, createRuntime) {
     assert(!a.uop.hasBufferIdentity(), 'assign before realize should be an effect graph')
   })
 
+  await test('cat equal widths uses the shared stack graph', async () => {
+    const x = await Tensor.arange(12).cast('float32').reshape([2, 2, 3]).realize()
+    const y = x.add(1)
+    for (const dim of [0, 1, -1]) {
+      const axis = (dim + 3) % 3
+      const got = x.cat(y, {dim})
+      const expected = x.stack(y, {dim: axis}).flatten(axis, axis + 1)
+      assert(got.uop.key === expected.uop.key, 'cat bypassed the shared stack lowering')
+      assertClose(await got.toArray(), await expected.toArray())
+      got.dispose(); expected.dispose()
+    }
+    x.dispose(); y.dispose()
+  })
+
   await test('assign realized source to unrealized target preserves independent storage', async () => {
     const source = await new Tensor(new Float32Array([3, 4, 5, 6])).realize()
     const target = Tensor.zeros([4]).add(1)

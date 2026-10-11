@@ -3970,24 +3970,10 @@ function createBoundTensorClass(runtime) {
       if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
       if (!tensors.length) throw new Error('cat requires at least one tensor')
 
-      const ndim = tensors[0].shape.length
-      if (dim < 0) dim += ndim
-      const outShape = [...tensors[0].shape]
-      outShape[dim] = tensors.reduce((acc, t) => acc + t.shape[dim], 0)
-
-      let offset = 0
-      let result = null
-      for (const t of tensors) {
-        const padBefore = new Array(ndim).fill(0)
-        const padAfter = new Array(ndim).fill(0)
-        padBefore[dim] = offset
-        padAfter[dim] = outShape[dim] - offset - t.shape[dim]
-        const padArg = Array.from({ length: ndim }, (_, i) => [padBefore[i], padAfter[i]])
-        const padded = t.pad(padArg)
-        result = result ? result.add(padded) : padded
-        offset += t.shape[dim]
-      }
-      return result
+      if (tensors.some(t => !(t instanceof Tensor))) throw new TypeError('cat expects tensors')
+      dim = tensors[0]._resolveDim(dim)
+      const core = tensors[0]._rt._core.ffi.poly_tensor_cat(tensors[0]._ctx, tensors.map(t => t._tensor), dim)
+      return tensors[0]._makeResultFromCore(core)
     }
 
     stack(...tensors) {

@@ -2520,7 +2520,7 @@ static napi_value napi_poly_tensor_sparse_categorical_crossentropy(
   );
 }
 
-static napi_value napi_poly_tensor_stack(napi_env env, napi_callback_info info) {
+static napi_value napi_tensor_join(napi_env env, napi_callback_info info, bool stack) {
   napi_value argv[3];
   size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -2528,9 +2528,19 @@ static napi_value napi_poly_tensor_stack(napi_env env, napi_callback_info info) 
   PolyTensor **inputs = (PolyTensor **)read_uop_array(env, argv[1], &n);
   if (!inputs) return NULL;
   napi_get_value_int32(env, argv[2], &dim);
-  PolyTensor *out = poly_tensor_stack(get_external(env, argv[0]), inputs, n, dim);
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *out =
+      stack ? poly_tensor_stack(ctx, inputs, n, dim) : poly_tensor_cat(ctx, inputs, n, dim);
   free(inputs);
   return make_external(env, out);
+}
+
+static napi_value napi_poly_tensor_stack(napi_env env, napi_callback_info info) {
+  return napi_tensor_join(env, info, true);
+}
+
+static napi_value napi_poly_tensor_cat(napi_env env, napi_callback_info info) {
+  return napi_tensor_join(env, info, false);
 }
 
 static napi_value napi_poly_tensor_quick_gelu(napi_env env, napi_callback_info info) {
@@ -7685,6 +7695,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_pad_mode", napi_poly_tensor_pad_mode),
       DECLARE_NAPI_METHOD("poly_tensor_gelu", napi_poly_tensor_gelu),
       DECLARE_NAPI_METHOD("poly_tensor_stack", napi_poly_tensor_stack),
+      DECLARE_NAPI_METHOD("poly_tensor_cat", napi_poly_tensor_cat),
       DECLARE_NAPI_METHOD("poly_tensor_bitwise_not", napi_poly_tensor_bitwise_not),
       DECLARE_NAPI_METHOD(
           "poly_tensor_sparse_categorical_crossentropy",

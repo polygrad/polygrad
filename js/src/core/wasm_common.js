@@ -1316,6 +1316,11 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_stack(ctx, ptr, inputs.length, dim) }
       finally { Module._free(ptr) }
     },
+    poly_tensor_cat: (ctx, inputs, dim) => {
+      const ptr = writePtrArray(inputs)
+      try { return Module._poly_tensor_cat(ctx, ptr, inputs.length, dim) }
+      finally { Module._free(ptr) }
+    },
     poly_tensor_bitwise_not: (ctx, src) => Module._poly_tensor_bitwise_not(ctx, src),
     poly_tensor_sparse_categorical_crossentropy: (ctx, x, target, ignoreIndex, smoothing, reduction) =>
       Module._poly_tensor_sparse_categorical_crossentropy(ctx, x, target, BigInt(ignoreIndex), smoothing, reduction),

@@ -3860,31 +3860,10 @@ class Tensor:
             tensors = (self,) + tensors
         if not tensors:
             raise ValueError('cat requires at least one tensor')
-        # Implementation: pad each tensor, then sum
-        shapes = [t.shape for t in tensors]
-        ndim = len(shapes[0])
-        if dim < 0:
-            dim += ndim
-
-        # Compute output shape
-        out_shape = list(shapes[0])
-        out_shape[dim] = sum(s[dim] for s in shapes)
-
-        # Pad each tensor to output shape and sum
-        offset = 0
-        result = None
-        for t in tensors:
-            pad_before = [0] * ndim
-            pad_after = [0] * ndim
-            pad_before[dim] = offset
-            pad_after[dim] = out_shape[dim] - offset - t.shape[dim]
-            padded = t.pad(tuple((pad_before[i], pad_after[i]) for i in range(ndim)))
-            if result is None:
-                result = padded
-            else:
-                result = result + padded
-            offset += t.shape[dim]
-        return result
+        dim = tensors[0]._resolve_dim(dim)
+        cores = (_ffi._ptr * len(tensors))(*(t._tensor for t in tensors))
+        core = _ffi._lib.poly_tensor_cat(tensors[0]._ctx, cores, len(tensors), dim)
+        return tensors[0]._make_result_from_core(core, None)
 
     def stack(self, *tensors, dim=0):
         if isinstance(self, (list, tuple)) and tensors:
