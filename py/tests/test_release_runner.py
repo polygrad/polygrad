@@ -40,6 +40,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
     assert 'test-symbolic-z3-supported' in targets
     assert 'test-release-py-performance' in targets
+    assert {'test-model-workloads', 'test-generative-soak'} <= set(targets)
     assert {'test-kernels', 'test-extension', 'test-examples', 'test-llama-pretrained', 'test-onnx-encoder'} <= set(targets)
     assert targets.index('test-release-py-performance') < targets.index('test')
     perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')

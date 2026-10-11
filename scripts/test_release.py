@@ -55,7 +55,7 @@ def release_gates():
         test-parity-graph test-release-op-census
         test-compat-tinygrad-upstream-ratchet test-compat-tinygrad-ops test-compat-tinygrad-nn
         test-compat-tinygrad-policy
-        test-compat-tinygrad-tier1 test-compat-tinygrad-convnext
+        test-compat-tinygrad-tier1 test-compat-tinygrad-convnext test-model-workloads test-generative-soak
         test-reference-parity fuzz-smoke test-symbolic-z3-supported
         test-release-c-performance bench-hlb-cuda-semantic bench-hlb-cuda-timing
     '''.split()

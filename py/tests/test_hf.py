@@ -441,6 +441,52 @@ def test_transformer_generation_reclaims_dropped_storage(device):
         assert rt.GlobalCounters.mem_used <= baseline
 
 
+def test_transformer_generation_soak():
+    """Repeated conversations must not retain old caches or rollout graphs.
+
+    The ordinary suite runs 80 conversations. The release target also requires
+    three minutes of execution; elapsed time is not a performance assertion.
+    """
+    import gc
+    import os
+    import time
+    import polygrad as pg
+    seconds = float(os.environ.get('POLY_SOAK_SECONDS', '0'))
+    if not np.isfinite(seconds) or seconds < 0:
+        raise ValueError('POLY_SOAK_SECONDS must be finite and nonnegative')
+    device = os.environ.get('POLY_SOAK_DEVICE', 'cpu')
+    case = LLAMA_CASES[0]
+    snapshots = []
+    with pg.create(device=device) as rt:
+        model = rt.models.Llama({**case['config'], 'cache_capacity':8, 'prefill_chunk_size':4})
+        try:
+            for name, data in llama_weights(case).items():
+                model.write_buffer(name, data)
+            prompt = np.array([1, 4], np.int32)
+            expected = list(model.generate(prompt, temperature=0, max_tokens=6))
+            assert len(expected) == 6
+            started, count = time.monotonic(), 0
+            while count < 80 or time.monotonic() - started < seconds:
+                model.reset()
+                assert list(model.generate(prompt, temperature=0, max_tokens=6)) == expected
+                assert model.decode_position == 7
+                count += 1
+                if count >= 40 and count % 20 == 0:
+                    gc.collect()
+                    rt.collect()
+                    state = rt.stats()
+                    snapshot = {k: state[k] for k in
+                                ('arena_bytes', 'cse_entries', 'buffer_entries', 'buffer_owned_bytes')}
+                    if snapshots:
+                        assert snapshot == snapshots[0], (count, snapshots[0], snapshot)
+                    else:
+                        snapshots.append(snapshot)
+            print({'conversations':count, 'seconds':time.monotonic()-started,
+                   'device':device, 'retained':snapshots[0]})
+        finally:
+            model.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_transformer_sampler_matches_pinned_gumbel(device):
     import polygrad as pg

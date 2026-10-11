@@ -425,9 +425,22 @@ test-compat-tinygrad-nn: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
 		--adapter cpu-nn --test test/backend/test_nn.py --test test/backend/test_optim.py $(UPSTREAM_COMPAT_ARGS)
 
-.PHONY: test-whisper
+.PHONY: test-model-workloads test-generative-soak test-whisper
 test-whisper: build/libpolygrad.so
 	POLY_LIB="$(CURDIR)/build/libpolygrad.so" PYTHONPATH=py $(HF_PYTHON) -m pytest -q py/tests/test_whisper.py
+
+test-model-workloads: build/libpolygrad.so
+	MODEL_WORKLOAD_ENGINE=tinygrad DEV=CPU PYTHONPATH=references/tinygrad_latest \
+		$(HF_PYTHON) -m pytest -q -s py/tests/test_model_workloads.py
+	POLY_LIB="$(CURDIR)/build/libpolygrad.so" PYTHONPATH=py \
+		$(HF_PYTHON) -m pytest -q -s py/tests/test_model_workloads.py
+
+SOAK_SECONDS ?= 180
+SOAK_DEVICE ?= cpu
+test-generative-soak: build/libpolygrad.so
+	POLY_LIB="$(CURDIR)/build/libpolygrad.so" PYTHONPATH=py \
+		POLY_SOAK_SECONDS=$(SOAK_SECONDS) POLY_SOAK_DEVICE=$(SOAK_DEVICE) \
+		$(PARITY_PY) -m pytest -q -s py/tests/test_hf.py -k test_transformer_generation_soak
 
 .PHONY: test-compat-tinygrad-suite
 # Diagnostic refresh of all selected upstream files. Run every lane even when
