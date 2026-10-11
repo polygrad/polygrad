@@ -2632,6 +2632,68 @@ def inferred_symbolic_reshape_graph():
 CASES['inferred_symbolic_reshape'] = ('tensor', inferred_symbolic_reshape_graph)
 
 
+def core_composite_graph(method, dtype):
+    x = typed_realized_empty(dtype)
+    params = [.01] if method == 'leaky_relu' else [1.] if method in ('elu', 'softplus') else [-1] if method in ('triu', 'tril') else []
+    if ENGINE == 'polygrad':
+        fn = getattr(_ffi._lib, 'poly_tensor_' + method)
+        fn.restype = _ffi._ptr
+        fn.argtypes = [_ffi._ptr, _ffi._ptr] + ([ctypes.c_int if method in ('triu', 'tril') else ctypes.c_double] if params else [])
+        out = x._make_result_from_core(fn(x._ctx, x._tensor, *params), x.shape)
+    else:
+        out = getattr(x, method)(*params)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _method in ('relu', 'ceil', 'floor', 'leaky_relu', 'hardswish', 'elu', 'sigmoid',
+                'abs', 'sign', 'round', 'isinf', 'isnan', 'silu', 'softplus', 'triu', 'tril',
+                'square', 'rsqrt', 'relu6', 'logical_not', 'neg'):
+    for _dtype in ('int32', 'int64', 'float32', 'float64'):
+        CASES[f'core_{_method}_{_dtype}'] = (
+            'tensor', lambda m=_method, d=_dtype: core_composite_graph(m, d))
+# Mish contains the separately approved tanh composition; its ordinary graph
+# case already checks that scoped divergence. The other five require exact IR.
+
+
+def parameter_composite_graph(method, variant):
+    x = typed_realized_empty('int64')
+    parameter = {'integer': 1, 'float': 1.0, 'tensor': None}[variant]
+    if parameter is None: parameter = Tensor.full((2, 1), .5, dtype='float32', device='CPU').realize()
+    if method == 'clamp': out = x.clamp(parameter, None)
+    elif method == 'hardsigmoid': out = x.hardsigmoid(parameter, .5)
+    elif method == 'logaddexp': out = x.logaddexp(parameter)
+    elif method == 'ge': out = x >= parameter
+    elif method == 'le': out = x <= parameter
+    else: out = getattr(x, method)(parameter)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _method in ('clamp', 'hardsigmoid', 'elu', 'softplus', 'logaddexp', 'eq', 'ge', 'le'):
+    for _variant in ('integer', 'float', 'tensor'):
+        CASES[f'composite_{_method}_{_variant}'] = ('tensor', lambda m=_method, v=_variant: parameter_composite_graph(m, v))
+
+
+def repeat_one_graph(interleave=False, zero=False):
+    x = typed_realized_empty('float32')
+    out = x.repeat_interleave(0 if zero else 1, dim=1) if interleave else x.repeat(1, 0 if zero else 2)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _interleave in (False, True):
+    for _zero in (False, True):
+        CASES[f'composite_repeat_{_interleave}_{_zero}'] = ('tensor', lambda i=_interleave, z=_zero: repeat_one_graph(i, z))
+
+
+def triangular_wide_graph(method, diagonal):
+    out = getattr(typed_realized_empty('float32'), method)(diagonal)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _method in ('triu', 'tril'):
+    for _diagonal in (2**32, 2**31-1, -2**32):
+        CASES[f'composite_{_method}_{_diagonal}'] = ('tensor', lambda m=_method, d=_diagonal: triangular_wide_graph(m, d))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

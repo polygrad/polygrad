@@ -2050,6 +2050,134 @@ static napi_value napi_poly_tensor_tanh(napi_env env, napi_callback_info info) {
   );
 }
 
+#define NAPI_TENSOR_COMPOSITION(name)                                                              \
+  static napi_value napi_poly_tensor_##name(napi_env env, napi_callback_info info) {               \
+    napi_value argv[2];                                                                            \
+    size_t argc = 2;                                                                               \
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));                          \
+    return make_external(                                                                          \
+        env, poly_tensor_##name(get_external(env, argv[0]), get_external(env, argv[1]))            \
+    );                                                                                             \
+  }
+NAPI_TENSOR_COMPOSITION(relu)
+NAPI_TENSOR_COMPOSITION(ceil)
+NAPI_TENSOR_COMPOSITION(floor)
+NAPI_TENSOR_COMPOSITION(mish)
+NAPI_TENSOR_COMPOSITION(hardswish)
+NAPI_TENSOR_COMPOSITION(sigmoid)
+NAPI_TENSOR_COMPOSITION(abs)
+NAPI_TENSOR_COMPOSITION(sign)
+NAPI_TENSOR_COMPOSITION(square)
+NAPI_TENSOR_COMPOSITION(rsqrt)
+NAPI_TENSOR_COMPOSITION(round)
+NAPI_TENSOR_COMPOSITION(isnan)
+NAPI_TENSOR_COMPOSITION(relu6)
+NAPI_TENSOR_COMPOSITION(silu)
+NAPI_TENSOR_COMPOSITION(logical_not)
+NAPI_TENSOR_COMPOSITION(neg)
+#undef NAPI_TENSOR_COMPOSITION
+
+#define NAPI_TENSOR_BINARY_COMPOSITION(name)                                                       \
+  static napi_value napi_poly_tensor_##name(napi_env env, napi_callback_info info) {               \
+    napi_value argv[3];                                                                            \
+    size_t argc = 3;                                                                               \
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));                          \
+    return make_external(                                                                          \
+        env,                                                                                       \
+        poly_tensor_##name(                                                                        \
+            get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2])     \
+        )                                                                                          \
+    );                                                                                             \
+  }
+NAPI_TENSOR_BINARY_COMPOSITION(leaky_relu_tensor)
+NAPI_TENSOR_BINARY_COMPOSITION(elu_tensor)
+NAPI_TENSOR_BINARY_COMPOSITION(logaddexp)
+NAPI_TENSOR_BINARY_COMPOSITION(eq)
+NAPI_TENSOR_BINARY_COMPOSITION(ge)
+NAPI_TENSOR_BINARY_COMPOSITION(le)
+NAPI_TENSOR_BINARY_COMPOSITION(triu_tensor)
+NAPI_TENSOR_BINARY_COMPOSITION(tril_tensor)
+#undef NAPI_TENSOR_BINARY_COMPOSITION
+
+#define NAPI_TENSOR_TERNARY_COMPOSITION(name)                                                      \
+  static napi_value napi_poly_tensor_##name(napi_env env, napi_callback_info info) {               \
+    napi_value argv[4];                                                                            \
+    size_t argc = 4;                                                                               \
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));                          \
+    return make_external(                                                                          \
+        env, poly_tensor_##name(                                                                   \
+                 get_external(env, argv[0]), get_external(env, argv[1]),                           \
+                 get_external(env, argv[2]), get_external(env, argv[3])                            \
+             )                                                                                     \
+    );                                                                                             \
+  }
+NAPI_TENSOR_TERNARY_COMPOSITION(softplus_tensor)
+NAPI_TENSOR_TERNARY_COMPOSITION(clamp)
+NAPI_TENSOR_TERNARY_COMPOSITION(hardsigmoid)
+#undef NAPI_TENSOR_TERNARY_COMPOSITION
+
+#define NAPI_TENSOR_TRIANGULAR(name)                                                               \
+  static napi_value napi_poly_tensor_##name(napi_env env, napi_callback_info info) {               \
+    napi_value argv[3];                                                                            \
+    size_t argc = 3;                                                                               \
+    NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));                          \
+    int32_t diagonal;                                                                              \
+    NAPI_CALL(env, napi_get_value_int32(env, argv[2], &diagonal));                                 \
+    return make_external(                                                                          \
+        env, poly_tensor_##name(get_external(env, argv[0]), get_external(env, argv[1]), diagonal)  \
+    );                                                                                             \
+  }
+NAPI_TENSOR_TRIANGULAR(triu)
+NAPI_TENSOR_TRIANGULAR(tril)
+#undef NAPI_TENSOR_TRIANGULAR
+
+static napi_value napi_poly_tensor_isinf_flags(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  bool positive, negative;
+  NAPI_CALL(env, napi_get_value_bool(env, argv[2], &positive));
+  NAPI_CALL(env, napi_get_value_bool(env, argv[3], &negative));
+  return make_external(
+      env, poly_tensor_isinf_flags(
+               get_external(env, argv[0]), get_external(env, argv[1]), positive, negative
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_repeat_interleave(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  int32_t repeats, dim;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &repeats));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &dim));
+  return make_external(
+      env, poly_tensor_repeat_interleave(
+               get_external(env, argv[0]), get_external(env, argv[1]), repeats, dim
+           )
+  );
+}
+
+static napi_value napi_poly_tensor_repeat(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  uint32_t count_requested;
+  NAPI_CALL(env, napi_get_array_length(env, argv[2], &count_requested));
+  if (count_requested > POLY_MAX_DIMS) {
+    napi_throw_range_error(env, NULL, "repeat rank exceeds the Tensor dimension limit");
+    return NULL;
+  }
+  int64_t repeats[POLY_MAX_DIMS];
+  int count = read_int64_array(env, argv[2], repeats, POLY_MAX_DIMS);
+  if (count < 0) return NULL;
+  return make_external(
+      env,
+      poly_tensor_repeat(get_external(env, argv[0]), get_external(env, argv[1]), repeats, count)
+  );
+}
+
 static napi_value napi_poly_tensor_log10(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -7658,6 +7786,38 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_cos", napi_poly_tensor_cos),
       DECLARE_NAPI_METHOD("poly_tensor_tan", napi_poly_tensor_tan),
       DECLARE_NAPI_METHOD("poly_tensor_tanh", napi_poly_tensor_tanh),
+      DECLARE_NAPI_METHOD("poly_tensor_relu", napi_poly_tensor_relu),
+      DECLARE_NAPI_METHOD("poly_tensor_ceil", napi_poly_tensor_ceil),
+      DECLARE_NAPI_METHOD("poly_tensor_floor", napi_poly_tensor_floor),
+      DECLARE_NAPI_METHOD("poly_tensor_mish", napi_poly_tensor_mish),
+      DECLARE_NAPI_METHOD("poly_tensor_hardswish", napi_poly_tensor_hardswish),
+      DECLARE_NAPI_METHOD("poly_tensor_sigmoid", napi_poly_tensor_sigmoid),
+      DECLARE_NAPI_METHOD("poly_tensor_abs", napi_poly_tensor_abs),
+      DECLARE_NAPI_METHOD("poly_tensor_sign", napi_poly_tensor_sign),
+      DECLARE_NAPI_METHOD("poly_tensor_square", napi_poly_tensor_square),
+      DECLARE_NAPI_METHOD("poly_tensor_rsqrt", napi_poly_tensor_rsqrt),
+      DECLARE_NAPI_METHOD("poly_tensor_round", napi_poly_tensor_round),
+      DECLARE_NAPI_METHOD("poly_tensor_isnan", napi_poly_tensor_isnan),
+      DECLARE_NAPI_METHOD("poly_tensor_relu6", napi_poly_tensor_relu6),
+      DECLARE_NAPI_METHOD("poly_tensor_silu", napi_poly_tensor_silu),
+      DECLARE_NAPI_METHOD("poly_tensor_logical_not", napi_poly_tensor_logical_not),
+      DECLARE_NAPI_METHOD("poly_tensor_neg", napi_poly_tensor_neg),
+      DECLARE_NAPI_METHOD("poly_tensor_ge", napi_poly_tensor_ge),
+      DECLARE_NAPI_METHOD("poly_tensor_le", napi_poly_tensor_le),
+      DECLARE_NAPI_METHOD("poly_tensor_triu_tensor", napi_poly_tensor_triu_tensor),
+      DECLARE_NAPI_METHOD("poly_tensor_tril_tensor", napi_poly_tensor_tril_tensor),
+      DECLARE_NAPI_METHOD("poly_tensor_repeat", napi_poly_tensor_repeat),
+      DECLARE_NAPI_METHOD("poly_tensor_repeat_interleave", napi_poly_tensor_repeat_interleave),
+      DECLARE_NAPI_METHOD("poly_tensor_elu_tensor", napi_poly_tensor_elu_tensor),
+      DECLARE_NAPI_METHOD("poly_tensor_logaddexp", napi_poly_tensor_logaddexp),
+      DECLARE_NAPI_METHOD("poly_tensor_eq", napi_poly_tensor_eq),
+      DECLARE_NAPI_METHOD("poly_tensor_softplus_tensor", napi_poly_tensor_softplus_tensor),
+      DECLARE_NAPI_METHOD("poly_tensor_clamp", napi_poly_tensor_clamp),
+      DECLARE_NAPI_METHOD("poly_tensor_hardsigmoid", napi_poly_tensor_hardsigmoid),
+      DECLARE_NAPI_METHOD("poly_tensor_isinf_flags", napi_poly_tensor_isinf_flags),
+      DECLARE_NAPI_METHOD("poly_tensor_triu", napi_poly_tensor_triu),
+      DECLARE_NAPI_METHOD("poly_tensor_tril", napi_poly_tensor_tril),
+      DECLARE_NAPI_METHOD("poly_tensor_leaky_relu_tensor", napi_poly_tensor_leaky_relu_tensor),
       DECLARE_NAPI_METHOD("poly_tensor_log1p", napi_poly_tensor_log1p),
       DECLARE_NAPI_METHOD("poly_tensor_log10", napi_poly_tensor_log10),
       DECLARE_NAPI_METHOD("poly_tensor_atanh", napi_poly_tensor_atanh),

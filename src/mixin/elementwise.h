@@ -99,6 +99,7 @@ PolyUOp *poly_uop_floor(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_uop_round(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_isinf(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_uop_isinf_flags(PolyCtx *ctx, PolyUOp *x, bool detect_positive, bool detect_negative);
 
 PolyUOp *poly_uop_isnan(PolyCtx *ctx, PolyUOp *x);
 
@@ -122,6 +123,7 @@ PolyUOp *poly_uop_relu(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_uop_relu6(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope);
+PolyUOp *poly_uop_leaky_relu_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *slope);
 
 PolyUOp *poly_uop_gelu(PolyCtx *ctx, PolyUOp *x);
 
@@ -130,8 +132,11 @@ PolyUOp *poly_uop_quick_gelu(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_uop_silu(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_elu(PolyCtx *ctx, PolyUOp *x, double alpha);
+PolyUOp *poly_uop_elu_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha);
 
 PolyUOp *poly_uop_softplus(PolyCtx *ctx, PolyUOp *x, double beta);
+PolyUOp *poly_uop_softplus_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *beta, PolyUOp *inverse);
+PolyUOp *poly_uop_logaddexp(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
 PolyUOp *poly_uop_logsigmoid(PolyCtx *ctx, PolyUOp *x);
 
@@ -142,6 +147,7 @@ PolyUOp *poly_uop_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_
 PolyUOp *poly_uop_hardswish(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_hardsigmoid(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_uop_hardsigmoid_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *beta);
 
 PolyUOp *poly_uop_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
@@ -156,6 +162,7 @@ PolyUOp *poly_uop_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_uop_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
 PolyUOp *poly_uop_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi);
+PolyUOp *poly_uop_clamp_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *lo, PolyUOp *hi);
 
 PolyUOp *poly_uop_detach(PolyCtx *ctx, PolyUOp *x);
 

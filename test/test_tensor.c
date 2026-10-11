@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -223,6 +224,134 @@ static int read_tensor_bytes(PolyCtx *ctx, PolyTensor *tensor, void *out, size_t
 
 static int read_tensor_f32(PolyCtx *ctx, PolyTensor *tensor, float *out, size_t n);
 
+TEST(tensor, integer_composites_preserve_scalar_promotion) {
+  PolyTensor *(*exact[]
+  )(PolyCtx *, PolyTensor *) = {poly_tensor_relu, poly_tensor_floor, poly_tensor_ceil};
+  int64_t values[] = {-INT64_C(9007199254740993), -16777217, -1, 0, 1, 16777217,
+                      INT64_C(9007199254740993)};
+  int64_t shape[] = {7}, got[7];
+  for (int device = 0; device < 2; device++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_preferred_device(ctx, device ? POLY_DEVICE_INTERP : POLY_DEVICE_CPU);
+    PolyTensor *x = poly_tensor_from_host(ctx, values, sizeof(values), POLY_INT64, shape, 1);
+    ASSERT_NOT_NULL(x);
+    for (int op = 0; op < 3; op++) {
+      PolyTensor *y = exact[op](ctx, x);
+      ASSERT_NOT_NULL(y);
+      ASSERT_TRUE(poly_dtype_eq(y->uop_physical->dtype, POLY_INT64));
+      ASSERT_INT_EQ(read_tensor_bytes(ctx, y, got, sizeof(got)), 0);
+      for (int i = 0; i < 7; i++)
+        ASSERT_EQ(got[i], op == 0 && values[i] < 0 ? 0 : values[i]);
+      poly_tensor_release(y);
+    }
+    poly_tensor_release(x);
+    int32_t input[] = {-3, -1, 0, 1, 3};
+    shape[0] = 5;
+    x = poly_tensor_from_host(ctx, input, sizeof(input), POLY_INT32, shape, 1);
+    PolyTensor *out[] = {
+        poly_tensor_leaky_relu(ctx, x, .01), poly_tensor_mish(ctx, x),
+        poly_tensor_hardswish(ctx, x), poly_tensor_elu(ctx, x, 1.0)};
+    for (int op = 0; op < 4; op++) {
+      float result[5];
+      ASSERT_NOT_NULL(out[op]);
+      ASSERT_TRUE(poly_dtype_is_float(out[op]->uop_physical->dtype));
+      /* Weak floating results have no storage width; materialize like numpy(). */
+      PolyTensor *stored = poly_tensor_cast(ctx, out[op], POLY_FLOAT32);
+      ASSERT_INT_EQ(read_tensor_bytes(ctx, stored, result, sizeof(result)), 0);
+      for (int i = 0; i < 5; i++) {
+        double v = input[i];
+        double expected = op == 0   ? (v < 0 ? .01 * v : v)
+                          : op == 1 ? v * tanh(log1p(exp(v)))
+                          : op == 2 ? v * fmin(fmax(v + 3, 0), 6) / 6
+                                    : (v < 0 ? exp(v) - 1 : v);
+        ASSERT_FLOAT_EQ(result[i], expected, 1e-6);
+      }
+      poly_tensor_release(stored);
+      poly_tensor_release(out[op]);
+    }
+    PolyCtx *foreign = poly_ctx_new();
+    float slope_value = .01f;
+    PolyTensor *foreign_slope = poly_tensor_from_host(
+        foreign, &slope_value, sizeof(slope_value), POLY_FLOAT32, (int64_t[]){1}, 1
+    );
+    ASSERT_NOT_NULL(foreign_slope);
+    ASSERT_EQ(poly_tensor_leaky_relu_tensor(ctx, x, NULL), NULL);
+    ASSERT_EQ(poly_tensor_leaky_relu_tensor(ctx, NULL, x), NULL);
+    ASSERT_EQ(poly_tensor_leaky_relu_tensor(ctx, x, foreign_slope), NULL);
+    poly_tensor_release(foreign_slope);
+    poly_ctx_destroy(foreign);
+    poly_tensor_release(x);
+    poly_ctx_destroy(ctx);
+    shape[0] = 7;
+  }
+  PASS();
+}
+
+TEST(tensor, composite_parameter_ownership_and_broadcast) {
+  PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
+  float values[] = {-3, -1, 0, 1, 3, 5}, parameters[] = {.25f, .5f};
+  PolyTensor *x =
+      poly_tensor_from_host(ctx, values, sizeof(values), POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+  PolyTensor *a = poly_tensor_from_host(
+      ctx, parameters, sizeof(parameters), POLY_FLOAT32, (int64_t[]){2, 1}, 2
+  );
+  PolyTensor *foreign = poly_tensor_from_host(
+      other, parameters, sizeof(parameters), POLY_FLOAT32, (int64_t[]){2, 1}, 2
+  );
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(foreign);
+  PolyTensor *triangle = poly_tensor_tril(ctx, x, INT_MAX);
+  ASSERT_NOT_NULL(triangle);
+  float triangle_values[6];
+  ASSERT_INT_EQ(read_tensor_bytes(ctx, triangle, triangle_values, sizeof(triangle_values)), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(triangle_values[i], values[i], 0);
+  poly_tensor_release(triangle);
+  PolyTensor *(*binary[])(PolyCtx *, PolyTensor *, PolyTensor *) = {
+      poly_tensor_elu_tensor, poly_tensor_logaddexp, poly_tensor_eq, poly_tensor_ge,
+      poly_tensor_le};
+  for (size_t i = 0; i < sizeof(binary) / sizeof(binary[0]); i++) {
+    ASSERT_EQ(binary[i](ctx, x, foreign), NULL);
+    ASSERT_EQ(binary[i](ctx, x, NULL), NULL);
+    PolyTensor *result = binary[i](ctx, x, a);
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(poly_uop_ndim(ctx, result->uop_physical), 2);
+    int64_t width;
+    ASSERT_INT_EQ(poly_uop_const_i64(poly_uop_shape_dim(ctx, result->uop_physical, 1), &width), 0);
+    ASSERT_EQ(width, 3);
+    poly_tensor_release(result);
+  }
+  ASSERT_EQ(poly_tensor_clamp(ctx, x, NULL, NULL), NULL);
+  ASSERT_EQ(poly_tensor_clamp(ctx, x, a, foreign), NULL);
+  ASSERT_EQ(poly_tensor_softplus_tensor(ctx, x, NULL, NULL), NULL);
+  ASSERT_EQ(poly_tensor_softplus_tensor(ctx, x, a, foreign), NULL);
+  ASSERT_EQ(poly_tensor_hardsigmoid(ctx, x, a, NULL), NULL);
+  PolyTensor *outputs[] = {
+      poly_tensor_clamp(ctx, x, a, NULL), poly_tensor_clamp(ctx, x, NULL, a),
+      poly_tensor_softplus_tensor(ctx, x, a, NULL), poly_tensor_hardsigmoid(ctx, x, a, a)};
+  for (int i = 0; i < 4; i++) {
+    ASSERT_NOT_NULL(outputs[i]);
+    float got[6];
+    ASSERT_INT_EQ(read_tensor_bytes(ctx, outputs[i], got, sizeof(got)), 0);
+    for (int j = 0; j < 6; j++) {
+      float p = parameters[j / 3], v = values[j];
+      float expected = i == 0   ? fmaxf(v, p)
+                       : i == 1 ? fminf(v, p)
+                       : i == 2 ? log1pf(expf(v * p)) / p
+                                : fminf(fmaxf(p * v + p, 0), 1);
+      ASSERT_FLOAT_EQ(got[j], expected, 2e-6);
+    }
+    poly_tensor_release(outputs[i]);
+  }
+  poly_tensor_release(foreign);
+  poly_ctx_destroy(other);
+  poly_tensor_release(a);
+  poly_tensor_release(x);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, tanh_accuracy_and_portable_composition) {
   double values[] = {-INFINITY, -1000, -20,     -1,  -.25, -.249999, -1e-7, -1e-30,   -0.0, 0.0,
                      1e-30,     1e-7,  .249999, .25, 1,    20,       1000,  INFINITY, NAN};
@@ -292,7 +421,8 @@ TEST(tensor, round_half_ties_match_pinned_even_parity) {
     for (int i = 0; i < count; i++) {
       PolyUOp *u = nodes[i];
       if (u->op == POLY_OP_CMPNE && u->src[0]->op == POLY_OP_TRUNC &&
-          u->src[0]->src[0] == u->src[1] && u->src[1]->op == POLY_OP_FDIV)
+          u->src[0]->src[0] == u->src[1] && u->src[1]->op == POLY_OP_MUL &&
+          u->src[1]->src[1]->op == POLY_OP_RECIPROCAL)
         parity_checks++;
     }
     ASSERT_EQ(parity_checks, 1); /* eq is logical_not(CMPNE), as in the pin. */
@@ -316,7 +446,7 @@ TEST(tensor, round_integer_promotes_arithmetic_like_pinned) {
   int count = 0, divisions = 0;
   PolyUOp **nodes = poly_uop_toposort(ctx, out->uop_physical, &count);
   for (int i = 0; i < count; i++) {
-    if (nodes[i]->op != POLY_OP_FDIV) continue;
+    if (nodes[i]->op != POLY_OP_MUL || nodes[i]->src[1]->op != POLY_OP_RECIPROCAL) continue;
     ASSERT_TRUE(poly_dtype_is_float(nodes[i]->src[0]->dtype));
     ASSERT_EQ(nodes[i]->src[0]->op, POLY_OP_CAST);
     divisions++;
@@ -4630,7 +4760,10 @@ TEST(pe, repeat_interleave_e2e) {
 TEST(pe, repeat_interleave_identity_and_symbolic_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
-  ASSERT_PTR_EQ(poly_uop_repeat_interleave(ctx, x, 1, 1), x);
+  PolyUOp *expected = poly_uop_reshape(ctx, x, (int64_t[]){2, 3, 1}, 3);
+  expected = poly_uop_expand(ctx, expected, (int64_t[]){2, 3, 1}, 3);
+  expected = poly_uop_reshape(ctx, expected, (int64_t[]){2, 3}, 2);
+  ASSERT_PTR_EQ(poly_uop_repeat_interleave(ctx, x, 1, 1), expected);
 
   PolyUOp *cap = make_buf(ctx, (int64_t[]){2, 8}, 2);
   PolyUOp *n =

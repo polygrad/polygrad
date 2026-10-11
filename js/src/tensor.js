@@ -1699,8 +1699,7 @@ function createBoundTensorClass(runtime) {
     rshift(other, reverse = false) { return this._binop(other, 'SHR', reverse) }
     threefry(seed) { return this._binop(seed, 'THREEFRY') }
     logicalNot() {
-      const value = this.cast('bool')
-      try { return value.ne(true) } finally { if (value !== this) value.dispose() }
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_logical_not(this._ctx, this._tensor))
     }
     floorDiv(other) { return this.div(other, 'floor') }
     bitwiseNot() {
@@ -1754,17 +1753,14 @@ function createBoundTensorClass(runtime) {
     lt(other) { return this._binop(other, 'CMPLT') }
 
     neg() {
-      if (this._dtype === 'bool') return this.cast('bool').ne(true)
-      return this.mul(-1)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_neg(this._ctx, this._tensor))
     }
 
     // --- Comparisons (C core) ---
 
     eq(other) {
-      // Pinned mixin/elementwise.py:315-322: promoted CMPNE + logical_not.
-      const comparison = this._binop(other, 'CMPNE')
-      try { return comparison.ne(true) }
-      finally { releaseTensorTemporaries([comparison]) }
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_eq(this._ctx, this._tensor, rhs._tensor)))
     }
 
     ne(other) {
@@ -1777,15 +1773,13 @@ function createBoundTensorClass(runtime) {
     }
 
     ge(other) {
-      const comparison = this.lt(other)
-      try { return comparison.ne(true) }
-      finally { releaseTensorTemporaries([comparison]) }
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_ge(this._ctx, this._tensor, rhs._tensor)))
     }
 
     le(other) {
-      const comparison = this.gt(other)
-      try { return comparison.ne(true) }
-      finally { releaseTensorTemporaries([comparison]) }
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_le(this._ctx, this._tensor, rhs._tensor)))
     }
 
     where(x, y) {
@@ -1821,23 +1815,8 @@ function createBoundTensorClass(runtime) {
       if (lo === undefined && hi === undefined) {
         throw new Error("at least one of 'lo' or 'hi' must not be undefined")
       }
-      // Pinned clamp conditionally composes comparison/WHERE Tensor
-      // operations; an omitted bound is not a finite sentinel
-      // (mixin/elementwise.py:569-580).
-      const owned = []
-      try {
-        let ret = this
-        if (lo !== undefined) {
-          const comparison = this.lt(lo)
-          owned.push(comparison)
-          ret = comparison.where(lo, this)
-        }
-        if (hi === undefined) return ret
-        if (ret !== this) owned.push(ret)
-        const comparison = ret.gt(hi)
-        owned.push(comparison)
-        return comparison.where(hi, ret)
-      } finally { releaseTensorTemporaries(owned) }
+      return this._withTensorOperands([lo === undefined ? null : lo, hi === undefined ? null : hi], (a, b) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_clamp(this._ctx, this._tensor, a ? a._tensor : null, b ? b._tensor : null)))
     }
 
     // Pinned mixin/elementwise.py:582-584: clip is the public clamp alias.
@@ -1893,15 +1872,13 @@ function createBoundTensorClass(runtime) {
     }
 
     triu(diagonal = 0) {
-      // Pinned mixin/__init__.py:313-334.
-      const [r, c] = this.shape.slice(-2)
-      return Tensor._tri(r, c, diagonal, this._device).where(this, this.constLike(0))
+      return this._withTensorOperands([diagonal], d => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_triu_tensor(this._ctx, this._tensor, d._tensor)))
     }
 
     tril(diagonal = 0) {
-      // Pinned mixin/__init__.py:336-349.
-      const [r, c] = this.shape.slice(-2)
-      return Tensor._tri(r, c, diagonal + 1, this._device).where(this.constLike(0), this)
+      return this._withTensorOperands([diagonal], d => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_tril_tensor(this._ctx, this._tensor, d._tensor)))
     }
 
     // --- Unary math (C core composed ops) ---
@@ -2104,8 +2081,7 @@ function createBoundTensorClass(runtime) {
     }
 
     sigmoid() {
-      // Pinned mixin/elementwise.py:667-677.
-      return this.mul(-1 / Math.log(2)).exp2().add(1, true).reciprocal()
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_sigmoid(this._ctx, this._tensor))
     }
 
     tanh() {
@@ -2114,89 +2090,57 @@ function createBoundTensorClass(runtime) {
     }
 
     abs() {
-      // Pinned mixin/elementwise.py:892-900.
-      return this.mul(this.sign())
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_abs(this._ctx, this._tensor))
     }
 
     sign() {
-      // Pinned mixin/elementwise.py:882-890.
-      return this.ne(0).where(
-        this.lt(0).where(this.constLike(-1), this.constLike(1)),
-        this.constLike(0)
-      )
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_sign(this._ctx, this._tensor))
     }
 
     square() {
-      // Pinned mixin/elementwise.py:558-566.
-      return this.mul(this)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_square(this._ctx, this._tensor))
     }
 
     rsqrt() {
-      // Pinned mixin/elementwise.py:802-810.
-      return this.sqrt().reciprocal()
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_rsqrt(this._ctx, this._tensor))
     }
 
     ceil() {
-      // Pinned mixin/elementwise.py:636-644.
-      const b = this.trunc()
-      return this.gt(b).where(b.add(1), b)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_ceil(this._ctx, this._tensor))
     }
 
     floor() {
-      // Pinned mixin/elementwise.py:646-654.
-      const b = this.trunc()
-      return this.lt(b).where(b.sub(1), b)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_floor(this._ctx, this._tensor))
     }
 
     round() {
-      // Pinned mixin/elementwise.py:872-880 implements round-half-to-even
-      // through ordinary Tensor primitives and their scalar broadcast rules.
-      // JavaScript Number erases the source spelling distinction between 2
-      // and 2.0. Pinned UOp.ufix keeps it in the receiver dtype for floating
-      // inputs and uses from_py(float)==default_float for integer/bool inputs
-      // (uop/ops.py:504-508).
-      const two = new Tensor(2.0, {
-        _ctx: this._ctx,
-        dtype: isFloatDtype(this._dtype) ? this._dtype : _runtime.defaultFloat,
-        device: this._device
-      })
-      const b = this.trunc().div(two)
-      return this.gt(0).eq(b.trunc().eq(b)).where(
-        this.sub(0.5).ceil(), this.add(0.5).floor()
-      )
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_round(this._ctx, this._tensor))
     }
 
     isinf(detectPositive = true, detectNegative = true) {
-      // Pinned mixin/elementwise.py:596-604 independently gates positive
-      // and negative infinity before adding the boolean results.
-      return this.eq(Infinity).mul(detectPositive)
-        .add(this.eq(-Infinity).mul(detectNegative))
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_isinf_flags(
+        this._ctx, this._tensor, detectPositive, detectNegative))
     }
 
     isnan() {
-      // Pinned mixin/elementwise.py:586-594.
-      return this.ne(this)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_isnan(this._ctx, this._tensor))
     }
 
     // --- Activations (C core composed ops) ---
 
     relu() {
-      // Pinned mixin/elementwise.py:656-666. Tensor comparison/where keeps
-      // scalar-zero broadcasting and exact ordered physical occurrences.
-      const comparison = this.gt(0)
-      try { return comparison.where(this, 0) }
-      finally { releaseTensorTemporaries([comparison]) }
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_relu(this._ctx, this._tensor))
     }
 
     relu6() {
-      // Pinned mixin/elementwise.py:679-689.
-      return this.relu().sub(this.sub(6).relu())
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_relu6(this._ctx, this._tensor))
     }
 
     leakyRelu(negSlope) {
       if (negSlope === undefined) negSlope = 0.01
-      // Pinned mixin/elementwise.py:726-737.
-      return this.lt(0).where(this.mul(negSlope, true), this)
+      return this._withTensorOperands([negSlope], slope => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_leaky_relu_tensor(this._ctx, this._tensor, slope._tensor)
+      ))
     }
 
     gelu(approximate = 'tanh') {
@@ -2215,48 +2159,42 @@ function createBoundTensorClass(runtime) {
     }
 
     silu() {
-      // Pinned mixin/elementwise.py:790-800.
-      return this.swish()
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_silu(this._ctx, this._tensor))
     }
 
     swish() {
-      // Pinned mixin/elementwise.py:778-788.
-      return this.mul(this.sigmoid())
+      return this.silu()
     }
 
     elu(alpha) {
-      if (alpha === undefined) alpha = 1.0
-      // Pinned mixin/elementwise.py:945-955.
-      return this.relu().sub(this.exp()._binop(1, 'SUB', true).relu().mul(alpha, true))
+      const fallback = alpha === undefined ? new Tensor(1, {dtype: 'weakfloat', _ctx: this._ctx, device: this._device}) : null
+      try {
+        return this._withTensorOperands([fallback || alpha], a => this._makeResultFromCore(
+          this._rt._core.ffi.poly_tensor_elu_tensor(this._ctx, this._tensor, a._tensor)))
+      } finally { if (fallback) fallback.dispose() }
     }
 
     logaddexp(other) {
-      // Pinned mixin/elementwise.py:403-410.
-      return this._withTensorOperands([other], rhs => {
-        const owned = []
-        const keep = t => { owned.push(t); return t }
-        try {
-          const shape = this._broadcastShape(rhs.shape)
-          const a = this._broadcastTensor(shape), b = rhs._broadcastTensor(shape)
-          if (a !== this) keep(a)
-          if (b !== rhs) keep(b)
-          const m = keep(a.maximum(b))
-          const left = keep(keep(a.sub(m)).exp())
-          const right = keep(keep(b.sub(m)).exp())
-          return keep(keep(left.add(right)).log()).add(m)
-        } finally { releaseTensorTemporaries(owned) }
-      })
+      return this._withTensorOperands([other], rhs => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_logaddexp(this._ctx, this._tensor, rhs._tensor)))
     }
 
     softplus(beta) {
-      if (beta === undefined) beta = 1.0
-      // Pinned mixin/elementwise.py:981-989.
-      return this.mul(beta).logaddexp(0.0).mul(1 / beta, true)
+      const input = beta
+      const scalar = value => new Tensor(value, {dtype: 'weakfloat', _ctx: this._ctx, device: this._device})
+      // The default beta and Python's scalar 1/beta retain float provenance.
+      const b = input === undefined ? scalar(1) : this._ensureTensor(input)
+      const inverse = input instanceof Tensor ? null : scalar(1 / (input === undefined ? 1 : input))
+      try {
+        return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_softplus_tensor(
+          this._ctx, this._tensor, b._tensor, inverse ? inverse._tensor : null))
+      } finally {
+        releaseTensorTemporaries([...(inverse ? [inverse] : []), ...(b !== input ? [b] : [])])
+      }
     }
 
     mish() {
-      // Pinned mixin/elementwise.py:991-1001.
-      return this.mul(this.softplus().tanh())
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_mish(this._ctx, this._tensor))
     }
 
     hardtanh(minVal, maxVal) {
@@ -2267,14 +2205,12 @@ function createBoundTensorClass(runtime) {
     }
 
     hardswish() {
-      // Pinned mixin/elementwise.py:691-701.
-      return this.mul(this.add(3).relu6()).mul(1 / 6)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_hardswish(this._ctx, this._tensor))
     }
 
     hardsigmoid(alpha = 1 / 6, beta = 0.5) {
-      // Pinned mixin/elementwise.py:703-714.
-      const y = this.mul(alpha, true).add(beta)
-      return y.relu().sub(y.sub(1).relu())
+      return this._withTensorOperands([alpha, beta], (a, b) => this._makeResultFromCore(
+        this._rt._core.ffi.poly_tensor_hardsigmoid(this._ctx, this._tensor, a._tensor, b._tensor)))
     }
 
     // --- Softmax ---
@@ -2484,30 +2420,19 @@ function createBoundTensorClass(runtime) {
 
     repeat(...repeats) {
       if (repeats.length === 1 && Array.isArray(repeats[0])) repeats = repeats[0]
-      const nd = Math.max(this.shape.length, repeats.length)
-      const shape = new Array(nd - this.shape.length).fill(1).concat(this.shape)
-      repeats = new Array(nd - repeats.length).fill(1).concat(repeats)
-      const newShape = []
-      const expShape = []
-      for (let i = 0; i < nd; i++) {
-        newShape.push(1, shape[i])
-        expShape.push(repeats[i], shape[i])
-      }
-      const finalShape = shape.map((s, i) => s * repeats[i])
-      return this.reshape(newShape).expand(expShape).reshape(finalShape)
+      if (repeats.some(r => !Number.isSafeInteger(r) || r < 0)) throw new RangeError('repeats must be nonnegative integers')
+      // Preserve the JS shorthand for omitted leading repeat-one axes.
+      if (repeats.length < this.ndim) repeats = Array(this.ndim - repeats.length).fill(1).concat(repeats)
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_repeat(this._ctx, this._tensor, repeats))
     }
 
     repeatInterleave(repeats, dim = null) {
-      // Direct port of pinned mixin/movement.py:520-534.
-      let x = this
-      if (dim === null || dim === undefined) {
-        x = this.flatten(); dim = 0
-      } else if (dim < 0) dim += this.shape.length
-      if (dim < 0 || dim >= x.shape.length) throw new RangeError(`dim ${dim} out of range`)
-      const shape = x.shape
-      x = x.reshape([...shape.slice(0, dim + 1), 1, ...shape.slice(dim + 1)])
-      x = x.expand([...shape.slice(0, dim + 1), Number(repeats), ...shape.slice(dim + 1)])
-      return x.reshape([...shape.slice(0, dim), shape[dim] * Number(repeats), ...shape.slice(dim + 1)])
+      if (!Number.isInteger(repeats) || repeats < 0 || repeats > 2147483647) throw new RangeError('repeats is out of range')
+      const x = dim === null || dim === undefined ? this.flatten() : this
+      try {
+        dim = dim === null || dim === undefined ? 0 : x._resolveDim(dim)
+        return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_repeat_interleave(this._ctx, x._tensor, repeats, dim))
+      } finally { if (x !== this) x.dispose() }
     }
 
     repeat_interleave(repeats, dim = null) { return this.repeatInterleave(repeats, dim) }
@@ -3257,13 +3182,10 @@ function createBoundTensorClass(runtime) {
       ))
     }
 
-    layernorm(axis, eps) {
-      if (axis === undefined) axis = -1
-      if (eps === undefined) eps = 1e-5
-      // Pinned mixin/__init__.py:1548-1564. Reuse the centered value and keep
-      // the exact mul/rsqrt spelling as one ordinary lazy graph.
-      const y = this.sub(this.mean(axis, true))
-      return y.mul(y.mul(y).mean(axis, true).add(eps).rsqrt())
+    layernorm(axis = -1, eps = 1e-5) {
+      const axes = axis === null ? this.shape.map((_, i) => i) : Array.isArray(axis) ? axis : [axis]
+      return this._makeResultFromCore(this._rt._core.ffi.poly_tensor_layernorm_axes_apply(
+        this._ctx, this._tensor, null, null, axes.map(a => this._resolveDim(a)), eps))
     }
 
     // --- Indexing ---

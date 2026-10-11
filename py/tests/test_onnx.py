@@ -521,6 +521,27 @@ def test_onnx_rejects_implicit_dtype_promotion_and_reverse_norm_broadcast():
             rt.Model.from_onnx(bad_broadcast)
 
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+@pytest.mark.parametrize('op', ['Clip', 'HardSigmoid'])
+def test_onnx_clipping_preserves_infinities_and_nan(device, op):
+    x = np.array([-np.inf, -2., 0., 2., np.inf, np.nan], np.float32)
+    inputs = [('x', [6], 1)]
+    feed = {'x': x}
+    if op == 'Clip':
+        inputs += [('lo', [], 1), ('hi', [], 1)]
+        feed.update(lo=np.array(0., np.float32), hi=np.array(1., np.float32))
+    raw = _small_graph(op, inputs, [('y', [6], 1)])
+    # ONNX HardSigmoid clips alpha*x+beta; replacing it with the Tensor
+    # relu-difference formula turns +infinity into NaN.
+    expected = np.clip(x if op == 'Clip' else np.float32(.2)*x + np.float32(.5), 0, 1)
+    with pg.Runtime(device=device) as rt:
+        model = rt.Model.from_onnx(raw)
+        try:
+            np.testing.assert_array_equal(model.call('forward', feed)['y'], expected)
+        finally:
+            model.dispose()
+
+
 def test_onnx_integer_division_truncates_and_preserves_dtype():
     raw = _small_graph('Div', [('x', [4], 6), ('d', [4], 6)], [('y', [4], 6)])
     with pg.Runtime(device='INTERP') as rt:

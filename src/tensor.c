@@ -2755,43 +2755,46 @@ PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divi
 
 /* Tensor.repeat -- movement.py:465 */
 PolyUOp *poly_uop_repeat(PolyCtx *ctx, PolyUOp *x, const int64_t *repeats, int n_repeats) {
-  int64_t in_shape[POLY_MAX_DIMS];
-  int in_ndim = uop_shape(ctx, x, in_shape);
-  if (in_ndim < 0 || in_ndim > n_repeats || n_repeats > POLY_MAX_DIMS) return NULL;
-
-  /* _align_left: pad input shape with leading 1s to match n_repeats */
-  int64_t base[POLY_MAX_DIMS];
-  int pad = n_repeats - in_ndim;
-  for (int i = 0; i < pad; i++)
-    base[i] = 1;
-  for (int i = 0; i < in_ndim; i++)
-    base[pad + i] = in_shape[i];
-
-  /* unsqueezed = flatten([[s] if r==1 else [1,s] for r,s in zip(repeats, base)])
-   * expanded   = flatten([[s] if r==1 else [r,s] for r,s in zip(repeats, base)])
-   * final      = [r*s for r,s in zip(repeats, base)] */
-  int64_t unsq[POLY_MAX_DIMS * 2], exp[POLY_MAX_DIMS * 2], final_sh[POLY_MAX_DIMS];
-  int n = 0;
-  for (int i = 0; i < n_repeats; i++) {
-    int64_t r = repeats[i], s = base[i];
-    if (r == 1) {
-      unsq[n] = s;
-      exp[n] = s;
-      n++;
-    } else {
-      unsq[n] = 1;
-      exp[n] = r;
-      n++;
-      unsq[n] = s;
-      exp[n] = s;
-      n++;
+  int in_ndim = x ? poly_uop_ndim(ctx, x) : -1;
+  if (in_ndim < 0 || n_repeats < 0 || n_repeats > POLY_MAX_DIMS || (n_repeats && !repeats))
+    return NULL;
+  /* zip(repeats, shape) may omit trailing unit axes, but must not discard
+   * elements. UOp reshape itself is a graph primitive, not this validation. */
+  if (n_repeats < in_ndim) {
+    bool kept_zero = false;
+    for (int i = 0; i < n_repeats; i++) {
+      int64_t size;
+      kept_zero |= poly_uop_const_i64(poly_uop_shape_dim(ctx, x, i), &size) == 0 && size == 0;
     }
-    final_sh[i] = r * s;
+    for (int i = n_repeats; !kept_zero && i < in_ndim; i++) {
+      int64_t lo = 0, hi = 0;
+      poly_uop_minmax(ctx, poly_uop_shape_dim(ctx, x, i), &lo, &hi);
+      if (lo != 1 || hi != 1) return NULL;
+    }
   }
-
-  return poly_uop_reshape(
-      ctx, poly_uop_expand(ctx, poly_uop_reshape(ctx, x, unsq, n), exp, n), final_sh, n_repeats
-  );
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *unsq[POLY_MAX_DIMS], *expanded[POLY_MAX_DIMS], *final[POLY_MAX_DIMS];
+  int pad = n_repeats > in_ndim ? n_repeats - in_ndim : 0, n = 0;
+  /* Keep repeat-one axes unsplit, including symbolic dimensions. */
+  for (int i = 0; i < n_repeats; i++) {
+    int64_t r = repeats[i];
+    if (r < 0 || n + (r == 1 ? 1 : 2) > POLY_MAX_DIMS) return NULL;
+    PolyUOp *s = i < pad ? one : poly_uop_shape_dim(ctx, x, i - pad);
+    PolyUOp *factor = poly_uop_const_int(ctx, r);
+    if (!s || !factor) return NULL;
+    int64_t size;
+    if (poly_uop_const_i64(s, &size) == 0 && r && size > INT64_MAX / r) return NULL;
+    if (r != 1) {
+      unsq[n] = one;
+      expanded[n++] = factor;
+    }
+    unsq[n] = expanded[n] = s;
+    n++;
+    final[i] = poly_uop_mul(ctx, factor, s);
+  }
+  PolyUOp *reshaped = poly_uop_reshape_symbolic(ctx, x, unsq, n);
+  PolyUOp *broadcast = reshaped ? poly_uop_expand_symbolic(ctx, reshaped, expanded, n) : NULL;
+  return broadcast ? poly_uop_reshape_symbolic(ctx, broadcast, final, n_repeats) : NULL;
 }
 
 /* Tensor.shrink_to -- movement.py:168. ends[i] == -1 means no-op (keep dim). */
@@ -5311,15 +5314,14 @@ PolyUOp *poly_uop_eye(PolyCtx *ctx, int64_t n) {
 /* tinygrad Tensor._tri -- mixin/op.py:233-234
  *   arange(r).unsqueeze(-1) + diagonal <= arange(c)
  *   Returns a bool mask of shape (r, c). */
-static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) {
+static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, PolyUOp *diagonal) {
   PolyUOp *rows = poly_uop_reshape(ctx, arange_default_int(ctx, 0, r, 1), (int64_t[]){r, 1}, 2);
   /* Current _tri leaves the column arange rank one. UOp elementwise shape
    * inference broadcasts it against only the row arange's unsqueeze
    * (mixin/op.py:233-234). */
   PolyUOp *cols = arange_default_int(ctx, 0, c, 1);
   /* Even diagonal zero is an ADD at construction, not an eager rewrite. */
-  PolyUOp *rows_shifted =
-      poly_uop_add(ctx, rows, poly_uop_const_exact_int(ctx, POLY_WEAKINT, diagonal));
+  PolyUOp *rows_shifted = poly_uop_add(ctx, rows, diagonal);
   return poly_uop_le(ctx, rows_shifted, cols);
 }
 
@@ -5332,11 +5334,10 @@ static bool uop_extent_concrete(PolyUOp *u, int64_t *out) {
  * have to pool a symbolic window. */
 static PolyUOp *poly_tri_mask_uop(PolyCtx *ctx, PolyUOp *r, PolyUOp *c, PolyUOp *diagonal) {
   if (!ctx || !r || !c || !diagonal) return NULL;
-  int64_t r_bound = 0, c_bound = 0, d_bound = 0;
-  if (uop_extent_concrete(r, &r_bound) && uop_extent_concrete(c, &c_bound) &&
-      uop_extent_concrete(diagonal, &d_bound)) {
-    if (r_bound < 0 || c_bound < 0 || d_bound < INT_MIN || d_bound > INT_MAX) return NULL;
-    return poly_tri_mask(ctx, r_bound, c_bound, (int)d_bound);
+  int64_t r_bound = 0, c_bound = 0;
+  if (uop_extent_concrete(r, &r_bound) && uop_extent_concrete(c, &c_bound)) {
+    if (r_bound < 0 || c_bound < 0) return NULL;
+    return poly_tri_mask(ctx, r_bound, c_bound, diagonal);
   }
   int64_t rmin = 0, rmax = 0, cmin = 0, cmax = 0;
   poly_uop_minmax(ctx, r, &rmin, &rmax);
@@ -5365,7 +5366,9 @@ PolyUOp *poly_uop_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   int ndim = uop_shape(ctx, x, shape);
   if (ndim < 2) return NULL;
   if (shape[ndim - 2] < 0 || shape[ndim - 1] < 0) return NULL;
-  PolyUOp *mask = poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], diagonal + 1);
+  PolyUOp *mask = poly_tri_mask(
+      ctx, shape[ndim - 2], shape[ndim - 1], poly_uop_const_int(ctx, (int64_t)diagonal + 1)
+  );
   PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
   return poly_uop_where(ctx, mask, zero, x);
 }
@@ -5378,7 +5381,8 @@ PolyUOp *poly_uop_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   int ndim = uop_shape(ctx, x, shape);
   if (ndim < 2) return NULL;
   if (shape[ndim - 2] < 0 || shape[ndim - 1] < 0) return NULL;
-  PolyUOp *mask = poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], diagonal);
+  PolyUOp *mask =
+      poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], poly_uop_const_int(ctx, diagonal));
   PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
   return poly_uop_where(ctx, mask, x, zero);
 }
@@ -5392,6 +5396,10 @@ PolyUOp *poly_uop_tril_uop(PolyCtx *ctx, PolyUOp *x, PolyUOp *diagonal) {
   PolyUOp *one = poly_uop_const_int(ctx, 1);
   if (!r || !c || !one) return NULL;
   PolyUOp *diag1 = poly_uop_add(ctx, diagonal, one);
+  /* Host scalar diagonal+1 is evaluated before _tri in the pin. Tensor
+   * diagonals keep their ADD; weak constants retain arbitrary integer width. */
+  if (diag1 && diagonal->op == POLY_OP_CONST && poly_dtype_is_weak(diagonal->dtype))
+    diag1 = poly_graph_rewrite_ex(ctx, diag1, poly_symbolic_simple(), false);
   PolyUOp *mask = diag1 ? poly_tri_mask_uop(ctx, r, c, diag1) : NULL;
   PolyUOp *zero = poly_uop_const_like(ctx, x, poly_arg_int(0));
   return (mask && zero) ? poly_uop_where(ctx, mask, zero, x) : NULL;
@@ -7677,6 +7685,11 @@ TENSOR_UNARY_COMPOSITION(isnan, poly_uop_isnan)
 TENSOR_UNARY_COMPOSITION(isinf, poly_uop_isinf)
 TENSOR_UNARY_COMPOSITION(mish, poly_uop_mish)
 TENSOR_UNARY_COMPOSITION(hardswish, poly_uop_hardswish)
+TENSOR_UNARY_COMPOSITION(square, poly_uop_square)
+TENSOR_UNARY_COMPOSITION(rsqrt, poly_uop_rsqrt)
+TENSOR_UNARY_COMPOSITION(relu6, poly_uop_relu6)
+TENSOR_UNARY_COMPOSITION(logical_not, poly_uop_logical_not)
+TENSOR_UNARY_COMPOSITION(neg, poly_uop_elementwise_neg)
 #undef TENSOR_UNARY_COMPOSITION
 
 PolyTensor *poly_tensor_reciprocal(PolyCtx *ctx, PolyTensor *src) {
@@ -7733,6 +7746,77 @@ TENSOR_SCALAR_COMPOSITION(softplus, poly_uop_softplus)
 TENSOR_SCALAR_COMPOSITION(elu, poly_uop_elu)
 TENSOR_SCALAR_COMPOSITION(leaky_relu, poly_uop_leaky_relu)
 #undef TENSOR_SCALAR_COMPOSITION
+
+#define TENSOR_BINARY_COMPOSITION(name, build)                                                     \
+  PolyTensor *poly_tensor_##name(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {                     \
+    if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;     \
+    PolyTensor *inputs[] = {a, b};                                                                 \
+    int logical = poly_tensor_result_builds_logical(ctx, inputs, 2);                               \
+    if (logical < 0) return NULL;                                                                  \
+    return tensor_composite_result(                                                                \
+        ctx, logical ? build(ctx, a->uop_logical, b->uop_logical) : NULL,                          \
+        build(ctx, a->uop_physical, b->uop_physical), inputs, 2                                    \
+    );                                                                                             \
+  }
+TENSOR_BINARY_COMPOSITION(leaky_relu_tensor, poly_uop_leaky_relu_tensor)
+TENSOR_BINARY_COMPOSITION(elu_tensor, poly_uop_elu_tensor)
+TENSOR_BINARY_COMPOSITION(logaddexp, poly_uop_logaddexp)
+TENSOR_BINARY_COMPOSITION(eq, poly_uop_eq)
+TENSOR_BINARY_COMPOSITION(ge, poly_uop_ge)
+TENSOR_BINARY_COMPOSITION(le, poly_uop_le)
+TENSOR_BINARY_COMPOSITION(triu_tensor, poly_uop_triu_uop)
+TENSOR_BINARY_COMPOSITION(tril_tensor, poly_uop_tril_uop)
+#undef TENSOR_BINARY_COMPOSITION
+
+/* Optional parameters stay absent in both graphs; never substitute infinities
+ * for omitted clamp bounds or a stored scalar for a Tensor reciprocal. */
+#define TENSOR_TERNARY_COMPOSITION(name, build, valid)                                             \
+  PolyTensor *poly_tensor_##name(PolyCtx *ctx, PolyTensor *x, PolyTensor *a, PolyTensor *b) {      \
+    if (!tensor_roots_owned_by_ctx(ctx, x) || !(valid) ||                                          \
+        (a && !tensor_roots_owned_by_ctx(ctx, a)) || (b && !tensor_roots_owned_by_ctx(ctx, b)))    \
+      return NULL;                                                                                 \
+    PolyTensor *inputs[] = {x, a, b};                                                              \
+    int logical = poly_tensor_result_builds_logical(ctx, inputs, 3);                               \
+    if (logical < 0) return NULL;                                                                  \
+    return tensor_composite_result(                                                                \
+        ctx,                                                                                       \
+        logical ? build(ctx, x->uop_logical, a ? a->uop_logical : NULL, b ? b->uop_logical : NULL) \
+                : NULL,                                                                            \
+        build(ctx, x->uop_physical, a ? a->uop_physical : NULL, b ? b->uop_physical : NULL),       \
+        inputs, 3                                                                                  \
+    );                                                                                             \
+  }
+TENSOR_TERNARY_COMPOSITION(softplus_tensor, poly_uop_softplus_tensor, a)
+TENSOR_TERNARY_COMPOSITION(clamp, poly_uop_clamp_tensor, a || b)
+TENSOR_TERNARY_COMPOSITION(hardsigmoid, poly_uop_hardsigmoid_tensor, a &&b)
+#undef TENSOR_TERNARY_COMPOSITION
+
+PolyTensor *poly_tensor_isinf_flags(PolyCtx *ctx, PolyTensor *src, bool positive, bool negative) {
+  int logical = tensor_unary_builds_logical(ctx, src);
+  if (logical < 0 || !tensor_current_uop(src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, logical ? poly_uop_isinf_flags(ctx, src->uop_logical, positive, negative) : NULL,
+      poly_uop_isinf_flags(ctx, src->uop_physical, positive, negative)
+  );
+}
+
+PolyTensor *poly_tensor_repeat(PolyCtx *ctx, PolyTensor *src, const int64_t *repeats, int count) {
+  int logical = tensor_unary_builds_logical(ctx, src);
+  if (logical < 0 || !tensor_current_uop(src) || (count && !repeats)) return NULL;
+  return tensor_unary_result(
+      ctx, src, logical ? poly_uop_repeat(ctx, src->uop_logical, repeats, count) : NULL,
+      poly_uop_repeat(ctx, src->uop_physical, repeats, count)
+  );
+}
+
+PolyTensor *poly_tensor_repeat_interleave(PolyCtx *ctx, PolyTensor *src, int repeats, int dim) {
+  int logical = tensor_unary_builds_logical(ctx, src);
+  if (logical < 0 || !tensor_current_uop(src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, logical ? poly_uop_repeat_interleave(ctx, src->uop_logical, repeats, dim) : NULL,
+      poly_uop_repeat_interleave(ctx, src->uop_physical, repeats, dim)
+  );
+}
 
 PolyTensor *poly_tensor_log10(PolyCtx *ctx, PolyTensor *x) {
   PolyTensor *inputs[1] = {x};
@@ -10139,8 +10223,7 @@ PolyTensor *poly_tensor_rope(
 }
 
 PolyUOp *poly_uop_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) {
-  if (!ctx || !x || repeats <= 0) return NULL;
-  if (repeats == 1) return x;
+  if (!ctx || !x || repeats < 0) return NULL;
   int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 1 || ndim >= POLY_MAX_DIMS) return NULL;
   if (dim < 0) dim += ndim;

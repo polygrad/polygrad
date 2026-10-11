@@ -200,6 +200,39 @@ PolyTensor *poly_tensor_hardswish(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_softplus(PolyCtx *ctx, PolyTensor *src, double beta);
 PolyTensor *poly_tensor_elu(PolyCtx *ctx, PolyTensor *src, double alpha);
 PolyTensor *poly_tensor_leaky_relu(PolyCtx *ctx, PolyTensor *src, double slope);
+/* Preserve scalar dtype (including integer slopes) or a Tensor slope. */
+PolyTensor *poly_tensor_leaky_relu_tensor(PolyCtx *ctx, PolyTensor *src, PolyTensor *slope);
+PolyTensor *poly_tensor_elu_tensor(PolyCtx *ctx, PolyTensor *src, PolyTensor *alpha);
+/* inverse is optional: NULL builds Tensor 1/beta; host scalar beta supplies its
+ * already evaluated reciprocal to preserve scalar constant folding. */
+PolyTensor *poly_tensor_softplus_tensor(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *beta,
+    PolyTensor *inverse
+);
+PolyTensor *poly_tensor_logaddexp(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_hardsigmoid(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *alpha,
+    PolyTensor *beta
+);
+/* At least one bound must be non-NULL. */
+PolyTensor *poly_tensor_clamp(PolyCtx *ctx, PolyTensor *src, PolyTensor *lo, PolyTensor *hi);
+PolyTensor *poly_tensor_isinf_flags(PolyCtx *ctx, PolyTensor *src, bool positive, bool negative);
+PolyTensor *poly_tensor_square(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_rsqrt(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_relu6(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_logical_not(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_eq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_ge(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_le(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_neg(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_repeat(PolyCtx *ctx, PolyTensor *src, const int64_t *repeats, int count);
+PolyTensor *poly_tensor_repeat_interleave(PolyCtx *ctx, PolyTensor *src, int repeats, int dim);
+PolyTensor *poly_tensor_triu_tensor(PolyCtx *ctx, PolyTensor *src, PolyTensor *diagonal);
+PolyTensor *poly_tensor_tril_tensor(PolyCtx *ctx, PolyTensor *src, PolyTensor *diagonal);
 
 PolyTensor *poly_tensor_cos(PolyCtx *ctx, PolyTensor *src);
 

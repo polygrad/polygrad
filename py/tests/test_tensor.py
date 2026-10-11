@@ -16,6 +16,75 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('dtype', ['int32', 'int64', 'float32', 'float64'])
+@pytest.mark.parametrize('name', ['sigmoid', 'abs', 'sign', 'round', 'isinf', 'isnan', 'silu', 'softplus', 'triu', 'tril'])
+def test_remaining_core_composites_match_frontend(dtype, name):
+    with Runtime(device=os.environ.get('POLY_DEV', 'CPU')) as rt:
+        values = [[-3, -1, 0], [1, 3, 16777217]]
+        if dtype == 'int64': values[-1][-1] = 2**53 + 1
+        if dtype.startswith('float'): values = [[-3.5, -1.5, -.5], [.5, 1.5, 3.5]]
+        x = rt.Tensor(np.array(values, dtype=dtype)).realize()
+        fn = getattr(_ffi._lib, 'poly_tensor_' + name)
+        fn.restype = _ffi._ptr
+        params = [1.] if name == 'softplus' else [-1] if name in ('triu', 'tril') else []
+        fn.argtypes = [_ffi._ptr, _ffi._ptr] + ([ctypes.c_double if name == 'softplus' else ctypes.c_int] if params else [])
+        core = x._make_result_from_core(fn(x._ctx, x._tensor, *params), None)
+        expected = getattr(x, name)(*params)
+        assert core.dtype == expected.dtype
+        assert core.uop.raw == expected.uop.raw
+        assert core._core_uop_logical_raw(core._tensor) == expected._core_uop_logical_raw(expected._tensor)
+        np.testing.assert_allclose(core.numpy(), expected.numpy(), rtol=2e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize('dtype', ['int32', 'int64', 'float32', 'float64'])
+@pytest.mark.parametrize('name', ['relu', 'floor', 'ceil', 'leaky_relu', 'mish', 'hardswish', 'elu'])
+def test_core_composites_match_scalar_program(dtype, name):
+    # Exercise the C entrypoints even before a frontend delegates to them.
+    programs = {
+        'relu': lambda x: (x > 0).where(x, 0),
+        'floor': lambda x: (x < x.trunc()).where(x.trunc() - 1, x.trunc()),
+        'ceil': lambda x: (x > x.trunc()).where(x.trunc() + 1, x.trunc()),
+        'leaky_relu': lambda x: (x < 0).where(.01 * x, x),
+        'mish': lambda x: x * x.softplus().tanh(),
+        'hardswish': lambda x: x * (x + 3).relu6() * (1 / 6),
+        'elu': lambda x: x.relu() - 1.0 * (1 - x.exp()).relu(),
+    }
+    with Runtime(device=os.environ.get('POLY_DEV', 'CPU')) as rt:
+        values = [-16777217, -3, -1, 0, 1, 3, 16777217]
+        if dtype == 'int64': values = [-2**53 - 1, *values, 2**53 + 1]
+        if dtype.startswith('float'): values = [-3.5, -1.25, -0., 0., .25, 3.5]
+        x = rt.Tensor(np.array(values, dtype=dtype)).realize()
+        fn = getattr(_ffi._lib, 'poly_tensor_' + name)
+        fn.restype = _ffi._ptr
+        params = [.01] if name == 'leaky_relu' else [1.] if name == 'elu' else []
+        fn.argtypes = [_ffi._ptr, _ffi._ptr] + ([ctypes.c_double] if params else [])
+        core = x._make_result_from_core(fn(x._ctx, x._tensor, *params), x.shape)
+        expected = programs[name](x)
+        assert core.dtype == expected.dtype
+        assert core.uop.raw == expected.uop.raw
+        frontend = getattr(x, name)(*params)
+        assert frontend.uop.raw == core.uop.raw
+        np.testing.assert_allclose(core.numpy(), expected.numpy(), rtol=2e-6, atol=1e-7)
+        if name in ('relu', 'floor', 'ceil') and dtype.startswith('int'):
+            exact = np.maximum(values, 0) if name == 'relu' else values
+            np.testing.assert_array_equal(core.numpy(), np.array(exact, dtype=dtype))
+
+
+@pytest.mark.parametrize('slope', [0, 1, 0.0, 1.0, .01])
+def test_leaky_relu_preserves_slope_dtype(slope):
+    with Runtime(device=os.environ.get('POLY_DEV', 'CPU')) as rt:
+        x = rt.Tensor(np.array([-16777217, 16777217], dtype=np.int64)).realize()
+        expected = (x < 0).where(slope * x, x)
+        got = x.leaky_relu(slope)
+        assert got.uop.raw == expected.uop.raw
+        np.testing.assert_array_equal(got.numpy(), expected.numpy())
+        param = rt.Tensor(np.array([[.25], [.5]], dtype=np.float32))
+        got = x.leaky_relu(param)
+        expected = (x < 0).where(param * x, x)
+        assert got.uop.raw == expected.uop.raw
+        np.testing.assert_array_equal(got.numpy(), expected.numpy())
+
+
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])
 def test_tanh_accuracy_and_finite_gradients(dtype):
     npdtype = np.dtype(dtype)
@@ -40,6 +109,39 @@ def test_tanh_accuracy_and_finite_gradients(dtype):
         special = rt.Tensor(np.array([-np.inf, np.inf, np.nan], npdtype), dtype=dtype).tanh().numpy()
         np.testing.assert_array_equal(special[:2], [-1, 1])
         assert np.isnan(special[2])
+
+
+@pytest.mark.parametrize('diagonal', [2**32, 2**31-1, -2**32])
+def test_shared_triangular_diagonal_is_not_narrowed(diagonal):
+    x = Tensor.ones(2, 2)
+    np.testing.assert_array_equal(x.tril(diagonal).numpy(), np.tril(np.ones((2, 2)), diagonal))
+    np.testing.assert_array_equal(x.triu(diagonal).numpy(), np.triu(np.ones((2, 2)), diagonal))
+
+
+def test_shared_repeat_preserves_shape_errors_and_unit_axes():
+    with pytest.raises(ValueError): Tensor.ones(4, 6, 3).repeat(2, 4)
+    np.testing.assert_array_equal(Tensor.ones(2, 1).repeat(3).numpy(), np.ones(6))
+
+
+def test_shared_composites_preserve_wide_integer_bounds_and_parameters():
+    with Runtime(device=os.environ.get('POLY_DEV', 'CPU')) as rt:
+        values = np.array([-2**53-1, -16777217, -1, 0, 1, 16777217, 2**53+1], dtype=np.int64)
+        x = rt.Tensor(values).realize()
+        np.testing.assert_array_equal(x.abs().numpy(), np.abs(values))
+        np.testing.assert_array_equal(x.sign().numpy(), np.sign(values))
+        np.testing.assert_array_equal(x.clamp(-2**53-1, 2**53+1).numpy(), values)
+        bound = rt.Tensor(np.array([2**53+1], dtype=np.int64))
+        np.testing.assert_array_equal(x.clamp(min_=bound).numpy(), np.full_like(values, 2**53+1))
+        np.testing.assert_array_equal((x == bound).numpy(), values == 2**53+1)
+        np.testing.assert_array_equal((x >= bound).numpy(), values >= 2**53+1)
+        np.testing.assert_array_equal(x.logical_not().numpy(), values == 0)
+        for dtype in ('float32', 'float64'):
+            y = rt.Tensor(np.array([[-3, -1, 0], [1, 3, 5]], dtype=dtype))
+            beta = rt.Tensor(np.array([[.25], [.5]], dtype=dtype))
+            actual = y.softplus(beta)
+            expected = (1 / beta) * (y * beta).logaddexp(0.0)
+            assert actual.uop.raw == expected.uop.raw
+            np.testing.assert_allclose(actual.numpy(), expected.numpy(), rtol=2e-6)
 
 
 @pytest.mark.parametrize('assignment', [False, True])

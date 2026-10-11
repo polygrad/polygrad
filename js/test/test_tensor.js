@@ -2518,15 +2518,14 @@ async function runTensorTests(pg, createRuntime) {
       ])
       const other = new Tensor([[-2], [3]])
       const pinnedLogaddexp = (lhs, rhs) => {
-        let b = lhs._ensureTensor(rhs)
-        const shape = lhs._broadcastShape(b.shape)
-        const a = lhs._broadcastTensor(shape)
-        b = b._broadcastTensor(shape)
+        const a = lhs, b = lhs._ensureTensor(rhs)
         const m = a.maximum(b)
         return a.sub(m).exp().add(b.sub(m).exp()).log().add(m)
       }
-      const pinnedSoftplus = (value, beta = 1) =>
-        pinnedLogaddexp(value.mul(beta), 0).mul(1 / beta, true)
+      const scalarFloat = value => new Tensor(value, {dtype: 'weakfloat', _ctx: x._ctx, device: x.device})
+      const pinnedSoftplus = (value, beta) =>
+        pinnedLogaddexp(value.mul(beta === undefined ? scalarFloat(1) : beta), scalarFloat(0))
+          .mul(scalarFloat(1 / (beta === undefined ? 1 : beta)), true)
       const pairs = [
         [x.logaddexp(0), pinnedLogaddexp(x, 0)],
         [x.logaddexp(other), pinnedLogaddexp(x, other)],
@@ -4628,6 +4627,106 @@ async function runTensorTests(pg, createRuntime) {
     }
     x.dispose(); y.dispose()
   })
+
+  await test('shared C composites preserve scalar promotion and graphs', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const programs = {
+      relu: x => x.gt(0).where(x, 0),
+      ceil: x => x.gt(x.trunc()).where(x.trunc().add(1), x.trunc()),
+      floor: x => x.lt(x.trunc()).where(x.trunc().sub(1), x.trunc()),
+      leakyRelu: x => x.lt(0).where(x.mul(.01, true), x),
+      // Preserve Python's floating beta=1.0 and logaddexp(0.0), which JS
+      // Number cannot distinguish from integer literals in the old wrapper.
+      mish: x => {
+        const one = new Tensor(1, {dtype: 'weakfloat', _ctx: x._ctx, device: x.device})
+        const zero = new Tensor(0, {dtype: 'weakfloat', _ctx: x._ctx, device: x.device})
+        return x.mul(x.mul(one).logaddexp(zero).mul(one, true).tanh())
+      },
+      hardswish: x => x.mul(x.add(3).relu6()).mul(1 / 6),
+      sigmoid: x => x.mul(-1 / Math.log(2)).exp2().add(1, true).reciprocal(),
+      abs: x => x.mul(x.sign()),
+      sign: x => x.ne(0).where(x.lt(0).where(x.constLike(-1), x.constLike(1)), x.constLike(0)),
+      square: x => x.mul(x),
+      rsqrt: x => x.sqrt().reciprocal(),
+      round: x => {
+        const two = new Tensor(2, {dtype: 'weakfloat', _ctx: x._ctx, device: x.device})
+        const b = x.trunc().div(two)
+        return x.gt(0).eq(b.trunc().eq(b)).where(x.sub(.5).ceil(), x.add(.5).floor())
+      },
+      isnan: x => x.ne(x),
+      silu: x => x.mul(x.sigmoid()),
+      relu6: x => x.relu().sub(x.sub(6).relu()),
+      logicalNot: x => x.cast('bool').ne(true),
+      neg: x => x.mul(-1)
+    }
+    for (const dtype of ['int32', 'int64', 'float32', ...(supportsF64 ? ['float64'] : [])]) {
+      const values = dtype === 'int64'
+        ? new BigInt64Array([-9007199254740993n, -16777217n, -1n, 0n, 1n, 16777217n, 9007199254740993n])
+        : dtype === 'int32' ? new Int32Array([-16777217, -1, 0, 1, 16777217]) : [-3.5, -1.25, 0, .25, 3.5]
+      const x = await new Tensor(values, {dtype}).realize()
+      const softplus = x.softplus()
+      const softplusRoot = runtime._core.ffi.poly_uop_softplus(x._ctx, x.uop.raw, 1.0)
+      assert(softplus.uop.key === String(runtime._core.ffi.poly_uop_key(softplusRoot)), `softplus/${dtype}: default scalar provenance`)
+      softplus.dispose()
+      for (const [name, program] of Object.entries(programs)) {
+        const got = x[name](), expected = program(x)
+        const cname = name === 'leakyRelu' ? 'leaky_relu_tensor' : name === 'logicalNot' ? 'logical_not' : name
+        const slope = name === 'leakyRelu' ? x._ensureTensor(.01) : null
+        const direct = x._makeResultFromCore(x._rt._core.ffi[`poly_tensor_${cname}`](x._ctx, x._tensor, ...(slope ? [slope._tensor] : [])))
+        assert(got.uop.key === direct.uop.key, `${name}/${dtype}: frontend/C graph differs`)
+        direct.dispose(); if (slope) slope.dispose()
+        assert(got.uop.key === expected.uop.key, `${name}/${dtype}: scalar-program graph differs`)
+        const a = Array.from(await got.toArray()), b = Array.from(await expected.toArray())
+        if (typeof a[0] === 'bigint') assert(a.every((v, i) => v === b[i]), `${name}: int64 mismatch`)
+        else a.forEach((v, i) => { if (v !== b[i]) assertClose([v], [b[i]], 1e-6) })
+        if (['relu', 'floor', 'ceil'].includes(name) && dtype.startsWith('int')) {
+          assert(a.every((v, i) => v === (name === 'relu' && values[i] < 0 ? (dtype === 'int64' ? 0n : 0) : values[i])), `${name}: lost integer precision`)
+        }
+        got.dispose(); expected.dispose()
+      }
+      for (const slope of [0, 1, .01]) {
+        const got = x.leakyRelu(slope), expected = x.lt(0).where(x.mul(slope, true), x)
+        assert(got.uop.key === expected.uop.key, `leakyRelu slope ${slope}/${dtype}`)
+        got.dispose(); expected.dispose()
+      }
+      x.dispose()
+    }
+  }))
+
+  await test('shared C parameterized composites and movement graphs', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const x = await new Tensor([[-3., -1., 0.], [1., 3., 5.]], {dtype: 'float32'}).realize()
+    const alpha = new Tensor([[.25], [.5]], {dtype: 'float32'})
+    const cases = [
+      [x.elu(alpha), x.relu().sub(x.exp().sub(1, true).relu().mul(alpha, true))],
+      [x.hardsigmoid(alpha, .5), alpha.mul(x).add(.5).relu().sub(alpha.mul(x).add(.5).sub(1).relu())],
+      [x.softplus(alpha), alpha.div(1, undefined, true).mul(x.mul(alpha).logaddexp(0.0))],
+      [x.clamp(alpha, undefined), x.lt(alpha).where(alpha, x)],
+      [x.clamp(undefined, alpha), x.gt(alpha).where(alpha, x)],
+      [x.repeat(1, 2), x.reshape([2, 1, 3]).expand([2, 2, 3]).reshape([2, 6])],
+      [x.repeat(2), x.repeat(1, 2)],
+      [x.repeatInterleave(1, 1), x.reshape([2, 3, 1]).expand([2, 3, 1]).reshape([2, 3])],
+      [x.triu(1), Tensor._tri(2, 3, 1, x.device).where(x, x.constLike(0))],
+      [x.tril(-1), Tensor._tri(2, 3, 0, x.device).where(x.constLike(0), x)]
+    ]
+    for (const [got, expected] of cases) {
+      assert(got.uop.key === expected.uop.key, 'parameterized physical graph differs')
+      const ffi = runtime._core.ffi
+      assert(String(ffi.poly_uop_key(ffi.poly_tensor_uop_logical(got._tensor))) ===
+        String(ffi.poly_uop_key(ffi.poly_tensor_uop_logical(expected._tensor))), 'parameterized logical graph differs')
+      assertClose(await got.toArray(), await expected.toArray(), 1e-6)
+    }
+    const special = new Tensor([-Infinity, 0, Infinity, NaN])
+    for (const diagonal of [4294967296, 2147483647, -4294967296]) {
+      assertClose(await x.tril(diagonal).toArray(), diagonal > 0 ? [-3, -1, 0, 1, 3, 5] : [0, 0, 0, 0, 0, 0])
+      assertClose(await x.triu(diagonal).toArray(), diagonal < 0 ? [-3, -1, 0, 1, 3, 5] : [0, 0, 0, 0, 0, 0])
+    }
+    for (const positive of [false, true]) for (const negative of [false, true]) {
+      const got = special.isinf(positive, negative), expected = special.eq(Infinity).mul(positive).add(special.eq(-Infinity).mul(negative))
+      assert(got.uop.key === expected.uop.key, 'isinf flags graph differs')
+      assertClose(await got.toArray(), await expected.toArray())
+    }
+  }))
 
   await test('assign realized source to unrealized target preserves independent storage', async () => {
     const source = await new Tensor(new Float32Array([3, 4, 5, 6])).realize()

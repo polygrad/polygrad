@@ -1949,12 +1949,10 @@ class Tensor:
         return self._make_result_from_core(core, out_shape)
 
     def __neg__(self):
-        if dtypes.is_bool(to_dtype(self.dtype)):
-            return self.logical_not()
-        return self * -1
+        return self._make_result_from_core(_ffi._lib.poly_tensor_neg(self._ctx, self._tensor), self.shape)
 
     def logical_not(self):
-        return self.cast('bool') != True
+        return self._make_result_from_core(_ffi._lib.poly_tensor_logical_not(self._ctx, self._tensor), self.shape)
 
     def neg(self):
         return self.__neg__()
@@ -1986,9 +1984,8 @@ class Tensor:
         return self._binop(other, 'CMPLT')
 
     def __eq__(self, other):
-        # Pinned mixin/elementwise.py:315-322: equality is promoted CMPNE
-        # followed by logical_not, not a raw mixed-dtype UOp helper.
-        return self._binop(other, 'CMPNE').logical_not()
+        other = self._ensure_tensor(other)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_eq(self._ctx, self._tensor, other._tensor), None)
 
     def __ne__(self, other):
         return self._binop(other, 'CMPNE')
@@ -1999,10 +1996,12 @@ class Tensor:
         return self._binop(other, 'CMPLT', reverse=True)
 
     def __ge__(self, other):
-        return (self < other).logical_not()
+        other = self._ensure_tensor(other)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_ge(self._ctx, self._tensor, other._tensor), None)
 
     def __le__(self, other):
-        return (self > other).logical_not()
+        other = self._ensure_tensor(other)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_le(self._ctx, self._tensor, other._tensor), None)
 
     def ne(self, other):
         return self.__ne__(other)
@@ -2037,11 +2036,11 @@ class Tensor:
     def clamp(self, min_=None, max_=None):
         if min_ is None and max_ is None:
             raise RuntimeError("at least one of 'min_' or 'max_' must not be None")
-        # Pinned clamp conditionally composes comparison/WHERE Tensor
-        # operations; an omitted bound is not a finite sentinel
-        # (mixin/elementwise.py:569-580).
-        ret = (self < min_).where(min_, self) if min_ is not None else self
-        return (ret > max_).where(max_, ret) if max_ is not None else ret
+        lo = self._ensure_tensor(min_) if min_ is not None else None
+        hi = self._ensure_tensor(max_) if max_ is not None else None
+        return self._make_result_from_core(_ffi._lib.poly_tensor_clamp(
+            self._ctx, self._tensor, lo._tensor if lo is not None else None,
+            hi._tensor if hi is not None else None), None)
 
     def clip(self, min_=None, max_=None):
         """Alias for :meth:`Tensor.clamp` (mixin/elementwise.py:582-584)."""
@@ -2223,76 +2222,52 @@ class Tensor:
         return self._make_result_from_core(core, self.shape)
 
     def sigmoid(self):
-        # Pinned mixin/elementwise.py:667-677.
-        return (1 + (self * (-1 / math.log(2))).exp2()).reciprocal()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_sigmoid(self._ctx, self._tensor), self.shape)
 
     def tanh(self):
         core = _ffi._lib.poly_tensor_tanh(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)
 
     def abs(self):
-        # Pinned mixin/elementwise.py:892-900.
-        return self * self.sign()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_abs(self._ctx, self._tensor), self.shape)
 
     def sign(self):
-        # Pinned mixin/elementwise.py:882-890 uses typed const_like branches.
-        return self.ne(0).where(
-            (self < 0).where(self.const_like(-1), self.const_like(1)),
-            self.const_like(0),
-        )
+        return self._make_result_from_core(_ffi._lib.poly_tensor_sign(self._ctx, self._tensor), self.shape)
 
     def square(self):
-        # Pinned mixin/elementwise.py:558-566.
-        return self * self
+        return self._make_result_from_core(_ffi._lib.poly_tensor_square(self._ctx, self._tensor), self.shape)
 
     def rsqrt(self):
-        # Pinned mixin/elementwise.py:802-810.
-        return self.sqrt().reciprocal()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_rsqrt(self._ctx, self._tensor), self.shape)
 
     def ceil(self):
-        # Pinned mixin/elementwise.py:636-644.
-        b = self.trunc()
-        return (self > b).where(b + 1, b)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_ceil(self._ctx, self._tensor), self.shape)
 
     def floor(self):
-        # Pinned mixin/elementwise.py:646-654.
-        b = self.trunc()
-        return (self < b).where(b - 1, b)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_floor(self._ctx, self._tensor), self.shape)
 
     def round(self):
-        # Pinned mixin/elementwise.py:872-880 implements round-half-to-even
-        # through ordinary Tensor primitives and their scalar broadcast rules.
-        b = self.trunc() / 2.0
-        return ((self > 0).eq(b.trunc().eq(b))).where(
-            (self - 0.5).ceil(), (self + 0.5).floor()
-        )
+        return self._make_result_from_core(_ffi._lib.poly_tensor_round(self._ctx, self._tensor), self.shape)
 
     def isinf(self, detect_positive=True, detect_negative=True):
-        # Pinned mixin/elementwise.py:596-604 independently gates positive
-        # and negative infinity before adding the boolean results.
-        return (
-            self.eq(float("inf")) * detect_positive
-            + self.eq(float("-inf")) * detect_negative
-        )
+        return self._make_result_from_core(_ffi._lib.poly_tensor_isinf_flags(
+            self._ctx, self._tensor, bool(detect_positive), bool(detect_negative)), self.shape)
 
     def isnan(self):
-        # Pinned mixin/elementwise.py:586-594.
-        return self != self
+        return self._make_result_from_core(_ffi._lib.poly_tensor_isnan(self._ctx, self._tensor), self.shape)
 
     # --- Activations (C core composed ops) ---
 
     def relu(self):
-        # Pinned mixin/elementwise.py:656-666. Tensor comparison/where keeps
-        # the scalar-zero RESHAPE/EXPAND topology and ordered physical roots.
-        return (self > 0).where(self, 0)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_relu(self._ctx, self._tensor), self.shape)
 
     def relu6(self):
-        # Pinned mixin/elementwise.py:679-689.
-        return self.relu() - (self - 6).relu()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_relu6(self._ctx, self._tensor), self.shape)
 
     def leaky_relu(self, neg_slope=0.01):
-        # Pinned mixin/elementwise.py:726-737.
-        return (self < 0).where(neg_slope * self, self)
+        slope = self._ensure_tensor(neg_slope)
+        core = _ffi._lib.poly_tensor_leaky_relu_tensor(self._ctx, self._tensor, slope._tensor)
+        return self._make_result_from_core(core, None)
 
     def gelu(self, approximate='tanh'):
         # Pinned mixin/elementwise.py:761-776. C applies the exact formula
@@ -2311,42 +2286,41 @@ class Tensor:
         return self._make_result_from_core(core, self.shape)
 
     def silu(self):
-        # Pinned mixin/elementwise.py:790-800.
-        return self.swish()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_silu(self._ctx, self._tensor), self.shape)
 
     def swish(self):
-        # Pinned mixin/elementwise.py:778-788.
-        return self * self.sigmoid()
+        return self.silu()
 
     def elu(self, alpha=1.0):
-        # Pinned mixin/elementwise.py:945-955.
-        return self.relu() - alpha * (1 - self.exp()).relu()
+        alpha = self._ensure_tensor(alpha)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_elu_tensor(
+            self._ctx, self._tensor, alpha._tensor), None)
 
     def logaddexp(self, other):
-        # Pinned mixin/elementwise.py:403-410.
-        a, b, _ = self._broadcasted(other)
-        m = a.maximum(b)
-        return ((a - m).exp() + (b - m).exp()).log() + m
+        other = self._ensure_tensor(other)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_logaddexp(
+            self._ctx, self._tensor, other._tensor), None)
 
     def softplus(self, beta=1.0):
-        # Pinned mixin/elementwise.py:981-989.
-        return (1 / beta) * (self * beta).logaddexp(0.0)
+        inverse = None if isinstance(beta, Tensor) else self._ensure_tensor(1 / beta)
+        beta = self._ensure_tensor(beta)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_softplus_tensor(
+            self._ctx, self._tensor, beta._tensor, inverse._tensor if inverse is not None else None), None)
 
     def mish(self):
-        # Pinned mixin/elementwise.py:991-1001.
-        return self * self.softplus().tanh()
+        return self._make_result_from_core(_ffi._lib.poly_tensor_mish(self._ctx, self._tensor), self.shape)
 
     def hardtanh(self, min_val=-1, max_val=1):
         # Pinned mixin/elementwise.py:716-724.
         return self.clamp(min_val, max_val)
 
     def hardswish(self):
-        # Pinned mixin/elementwise.py:691-701.
-        return self * (self + 3).relu6() * (1 / 6)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_hardswish(self._ctx, self._tensor), self.shape)
 
     def hardsigmoid(self, alpha=1 / 6, beta=0.5):
-        # Pinned mixin/elementwise.py:703-714.
-        return (alpha * self + beta).relu() - (alpha * self + beta - 1).relu()
+        alpha, beta = self._ensure_tensor(alpha), self._ensure_tensor(beta)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_hardsigmoid(
+            self._ctx, self._tensor, alpha._tensor, beta._tensor), None)
 
     # --- Softmax ---
 
@@ -2609,14 +2583,12 @@ class Tensor:
         ) <= Tensor.arange(c, **opts)
 
     def triu(self, diagonal=0):
-        r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device, _ctx=self._ctx)
-        return mask.where(self, self.const_like(0))
+        diagonal = self._ensure_tensor(diagonal)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_triu_tensor(self._ctx, self._tensor, diagonal._tensor), None)
 
     def tril(self, diagonal=0):
-        r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device, _ctx=self._ctx)
-        return mask.where(self.const_like(0), self)
+        diagonal = self._ensure_tensor(diagonal)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_tril_tensor(self._ctx, self._tensor, diagonal._tensor), None)
 
     def squeeze(self, dim=None):
         if dim is not None:
@@ -2659,26 +2631,17 @@ class Tensor:
     def repeat(self, *repeats):
         if len(repeats) == 1 and isinstance(repeats[0], (tuple, list)):
             repeats = tuple(repeats[0])
-        # Literal pinned MovementMixin.repeat: repeat-one axes remain single
-        # lanes instead of introducing no-op RESHAPE/EXPAND dimensions
-        # (mixin/movement.py:536-554).
-        base_shape = (1,) * (max(len(self.shape), len(repeats)) - len(self.shape)) + self.shape
-        unsqueezed_shape = tuple(
-            v for r, s in zip(repeats, base_shape) for v in ((s,) if r == 1 else (1, s))
-        )
-        expanded_shape = tuple(
-            v for r, s in zip(repeats, base_shape) for v in ((s,) if r == 1 else (r, s))
-        )
-        final_shape = tuple(r * s for r, s in zip(repeats, base_shape))
-        return self.reshape(unsqueezed_shape).expand(expanded_shape).reshape(final_shape)
+        core = _ffi._lib.poly_tensor_repeat(
+            self._ctx, self._tensor, (ctypes.c_int64 * len(repeats))(*repeats), len(repeats))
+        if not core: raise ValueError('invalid repeat shape')
+        return self._make_result_from_core(core, None)
 
     def repeat_interleave(self, repeats, dim=None):
-        # Direct port of pinned mixin/movement.py:520-534.
+        if not isinstance(repeats, (int, np.integer)) or not 0 <= repeats <= 2147483647:
+            raise ValueError('repeats is out of range')
         x, dim = (self.flatten(), 0) if dim is None else (self, self._resolve_dim(dim))
-        shp = x.shape
-        x = x.reshape(*shp[:dim + 1], 1, *shp[dim + 1:])
-        x = x.expand(*shp[:dim + 1], repeats, *shp[dim + 1:])
-        return x.reshape(*shp[:dim], shp[dim] * repeats, *shp[dim + 1:])
+        return self._make_result_from_core(_ffi._lib.poly_tensor_repeat_interleave(
+            self._ctx, x._tensor, repeats, dim), None)
 
     def roll(self, shifts, dims=None):
         if dims is None:
@@ -3348,11 +3311,10 @@ class Tensor:
         return self._make_result_from_core(core, None)
 
     def layernorm(self, axis=-1, eps=1e-5):
-        # Pinned mixin/__init__.py:1548-1564. Keep the centered value shared
-        # and use the exact mul/rsqrt spelling; this is ordinary lazy graph
-        # construction and never a materialization boundary.
-        y = self - self.mean(axis=axis, keepdim=True)
-        return y.mul((y * y).mean(axis=axis, keepdim=True).add(eps).rsqrt())
+        axes = tuple(range(self.ndim)) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
+        axes = tuple(self._resolve_dim(a) for a in axes)
+        return self._make_result_from_core(_ffi._lib.poly_tensor_layernorm_axes_apply(
+            self._ctx, self._tensor, None, None, (ctypes.c_int64 * len(axes))(*axes), len(axes), eps), self.shape)
 
     # --- Indexing ---
 

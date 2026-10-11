@@ -2794,16 +2794,15 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
   }
   if (!strcmp(op, "Clip")) {
     if (!arity(d, n, 1, 3) || !attrs(d, n, "")) return NULL;
-    PolyTensor *out = x;
+    PolyTensor *bounds[2] = {NULL, NULL};
     for (int i = 1; i < n->nin; i++)
       if (n->inputs[i]) {
         PolyTensor *bound = n->inputs[i]->tensor;
         if (rank(d, bound) != 0 || !same_dtype(x, bound)) return NULL;
-        PolyTensor *condition = i == 1 ? poly_tensor_alu2(ctx, POLY_OP_CMPLT, out, bound)
-                                       : poly_tensor_alu2(ctx, POLY_OP_CMPLT, bound, out);
-        out = poly_tensor_alu3(ctx, POLY_OP_WHERE, condition, bound, out);
+        bounds[i - 1] = bound;
       }
-    return poly_tensor_retain(out);
+    return bounds[0] || bounds[1] ? poly_tensor_clamp(ctx, x, bounds[0], bounds[1])
+                                  : poly_tensor_retain(x);
   }
   if (!strcmp(op, "Pow") || !strcmp(op, "Mod")) {
     bool pow = !strcmp(op, "Pow");
@@ -2919,12 +2918,9 @@ static PolyTensor *onnx_operation(Import *d, Node *n) {
     );
     PolyTensor *zero = onnx_float(d, 0);
     PolyTensor *one = onnx_float(d, 1);
-    out = poly_tensor_alu3(
-        ctx, POLY_OP_WHERE, poly_tensor_alu2(ctx, POLY_OP_CMPLT, out, zero), zero, out
-    );
-    return poly_tensor_alu3(
-        ctx, POLY_OP_WHERE, poly_tensor_alu2(ctx, POLY_OP_CMPLT, one, out), one, out
-    );
+    /* ONNX clips +/-infinity; Tensor.hardsigmoid's relu-difference formula
+     * intentionally follows a different reference contract. Share clamp. */
+    return poly_tensor_clamp(ctx, out, zero, one);
   }
   if (!strcmp(op, "Celu") || !strcmp(op, "Selu") || !strcmp(op, "Elu")) {
     bool selu = !strcmp(op, "Selu");

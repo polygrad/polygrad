@@ -1,4 +1,6 @@
 from pathlib import Path
+import ast
+import inspect
 import os
 import re
 import subprocess
@@ -13,6 +15,36 @@ from polygrad import Context, GlobalCounters, Jit, Tensor, TinyJit, UOp, Variabl
 from polygrad.helpers import Context as HelperContext, TRAINING, fetch as helper_fetch, getenv as helper_getenv
 from polygrad.nn.optim import SGD
 from polygrad.uop.ops import UOp as OpsUOp, resolve
+
+
+@pytest.mark.parametrize('python_name,js_name,core_name', [
+    ('sigmoid', 'sigmoid', 'sigmoid'), ('abs', 'abs', 'abs'), ('sign', 'sign', 'sign'),
+    ('round', 'round', 'round'), ('relu', 'relu', 'relu'), ('ceil', 'ceil', 'ceil'),
+    ('floor', 'floor', 'floor'), ('mish', 'mish', 'mish'), ('hardswish', 'hardswish', 'hardswish'),
+    ('isnan', 'isnan', 'isnan'), ('isinf', 'isinf', 'isinf_flags'), ('silu', 'silu', 'silu'),
+    ('elu', 'elu', 'elu_tensor'), ('softplus', 'softplus', 'softplus_tensor'),
+    ('leaky_relu', 'leakyRelu', 'leaky_relu_tensor'), ('hardsigmoid', 'hardsigmoid', 'hardsigmoid'),
+    ('clamp', 'clamp', 'clamp'), ('logaddexp', 'logaddexp', 'logaddexp'),
+    ('square', 'square', 'square'), ('rsqrt', 'rsqrt', 'rsqrt'), ('relu6', 'relu6', 'relu6'),
+    ('logical_not', 'logicalNot', 'logical_not'), ('__eq__', 'eq', 'eq'),
+    ('__ge__', 'ge', 'ge'), ('__le__', 'le', 'le'), ('__neg__', 'neg', 'neg'),
+    ('triu', 'triu', 'triu_tensor'), ('tril', 'tril', 'tril_tensor'), ('repeat', 'repeat', 'repeat'),
+    ('repeat_interleave', 'repeatInterleave', 'repeat_interleave'),
+    ('layernorm', 'layernorm', 'layernorm_axes_apply'),
+])
+def test_composite_frontends_delegate_to_core(python_name, js_name, core_name):
+    # Reviewed ownership inventory, not a ban on host argument normalization.
+    import textwrap
+    source = textwrap.dedent(inspect.getsource(getattr(Tensor, python_name)))
+    calls = [n.func for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)]
+    assert any(isinstance(n, ast.Attribute) and n.attr == 'poly_tensor_' + core_name for n in calls)
+    forbidden = {'add', 'sub', 'mul', 'div', 'where', 'exp', 'log', 'relu', 'mean', 'expand'}
+    assert not any(isinstance(n, ast.Attribute) and n.attr in forbidden for n in calls)
+    js = Path(__file__).resolve().parents[2] / 'js/src/tensor.js'
+    if not js.exists(): pytest.skip('source ownership check requires repository JS sources')
+    body = re.search(r'^    ' + re.escape(js_name) + r'\([^\n]*\) \{\n(.*?)^    \}', js.read_text(), re.M | re.S)
+    assert body and 'poly_tensor_' + core_name in body.group(1)
+    assert not re.search(r'\.(?:' + '|'.join(forbidden) + r')\(', body.group(1))
 
 
 def test_gguf_annotations_are_deferred_for_python39():
