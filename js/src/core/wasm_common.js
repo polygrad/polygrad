@@ -1161,10 +1161,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_to_device_name(ctx, tensor, ptr) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_prod: (ctx, src, axes, n_axes, keepdim) =>
-      callWithInt64(Module._poly_tensor_prod, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
-    poly_tensor_logsumexp: (ctx, src, axes, n_axes, keepdim) =>
-      callWithInt64(Module._poly_tensor_logsumexp, ctx, src, axes, n_axes, (keepdim ? 1 : 0)),
     poly_tensor_pad_mode: (ctx, src, pairs, ndim, mode) =>
       callWithInt64(Module._poly_tensor_pad_mode, ctx, src, pairs, ndim, mode),
     poly_tensor_repeat: (ctx, src, repeats) => callWithInt64(Module._poly_tensor_repeat, ctx, src, repeats, repeats.length),
@@ -1178,15 +1174,6 @@ function createWasmCoreFromModule(Module, device) {
       try { return Module._poly_tensor_cat(ctx, ptr, inputs.length, dim) }
       finally { Module._free(ptr) }
     },
-    poly_tensor_sum_dtype_by_id: (ctx, src, axes, len, keepdim, dtypeId) =>
-      callWithInt64(
-        Module._poly_tensor_sum_dtype_by_id,
-        ctx, src, axes, len, keepdim ? 1 : 0, dtypeId
-      ),
-    poly_tensor_all: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_all, ctx, src, axes, len, keepdim ? 1 : 0),
-    poly_tensor_any: (ctx, src, axes, len, keepdim) =>
-      callWithInt64(Module._poly_tensor_any, ctx, src, axes, len, keepdim ? 1 : 0),
     poly_tensor_cummax: (ctx, src, axis) =>
       callUopPair(Module._poly_tensor_cummax, [ctx, src, axis], 'poly_tensor_cummax'),
     poly_tensor_cummin: (ctx, src, axis) =>

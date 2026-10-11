@@ -592,28 +592,10 @@ def _declare_signatures(lib):
     lib.poly_tensor_to_device_name.restype = _ptr
     lib.poly_tensor_to_device_name.argtypes = [_ptr, _ptr, ctypes.c_char_p]
 
-    lib.poly_tensor_prod.restype = _ptr
-    lib.poly_tensor_prod.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
-    lib.poly_tensor_logsumexp.restype = _ptr
-    lib.poly_tensor_logsumexp.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_pad_mode.restype = _ptr
     lib.poly_tensor_pad_mode.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
-    for name in ('relu', 'ceil', 'floor', 'mish', 'hardswish', 'sigmoid', 'abs', 'sign',
-                 'round', 'isnan', 'silu', 'square', 'rsqrt', 'relu6', 'logical_not', 'neg'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype = _ptr
-        fn.argtypes = [_ptr, _ptr]
-    for name in ('elu_tensor', 'logaddexp', 'eq', 'ge', 'le', 'triu_tensor', 'tril_tensor'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype, fn.argtypes = _ptr, [_ptr, _ptr, _ptr]
-    for name in ('softplus_tensor', 'clamp', 'hardsigmoid'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype, fn.argtypes = _ptr, [_ptr, _ptr, _ptr, _ptr]
     lib.poly_tensor_repeat.restype = _ptr
     lib.poly_tensor_repeat.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
-    for name in ('triu', 'tril'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype, fn.argtypes = _ptr, [_ptr, _ptr, ctypes.c_int]
     lib.poly_tensor_stack.restype = _ptr
     lib.poly_tensor_stack.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_cat.restype = _ptr
@@ -653,19 +635,6 @@ def _declare_signatures(lib):
         fn.restype = ctypes.c_int
         fn.argtypes = [_ptr]
 
-    lib.poly_tensor_sum_dtype_by_id.restype = _ptr
-    lib.poly_tensor_sum_dtype_by_id.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool, ctypes.c_int,
-    ]
-
-    for name in ('all', 'any'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype = _ptr
-        fn.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_bool]
-    for name in ('cumsum', 'cumprod'):
-        fn = getattr(lib, 'poly_tensor_' + name)
-        fn.restype = _ptr
-        fn.argtypes = [_ptr, _ptr, ctypes.c_int]
     for name in ('cummax', 'cummin'):
         fn = getattr(lib, 'poly_tensor_' + name)
         fn.restype = ctypes.c_int

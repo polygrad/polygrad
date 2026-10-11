@@ -6,9 +6,19 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_abs: (a0, a1) => Module._poly_tensor_abs((a0 || 0), (a1 || 0)),
   poly_tensor_acos: (a0, a1) => Module._poly_tensor_acos((a0 || 0), (a1 || 0)),
   poly_tensor_acosh: (a0, a1) => Module._poly_tensor_acosh((a0 || 0), (a1 || 0)),
+  poly_tensor_all: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_all, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
+  },
   poly_tensor_alu1: (a0, a1, a2) => Module._poly_tensor_alu1((a0 || 0), Number(a1), (a2 || 0)),
   poly_tensor_alu2: (a0, a1, a2, a3) => Module._poly_tensor_alu2((a0 || 0), Number(a1), (a2 || 0), (a3 || 0)),
   poly_tensor_alu3: (a0, a1, a2, a3, a4) => Module._poly_tensor_alu3((a0 || 0), Number(a1), (a2 || 0), (a3 || 0), (a4 || 0)),
+  poly_tensor_any: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_any, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
+  },
   poly_tensor_arange_float_by_id: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_arange_float_by_id((a0 || 0), a1, a2, a3, Number(a4), Number(a5)),
   poly_tensor_arange_int_by_id: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_arange_int_by_id((a0 || 0), integer64(a1, false), integer64(a2, false), integer64(a3, false), Number(a4), Number(a5)),
   poly_tensor_argmax: (a0, a1, a2, a3) => Module._poly_tensor_argmax((a0 || 0), (a1 || 0), Number(a2), +!!a3),
@@ -103,6 +113,11 @@ module.exports = (Module, callWithInt64) => ({
   poly_tensor_logcumsumexp: (a0, a1, a2) => Module._poly_tensor_logcumsumexp((a0 || 0), (a1 || 0), Number(a2)),
   poly_tensor_logical_not: (a0, a1) => Module._poly_tensor_logical_not((a0 || 0), (a1 || 0)),
   poly_tensor_logsigmoid: (a0, a1) => Module._poly_tensor_logsigmoid((a0 || 0), (a1 || 0)),
+  poly_tensor_logsumexp: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_logsumexp, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
+  },
   poly_tensor_lstsq: (a0, a1, a2) => Module._poly_tensor_lstsq((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_max: (a0, a1, a2, a3, a4) => {
     if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
@@ -130,6 +145,11 @@ module.exports = (Module, callWithInt64) => ({
     if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_permute, (a0 || 0), (a1 || 0), a2, Number(a3))
+  },
+  poly_tensor_prod: (a0, a1, a2, a3, a4) => {
+    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_prod, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
   },
   poly_tensor_quick_gelu: (a0, a1) => Module._poly_tensor_quick_gelu((a0 || 0), (a1 || 0)),
   poly_tensor_reciprocal: (a0, a1) => Module._poly_tensor_reciprocal((a0 || 0), (a1 || 0)),
@@ -161,6 +181,11 @@ module.exports = (Module, callWithInt64) => ({
     if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
     for (const value of a2) integer64(value)
     return callWithInt64(Module._poly_tensor_sum, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4)
+  },
+  poly_tensor_sum_dtype_by_id: (a0, a1, a2, a3, a4, a5) => {
+    if (!Array.isArray(a2) || a2.length !== a3 || a3 > 64) throw new RangeError('invalid dimension array')
+    for (const value of a2) integer64(value)
+    return callWithInt64(Module._poly_tensor_sum_dtype_by_id, (a0 || 0), (a1 || 0), a2, Number(a3), +!!a4, Number(a5))
   },
   poly_tensor_tan: (a0, a1) => Module._poly_tensor_tan((a0 || 0), (a1 || 0)),
   poly_tensor_tanh: (a0, a1) => Module._poly_tensor_tanh((a0 || 0), (a1 || 0)),

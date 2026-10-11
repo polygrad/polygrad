@@ -32,7 +32,8 @@ ARRAYS = {
     },
     **{
         f"poly_tensor_{op}": {"axes": ("n_axes", 8, "in")}
-        for op in ("sum", "mean", "max", "min", "flip", "var_axes")
+        for op in ("sum", "mean", "max", "min", "flip", "var_axes", "prod", "logsumexp",
+                   "all", "any", "sum_dtype_by_id")
     },
     **{
         f"poly_tensor_{op}": {"dims": ("ndim", 8, "in")}
@@ -141,7 +142,10 @@ def frontend_bindings(decls):
                                f"  NAPI_CALL(env, napi_get_value_int32(env, v{i}, &{n}));"]
                     js_args.append(f"Number({n})")
         for index, count in arrays:
-            native.append(f'  if (a{count} < 0 || (uint32_t)a{count} != length{index}) {{ napi_throw_range_error(env, NULL, "array length mismatch"); return NULL; }}')
+            # Check the original Number, not the already narrowed int32 value.
+            native += [f'  double count{index};',
+                       f'  NAPI_CALL(env, napi_get_value_double(env, argv[{count}], &count{index}));',
+                       f'  if (count{index} != length{index}) {{ napi_throw_range_error(env, NULL, "array length mismatch"); return NULL; }}']
         native += [f"  return make_external(env, {name}({', '.join(names)}));", "}"]
         exports.append(f'DECLARE_NAPI_METHOD("{name}", napi_{name}),')
         if arrays:

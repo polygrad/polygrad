@@ -8,12 +8,16 @@ def bind(lib):
     lib.poly_tensor_acos.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_acosh.restype = ctypes.c_void_p
     lib.poly_tensor_acosh.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_all.restype = ctypes.c_void_p
+    lib.poly_tensor_all.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_alu1.restype = ctypes.c_void_p
     lib.poly_tensor_alu1.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     lib.poly_tensor_alu2.restype = ctypes.c_void_p
     lib.poly_tensor_alu2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_alu3.restype = ctypes.c_void_p
     lib.poly_tensor_alu3.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_any.restype = ctypes.c_void_p
+    lib.poly_tensor_any.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_arange_float_by_id.restype = ctypes.c_void_p
     lib.poly_tensor_arange_float_by_id.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int, ctypes.c_int]
     lib.poly_tensor_arange_int_by_id.restype = ctypes.c_void_p
@@ -178,6 +182,8 @@ def bind(lib):
     lib.poly_tensor_logical_not.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_logsigmoid.restype = ctypes.c_void_p
     lib.poly_tensor_logsigmoid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_logsumexp.restype = ctypes.c_void_p
+    lib.poly_tensor_logsumexp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_lstsq.restype = ctypes.c_void_p
     lib.poly_tensor_lstsq.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_max.restype = ctypes.c_void_p
@@ -202,6 +208,8 @@ def bind(lib):
     lib.poly_tensor_one_hot.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
     lib.poly_tensor_permute.restype = ctypes.c_void_p
     lib.poly_tensor_permute.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+    lib.poly_tensor_prod.restype = ctypes.c_void_p
+    lib.poly_tensor_prod.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool]
     lib.poly_tensor_quick_gelu.restype = ctypes.c_void_p
     lib.poly_tensor_quick_gelu.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_reciprocal.restype = ctypes.c_void_p
@@ -248,6 +256,8 @@ def bind(lib):
     lib.poly_tensor_square.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_sum.restype = ctypes.c_void_p
     lib.poly_tensor_sum.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool]
+    lib.poly_tensor_sum_dtype_by_id.restype = ctypes.c_void_p
+    lib.poly_tensor_sum_dtype_by_id.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int, ctypes.c_bool, ctypes.c_int]
     lib.poly_tensor_tan.restype = ctypes.c_void_p
     lib.poly_tensor_tan.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_tanh.restype = ctypes.c_void_p

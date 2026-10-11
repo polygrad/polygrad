@@ -54,6 +54,27 @@ def test_generated_abi_has_no_handwritten_signature_duplicates():
     names = set(re.findall(r'lib\.(poly_\w+)\.argtypes', generated))
     manual = inspect.getsource(_ffi)
     assert not names.intersection(re.findall(r'lib\.(poly_\w+)\.(?:argtypes|restype)', manual))
+    # Exercise declaration loops too: textual checks miss getattr-based copies.
+    writes = set()
+
+    class Function:
+        def __init__(self, name):
+            self.name = name
+
+        def __setattr__(self, field, value):
+            if field in ('argtypes', 'restype') and self.name in names:
+                key = (self.name, field)
+                assert key not in writes, f'duplicate generated declaration: {key}'
+                writes.add(key)
+            object.__setattr__(self, field, value)
+
+    class Library:
+        def __getattr__(self, name):
+            value = Function(name)
+            setattr(self, name, value)
+            return value
+
+    _ffi._declare_signatures(Library())
     for name in names:
         assert getattr(_ffi._lib, name).argtypes is not None
     root = Path(__file__).resolve().parents[2]
@@ -764,8 +785,8 @@ def test_tinyjit_repeated_scalar_readback_preserves_replay(device):
     from polygrad import Runtime
     from polygrad.device import Device
 
-    if device == 'CUDA' and not Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+    if device == 'CUDA':
+        assert Device.cuda_available(), 'required CUDA backend is unavailable in the selected library'
     with Runtime(device=device) as rt:
         x = rt.Tensor([1.0, 2.0, 3.0]).realize()
         step = TinyJit(lambda value: (value * 2 + 1).sum().realize())
@@ -787,8 +808,8 @@ def test_tinyjit_readback_reclaims_dropped_storage(device, last_view):
     from polygrad import Runtime
     from polygrad.device import Device
 
-    if device == 'CUDA' and not Device.cuda_available():
-        pytest.skip('poly_cuda_available() is false in the selected library')
+    if device == 'CUDA':
+        assert Device.cuda_available(), 'required CUDA backend is unavailable in the selected library'
     with Runtime(device=device) as rt:
         x = rt.Tensor([3.0]).realize()
         step = TinyJit(lambda value: (value + 1).realize())
@@ -1015,8 +1036,7 @@ def test_readme_javascript_package_example():
     import re
 
     node = shutil.which('node')
-    if node is None:
-        pytest.skip('Node is required to execute the JavaScript README example')
+    assert node is not None, 'Node is required to execute the JavaScript README example'
     root = Path(__file__).resolve().parents[2]
     text = (root / 'js/README.md').read_text(encoding='utf-8')
     section = text.split('JavaScript package pattern:', 1)[1]

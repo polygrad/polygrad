@@ -173,6 +173,34 @@ async function runTensorTests(pg, createRuntime) {
     } finally { x.dispose() }
   })
 
+  await test('reduction ABI accepts full rank and rejects invalid axes arrays', async () => {
+    const x = Tensor.ones(Array(17).fill(1))
+    const ffi = pg._core.ffi
+    const axes = Array.from({length: 17}, (_, i) => i)
+    try {
+      for (const name of ['prod', 'logsumexp', 'all', 'any', 'sum_dtype_by_id']) {
+        const call = (values, count) => ffi[`poly_tensor_${name}`](
+          x._ctx, x._tensor, values, count, false,
+          ...(name === 'sum_dtype_by_id' ? [pg._core.dtypeIds.float32] : []))
+        // All inputs are singleton ones.
+        const raw = call(axes, axes.length)
+        assert(raw, `${name}: full-rank axes rejected`)
+        const result = x._makeResultFromCore(raw)
+        try { assertClose(await result.toArray(), [1], 1e-6) }
+        finally { result.dispose() }
+        for (const [values, count] of [[[0.5], 1], [[NaN], 1], [[0], 0], [[], 1],
+          [[0], 1.5], [[0], 4294967297], [Array(65).fill(0), 65]]) {
+          let threw = false
+          try {
+            const invalid = call(values, count)
+            if (invalid) ffi.poly_tensor_release(invalid)
+          } catch (_) { threw = true }
+          assert(threw, `${name}: invalid axes accepted`)
+        }
+      }
+    } finally { x.dispose() }
+  })
+
   await test('shared variance preserves correction and integer accumulation', async () => {
     for (const dtype of ['float32', 'int32']) {
       const x = new Tensor([[1, 2, 3], [2, 4, 7]], { dtype })
