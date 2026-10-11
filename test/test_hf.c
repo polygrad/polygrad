@@ -25,6 +25,30 @@
 
 /* Safetensors multi-dtype */
 
+TEST(hf, whisper_config_ownership) {
+  const char *config =
+      "{\"d_model\":8,\"num_mel_bins\":4,\"max_source_positions\":4,"
+      "\"max_target_positions\":8,\"max_seq_len\":3,\"vocab_size\":16,"
+      "\"encoder_layers\":1,\"decoder_layers\":1,\"encoder_attention_heads\":2,"
+      "\"decoder_attention_heads\":2,\"encoder_ffn_dim\":16,\"decoder_ffn_dim\":16}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModelError err = {0};
+  PolyModel *m =
+      poly_model_from_config(ctx, "Whisper", config, (int)strlen(config), POLY_DEVICE_INTERP, &err);
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "encode"), 1);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "decode_sample"), 2);
+  int size = 0;
+  uint8_t *bundle = poly_model_save_bundle(m, &size);
+  ASSERT_TRUE(bundle == NULL);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not initialized") != NULL);
+  free(bundle);
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(hf, embeddinggemma2_config_ownership) {
   const char *config =
       "{\"hidden_size\":8,\"intermediate_size\":16,\"hidden_size_per_layer_input\":4,"

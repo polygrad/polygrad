@@ -20,7 +20,7 @@ typedef struct {
 
 /* tinygrad llm/model.py: Transformer.forward sampling. RNG capture uses the
  * same Model AUX/effect contract as Tensor-authored models, not a host sampler. */
-static int transformer_sampler(PolyModel *m, int vocab, PolyTensor *decode, PolyUOp *position) {
+int model_decoder_sampler(PolyModel *m, int vocab, PolyTensor *decode, PolyUOp *position) {
   PolyCtx *ctx = poly_model_ctx(m);
   PolyTensor *logits =
       poly_model_input(m, "sampling.logits", POLY_FLOAT32, (int64_t[]){1, vocab}, 2);
@@ -332,7 +332,7 @@ model_transformer_build(
     }
   }
   stage = "sampler";
-  if (c->cache_capacity && transformer_sampler(m, c->vocab, decode_logits, decode_position) != 0)
+  if (c->cache_capacity && model_decoder_sampler(m, c->vocab, decode_logits, decode_position) != 0)
     goto fail;
   if (poly_model_build(m, err) != POLY_STATUS_OK) goto fail;
   if (poly_model_require_weights(m) != 0) goto fail;

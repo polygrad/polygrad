@@ -423,6 +423,17 @@ the causal, append-only cache semantics required by prefix reuse and rewind.
 Calling `pg.models.Qwen3(...)` reports that it is import-only and points to
 `pg.Model.fromGGUF(...)`; it does not construct an uninitialized model.
 
+Whisper HF imports expose `encode(input_features)` followed by `prefill(tokens_prefill)`
+or `decode(tokens_decode)`, called through `await model.callAsync(...)`. Features
+are batch-one FP32 log-mels `[1, num_mel_bins, 2*max_source_positions]`; tokens
+are `Int32Array`. Pass `{controls:{start_pos: position}}` to decoder calls;
+`maxSeqLen` sets the maximum prefill chunk. `decode_sample` takes `tokens_decode`
+and `sampling.temperature` and returns `sampling.decode_token`, sampling on-device.
+Use `await model.resetTransientAsync()` and encode again for a new recording.
+Saved models load with empty caches. Audio preprocessing, tokenization and
+transcription policy (language/task tokens, suppression and timestamp rules)
+remain the caller's job; this is not Whisper's full `transcribe` pipeline.
+
 For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
 {cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
 contract; `pg.Model.fromGGUF` accepts the same cache options but stays generic.

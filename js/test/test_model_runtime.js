@@ -6,6 +6,54 @@ const embeddingGemma2ImageFixture = require('../../test/fixtures/embeddinggemma2
 const embeddingGemma2AudioFixture = require('../../test/fixtures/embeddinggemma2_audio.json')
 const torchFixture = require('../../test/fixtures/torch.json')
 
+async function checkWhisperCaches(pg) {
+  const model = await pg.models.WhisperAsync({d_model:8, num_mel_bins:4,
+    max_source_positions:4, max_target_positions:8, max_seq_len:3, vocab_size:16,
+    encoder_layers:1, decoder_layers:1, encoder_attention_heads:2, decoder_attention_heads:2,
+    encoder_ffn_dim:16, decoder_ffn_dim:16})
+  let restored, phase = 'weights'
+  try {
+    for (const b of model.bindings()) if (b.role === pg.Model.ROLE_PARAM) {
+      const values = Float32Array.from({length:b.shape.reduce((a,v)=>a*v,1)},
+        (_,i)=>b.name.includes('layer_norm.weight') ? 1 : ((i*7)%19-9)/64)
+      await model.writeBufferAsync(b.name, values)
+    }
+    const features = Float32Array.from({length:32}, (_,i)=>(i-16)/32)
+    const tokens = new Int32Array([1,5,7])
+    phase = 'forward'
+    const expected = (await model.forwardAsync({input_features:features, decoder_input_ids:tokens})).logits
+    phase = 'encode'
+    await model.callAsync('encode', {input_features:features})
+    for (let pos=0;pos<3;pos++) {
+      phase = `decode ${pos}`
+      const got = await model.callAsync('decode', {tokens_decode:tokens.slice(pos,pos+1)}, {controls:{start_pos:pos}})
+      assertClose(got.logits_decode, expected.slice(pos*16,(pos+1)*16), 3e-5)
+    }
+    phase = 'bounds'
+    const cache = await model.readBufferAsync('model.decoder.layers.0.self_cache')
+    let error
+    try { await model.callAsync('prefill', {tokens_prefill:tokens}, {controls:{start_pos:7}}) }
+    catch (e) { error=e }
+    assert(error && /view bounds/.test(error.message), 'Whisper cache overflow must reject')
+    assertClose(await model.readBufferAsync('model.decoder.layers.0.self_cache'), cache, 0)
+    phase = 'round trip'
+    restored = pg.Model.load(await model.saveAsync())
+    assertClose(await restored.readBufferAsync('model.decoder.layers.0.self_cache'), new Float32Array(cache.length), 0)
+    await restored.callAsync('encode', {input_features:features})
+    phase = 'sample'
+    const sample = await restored.callAsync('decode_sample', {tokens_decode:tokens.slice(0,1),
+      'sampling.temperature':new Float32Array([0])}, {controls:{start_pos:0}})
+    let best=0
+    for(let i=1;i<16;i++) if(expected[i]>expected[best]) best=i
+    assertClose(sample['sampling.decode_token'], [best], 0)
+  } catch (error) {
+    throw new Error(`Whisper ${phase}: ${error.stack || error.message}`)
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+}
+
 async function checkTorchCheckpoint(pg) {
   for (const row of require('../../test/fixtures/hf_plan.json')) {
     if (row.error) {
@@ -2532,6 +2580,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model bounded components match pinned Tensor programs', () => checkBoundedComponents(pg))
   await test('Model integer controls survive portable import', () => checkIntegerControls(pg))
   await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
+  await test('Whisper internal caches sampling and bounds', () => checkWhisperCaches(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
   await test('Model description state writes and deferred readback', () => checkDescriptionState(pg))
@@ -3319,6 +3368,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model integer controls survive portable import', () => checkIntegerControls(pg))
   await test('Model cached Llama partition reset and import', () => checkCachedLlama(pg))
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
+  await test('Whisper internal caches sampling and bounds', () => checkWhisperCaches(pg))
   await test('Model composition catalogue and named target objective', () => checkCompositionCatalogue(pg))
   await test('Model description explicit gradients', () => checkDescriptionGradient(pg))
   await test('Model description state writes and deferred readback', () => checkDescriptionState(pg))

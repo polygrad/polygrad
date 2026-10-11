@@ -190,11 +190,12 @@ troubleshooting sections for installation and runtime errors.
 | GPT2, DistilGPT2 | Yes | Yes | Yes | Legacy Python helper (uncached) |
 | Llama | Yes | Yes | No | C-backed Transformer in Python/JS |
 | Qwen3 | No | No | Yes | C-backed Transformer in Python/JS |
+| Whisper | Yes | Yes | No | Internal caches and fused token sampling; external audio preprocessing |
 | CLIP, ViT, DINOv2, DINOv3 | Yes | Yes | No | No |
 | EmbeddingGemma2 (text/image/audio), EmbeddingGemma2Text | Yes | Yes | No | No |
 
 Checkpoint-required types must have all weights loaded before execution or
-export. `models.list()` reports construction/import capabilities. Cached generation
+export. `models.list()` reports construction/import capabilities. Cached Llama/Qwen3 generation
 requires `cache_capacity` / `cacheCapacity`; specialize an imported Model with
 `Transformer.from_model()` / `Transformer.fromModel()`.
 

@@ -398,6 +398,17 @@ capabilities; see [supported models](https://github.com/polygrad/polygrad#suppor
 Calling `models.Qwen3(...)` reports that it is import-only and points to
 `Model.from_gguf(...)`; it does not construct an uninitialized model.
 
+Whisper HF imports expose `encode(input_features)` followed by `prefill(tokens_prefill)`
+or `decode(tokens_decode)`, called through `Model.call`. They accept batch-one
+FP32 log-mel features `[1, num_mel_bins, 2*max_source_positions]` and int32 token
+IDs. Decoder calls require `controls={'start_pos': position}`; `max_seq_len`
+sets the maximum prefill chunk. `decode_sample` takes `tokens_decode` and
+`sampling.temperature` and returns `sampling.decode_token`, sampling on-device.
+Call `reset_transient()` and encode again for a new recording. Saved models load
+with empty caches. Audio preprocessing, tokenization and transcription policy
+(language/task tokens, suppression and timestamp rules) remain the caller's job;
+this is not a replacement for Whisper's full `transcribe` pipeline.
+
 For cached Qwen3 generation, use `models.Transformer.from_gguf(data,
 cache_capacity=4096, prefill_chunk_size=64)`, or the runtime-bound
 `rt.models.Transformer.from_gguf(...)`. The loader validates the generation
