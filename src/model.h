@@ -550,6 +550,14 @@ int poly_model_train_step(
 /* Change only the learning rate; retain moments, beta powers and cached graphs.
  * Requires a configured optimizer. Finite nonnegative rates, including zero. */
 int poly_model_set_learning_rate(PolyModel *inst, float lr);
+
+/* JSON array of {params:[names], lr, weight_decay}. Every parameter storage
+ * must appear exactly once (aliases count as the same parameter). Enable
+ * groups before training; subsequent calls update per-parameter scalar values,
+ * preserving compiled graphs and optimizer moments. Omitted values inherit
+ * the global optimizer defaults. Reapply the configuration after loading;
+ * training rejects a grouped checkpoint until its groups are configured. */
+int poly_model_set_optimizer_groups(PolyModel *inst, const char *json);
 /* Configure optimizer. Call before first train_step. */
 int poly_model_set_optimizer(
     PolyModel *inst,

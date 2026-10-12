@@ -869,6 +869,8 @@ int poly_tensor_retire_logical_resources(PolyCtx *ctx, PolyTensor **tensors, int
 typedef struct PolyTensorCapture PolyTensorCapture;
 
 PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx);
+/* Override only the capture-private RNG, leaving the caller's stream intact. */
+PolyTensorCapture *poly_tensor_capture_begin_seeded(PolyCtx *ctx, int64_t seed);
 
 int poly_tensor_capture_wrap(
     PolyTensorCapture *capture,
@@ -959,6 +961,14 @@ PolyTensor *poly_tensor_rand(
     int ndim,
     PolyDType dtype,
     PolyDevice device,
+    int contiguous
+);
+/* Concrete shapes follow rand; bounded symbolic shapes require Model capture.
+ * RNG state advances by the actual draw size, never the bound's capacity. */
+PolyTensor *poly_tensor_rand_like_dtype(
+    PolyCtx *ctx,
+    PolyTensor *like,
+    PolyDType dtype,
     int contiguous
 );
 PolyTensor *poly_tensor_randn(

@@ -69,6 +69,23 @@ int poly_optim_build_update(
     PolyOptimUpdate *out
 );
 
+/* As above, with a mutable decay scalar. NULL keeps cfg->weight_decay and
+ * its existing graph topology. This does not own either scalar's storage. */
+int poly_optim_build_update_ex(
+    PolyCtx *ctx,
+    const PolyOptimConfig *cfg,
+    PolyUOp *lr,
+    PolyUOp *weight_decay,
+    PolyUOp *param,
+    PolyUOp *grad,
+    PolyUOp *m_buf,
+    PolyUOp *v_buf,
+    PolyUOp *bc1_buf,
+    PolyUOp *bc2_buf,
+    int64_t numel,
+    PolyOptimUpdate *out
+);
+
 /* Tensor-level optimizer step builder shared by frontends and Model-like
  * callers. This is the C-side graph-construction part of tinygrad's
  * Optimizer.schedule_step(), not the engine scheduler. It owns no state:

@@ -1215,6 +1215,24 @@ function createBoundModelClass(runtime) {
       return this
     }
 
+    setOptimizerGroups(groups) {
+      this._requireSync('setOptimizerGroups()', 'setOptimizerGroupsAsync()')
+      if (this._rt._core.model.setOptimizerGroups(this._handle, JSON.stringify(groups)) !== 0)
+        throw this._error('invalid optimizer groups')
+      return this
+    }
+
+    setOptimizerGroupsAsync(groups) {
+      this._requireOpen()
+      const json = JSON.stringify(groups)
+      const run = async () => {
+        if (await this._rt._core.model.setOptimizerGroups(this._handle, json) !== 0)
+          throw this._error('invalid optimizer groups')
+        return this
+      }
+      return this._usesAsyncHostBridge() ? this._enqueueAsync(run) : run()
+    }
+
     setLearningRateAsync(lr) {
       this._requireOpen()
       const run = async () => {

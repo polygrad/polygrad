@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/models/models.h"
 #include "../src/model.h"
+#include "../src/ctx.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -20,6 +21,62 @@ static const char *ce_tabm_spec =
     "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
 
 /* Tests */
+
+TEST(tabm, captured_dropout_embeddings_lifetime) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  const char *spec =
+      "{\"layers\":[2,4,1],\"n_ensemble\":2,\"batch_size\":4,\"seed\":123,"
+      "\"loss\":\"mse\",\"dropout\":0.5,\"num_embeddings\":{\"type\":\"piecewise_linear\","
+      "\"d_embedding\":3,\"bins\":[[-1,0,2],[0,2]]}}";
+  PolyModel *a = poly_model_from_config(ctx, "tabm", spec, strlen(spec), POLY_DEVICE_INTERP, NULL);
+  PolyModel *b = poly_model_from_config(ctx, "tabm", spec, strlen(spec), POLY_DEVICE_INTERP, NULL);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  ASSERT_INT_EQ(poly_model_set_optimizer(a, POLY_OPTIM_ADAM, .01f, .9f, .95f, 1e-8f, 0), 0);
+  ASSERT_INT_EQ(poly_model_set_optimizer(b, POLY_OPTIM_ADAM, .01f, .9f, .95f, 1e-8f, 0), 0);
+  float x[] = {-2, -.5, .3, 1, 3, 4, .7, .3}, y[] = {0, 0, 0, 0};
+  int sizes[] = {4, 1, 3};
+  for (int step = 0; step < 3; step++) {
+    int n = sizes[step];
+    PolyIOBinding io[] = {
+        {.name = "x",
+         .data = x,
+         .nbytes = (size_t)n * 2 * sizeof(float),
+         .dtype_id = poly_dtype_id_by_name("float32"),
+         .shape = (int64_t[]){n, 2},
+         .ndim = 2},
+        {.name = "y",
+         .data = y,
+         .nbytes = (size_t)n * sizeof(float),
+         .dtype_id = poly_dtype_id_by_name("float32"),
+         .shape = (int64_t[]){n, 1},
+         .ndim = 2},
+    };
+    float la, lb;
+    ASSERT_INT_EQ(poly_model_train_step(a, "loss", io, 2, &la), 0);
+    ASSERT_INT_EQ(poly_model_train_step(b, "loss", io, 2, &lb), 0);
+    ASSERT_FLOAT_EQ(la, lb, 0);
+    ASSERT_INT_EQ(poly_model_forward(a, io, 1), 0);
+    ASSERT_INT_EQ(poly_model_forward(b, io, 1), 0);
+    float out_a[4], out_b[4];
+    ASSERT_INT_EQ(poly_model_read_buf_named(a, "output", out_a, (size_t)n * sizeof(float)), 0);
+    ASSERT_INT_EQ(poly_model_read_buf_named(b, "output", out_b, (size_t)n * sizeof(float)), 0);
+    ASSERT_INT_EQ(memcmp(out_a, out_b, (size_t)n * sizeof(float)), 0);
+  }
+  poly_model_free(a);
+  poly_model_free(b);
+  const char *bad = "{\"layers\":[2,4,1],\"loss\":\"mse\",\"dropout\":0.5,"
+                    "\"num_embeddings\":{\"type\":\"piecewise_linear\",\"d_embedding\":3,\"bins\":["
+                    "[0,0],[0,1]]}}";
+  ASSERT_TRUE(
+      poly_model_from_config(ctx, "tabm", bad, strlen(bad), POLY_DEVICE_INTERP, NULL) == NULL
+  );
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(tabm, create_simple) {
   PolyModel *inst = poly_model_from_config(

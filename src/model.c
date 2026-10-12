@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <math.h>
+#include <float.h>
 
 /* Internal types */
 
@@ -185,6 +186,8 @@ typedef struct {
   bool nesterov;
   bool classic;
   int step;
+  int n_groups;
+  float *group_values; /* [lr, decay] per parameter; one atomic storage write */
 } OptimState;
 
 /* C-owned form of Tinygrad's `(LINEAR, var_vals)` execution tuple. */
@@ -3124,6 +3127,8 @@ void poly_model_free(PolyModel *inst) {
   /* Free training state */
   train_free(inst->training.train, inst->n_params);
 
+  free(inst->training.optim.group_values);
+
   /* Free context (arena-frees all UOps) -- only if we own it */
   if (inst->owns_ctx && inst->ctx) poly_ctx_destroy(inst->ctx);
 
@@ -5692,12 +5697,103 @@ int poly_model_set_optimizer(
 int poly_model_set_learning_rate(PolyModel *inst, float lr) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || inst->ctx->execution_depth ||
       inst->ctx->collecting || inst->training.optim.kind == POLY_OPTIM_NONE || !isfinite(lr) ||
-      lr < 0)
+      lr < 0 || inst->training.optim.n_groups)
     return -1;
   int bi = find_buf_by_name(inst, "optim.lr");
   if (bi >= 0 && poly_model_write_buf(inst, bi, &lr, sizeof(lr)) != 0) return -1;
   inst->training.optim.lr = lr;
   return 0;
+}
+
+int poly_model_set_optimizer_groups(PolyModel *inst, const char *json) {
+  poly_model_set_error(
+      inst, POLY_STATUS_INVALID, __func__,
+      "optimizer groups require a configured optimizer, complete unique parameter membership, "
+      "and finite nonnegative rates"
+  );
+  if (!inst || inst->stage != POLY_MODEL_BUILT || poly_model_is_busy(inst) ||
+      inst->training.optim.kind == POLY_OPTIM_NONE || !json || inst->n_params <= 0)
+    return -1;
+  OptimState *o = &inst->training.optim;
+  cJSON *groups = cJSON_Parse(json);
+  int ng = cJSON_GetArraySize(groups), rc = -1;
+  int *membership = NULL;
+  float *values = NULL;
+  if (!cJSON_IsArray(groups) || ng < 1 || ng > inst->n_params) goto done;
+  membership = malloc((size_t)inst->n_params * sizeof(*membership));
+  values = malloc((size_t)inst->n_params * 2 * sizeof(*values));
+  if (!membership || !values) goto done;
+  for (int p = 0; p < inst->n_params; p++)
+    membership[p] = -1;
+  for (int g = 0; g < ng; g++) {
+    const cJSON *group = cJSON_GetArrayItem(groups, g);
+    if (!cJSON_IsObject(group)) goto done;
+    unsigned seen = 0;
+    for (const cJSON *f = group->child; f; f = f->next) {
+      unsigned bit = !strcmp(f->string, "params")         ? 1
+                     : !strcmp(f->string, "lr")           ? 2
+                     : !strcmp(f->string, "weight_decay") ? 4
+                                                          : 0;
+      if (!bit || (seen & bit)) goto done;
+      seen |= bit;
+    }
+    const cJSON *names = cJSON_GetObjectItemCaseSensitive(group, "params");
+    if (!cJSON_IsArray(names) || cJSON_GetArraySize(names) < 1) goto done;
+    const char *keys[] = {"lr", "weight_decay"};
+    float scalar[2];
+    for (int j = 0; j < 2; j++) {
+      const cJSON *v = cJSON_GetObjectItemCaseSensitive(group, keys[j]);
+      double value = v ? v->valuedouble : j ? o->weight_decay : o->lr;
+      if ((v && !cJSON_IsNumber(v)) || !isfinite(value) || value < 0 || value > FLT_MAX) goto done;
+      scalar[j] = (float)value;
+    }
+    for (const cJSON *name = names->child; name; name = name->next) {
+      if (!cJSON_IsString(name)) goto done;
+      int bi = find_buf_by_name(inst, name->valuestring);
+      if (bi < 0 || inst->bufs[bi].role != POLY_ROLE_PARAM) {
+        poly_model_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "unknown parameter '%.128s'", name->valuestring
+        );
+        goto done;
+      }
+      bool found = false;
+      for (int p = 0; p < inst->n_params; p++) {
+        if (inst->bufs[inst->param_indices[p]].logical_buffer != inst->bufs[bi].logical_buffer)
+          continue;
+        if (membership[p] != -1) goto done;
+        membership[p] = g;
+        values[2 * p] = scalar[0];
+        values[2 * p + 1] = scalar[1];
+        found = true;
+      }
+      if (!found) goto done;
+    }
+  }
+  for (int p = 0; p < inst->n_params; p++)
+    if (membership[p] < 0) goto done;
+  /* Lower group declarations to parameter scalars, not separate optimizers.
+   * Regrouping and schedules then leave moments and execution topology intact. */
+  if (!o->n_groups && inst->training.train) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "enable optimizer groups before training"
+    );
+    goto done;
+  }
+  int bi = find_buf_by_name(inst, "optim.groups");
+  if (bi >= 0 &&
+      poly_model_write_buf(inst, bi, values, (size_t)inst->n_params * 2 * sizeof(*values)) != 0)
+    goto done;
+  free(o->group_values);
+  o->group_values = values;
+  o->n_groups = ng;
+  values = NULL;
+  rc = 0;
+  poly_model_set_error(inst, POLY_STATUS_OK, __func__, NULL);
+done:
+  free(membership);
+  free(values);
+  cJSON_Delete(groups);
+  return rc;
 }
 
 int poly_model_set_optimizer_ex(
@@ -5742,6 +5838,7 @@ int poly_model_set_optimizer_ex(
     return -1;
   }
   TrainState *old_train = inst->training.train;
+  free(inst->training.optim.group_values);
   inst->training.optim = next;
   inst->training.train = NULL;
   model_publish_residency_roots(inst, &prepared_roots);
@@ -6189,13 +6286,25 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
   }
   /* The existing optimizer consumes a scalar Tensor, as nn.optim does. A
    * schedule changes its storage value without rebuilding or resetting state. */
-  PolyUOp *lr = NULL;
+  PolyUOp *lr = NULL, *group_values = NULL;
   int64_t lr_shape[] = {1};
   if (ensure_optimizer_state_buffer(inst, "optim.lr", lr_shape, 1, true, o->lr, named_loss, &lr) !=
       0) {
     free(sink_srcs);
     train_free(ts, np);
     return -1;
+  }
+  if (o->n_groups) {
+    int64_t shape[] = {2 * (int64_t)inst->n_params};
+    if (ensure_optimizer_state_buffer(
+            inst, "optim.groups", shape, 1, false, 0, named_loss, &group_values
+        ) != 0 ||
+        poly_buffer_write(ctx, group_values, o->group_values, (size_t)shape[0] * sizeof(float)) !=
+            0) {
+      free(sink_srcs);
+      train_free(ts, np);
+      return -1;
+    }
   }
 
   for (int i = 0; i < np; i++) {
@@ -6233,11 +6342,20 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
         .classic = o->classic,
     };
     PolyOptimUpdate upd;
+    PolyUOp *param_lr = lr, *param_decay = NULL;
+    if (group_values) {
+      int64_t offset = 2 * (int64_t)param_ord;
+      int64_t span[][2] = {{offset, offset + 1}};
+      param_lr = poly_uop_shrink(ctx, group_values, span, 1);
+      span[0][0]++;
+      span[0][1]++;
+      param_decay = poly_uop_shrink(ctx, group_values, span, 1);
+    }
     PolyUOp *m_buf = has_m_bufs ? ts->m_bufs[i] : NULL;
     PolyUOp *v_buf = is_adam ? ts->v_bufs[i] : NULL;
-    if (poly_optim_build_update(
-            ctx, &cfg, lr, param_buf, grad, m_buf, v_buf, ts->bc1_buf, ts->bc2_buf, pb_opt->numel,
-            &upd
+    if (poly_optim_build_update_ex(
+            ctx, &cfg, param_lr, param_decay, param_buf, grad, m_buf, v_buf, ts->bc1_buf,
+            ts->bc2_buf, pb_opt->numel, &upd
         ) != 0) {
       fprintf(stderr, "ensure_train_graph: unsupported optimizer %d\n", o->kind);
       free(sink_srcs);
@@ -6280,6 +6398,16 @@ static int build_train_graph(PolyModel *inst, TrainState **out) {
 }
 
 static int ensure_train_graph(PolyModel *inst, int loss_ep_idx) {
+  /* A checkpoint keeps per-parameter rates as AUX storage, while optimizer
+   * configuration is caller-owned. Never ignore that storage after reload or
+   * reconfiguration and silently train with the global defaults. */
+  if (!inst->training.optim.n_groups && find_buf_by_name(inst, "optim.groups") >= 0) {
+    poly_model_set_error(
+        inst, POLY_STATUS_INVALID, __func__,
+        "reapply optimizer groups before training this checkpoint"
+    );
+    return -1;
+  }
   if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
   if (inst->training.train) return 0;
 

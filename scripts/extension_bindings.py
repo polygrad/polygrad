@@ -12,7 +12,8 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-OPAQUE = {"PolyCtx *", "PolyTensor *", "PolyUOp *", "PolyTensorCapture *"}
+OPAQUE = {"PolyCtx *", "PolyTensor *", "PolyUOp *", "PolyTensorCapture *", "PolyModel *"}
+STATUS_CALLS = {"poly_model_set_optimizer_groups"}
 SCALARS = {
     "int",
     "_Bool",
@@ -115,10 +116,11 @@ def frontend_bindings(decls):
         inputs = args[:-2] if pair else args
         if pair:
             assert ret == "int" and all(a["type"]["qualType"] == "PolyTensor **" for a in args[-2:])
-        if (name.startswith(("poly_tensor_", "poly_uop_"))
+        if ((name.startswith(("poly_tensor_", "poly_uop_")) or name in STATUS_CALLS)
                 and name not in EXCLUDE
-                and (ret in ("PolyTensor *", "PolyUOp *") or pair)
+                and (ret in ("PolyTensor *", "PolyUOp *") or pair or (name in STATUS_CALLS and ret == "int"))
                 and all(a["type"]["qualType"].removeprefix("const ") in OPAQUE | SCALARS
+                        or (name in STATUS_CALLS and a["type"]["qualType"] == "const char *")
                         or (optional and a is args[-1] and a["type"]["qualType"] == "PolyTensor **")
                         or (a["type"]["qualType"] in ("int64_t *", "const int64_t *", "int64_t (*)[2]")
                             and ARRAYS.get(name, {}).get(a["name"], (None,0,None))[1:] in ((8, "in"), (16, "in")))
@@ -143,7 +145,7 @@ def frontend_bindings(decls):
                    f"  napi_value argv[{max(1,len(inputs))}];", f"  size_t argc = {len(inputs)};",
                    "  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));",
                    f'  if (argc != {len(inputs)}) {{ napi_throw_type_error(env, NULL, "{name}: wrong argument count"); return NULL; }}']
-        js_args, py_args, arrays, c_args = [], [], [], []
+        js_args, py_args, arrays, c_args, strings = [], [], [], [], []
         for i, arg in enumerate(inputs):
             t = arg["type"]["qualType"]
             if optional and i == len(args) - 1:
@@ -165,6 +167,10 @@ def frontend_bindings(decls):
                 js_args.append(n)
                 # Python passes flattened pairs, with the same contiguous C layout.
                 py_args.append("ctypes.POINTER(ctypes.c_int64)")
+            elif t == "const char *":
+                strings.append(i)
+                js_args.append(n)
+                py_args.append("ctypes.c_char_p")
             elif t.removeprefix("const ") in OPAQUE:
                 native.append(f"  {t} {n} = get_external_nullable(env, argv[{i}]);")
                 js_args.append(f"({n} || 0)")
@@ -193,7 +199,21 @@ def frontend_bindings(decls):
             native += [f'  double count{index};',
                        f'  NAPI_CALL(env, napi_get_value_double(env, argv[{count}], &count{index}));',
                        f'  if (count{index} < 0 || count{index} > POLY_MAX_DIMS * {limit} || count{index} != floor(count{index}) || count{index} * {elements} != length{index}) {{ napi_throw_range_error(env, NULL, "array length mismatch"); return NULL; }}']
-        if optional:
+        # Decode strings last: no earlier argument error can leak an allocation.
+        for i in strings:
+            native += [f"  char *a{i} = NULL;", f"  size_t bytes{i};",
+                       f"  napi_status status{i} = napi_get_value_string_utf8(env, argv[{i}], NULL, 0, &bytes{i});",
+                       f"  if (status{i} == napi_ok && (a{i} = malloc(bytes{i} + 1)))",
+                       f"    status{i} = napi_get_value_string_utf8(env, argv[{i}], a{i}, bytes{i} + 1, NULL);",
+                       f"  if (status{i} != napi_ok || !a{i}) {{"]
+            native += [f"    free(a{j});" for j in strings if j <= i]
+            native += ['    napi_throw_type_error(env, NULL, "expected a UTF-8 string"); return NULL;', "  }"]
+        if name in STATUS_CALLS:
+            native += [f"  int rc = {name}({', '.join(c_args)});"]
+            native += [f"  free(a{i});" for i in strings]
+            native += ["  napi_value result;", "  NAPI_CALL(env, napi_create_int32(env, rc, &result));",
+                       "  return result;", "}"]
+        elif optional:
             py_args[-1] = "ctypes.POINTER(ctypes.c_void_p)"
             native += ["  PolyTensor *second = NULL;",
                        f"  PolyTensor *first = {name}({', '.join(c_args[:-1])}, {names[-1]} ? &second : NULL);",
@@ -208,7 +228,10 @@ def frontend_bindings(decls):
         else:
             native += [f"  return make_external(env, {name}({', '.join(c_args)}));", "}"]
         exports.append(f'DECLARE_NAPI_METHOD("{name}", napi_{name}),')
-        if arrays:
+        if strings:
+            types = ['string' if i in strings else 'number' for i in range(len(args))]
+            wasm.append(f"  {name}: ({', '.join(names)}) => Module.ccall('{name}', 'number', {json.dumps(types)}, [{', '.join(js_args)}]),")
+        elif arrays:
             wasm += [f"  {name}: ({', '.join(input_names)}) => {{"]
             for index, count, elements, limit in arrays:
                 wasm += [f"    if (!Array.isArray(a{index}) || !Number.isInteger(a{count}) || a{count} < 0 || a{count} > {max_dims * limit} || a{index}.length !== a{count} * {elements}) throw new RangeError('invalid dimension array')",
@@ -223,7 +246,7 @@ def frontend_bindings(decls):
             wasm.append(f"  {name}: ({', '.join(input_names)}) => callTensorPair(Module._{name}, [{', '.join(js_args)}], '{name}'),")
         else:
             wasm.append(f"  {name}: ({', '.join(names)}) => Module._{name}({', '.join(js_args)}),")
-        python += [f"    lib.{name}.restype = ctypes.{'c_int' if pair else 'c_void_p'}",
+        python += [f"    lib.{name}.restype = ctypes.{'c_int' if pair or name in STATUS_CALLS else 'c_void_p'}",
                    f"    lib.{name}.argtypes = [{', '.join(py_args)}]"]
     wasm.append("})\n")
     comment = "/* Generated by scripts/extension_bindings.py --core. */\n"
@@ -262,7 +285,7 @@ def signature(d):
 
 
 def core(check=False):
-    decls = declarations('#include "polygrad.h"\n#include "frontend.h"\n#include "nn/nn.h"\n')
+    decls = declarations('#include "polygrad.h"\n#include "model.h"\n#include "frontend.h"\n#include "nn/nn.h"\n')
     result = {}
     for name, d in sorted(decls.items()):
         ret, args = signature(d)

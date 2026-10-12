@@ -14,6 +14,8 @@ void poly_init_param_kaiming(
     int64_t numel,
     int64_t fan_in
 );
+/* Same seed/name stream convention, with a standard normal distribution. */
+void poly_init_param_normal(uint64_t seed, const char *name, float *data, int64_t numel);
 
 /* Snapshot host bytes into Model-owned AUX storage; never retain the caller's
  * memory. The caller owns the returned Tensor handle independently of Model. */

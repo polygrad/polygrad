@@ -69,6 +69,43 @@ TEST(model, tabm_member_loss_batch_and_learning_rate) {
   ASSERT_EQ(poly_model_read_buf_named(m, "output.weight", unchanged, sizeof(unchanged)), 0);
   ASSERT_EQ(memcmp(weights, unchanged, sizeof(weights)), 0);
   ASSERT_EQ(poly_model_set_learning_rate(m, -1), -1);
+  ASSERT_EQ(poly_model_set_optimizer(m, POLY_OPTIM_ADAMW, .1f, .9f, .999f, 1e-8f, 0), 0);
+  ASSERT_EQ(
+      poly_model_set_optimizer_groups(
+          m, "[{\"params\":[\"output.weight\"],\"lr\":0.1},{\"params\":[\"output.bias\"],\"lr\":0}]"
+      ),
+      0
+  );
+  ASSERT_EQ(poly_model_train_step(m, "loss", io, 2, &loss), 0);
+  training_graph = poly_model_test_execution(m, true, false);
+  ASSERT_EQ(poly_model_read_buf_named(m, "output.weight", weights, sizeof(weights)), 0);
+  float moment[2], after_moment[2];
+  ASSERT_EQ(poly_model_read_buf_named(m, "optim.adam.m.output.weight", moment, sizeof(moment)), 0);
+  ASSERT_EQ(
+      poly_model_set_optimizer_groups(
+          m, "[{\"params\":[\"output.weight\"],\"lr\":0,\"weight_decay\":0.2},{\"params\":["
+             "\"output.bias\"],\"lr\":0.2}]"
+      ),
+      0
+  );
+  ASSERT_EQ(
+      poly_model_read_buf_named(
+          m, "optim.adam.m.output.weight", after_moment, sizeof(after_moment)
+      ),
+      0
+  );
+  ASSERT_EQ(memcmp(moment, after_moment, sizeof(moment)), 0);
+  ASSERT_EQ(poly_model_set_optimizer_groups(m, "[{\"params\":[\"output.weight\"]}]"), -1);
+  ASSERT_EQ(
+      poly_model_set_optimizer_groups(
+          m, "[{\"params\":[\"output.weight\",\"output.weight\",\"output.bias\"]}]"
+      ),
+      -1
+  );
+  ASSERT_EQ(poly_model_train_step(m, "loss", io, 2, &loss), 0);
+  ASSERT_TRUE(poly_model_test_execution(m, true, false) == training_graph);
+  ASSERT_EQ(poly_model_read_buf_named(m, "output.weight", unchanged, sizeof(unchanged)), 0);
+  ASSERT_EQ(memcmp(weights, unchanged, sizeof(weights)), 0);
   poly_model_free(m);
   poly_ctx_collect(ctx);
   ASSERT_EQ(ctx->n_tensors, 0);

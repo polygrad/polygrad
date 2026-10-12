@@ -827,24 +827,11 @@ PolyTensor *poly_tensor_dropout(PolyCtx *ctx, PolyTensor *x, double p, int train
   if (!training || p == 0) return poly_tensor_retain(x);
   PolyTensor *noise = NULL;
   if (p != 1) {
-    int ndim = poly_uop_ndim(ctx, x->uop_physical);
-    int64_t dims[POLY_MAX_DIMS];
-    if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
-    for (int i = 0; i < ndim; i++) {
-      PolyUOp *dim = poly_uop_shape_dim(ctx, x->uop_physical, i);
-      /* RandMixin.rand requires concrete extents; never draw at a symbolic
-       * maximum and silently change the RNG stream for a smaller binding. */
-      if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT) return NULL;
-      dims[i] = dim->arg.i;
-    }
     /* One RNG draw owns both graph occurrences; do not advance twice for
      * logical retention. The existing RNG owner retains seed/counter state. */
-    PolyDevice device = x->device;
-    if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
-    if (device == POLY_DEVICE_AUTO) device = poly_device_default();
     PolyDType dtype;
     if (!poly_dtype_by_id(poly_get_default_float(), &dtype)) return NULL;
-    noise = poly_tensor_rand(ctx, dims, ndim, dtype, device, 0);
+    noise = poly_tensor_rand_like_dtype(ctx, x, dtype, 0);
     if (!noise || (build_logical && !noise->uop_logical)) {
       poly_tensor_release(noise);
       return NULL;

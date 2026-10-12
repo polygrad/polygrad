@@ -2,6 +2,8 @@
 import ctypes
 
 def bind(lib):
+    lib.poly_model_set_optimizer_groups.restype = ctypes.c_int
+    lib.poly_model_set_optimizer_groups.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.poly_tensor_abs.restype = ctypes.c_void_p
     lib.poly_tensor_abs.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_acos.restype = ctypes.c_void_p

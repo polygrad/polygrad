@@ -4575,40 +4575,48 @@ PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyT
 PolyUOp *poly_uop_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
   if (!ctx || !tensors || n_tensors <= 0) return NULL;
 
-  int64_t sh0[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, tensors[0], sh0);
+  PolyUOp *sh0[POLY_MAX_DIMS];
+  int ndim = poly_uop_ndim(ctx, tensors[0]);
   if (ndim < 0) return NULL;
   if (dim < 0) dim += ndim;
   if (dim < 0 || dim >= ndim) return NULL;
 
   /* All tensors must match shape except along dim */
-  int64_t shi[POLY_MAX_DIMS];
-  int64_t *cum = malloc((size_t)(n_tensors + 1) * sizeof(*cum));
+  for (int j = 0; j < ndim; j++)
+    if (!(sh0[j] = poly_uop_shape_dim(ctx, tensors[0], j))) return NULL;
+  PolyUOp **cum = malloc(((size_t)n_tensors + 1) * sizeof(*cum));
   if (!cum) return NULL;
-  cum[0] = 0;
+  cum[0] = poly_uop_const_int(ctx, 0);
   bool equal_width = true;
   for (int i = 0; i < n_tensors; i++) {
-    int ni = uop_shape(ctx, tensors[i], shi);
+    int ni = poly_uop_ndim(ctx, tensors[i]);
     if (ni != ndim) {
       fprintf(stderr, "poly_uop_cat: ndim mismatch at tensor %d: %d vs %d\n", i, ni, ndim);
       free(cum);
       return NULL;
     }
+    PolyUOp *width = NULL;
     for (int j = 0; j < ndim; j++) {
-      if (j == dim) continue;
-      if (shi[j] != sh0[j]) {
-        fprintf(
-            stderr, "poly_uop_cat: shape mismatch at tensor %d dim %d: %lld vs %lld\n", i, j,
-            (long long)shi[j], (long long)sh0[j]
-        );
+      PolyUOp *size = poly_uop_shape_dim(ctx, tensors[i], j);
+      int64_t a, b;
+      bool equal = size == sh0[j] || (poly_uop_const_i64(size, &a) == 0 &&
+                                      poly_uop_const_i64(sh0[j], &b) == 0 && a == b);
+      if (j == dim) {
+        width = size;
+        equal_width &= equal;
+      } else if (!equal) {
+        fprintf(stderr, "poly_uop_cat: shape mismatch at tensor %d dim %d\n", i, j);
         free(cum);
         return NULL;
       }
     }
-    equal_width &= shi[dim] == sh0[dim];
-    cum[i + 1] = cum[i] + shi[dim];
+    if (!width) {
+      free(cum);
+      return NULL;
+    }
+    cum[i + 1] = poly_graph_rewrite(ctx, poly_uop_add(ctx, cum[i], width), poly_symbolic());
   }
-  int64_t total = cum[n_tensors];
+  PolyUOp *total = cum[n_tensors];
 
   /* Current cat uses stack(..., dim).flatten(dim, dim+1) when every source
    * has the same concatenated-axis extent. Sort's bitonic half merges all
@@ -4617,22 +4625,18 @@ PolyUOp *poly_uop_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
     PolyUOp *stacked = poly_uop_stack_axis(ctx, tensors, n_tensors, dim);
     free(cum);
     if (!stacked) return NULL;
-    int64_t out_shape[POLY_MAX_DIMS];
-    memcpy(out_shape, sh0, (size_t)ndim * sizeof(*out_shape));
-    out_shape[dim] = total;
-    return poly_uop_reshape(ctx, stacked, out_shape, ndim);
+    sh0[dim] = total;
+    return poly_uop_reshape_symbolic(ctx, stacked, sh0, ndim);
   }
 
   PolyUOp *acc = NULL;
   for (int i = 0; i < n_tensors; i++) {
-    int64_t pads[POLY_MAX_DIMS][2];
+    PolyUOp *offsets[POLY_MAX_DIMS], *sizes[POLY_MAX_DIMS];
     for (int j = 0; j < ndim; j++) {
-      pads[j][0] = 0;
-      pads[j][1] = 0;
+      offsets[j] = j == dim ? cum[i] : cum[0];
+      sizes[j] = j == dim ? total : sh0[j];
     }
-    pads[dim][0] = cum[i];
-    pads[dim][1] = total - cum[i + 1];
-    PolyUOp *padded = poly_uop_pad(ctx, tensors[i], pads, ndim);
+    PolyUOp *padded = poly_uop_pad_symbolic(ctx, tensors[i], offsets, sizes, ndim);
     if (!padded) {
       free(cum);
       return NULL;
@@ -5720,13 +5724,7 @@ static PolyTensor *rng_random_bits(
   return out;
 }
 
-static PolyTensor *rng_bits_to_rand(
-    PolyCtx *ctx,
-    PolyTensor *bits,
-    const int64_t *shape,
-    int ndim,
-    PolyDType dtype
-) {
+static PolyTensor *rng_bits_to_one_two(PolyCtx *ctx, PolyTensor *bits, PolyDType dtype) {
   int itemsize = poly_dtype_itemsize(dtype);
   int nmant = poly_dtype_eq(dtype, POLY_FLOAT16)    ? 10
               : poly_dtype_eq(dtype, POLY_BFLOAT16) ? 7
@@ -5759,6 +5757,17 @@ static PolyTensor *rng_bits_to_rand(
                                ? poly_tensor_alu2(ctx, POLY_OP_OR, mantissa, float_one_bits)
                                : NULL;
   one_to_two = one_to_two ? poly_tensor_bitcast(ctx, one_to_two, dtype) : NULL;
+  return one_to_two;
+}
+
+static PolyTensor *rng_bits_to_rand(
+    PolyCtx *ctx,
+    PolyTensor *bits,
+    const int64_t *shape,
+    int ndim,
+    PolyDType dtype
+) {
+  PolyTensor *one_to_two = rng_bits_to_one_two(ctx, bits, dtype);
   int64_t numel = poly_shape_numel_checked(shape, ndim);
   PolyTensor *selected =
       numel >= 0 && one_to_two ? rng_getitem_1d(ctx, one_to_two, 0, numel, false) : NULL;
@@ -5768,11 +5777,14 @@ static PolyTensor *rng_bits_to_rand(
   return zero_to_one ? rng_reshape_if_needed(ctx, zero_to_one, shape, ndim) : NULL;
 }
 
-static PolyTensor *rng_advance_counter_graph(PolyCtx *ctx, PolyTensor *counter, uint64_t num) {
+static PolyTensor *rng_advance_counter_parts(
+    PolyCtx *ctx,
+    PolyTensor *counter,
+    PolyTensor *low_add,
+    PolyTensor *high_add
+) {
   PolyTensor *low0 = rng_getitem_1d(ctx, counter, 0, 1, false);
   PolyTensor *high0 = rng_getitem_1d(ctx, counter, 1, 2, false);
-  PolyTensor *low_add = rng_weakint(ctx, (int64_t)(num & UINT32_MAX));
-  PolyTensor *high_add = rng_weakint(ctx, (int64_t)(num >> 32));
   PolyTensor *new_low = low0 && low_add ? poly_tensor_alu2(ctx, POLY_OP_ADD, low0, low_add) : NULL;
   PolyTensor *counter0 = rng_getitem_1d(ctx, counter, 0, 1, true);
   PolyTensor *carry =
@@ -5800,7 +5812,10 @@ static PolyTensor *rng_advance_counter(PolyCtx *ctx, PolyTensor *counter, uint64
    * reconstruct a logical graph for a counter created under NEVER. */
   PolyLogicalPolicy policy = ctx->logical_policy;
   ctx->logical_policy = counter->logical_policy;
-  PolyTensor *out = rng_advance_counter_graph(ctx, counter, num);
+  PolyTensor *out = rng_advance_counter_parts(
+      ctx, counter, rng_weakint(ctx, (int64_t)(num & UINT32_MAX)),
+      rng_weakint(ctx, (int64_t)(num >> 32))
+  );
   ctx->logical_policy = policy;
   return out;
 }
@@ -5842,6 +5857,10 @@ void poly_tensor_manual_seed(PolyCtx *ctx, int64_t seed) {
 }
 
 PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx) {
+  return poly_tensor_capture_begin_seeded(ctx, ctx ? (int64_t)ctx->rng_seed : 0);
+}
+
+PolyTensorCapture *poly_tensor_capture_begin_seeded(PolyCtx *ctx, int64_t seed) {
   if (!ctx || ctx->tensor_capture || ctx->active_jit_capture || ctx->execution_depth ||
       ctx->collecting)
     return NULL;
@@ -5858,6 +5877,7 @@ PolyTensorCapture *poly_tensor_capture_begin(PolyCtx *ctx) {
   capture->saved_seed = ctx->rng_seed;
   capture->saved_device_count = ctx->rng_device_count;
   ctx->rng_states = rng;
+  ctx->rng_seed = (uint64_t)seed;
   ctx->rng_device_count = 0;
   ctx->tensor_capture = capture;
   if (!capture->indices || tensor_capture_record(ctx) != 0) {
@@ -6178,6 +6198,100 @@ PolyTensor *poly_tensor_rand(
       state ? state->seed : NULL,
       state ? state->counter : NULL,
   };
+  tensor_release_temporaries(ctx, first_order, keep, 3);
+  return out;
+}
+
+/* Model capture extends RandMixin's concrete-size program to bounded shapes.
+ * Counts, the Threefry split point and the counter increment all use the live
+ * size, not its allocation capacity. One draw is limited to a uint32 chunk;
+ * ordinary eager rand keeps the pinned concrete/multi-chunk implementation. */
+PolyTensor *poly_tensor_rand_like_dtype(
+    PolyCtx *ctx,
+    PolyTensor *like,
+    PolyDType dtype,
+    int contiguous
+) {
+  if (!ctx || !like || like->owner_ctx != ctx || !like->uop_physical) return NULL;
+  int ndim = poly_uop_ndim(ctx, like->uop_physical);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  PolyUOp *dims[POLY_MAX_DIMS], *numel = poly_uop_const_int(ctx, 1);
+  int64_t concrete[POLY_MAX_DIMS];
+  bool symbolic = false;
+  for (int i = 0; i < ndim; i++) {
+    dims[i] = poly_uop_shape_dim(ctx, like->uop_physical, i);
+    if (!dims[i]) return NULL;
+    symbolic |= poly_uop_const_i64(dims[i], &concrete[i]) != 0;
+    numel = poly_uop_mul(ctx, numel, dims[i]);
+  }
+  PolyDevice device = like->device;
+  if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+  if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+  if (!symbolic) return poly_tensor_rand(ctx, concrete, ndim, dtype, device, contiguous);
+  if (!ctx->tensor_capture) {
+    fprintf(stderr, "poly_tensor_rand_like_dtype: symbolic random shapes require Model capture\n");
+    return NULL;
+  }
+  if (!poly_dtype_is_float(dtype)) {
+    fprintf(
+        stderr, "poly_tensor_rand_like_dtype: random generation requires a floating-point dtype\n"
+    );
+    return NULL;
+  }
+  int itemsize = poly_dtype_itemsize(dtype);
+  int64_t lo, hi;
+  poly_uop_minmax(ctx, numel, &lo, &hi);
+  if (lo < 1) {
+    fprintf(stderr, "poly_tensor_rand_like_dtype: symbolic random extents must be positive\n");
+    return NULL;
+  }
+  if (itemsize <= 0 || hi > (int64_t)UINT32_MAX * 4 / itemsize) {
+    fprintf(stderr, "poly_tensor_rand_like_dtype: symbolic random draw exceeds one uint32 chunk\n");
+    return NULL;
+  }
+  /* Shape expressions use index floor division, as Python's ceildiv does.
+   * Integer ALU division hides divisibility from unequal-width bitcast views. */
+  PolyUOp *num = poly_uop_alu2(
+      ctx, POLY_OP_FLOORDIV,
+      poly_uop_add(
+          ctx, poly_uop_mul(ctx, numel, poly_uop_const_int(ctx, itemsize)),
+          poly_uop_const_int(ctx, 3)
+      ),
+      poly_uop_const_int(ctx, 4)
+  );
+  PolyUOp *half = poly_uop_alu2(
+      ctx, POLY_OP_FLOORDIV, poly_uop_add(ctx, num, poly_uop_const_int(ctx, 1)),
+      poly_uop_const_int(ctx, 2)
+  );
+  uint64_t first_order = ctx->next_tensor_order;
+  PolyRngDeviceState *state = rng_device_state(ctx, device);
+  PolyTensor *out = NULL;
+  if (!state) goto done;
+  PolyTensor *increment = rng_tensor_result(ctx, num, num, device);
+  PolyTensor *counter =
+      increment ? rng_advance_counter_parts(ctx, state->counter, increment, rng_weakint(ctx, 0))
+                : NULL;
+  PolyTensor *low = counter ? rng_getitem_1d(ctx, counter, 0, 1, false) : NULL;
+  PolyTensor *high = counter ? rng_getitem_1d(ctx, counter, 1, 2, false) : NULL;
+  PolyTensor *key = low && high ? rng_threefry_random_bits(ctx, state->seed, low, high) : NULL;
+  int64_t half_lo, half_hi;
+  poly_uop_minmax(ctx, half, &half_lo, &half_hi);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  PolyUOp *range = poly_uop_arange_int_dtype(ctx, 0, half_hi, 1, POLY_UINT32);
+  range = range ? poly_uop_shrink_symbolic(ctx, range, &zero, &half, 1) : NULL;
+  PolyTensor *counts0 = range ? rng_tensor_result(ctx, range, range, device) : NULL;
+  PolyTensor *split = rng_tensor_result(ctx, half, half, device);
+  PolyTensor *counts1 =
+      counts0 && split ? poly_tensor_alu2(ctx, POLY_OP_ADD, counts0, split) : NULL;
+  PolyTensor *bits = key && counts1 ? rng_threefry_random_bits(ctx, key, counts0, counts1) : NULL;
+  bits = bits ? poly_tensor_shrink_uop(ctx, bits, &zero, &num, 1) : NULL;
+  PolyTensor *values = bits ? rng_bits_to_one_two(ctx, bits, dtype) : NULL;
+  values = values ? poly_tensor_shrink_uop(ctx, values, &zero, &numel, 1) : NULL;
+  values = values ? poly_tensor_alu2(ctx, POLY_OP_SUB, values, rng_weakint(ctx, 1)) : NULL;
+  out = values ? poly_tensor_reshape_uop(ctx, values, dims, ndim) : NULL;
+  if (out && contiguous) out = poly_tensor_contiguous(ctx, out);
+done:;
+  PolyTensor *keep[] = {out, state ? state->seed : NULL, state ? state->counter : NULL};
   tensor_release_temporaries(ctx, first_order, keep, 3);
   return out;
 }

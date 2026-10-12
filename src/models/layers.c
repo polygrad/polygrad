@@ -50,6 +50,17 @@ void poly_init_param_kaiming(
     data[i] = (prng_float(seed, stream, (uint64_t)i) * 2.0f - 1.0f) * bound;
 }
 
+void poly_init_param_normal(uint64_t seed, const char *name, float *data, int64_t numel) {
+  uint64_t stream = fnv1a_64(name, strlen(name));
+  for (int64_t i = 0; i < numel; i++) {
+    /* Shift the uniform away from zero before log. Initialization is keyed by
+     * parameter name and cannot consume or perturb the training RNG stream. */
+    double u = 1.0 - prng_float(seed, stream, 2 * (uint64_t)i);
+    double v = prng_float(seed, stream, 2 * (uint64_t)i + 1);
+    data[i] = (float)(sqrt(-2.0 * log(u)) * cos(6.2831853071795864769 * v));
+  }
+}
+
 int model_init_param(
     PolyModel *model,
     const char *name,

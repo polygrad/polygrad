@@ -1042,6 +1042,351 @@ def test_callable_model_rng_capture_is_private_and_resumable():
         model.dispose()
 
 
+@pytest.mark.parametrize('axis', [0, 1])
+@pytest.mark.parametrize('same_width', [True, False])
+def test_symbolic_cat_preserves_live_extents(axis, same_width):
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        n = rt.Variable('cat_batch', 1, 8).bind(8)
+        a = rt.Tensor.empty(n, 3)
+        b = rt.Tensor.empty(n if same_width else 2, 3) if axis == 0 else rt.Tensor.empty(n, 3 if same_width else 2)
+        model = rt.Model(lambda a, b: a.cat(b, dim=axis), inputs={'a': a, 'b': b})
+        try:
+            for size in (8, 3, 1):
+                x = np.arange(size*3, dtype=np.float32).reshape(size, 3)
+                shape = ((size if same_width else 2), 3) if axis == 0 else (size, 3 if same_width else 2)
+                y = np.ones(shape, np.float32)
+                np.testing.assert_array_equal(model.forward(a=x, b=y)['output'], np.concatenate((x, y), axis=axis))
+        finally: model.dispose()
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_callable_model_symbolic_dropout_uses_actual_batch_rng_and_resumes(device):
+    from polygrad import create
+    with create(device=device, logical='always') as rt, create(device=device) as oracle:
+        rt.Tensor.manual_seed(123)
+        oracle.Tensor.manual_seed(123)
+        batch = rt.Variable('dropout_batch', 1, 8).bind(8)
+        weight = rt.Tensor([1.0])
+        model = rt.Model(lambda x: (x*weight).dropout(0.5),
+                         inputs={'x': rt.Tensor.empty(batch, 3)},
+                         targets={'y': rt.Tensor.empty(batch, 3)}, params={'weight': weight},
+                         loss=lambda out, y: (out-y).square().mean())
+        restored = None
+        try:
+            model.set_optimizer('sgd', lr=0.01)
+            expected_weight, consumed = 1.0, 0
+            counters = [model.buf_name(i) for i in range(model.buf_count)
+                        if model.buf_name(i).endswith('.counter')]
+            assert len(counters) == 1
+            for size in (8, 3, 5, 1, 8):
+                noise = oracle.Tensor.rand(size, 3)
+                try: mask = (noise.numpy() >= .5).astype(np.float32) * 2
+                finally: noise.dispose()
+                x = np.arange(1, size*3+1, dtype=np.float32).reshape(size, 3) / 24
+                expected_loss = np.mean((x*expected_weight*mask)**2)
+                expected_weight -= .01 * 2 * expected_weight * np.mean((x*mask)**2)
+                np.testing.assert_allclose(model.train_step(x=x, y=x*0), expected_loss, rtol=2e-6)
+                consumed += size * 3
+                np.testing.assert_array_equal(model.read_buffer(counters[0]), [consumed, 0])
+                np.testing.assert_allclose(model.forward(x=x)['output'], x*expected_weight, rtol=2e-6)
+                np.testing.assert_array_equal(model.read_buffer(counters[0]), [consumed, 0])
+            restored = rt.Model.load(model.save())
+            restored.set_optimizer('sgd', lr=.01)
+            for size in (3, 8):
+                x = np.ones((size, 3), np.float32)
+                np.testing.assert_allclose(model.train_step(x=x, y=x*0), restored.train_step(x=x, y=x*0), rtol=2e-6)
+                np.testing.assert_array_equal(model.read_buffer('weight'), restored.read_buffer('weight'))
+        finally:
+            if restored: restored.dispose()
+            model.dispose()
+
+
+@pytest.mark.parametrize('capture,dtype_name,upper,message', [
+    (False, 'float32', 8, 'symbolic random shapes require Model capture'),
+    (True, 'int32', 8, 'random generation requires a floating-point dtype'),
+    (True, 'float32', 2**32, 'symbolic random draw exceeds one uint32 chunk'),
+])
+def test_symbolic_random_rejections(capture, dtype_name, upper, message, capfd):
+    import ctypes
+    from polygrad import create, _ffi
+    with create(device='INTERP', logical='always') as rt:
+        x = rt.Tensor.empty(rt.Variable('rejected_rng_batch', 1, upper).bind(1))
+        lib = _ffi.get_lib()
+        dtype = _ffi.PolyDType()
+        assert lib.poly_dtype_by_id(lib.poly_dtype_id_by_name(dtype_name.encode()), ctypes.byref(dtype))
+        fn = lib.poly_tensor_rand_like_dtype
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, _ffi.PolyDType, ctypes.c_int]
+        state = lib.poly_tensor_capture_begin(x._ctx) if capture else None
+        try:
+            if capture: assert state
+            assert not fn(x._ctx, x._tensor, dtype, 0)
+            assert message in capfd.readouterr().err
+        finally:
+            if state: lib.poly_tensor_capture_end(state)
+            x.dispose()
+
+
+@pytest.mark.parametrize('kind', ['sgd', 'adamw'])
+def test_optimizer_groups_schedule_preserves_moments_and_resume(kind):
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        a, b = rt.Tensor([1., -2.]), rt.Tensor([.5, 3.])
+        model = rt.Model(lambda x: x*a+b, inputs={'x': rt.Tensor.empty(2)},
+                         targets={'y': rt.Tensor.empty(2)}, params={'a': a, 'b': b},
+                         loss=lambda out, y: (out-y).square().mean())
+        restored = None
+        try:
+            model.set_optimizer(kind, beta1=.8, beta2=.9, eps=1e-6)
+            weights = [np.array([1., -2.]), np.array([.5, 3.])]
+            moments = [np.zeros(2), np.zeros(2)]
+            variances = [np.zeros(2), np.zeros(2)]
+            x, y = np.array([2., -1.], np.float32), np.array([.2, .7], np.float32)
+            for step in range(1, 7):
+                groups = [{'params': [name], 'lr': lr/step, 'weight_decay': .03*step*i}
+                          for i, (name, lr) in enumerate((('a', .01), ('b', .04)))]
+                model.set_optimizer_groups(groups)
+                if restored: restored.set_optimizer_groups(groups)
+                error = x*weights[0]+weights[1]-y
+                expected_loss = np.mean(error**2)
+                for i, grad in enumerate((x*error, error)):
+                    decay, rate = groups[i]['weight_decay'], groups[i]['lr']
+                    if kind == 'adamw':
+                        moments[i] = .8*moments[i]+.2*grad
+                        variances[i] = .9*variances[i]+.1*grad**2
+                        grad = (moments[i]/(1-.8**step))/(np.sqrt(variances[i]/(1-.9**step))+1e-6)
+                    weights[i] -= rate*(grad+decay*weights[i])
+                actual = model.train_step(x=x, y=y)
+                np.testing.assert_allclose(actual, expected_loss, rtol=3e-6)
+                for name, value in zip(('a', 'b'), weights):
+                    np.testing.assert_allclose(model.read_buffer(name), value, rtol=3e-6, atol=1e-6)
+                if restored:
+                    np.testing.assert_allclose(restored.train_step(x=x, y=y), actual, rtol=1e-6)
+                    for name in ('a', 'b', 'optim.groups'):
+                        np.testing.assert_array_equal(restored.read_buffer(name), model.read_buffer(name))
+                if step == 3:
+                    restored = rt.Model.load(model.save())
+                    restored.set_optimizer(kind, beta1=.8, beta2=.9, eps=1e-6)
+                    saved = {name: restored.read_buffer(name).copy()
+                             for name in ('a', 'b', 'optim.groups')}
+                    with pytest.raises(RuntimeError, match='reapply optimizer groups'):
+                        restored.train_step(x=x, y=y)
+                    for name, value in saved.items():
+                        np.testing.assert_array_equal(restored.read_buffer(name), value)
+                before = model.read_buffer('optim.groups').copy()
+                for invalid in ([{'params': ['a']}], [{'params': ['a', 'a', 'b']}],
+                                [{'params': ['a', 'b'], 'lr': -1}],
+                                [{'params': ['a', 'b'], 'momentum': .1}]):
+                    with pytest.raises(ValueError): model.set_optimizer_groups(invalid)
+                    np.testing.assert_array_equal(model.read_buffer('optim.groups'), before)
+        finally:
+            if restored: restored.dispose()
+            model.dispose()
+
+
+@pytest.mark.parametrize('random_dtype,words', [('float16', 5), ('bfloat16', 5),
+                                              ('float32', 9), ('float64', 18)])
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_compiled_symbolic_dropout_counter_carry_matches_concrete_draw(random_dtype, words, device):
+    from polygrad import create, Context
+    with create(device=device, logical='always') as rt, Context(DEFAULT_FLOAT=random_dtype):
+        rt.Tensor.manual_seed(123)
+        models = []
+        try:
+            for size in (rt.Variable('carry_batch', 1, 4).bind(3), 3):
+                weight = rt.Tensor([1.], dtype='float32')
+                model = rt.Model(lambda x: (x*weight).dropout(.5),
+                                 inputs={'x': rt.Tensor.empty(size, 3, dtype='float32')},
+                                 targets={'y': rt.Tensor.empty(size, 3, dtype='float32')}, params={'weight': weight},
+                                 loss=lambda out, y: (out-y).square().mean())
+                models.append(model)
+                model.set_optimizer('sgd', lr=.01)
+                counter = next(model.buf_name(i) for i in range(model.buf_count)
+                               if model.buf_name(i).endswith('.counter'))
+                model.write_buffer(counter, np.array([2**32-3, 9], np.uint32))
+            x = np.ones((3, 3), np.float32)
+            for step in range(2):
+                np.testing.assert_array_equal(models[0].train_step(x=x, y=x*0),
+                                              models[1].train_step(x=x, y=x*0))
+                np.testing.assert_array_equal(models[0].read_buffer('weight'), models[1].read_buffer('weight'))
+                np.testing.assert_array_equal(models[0].read_buffer(counter), [words*(step+1)-3, 10])
+        finally:
+            for model in models: model.dispose()
+
+
+def test_tabm_dropout_partial_batches_and_checkpoint():
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        config = dict(type='tabm', layers=[3, 16, 1], n_ensemble=2,
+                      batch_size=8, seed=321, dropout=.5, loss='mse')
+        model = rt.models.TabM(config)
+        twin = rt.models.TabM(config)
+        restored = None
+        try:
+            model.set_optimizer('sgd', lr=.001)
+            twin.set_optimizer('sgd', lr=.001)
+            assert model.param_count == 6
+            counters = [model.buf_name(i) for i in range(model.buf_count)
+                        if model.buf_name(i).endswith('.counter')]
+            assert len(counters) == 1
+            consumed = 0
+            for size in (8, 3, 1, 8):
+                x, y = np.ones((size, 3), np.float32), np.zeros((size, 1), np.float32)
+                np.testing.assert_array_equal(model.forward(x=x)['output'], twin.forward(x=x)['output'])
+                np.testing.assert_allclose(model.train_step(x=x, y=y), twin.train_step(x=x, y=y), rtol=1e-6)
+                consumed += size*2*16
+                np.testing.assert_array_equal(model.read_buffer(counters[0]), [consumed, 0])
+            restored = rt.Model.load(model.save())
+            restored.set_optimizer('sgd', lr=.001)
+            x, y = np.ones((3, 3), np.float32), np.zeros((3, 1), np.float32)
+            np.testing.assert_array_equal(restored.forward(x=x)['output'], model.forward(x=x)['output'])
+            np.testing.assert_allclose(model.train_step(x=x, y=y), restored.train_step(x=x, y=y), rtol=1e-6)
+            np.testing.assert_array_equal(restored.forward(x=x)['output'], model.forward(x=x)['output'])
+        finally:
+            if restored: restored.dispose()
+            twin.dispose()
+            model.dispose()
+
+
+def test_optimizer_groups_regroup_aliases_and_frozen_parameters():
+    from polygrad import create
+    with create(device='INTERP', logical='always') as rt:
+        a, b = rt.Tensor([1.]), rt.Tensor([2.])
+        model = rt.Model.from_tensors(params={'a': a, 'alias': a, 'b': b},
+                                      losses={'cost': (a+b).square().sum()})
+        try:
+            model.set_optimizer('adamw', lr=.01)
+            model.set_optimizer_groups([{'params': ['alias', 'b'], 'lr': .01}])
+            model.train_step()
+            moment = model.read_buffer('optim.adam.m.a').copy()
+            with pytest.raises(ValueError):
+                model.set_optimizer_groups([{'params': ['a', 'alias', 'b']}])
+            model.set_optimizer_groups([{'params': ['a'], 'lr': 0}, {'params': ['b'], 'lr': .02}])
+            np.testing.assert_array_equal(model.read_buffer('optim.adam.m.a'), moment)
+            before = model.read_buffer('a').copy()
+            model.train_step()
+            np.testing.assert_array_equal(model.read_buffer('a'), before)
+            with pytest.raises(ValueError): model.set_learning_rate(.02)
+            model.set_trainable('alias', False)
+            model.set_optimizer_groups([{'params': ['a', 'b'], 'lr': .02}])
+            model.train_step()
+            np.testing.assert_array_equal(model.read_buffer('a'), before)
+            model.set_trainable('a', True)
+            model.train_step()
+            assert not np.array_equal(model.read_buffer('a'), before)
+        finally:
+            model.dispose()
+
+
+def test_tabm_embedding_initialization_and_invalid_configuration():
+    from polygrad import create
+    with create(device='INTERP') as rt:
+        spec = dict(layers=[2, 4, 1], n_ensemble=3, seed=123,
+                    num_embeddings=dict(type='piecewise_linear', d_embedding=3,
+                                        bins=[[-1, 0, 2], [0, 2]]))
+        a, b = rt.models.TabM(spec), rt.models.TabM(spec)
+        try:
+            for i in range(a.param_count):
+                name = a.param_name(i)
+                np.testing.assert_array_equal(a.read_buffer(name), b.read_buffer(name))
+            scaling = a.read_buffer('layers.0.r').reshape(3, 2, 3)
+            np.testing.assert_array_equal(scaling, np.repeat(scaling[:, :, :1], 3, axis=2))
+            assert not np.array_equal(scaling[0], scaling[1])
+            assert np.any(np.abs(scaling) != 1)
+            assert not np.any(a.read_buffer('num_module.linear.weight'))
+        finally:
+            a.dispose()
+            b.dispose()
+        for edges in ([[0, 0], [0, 1]], [[0, 1], [1]], [[0, float('inf')], [0, 1]],
+                      [[0, 1e-50], [0, 1]], [[0, 1]]):
+            bad = {**spec, 'num_embeddings': {**spec['num_embeddings'], 'bins': edges}}
+            with pytest.raises((ValueError, RuntimeError)): rt.models.TabM(bad)
+        for probability in (-.1, 1.1, '0.5'):
+            with pytest.raises((ValueError, RuntimeError)): rt.models.TabM({**spec, 'dropout': probability})
+
+
+@pytest.mark.parametrize('kind', ['linear_relu', 'piecewise_linear'])
+def test_tabm_numerical_embeddings_values_gradients_and_save(kind):
+    from polygrad import create
+    with create(device='CPU', logical='always') as rt:
+        embedding = dict(type=kind, d_embedding=3)
+        if kind == 'piecewise_linear': embedding.update(bins=[[-1., 0., 2.], [0., 2.]], activation=False)
+        model = rt.models.TabM(dict(layers=[2, 1], n_ensemble=2, batch_size=4,
+                                    num_embeddings=embedding, loss='mse'))
+        restored = None
+        try:
+            # Nonzero piecewise weights test the learned term, not just version B's linear initialization.
+            model.set_optimizer('sgd', lr=1.)
+            shapes = {model.param_name(i): model.param_shape(i) for i in range(model.param_count)}
+            def read(name):
+                shape = shapes.get(name, (2, 2))
+                return model.read_buffer(name).reshape(shape)
+            for i in range(model.param_count):
+                name = model.param_name(i)
+                values = np.arange(np.prod(model.param_shape(i)), dtype=np.float32).reshape(model.param_shape(i))*.025+.1
+                model.write_buffer(name, values)
+            def oracle(x):
+                linear_name = 'num_module.linear0' if kind == 'piecewise_linear' else 'num_module.linear'
+                value = x[..., None]*read(linear_name+'.weight')+read(linear_name+'.bias')
+                if kind == 'linear_relu': value = np.maximum(value, 0)
+                else:
+                    encoded = x[..., None]*read('num_module.impl.weight')+read('num_module.impl.bias')
+                    encoded = np.maximum(np.minimum(encoded, read('num_module.impl.upper')), read('num_module.impl.lower'))
+                    value += np.einsum('bfk,fkd->bfd', encoded, read('num_module.linear.weight'))
+                return np.einsum('bf,kfo->bko', value.reshape(len(x), -1), read('output.weight'))+read('output.bias')
+            for size in (4, 1, 3):
+                x = np.array([[-2., -.5], [.3, 1.], [3., 4.], [.7, .3]], np.float32)[:size]
+                np.testing.assert_allclose(model.call('members', x=x)['members'], oracle(x), rtol=2e-6, atol=1e-6)
+                y = np.zeros((size, 1), np.float32)
+                before = {model.param_name(i): model.read_buffer(model.param_name(i)).copy()
+                          for i in range(model.param_count)}
+                loss = model.train_step(x=x, y=y)
+                grads = {name: value-model.read_buffer(name) for name, value in before.items()}
+                for name, value in before.items(): model.write_buffer(name, value)
+                np.testing.assert_allclose(loss, np.mean(oracle(x)**2), rtol=3e-6)
+                for name, gradient in grads.items():
+                    original = model.read_buffer(name).copy()
+                    for index in np.ndindex(original.shape):
+                        values = original.copy()
+                        values[index] += .001
+                        model.write_buffer(name, values)
+                        plus = np.mean(oracle(x)**2)
+                        values[index] -= .002
+                        model.write_buffer(name, values)
+                        minus = np.mean(oracle(x)**2)
+                        np.testing.assert_allclose(gradient[index], (plus-minus)/.002, rtol=.004, atol=.004)
+                        model.write_buffer(name, original)
+            restored = rt.Model.load(model.save())
+            np.testing.assert_array_equal(model.forward(x=x)['output'], restored.forward(x=x)['output'])
+        finally:
+            if restored: restored.dispose()
+            model.dispose()
+
+
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+def test_tabm_compiled_training_against_official_reference(device):
+    import json
+    from pathlib import Path
+    from polygrad import create
+    fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/tabm_training.json').read_text())
+    with create(device=device, logical='always') as rt:
+        for case in fixture['cases']:
+            model = rt.models.TabM(case['config'])
+            try:
+                for name, param in case['params'].items():
+                    model.write_buffer(name, np.array(param['values'], np.float32))
+                model.set_optimizer('adamw', lr=.01, beta1=.8, beta2=.9, eps=1e-6, weight_decay=.03)
+                model.set_optimizer_groups([{'params': list(case['params']), 'lr': .01, 'weight_decay': .03}])
+                for step in case['steps']:
+                    x, y = np.array(step['x'], np.float32), np.array(step['y'], np.float32)
+                    np.testing.assert_allclose(model.call('members', x=x)['members'].reshape(-1), step['members'], atol=2e-6, rtol=2e-5)
+                    np.testing.assert_allclose(model.train_step(x=x, y=y), step['loss'], atol=2e-6, rtol=2e-5)
+                    for name, expected in step['updated'].items():
+                        np.testing.assert_allclose(model.read_buffer(name), expected, atol=2e-6, rtol=2e-5, err_msg=name)
+            finally: model.dispose()
+
+
 def test_callable_model_capture_rejects_effectful_reads_and_restores_modes():
     from polygrad.helpers import TRAINING
     from polygrad import create

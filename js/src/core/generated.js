@@ -3,6 +3,7 @@
 const { integer64 } = require('./integer')
 
 module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
+  poly_model_set_optimizer_groups: (a0, a1) => Module.ccall('poly_model_set_optimizer_groups', 'number', ["number", "string"], [(a0 || 0), a1]),
   poly_tensor_abs: (a0, a1) => Module._poly_tensor_abs((a0 || 0), (a1 || 0)),
   poly_tensor_acos: (a0, a1) => Module._poly_tensor_acos((a0 || 0), (a1 || 0)),
   poly_tensor_acosh: (a0, a1) => Module._poly_tensor_acosh((a0 || 0), (a1 || 0)),

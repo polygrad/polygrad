@@ -1172,6 +1172,16 @@ class Model:
             raise ValueError('learning rate requires a configured optimizer and a finite nonnegative value')
         return self
 
+    def set_optimizer_groups(self, groups):
+        """Assign named parameters to LR/decay groups before training.
+
+        Repeating updates rates/decay for the named groups without resetting
+        moments or compiled graphs. Reapply groups after loading a checkpoint.
+        """
+        if _get_lib().poly_model_set_optimizer_groups(self._ptr, json.dumps(groups).encode()) != 0:
+            raise ValueError(str(self._error('invalid optimizer groups')))
+        return self
+
     def reset_transient(self):
         """Zero declared transient state without changing parameters or ordinary AUX."""
         if _get_lib().poly_model_reset_transient(self._ptr) != 0:

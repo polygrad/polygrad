@@ -322,9 +322,18 @@ Use their `Async` constructors on WebGPU. TabM trains individual members and
 averages them for regression. With `loss: 'cross_entropy'`, its `output` is
 log mean member probabilities; apply softmax to obtain probabilities.
 `await model.callAsync('members', {x})` returns raw member predictions with
-shape `[batch, members, outputs]`. This numerical template does not include
-TabM's optional feature embeddings or dropout recipe.
+shape `[batch, members, outputs]`.
 Cross-entropy targets are class probabilities or one-hot rows, not integer IDs.
+
+TabM's `dropout` (default `0`) applies only during training. Its seeded random
+state advances for each actual batch and is included in saved models; inference
+uses the same parameters without dropout. Optional `num_embeddings` accepts
+`{type: 'linear_relu', d_embedding: 16}` or
+`{type: 'piecewise_linear', d_embedding: 16, bins: edges}`.
+Supply strictly increasing bin edges for each numerical feature, fitted on
+training data. Piecewise embeddings use the reference's version B with an
+optional `activation: true` (default `false`). `layers[0]` remains the number of
+raw features. Categorical encoding and fitting bins are outside this template.
 
 For quantile regression, set `loss: 'pinball'`, `quantiles: [0.1, 0.5, 0.9]`
 and three output units (the last `layers` entry, or NAM's `n_outputs`). Targets
@@ -334,8 +343,16 @@ constrain quantile crossing or perform calibration.
 
 After configuring an optimizer, `model.setLearningRate(lr)` changes its rate
 without rebuilding the training graph or resetting moments. On WebGPU use
-`await model.setLearningRateAsync(lr)`. Use Tensor-level optimizer groups for
-parameter-specific schedules.
+`await model.setLearningRateAsync(lr)`. For separate rates and weight decay, call
+`await model.setOptimizerGroupsAsync([{params: ['weight'], lr: 0.001,
+weight_decay: 0.01}, {params: ['bias'], lr: 0.01}])` after `setOptimizer` and
+before the first training step. Cover every parameter once; list only one name
+for tied parameters. Omitted rates inherit the optimizer's defaults. Repeat
+this call to change rates or regroup parameters without resetting moments;
+use it instead of `setLearningRate` when groups are enabled. The synchronous
+method is `setOptimizerGroups`. After loading a checkpoint, reapply the optimizer
+configuration and groups; saved moments and random state resume from the checkpoint.
+Training rejects a grouped checkpoint until its groups have been reapplied.
 
 ### Saving And Loading
 

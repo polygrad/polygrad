@@ -2717,6 +2717,20 @@ for _method in ('triu', 'tril'):
         CASES[f'composite_{_method}_{_diagonal}'] = ('tensor', lambda m=_method, d=_diagonal: triangular_wide_graph(m, d))
 
 
+def bounded_cat_graph(axis, equal_width):
+    n = UOp.variable('cat_batch', 1, 8).bind(3) if ENGINE == 'tinygrad' else Variable('cat_batch', 1, 8).bind(3)
+    a = Tensor.empty(n, 3, device='CPU')
+    shape = ((n if equal_width else 2), 3) if axis == 0 else (n, 3 if equal_width else 2)
+    b = Tensor.empty(*shape, device='CPU')
+    out = a.cat(b, dim=axis)
+    return {'physical': out.uop, 'logical': logical(out)}
+
+
+for _axis in (0, 1):
+    for _equal in (False, True):
+        CASES[f'cat_bounded_{_axis}_{_equal}'] = ('tensor', lambda a=_axis, e=_equal: bounded_cat_graph(a, e))
+
+
 def singleton_broadcast_gradient_graph():
     n = UOp.variable('grad_batch', 1, 221).bind(1) if ENGINE == 'tinygrad' else Variable('grad_batch', 1, 221).bind(1)
     x = Tensor([[1.]], device='CPU').is_param_(False).expand(n, 3)

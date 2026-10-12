@@ -256,6 +256,10 @@ test-fast: build/polygrad_test
 test-model-c: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test model
 
+.PHONY: test-tabular-c
+test-tabular-c: build/polygrad_test
+	$(SAN_RUN) ./build/polygrad_test tabm
+
 # Full C suite routed through the selected backend. Backend portability failures
 # must remain visible; do not replace this with a small positive allowlist.
 test-common: build/polygrad_test
@@ -436,6 +440,12 @@ test-model-workloads: build/libpolygrad.so
 		$(HF_PYTHON) -m pytest -q -s py/tests/test_model_workloads.py
 	POLY_LIB="$(CURDIR)/build/libpolygrad.so" PYTHONPATH=py \
 		$(HF_PYTHON) -m pytest -q -s py/tests/test_model_workloads.py
+
+.PHONY: generate-tabular-fixtures
+generate-tabular-fixtures:
+	@test -n "$(TABM_REFERENCE_DIR)" -a -n "$(NUM_EMBEDDINGS_REFERENCE_DIR)" || { echo 'Set TABM_REFERENCE_DIR and NUM_EMBEDDINGS_REFERENCE_DIR to source-locked reference directories'; exit 1; }
+	OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 DEV=CPU $(HF_PYTHON) test/generate_tabular_fixture.py \
+		--tabm "$(TABM_REFERENCE_DIR)" --embeddings "$(NUM_EMBEDDINGS_REFERENCE_DIR)" > test/fixtures/tabm_training.json
 
 SOAK_SECONDS ?= 180
 SOAK_DEVICE ?= cpu

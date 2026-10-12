@@ -119,13 +119,34 @@ int poly_optim_build_update(
     int64_t numel,
     PolyOptimUpdate *out
 ) {
+  return poly_optim_build_update_ex(
+      ctx, cfg, lr, NULL, param, grad, m_buf, v_buf, bc1_buf, bc2_buf, numel, out
+  );
+}
+
+int poly_optim_build_update_ex(
+    PolyCtx *ctx,
+    const PolyOptimConfig *cfg,
+    PolyUOp *lr,
+    PolyUOp *weight_decay,
+    PolyUOp *param,
+    PolyUOp *grad,
+    PolyUOp *m_buf,
+    PolyUOp *v_buf,
+    PolyUOp *bc1_buf,
+    PolyUOp *bc2_buf,
+    int64_t numel,
+    PolyOptimUpdate *out
+) {
   if (!ctx || !cfg || !param || !grad || !out || numel <= 0) return -1;
   memset(out, 0, sizeof(*out));
 
   PolyUOp *param_value = param;
   PolyUOp *grad_value = grad;
   PolyUOp *lr_value = optim_lr_uop(ctx, lr);
-  if (!grad_value || !lr_value) return -1;
+  PolyUOp *decay =
+      weight_decay ? optim_lr_uop(ctx, weight_decay) : optim_float(ctx, cfg->weight_decay);
+  if (!grad_value || !lr_value || !decay) return -1;
 
   switch (cfg->kind) {
   case POLY_OPTIM_SGD:
@@ -139,13 +160,12 @@ int poly_optim_build_update(
       PolyUOp *r1 = optim_norm(ctx, base), *r2 = optim_norm(ctx, g);
       PolyUOp *ratio = poly_uop_div(
           ctx, poly_uop_mul(ctx, optim_float(ctx, cfg->tcoef), r1),
-          poly_uop_add(ctx, r2, poly_uop_mul(ctx, optim_float(ctx, cfg->weight_decay), r1))
+          poly_uop_add(ctx, r2, poly_uop_mul(ctx, decay, r1))
       );
       r = optim_trust_ratio(ctx, r1, r2, ratio);
     }
-    if (pre_wd && cfg->weight_decay > 0.0f) {
-      PolyUOp *wd = optim_float(ctx, cfg->weight_decay);
-      g = poly_uop_add(ctx, g, poly_uop_mul(ctx, wd, base));
+    if (pre_wd && (weight_decay || cfg->weight_decay > 0.0f)) {
+      g = poly_uop_add(ctx, g, poly_uop_mul(ctx, decay, base));
     }
     if (cfg->classic) {
       g = r ? poly_uop_mul(ctx, g, r) : NULL;
@@ -179,11 +199,8 @@ int poly_optim_build_update(
       g = r ? poly_uop_mul(ctx, g, r) : NULL;
       g = g ? poly_uop_mul(ctx, g, lr_value) : NULL;
     }
-    if (!pre_wd && cfg->weight_decay > 0)
-      g = poly_uop_add(
-          ctx, g,
-          poly_uop_mul(ctx, poly_uop_mul(ctx, optim_float(ctx, cfg->weight_decay), lr_value), base)
-      );
+    if (!pre_wd && (weight_decay || cfg->weight_decay > 0))
+      g = poly_uop_add(ctx, g, poly_uop_mul(ctx, poly_uop_mul(ctx, decay, lr_value), base));
     out->param_new = optim_sub(ctx, base, g ? poly_uop_cast(ctx, g, param->dtype) : NULL);
     return (out->param_new && (cfg->momentum <= 0.0f || out->m_new)) ? 0 : -1;
   }
@@ -234,8 +251,7 @@ int poly_optim_build_update(
         (v_hat && eps) ? poly_uop_add(ctx, poly_uop_alu1(ctx, POLY_OP_SQRT, v_hat), eps) : NULL;
     PolyUOp *up = denom ? optim_div(ctx, m_hat, denom) : NULL;
     PolyUOp *base = poly_uop_detach(ctx, param_value);
-    PolyUOp *wd = optim_float(ctx, cfg->weight_decay);
-    up = (up && wd) ? poly_uop_add(ctx, up, poly_uop_mul(ctx, wd, base)) : NULL;
+    up = up ? poly_uop_add(ctx, up, poly_uop_mul(ctx, decay, base)) : NULL;
     /* Current LAMB returns `self.lr * r * up` and leaves `[1]`/parameter
      * broadcasting to UOp shape inference (nn/optim.py:168-178). */
     PolyUOp *r = optim_float(ctx, 1.0);

@@ -294,9 +294,18 @@ For numerical tabular data, `rt.models.MLP`, `NAM` and `TabM` accept
 TabM trains individual members and averages them for regression. With
 `loss='cross_entropy'`, its `output` is log mean member probabilities; apply
 softmax to obtain probabilities. `model.call('members', x=x)['members']`
-returns raw `[batch, members, outputs]` predictions. This numerical template
-does not include TabM's optional feature embeddings or dropout recipe.
+returns raw `[batch, members, outputs]` predictions.
 Cross-entropy targets are class probabilities or one-hot rows, not integer IDs.
+
+TabM's `dropout` (default `0`) applies only during training. Its seeded random
+state advances for each actual batch and is included in saved models; inference
+uses the same parameters without dropout. Optional `num_embeddings` accepts
+`{'type': 'linear_relu', 'd_embedding': 16}` or
+`{'type': 'piecewise_linear', 'd_embedding': 16, 'bins': edges}`.
+Supply strictly increasing bin edges for each numerical feature, fitted on
+training data. Piecewise embeddings use the reference's version B with an
+optional `activation=True` (default `False`). `layers[0]` remains the number of
+raw features. Categorical encoding and fitting bins are outside this template.
 
 For quantile regression, set `loss='pinball'`, `quantiles=[0.1, 0.5, 0.9]`
 and three output units (`layers[-1]`, or NAM's `n_outputs`). Targets have shape
@@ -305,8 +314,16 @@ the loss averages samples, levels and (for TabM) members. It does not constrain
 quantile crossing or perform calibration.
 
 After configuring an optimizer, `model.set_learning_rate(lr)` changes its rate
-without rebuilding the training graph or resetting moments. Use Tensor-level
-optimizer groups for parameter-specific schedules.
+without rebuilding the training graph or resetting moments. For separate rates
+and weight decay, call `model.set_optimizer_groups([{'params': ['weight'],
+'lr': 0.001, 'weight_decay': 0.01}, {'params': ['bias'], 'lr': 0.01}])` after
+`set_optimizer` and before the first training step. Cover every parameter once;
+list only one name for tied parameters. Omitted rates inherit the optimizer's
+defaults. Repeat this call to change rates or regroup parameters without
+resetting moments; use it instead of `set_learning_rate` when groups are enabled.
+After loading a checkpoint, reapply the optimizer configuration and groups;
+saved moments and random state resume from the checkpoint.
+Training rejects a grouped checkpoint until its groups have been reapplied.
 
 ### Saving And Loading
 

@@ -2396,6 +2396,7 @@ function createWasmCoreFromModule(Module, device) {
     tokenizerEosId(tokPtr) { return Module._poly_tokenizer_eos_id(tokPtr) },
 
     setLearningRate(instPtr, lr) { return Module._poly_model_set_learning_rate(instPtr, lr) },
+    setOptimizerGroups(instPtr, json) { return ffi.poly_model_set_optimizer_groups(instPtr, json) },
     setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
       return Module._poly_model_set_optimizer_ex(
         instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)

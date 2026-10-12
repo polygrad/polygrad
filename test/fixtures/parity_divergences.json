@@ -44,7 +44,7 @@
       "stages": ["product", "model", "export"],
       "area": "PolyModel",
       "tinygrad": "No language-neutral ABI package equivalent; symbolic SHRINK has no call-time bounds admission. Transformer sampling advances global Tensor RNG, outside state_dict.",
-      "polygrad": "PolyModel owns named bindings, entrypoints, objectives, and package metadata. Call admission derives SHRINK bounds for reads and writes from each entrypoint graph, before input/state mutation. Transformer sampling RNG is ordinary Model AUX state: reset preserves progress and bundles checkpoint it.",
+      "polygrad": "PolyModel owns named bindings, entrypoints, objectives, and package metadata. Call admission derives SHRINK bounds for reads and writes from each entrypoint graph, before input/state mutation. Sampling and captured training RNG are ordinary Model AUX state: reset preserves progress and bundles checkpoint it.",
       "rationale": "Model-only safety and portable state extend the product contract without changing ordinary Tensor or TinyJit semantics. Derived view admission is not a sandbox for arbitrary graph programs.",
       "approval": "AGENTS.md Core Invariants; user-approved Model read/write bounds and persistent sampling RNG, 2026-09-23",
       "evidence": [
@@ -358,6 +358,18 @@
       "approval": "User 2026-10-11 approved investigation followed by a measured size-based update recorded as a divergence, explicitly requiring large LLM shapes before implementation.",
       "evidence": ["src/codegen/codegen.c:poly_apply_opts_heuristic", "test/test_codegen.c:scheduler_webgpu_small_matvec_policy_scope", "references/tinygrad_latest/tinygrad/codegen/opt/heuristic.py", "temp/webgpu-default-schedule-20261011/report.txt", "temp/webgpu-default-schedule-20261011/large-report.txt", "temp/webgpu-default-schedule-20261011/policy-red.log"],
       "close_when": "Pinned tinygrad adopts equivalent shape-dependent matvec selection, or broader matched adapter/model evidence supersedes this scoped tile policy. No allowance changes Tensor graphs, values, non-WebGPU default scheduling or explicit tuning settings."
+    },
+    {
+      "id": "PG-DIV-025",
+      "status": "approved",
+      "stages": ["model", "tensor"],
+      "area": "bounded symbolic random draws during Model capture",
+      "tinygrad": "RandMixin.rand rejects symbolic shapes, including bound variables; only concrete nonnegative integer extents are accepted.",
+      "polygrad": "Model capture may draw floating-point random tensors with positive bounded symbolic extents within one uint32 word chunk. Counts, Threefry split and counter advancement use the actual batch size. Concrete draws retain the pinned path; symbolic draws outside capture, integer random dtypes and oversized draws are rejected with diagnostics.",
+      "rationale": "Compiled dropout must support partial batches without padding, dropping samples or maintaining an eager fallback. Checkpointed RNG state resumes the same stream.",
+      "approval": "User 2026-10-12 explicitly approved the scoped Model extension, requiring its own entry, position-sensitive mask checks and diagnostic rejection tests.",
+      "evidence": ["src/tensor.c:poly_tensor_rand_like_dtype", "references/tinygrad_latest/tinygrad/mixin/rand.py:RandMixin.rand", "py/tests/test_model.py:test_callable_model_symbolic_dropout_uses_actual_batch_rng_and_resumes", "py/tests/test_model.py:test_compiled_symbolic_dropout_counter_carry_matches_concrete_draw", "py/tests/test_model.py:test_symbolic_random_rejections", "test/generate_tabular_fixture.py"],
+      "close_when": "Pinned tinygrad supports the same bounded symbolic random program and actual-size counter progression, or this Model extension is removed. No allowance changes ordinary concrete RNG or compiler rules."
     },
     {
       "id": "PG-DIV-026",

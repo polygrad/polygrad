@@ -2478,6 +2478,22 @@ async function checkRuntimeImports(pg, Model, createRuntime) {
 }
 
 async function checkTabularTraining(pg) {
+  for (const row of require('../../test/fixtures/tabm_training.json').cases) {
+    const model = await pg.models.TabMAsync(row.config)
+    try {
+      for (const [name, param] of Object.entries(row.params))
+        await model.writeBufferAsync(name, new Float32Array(param.values))
+      model.setOptimizer('adamw',.01,.8,.9,1e-6,.03)
+      await model.setOptimizerGroupsAsync([{params:Object.keys(row.params),lr:.01,weight_decay:.03}])
+      for (const step of row.steps) {
+        const x = new Float32Array(step.x.flat()), y = new Float32Array(step.y.flat())
+        assertClose((await model.callAsync('members',{x})).members,step.members,3e-5)
+        assert(Math.abs(await model.trainStepAsync({x,y})-step.loss)<3e-5,'official TabM training loss')
+        for (const [name, expected] of Object.entries(step.updated))
+          assertClose(await model.readBufferAsync(name),expected,3e-5)
+      }
+    } finally { await model.dispose() }
+  }
   const model = await pg.models.TabMAsync({layers:[1,1],n_ensemble:2,batch_size:4,loss:'mse'})
   try {
     await model.writeBufferAsync('output.weight',new Float32Array([1,3]))
@@ -2499,7 +2515,66 @@ async function checkTabularTraining(pg) {
     let rejected = false
     try { await model.setLearningRateAsync(-1) } catch { rejected = true }
     assert(rejected,'negative learning rate accepted')
+    model.setOptimizer('adamw', .1)
+    await model.setOptimizerGroupsAsync([{params:['output.weight'],lr:.01,weight_decay:.1},
+                                         {params:['output.bias'],lr:0}])
+    await model.trainStepAsync({x,y})
+    const savedMoment = await model.readBufferAsync('optim.adam.m.output.weight')
+    const savedWeight = await model.readBufferAsync('output.weight')
+    await model.setOptimizerGroupsAsync([{params:['output.weight'],lr:0,weight_decay:.3},
+                                         {params:['output.bias'],lr:.04}])
+    assertClose(await model.readBufferAsync('optim.adam.m.output.weight'),savedMoment,0)
+    await model.trainStepAsync({x,y})
+    assertClose(await model.readBufferAsync('output.weight'),savedWeight,0)
+    rejected = false
+    try { await model.setOptimizerGroupsAsync([{params:['output.weight']}]) } catch { rejected = true }
+    assert(rejected,'incomplete optimizer groups accepted')
+    const restored = await pg.Model.load(await model.saveAsync())
+    try {
+      restored.setOptimizer('adamw', .1)
+      const weight = await restored.readBufferAsync('output.weight')
+      rejected = false
+      try { await restored.trainStepAsync({x,y}) }
+      catch (error) { rejected = /reapply optimizer groups/.test(error.message) }
+      assert(rejected,'loaded groups silently replaced by global optimizer settings')
+      assertClose(await restored.readBufferAsync('output.weight'),weight,0)
+      await restored.setOptimizerGroupsAsync([{params:['output.weight','output.bias'],lr:0}])
+      await restored.trainStepAsync({x,y})
+      assertClose(await restored.readBufferAsync('output.weight'),weight,0)
+      rejected = false
+      try { await restored.setOptimizerGroupsAsync([{params:['misspelled']}]) }
+      catch (error) { rejected = /unknown parameter 'misspelled'/.test(error.message) }
+      assert(rejected,'group error lost the C diagnostic')
+    } finally { await restored.dispose() }
   } finally { await model.dispose() }
+  for (const embedding of [undefined, {type:'linear_relu',d_embedding:3},
+                           {type:'piecewise_linear',d_embedding:3,bins:[[-1,0,2],[0,2]]}]) {
+    const spec = {layers:[2,4,1],n_ensemble:2,batch_size:4,loss:'mse',seed:123,dropout:.5}
+    if (embedding) spec.num_embeddings = embedding
+    const a = await pg.models.TabMAsync(spec), b = await pg.models.TabMAsync(spec)
+    let restored
+    try {
+      a.setOptimizer('sgd', .01); b.setOptimizer('sgd', .01)
+      const counter = a.bindings().find(x=>x.name.endsWith('.counter')).name
+      let draws = 0
+      for (const size of [4,1,3,4]) {
+        const x = new Float32Array(size*2).fill(.4), y = new Float32Array(size)
+        assertClose((await a.forwardAsync({x})).output,(await b.forwardAsync({x})).output,0)
+        const la = await a.trainStepAsync({x,y}), lb = await b.trainStepAsync({x,y})
+        assert(Math.abs(la-lb)<1e-6,'seeded TabM training differs')
+        draws += size*2*4
+        assertClose(await a.readBufferAsync(counter),[draws,0],0)
+        const prediction = (await a.forwardAsync({x})).output
+        assertClose((await a.forwardAsync({x})).output,prediction,0)
+        assertClose(await a.readBufferAsync(counter),[draws,0],0)
+      }
+      restored = pg.Model.load(await a.saveAsync()); restored.setOptimizer('sgd', .01)
+      const io = {x:new Float32Array(6).fill(.4),y:new Float32Array(3)}
+      const la = await a.trainStepAsync(io), lb = await restored.trainStepAsync(io)
+      assert(Math.abs(la-lb)<1e-6,'restored TabM RNG differs')
+      assertClose((await a.forwardAsync({x:io.x})).output,(await restored.forwardAsync({x:io.x})).output,1e-6)
+    } finally { if(restored) await restored.dispose(); await b.dispose(); await a.dispose() }
+  }
   for (const [family,spec] of [['MLP',{layers:[1,2]}],['TabM',{layers:[1,2],n_ensemble:2}],
                               ['NAM',{n_features:1,hidden_sizes:[],n_outputs:2}]]) {
     const model = await pg.models[family+'Async']({...spec,batch_size:2,loss:'pinball',quantiles:[.25,.75]})
