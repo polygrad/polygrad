@@ -13,6 +13,7 @@
 
 const { PolyAsyncRequired } = require('../errors')
 const generatedBindings = require('./generated')
+const generatedDeviceCalls = require('./generated_device_calls')
 
 /**
  * Wrap an already-loaded Emscripten module into a polygrad core binding.
@@ -23,6 +24,7 @@ const generatedBindings = require('./generated')
  */
 function createWasmCoreFromModule(Module, device) {
   const deviceName = device || 'auto'
+  const callDevice = generatedDeviceCalls(Module)
   // Node's process environment is not Emscripten's libc environment. Initialize
   // each module once; another Runtime must not reset explicit compiler policy.
   if (!Module.__polygradEnvInitialized) {
@@ -699,13 +701,7 @@ function createWasmCoreFromModule(Module, device) {
         const h32 = heap32()
         for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = uops[i]
         for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
-        const rc = await Module.ccall(
-          'poly_realize_uops',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [ctx, inPtr, n, outPtr],
-          { async: true }
-        )
+        const rc = await callDevice('poly_realize_uops', [ctx, inPtr, n, outPtr])
         const out = new Array(n)
         if (rc === 0) {
           const h32b = heap32()
@@ -751,13 +747,7 @@ function createWasmCoreFromModule(Module, device) {
         const h32 = heap32()
         for (let i = 0; i < n; i++) h32[(inPtr >>> 2) + i] = tensors[i]
         for (let i = 0; i < n; i++) h32[(outPtr >>> 2) + i] = 0
-        const rc = await Module.ccall(
-          'poly_realize_tensors',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [ctx, inPtr, n, outPtr],
-          { async: true }
-        )
+        const rc = await callDevice('poly_realize_tensors', [ctx, inPtr, n, outPtr])
         const out = new Array(n)
         if (rc === 0) {
           const h32b = heap32()
@@ -782,13 +772,7 @@ function createWasmCoreFromModule(Module, device) {
     return enqueueAsyncify(async () => {
       await ensureWebGPU()
       const ptr = writePtrArrayScratch(tensors)
-      return await Module.ccall(
-        'poly_jit_run',
-        'number',
-        ['number', 'number', 'number'],
-        [jit, ptr, tensors.length],
-        { async: true }
-      )
+      return await callDevice('poly_jit_run', [jit, ptr, tensors.length])
     })
   }
 
@@ -803,13 +787,7 @@ function createWasmCoreFromModule(Module, device) {
     return enqueueAsyncify(async () => {
       await ensureWebGPU()
       const ptr = writePtrArrayScratch(tensors)
-      return await Module.ccall(
-        'poly_jit_end_capture',
-        'number',
-        ['number', 'number', 'number'],
-        [jit, ptr, tensors.length],
-        { async: true }
-      )
+      return await callDevice('poly_jit_end_capture', [jit, ptr, tensors.length])
     })
   }
 
@@ -833,13 +811,7 @@ function createWasmCoreFromModule(Module, device) {
       await ensureWebGPU()
       const dst = malloc(nbytes)
       try {
-        const rc = await Module.ccall(
-          'poly_buffer_read',
-          'number',
-          ['number', 'number', 'number', 'number'],
-          [ctx, buf, dst, nbytes],
-          { async: true }
-        )
+        const rc = await callDevice('poly_buffer_read', [ctx, buf, dst, nbytes])
         if (rc !== 0) throw new Error('poly_buffer_read failed (rc=' + rc + ')')
         return heapU8().slice(dst, dst + nbytes)
       } finally {
@@ -1728,8 +1700,7 @@ function createWasmCoreFromModule(Module, device) {
   async function ensureModelDevice(inst) {
     if (!inst || !pendingModelDevices.has(inst)) return
     await ensureWebGPU()
-    if (await Module.ccall('poly_model_set_device', 'number', ['number', 'number'],
-                           [inst, deviceId], { async: true }) !== 0) {
+    if (await callDevice('poly_model_set_device', [inst, deviceId]) !== 0) {
       throw new Error('polygrad: set_device failed for device ' + deviceName)
     }
     pendingModelDevices.delete(inst)
@@ -1761,8 +1732,7 @@ function createWasmCoreFromModule(Module, device) {
       try {
         if (deviceName === 'webgpu' && Module.ccall)
           return ensureModelDevice(Module._poly_transformer_model(handle))
-            .then(() => Module.ccall('poly_transformer_start', 'number', ['number','number','number'],
-              [handle, input, tokens.length], {async:true})).finally(() => Module._free(input))
+            .then(() => callDevice('poly_transformer_start', [handle, input, tokens.length])).finally(() => Module._free(input))
         const rc = Module._poly_transformer_start(handle, input, tokens.length)
         Module._free(input)
         return rc
@@ -1774,8 +1744,7 @@ function createWasmCoreFromModule(Module, device) {
       try {
         if (deviceName === 'webgpu' && Module.ccall)
           return ensureModelDevice(Module._poly_transformer_model(handle))
-            .then(() => Module.ccall('poly_transformer_next', 'number', ['number','number','number'],
-              [handle, temperature, output], {async:true})).then(read).finally(() => Module._free(output))
+            .then(() => callDevice('poly_transformer_next', [handle, temperature, output])).then(read).finally(() => Module._free(output))
         const result = read(Module._poly_transformer_next(handle, temperature, output))
         Module._free(output)
         return result
@@ -1795,8 +1764,7 @@ function createWasmCoreFromModule(Module, device) {
         heap32().set(tokens, input >>> 2)
         const args = [g, input, tokens.length, output, vocab]
         if (deviceName === 'webgpu' && Module.ccall) {
-          return ensureModelDevice(Module._poly_transformer_model(instPtr)).then(() => Module.ccall(operation, 'number',
-            ['number','number','number','number','number'], args, {async:true})).then(read).finally(cleanup)
+          return ensureModelDevice(Module._poly_transformer_model(instPtr)).then(() => callDevice(operation, args)).then(read).finally(cleanup)
         }
         const call = reuse ? Module._poly_transformer_prefill : Module._poly_transformer_append
         const result = read(call(...args))
@@ -1845,10 +1813,7 @@ function createWasmCoreFromModule(Module, device) {
       let weightsPtr = 0
       try {
         if (weightsBytes && weightsBytes.length) weightsPtr = allocBytes(weightsBytes)
-        return await Module.ccall('poly_model_from_program', 'number',
-          ['number', 'number', 'number', 'number'],
-          [programPtr, programBytes.length, weightsPtr, weightsPtr ? weightsBytes.length : 0],
-          { async: true })
+        return await callDevice('poly_model_from_program', [programPtr, programBytes.length, weightsPtr, weightsPtr ? weightsBytes.length : 0])
       } finally {
         Module._free(programPtr)
         if (weightsPtr) Module._free(weightsPtr)
@@ -1889,10 +1854,7 @@ function createWasmCoreFromModule(Module, device) {
       const target = deviceName === 'webgpu' && !async ? DEVICE_IDS.interp : deviceId
       if (async) {
         try {
-          return Module.ccall('poly_model_from_config', 'number',
-            ['number', 'number', 'number', 'number', 'number', 'number'],
-            [ctxPtr, familyPtr, ptr, bytes.length, target, err],
-            { async: true }).then(finish).finally(cleanup)
+          return callDevice('poly_model_from_config', [ctxPtr, familyPtr, ptr, bytes.length, target, err]).then(finish).finally(cleanup)
         } catch (error) { cleanup(); throw error }
       }
       try { return finish(Module._poly_model_from_config(ctxPtr, familyPtr, ptr, bytes.length, target, err)) }
@@ -1964,9 +1926,7 @@ function createWasmCoreFromModule(Module, device) {
           return copyModelStorage(dst, numel, dtypeId)
         }
         if (deviceName === 'webgpu' && Module.ccall)
-          return Module.ccall('poly_model_read_buf', 'number',
-            ['number', 'number', 'number', 'number'], [instPtr, i, dst, nbytes],
-            { async: true }).then(read).finally(() => Module._free(dst))
+          return callDevice('poly_model_read_buf', [instPtr, i, dst, nbytes]).then(read).finally(() => Module._free(dst))
         try { return read(Module._poly_model_read_buf(instPtr, i, dst, nbytes)) }
         finally { Module._free(dst) }
       }
@@ -1981,9 +1941,7 @@ function createWasmCoreFromModule(Module, device) {
         const ptr = allocBytes(new Uint8Array(array.buffer, array.byteOffset, array.byteLength))
         if (nbytes && !ptr) throw new Error('polygrad: buffer write allocation failed')
         if (deviceName === 'webgpu' && Module.ccall)
-          return Module.ccall('poly_model_write_buf', 'number',
-            ['number', 'number', 'number', 'number'], [instPtr, i, ptr, nbytes],
-            { async: true }).finally(() => Module._free(ptr))
+          return callDevice('poly_model_write_buf', [instPtr, i, ptr, nbytes]).finally(() => Module._free(ptr))
         try { return Module._poly_model_write_buf(instPtr, i, ptr, nbytes) }
         finally { Module._free(ptr) }
       }
@@ -1994,13 +1952,7 @@ function createWasmCoreFromModule(Module, device) {
       const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
-          return Module.ccall(
-            'poly_model_export_weights_ex',
-            'number',
-            ['number', 'number', 'number'],
-            [instPtr, _scratchLenPtr, exportFlags],
-            { async: true }
-          ).then(bytesPtr => {
+          return callDevice('poly_model_export_weights_ex', [instPtr, _scratchLenPtr, exportFlags]).then(bytesPtr => {
             if (!bytesPtr) {
               const error = this.lastError(instPtr)
               if (error) throw new Error(error)
@@ -2028,9 +1980,7 @@ function createWasmCoreFromModule(Module, device) {
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(async () => {
           const bytesPtr = allocBytes(bytes)
-          try { return await Module.ccall('poly_model_import_weights', 'number',
-            ['number', 'number', 'number'], [instPtr, bytesPtr, bytes.length],
-            { async: true }) }
+          try { return await callDevice('poly_model_import_weights', [instPtr, bytesPtr, bytes.length]) }
           finally { Module._free(bytesPtr) }
         })
       }
@@ -2080,13 +2030,7 @@ function createWasmCoreFromModule(Module, device) {
       const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
-          return Module.ccall(
-            'poly_model_save_bundle_ex',
-            'number',
-            ['number', 'number', 'number'],
-            [instPtr, _scratchLenPtr, exportFlags],
-            { async: true }
-          ).then(bytesPtr => {
+          return callDevice('poly_model_save_bundle_ex', [instPtr, _scratchLenPtr, exportFlags]).then(bytesPtr => {
             if (!bytesPtr) {
               const error = this.lastError(instPtr)
               if (error) throw new Error(error)
@@ -2191,8 +2135,7 @@ function createWasmCoreFromModule(Module, device) {
         if (async) {
           // Sealing uses this runtime's preferred device, now initialized.
           // Keep argument storage alive across snapshot realization/readback.
-          return Module.ccall('poly_model_from_binding_arrays', 'number',
-            args.map(() => 'number'), args, { async: true }).then(finish).finally(cleanup)
+          return callDevice('poly_model_from_binding_arrays', args).then(finish).finally(cleanup)
         }
         const inst = Module._poly_model_from_binding_arrays(...args)
         const result = finish(inst)
@@ -2232,11 +2175,10 @@ function createWasmCoreFromModule(Module, device) {
     setDevice(inst, device) {
       // Match module maps: only the public CPU alias maps to this Wasm core.
       const name = String(device).toLowerCase() === 'cpu' ? coreDeviceName(DEVICE_IDS.cpu) : device
-      const place = () => Module.ccall('poly_model_set_device_name', 'number',
-        ['number', 'string'], [inst, name], { async: true })
+      const place = () => callDevice('poly_model_set_device_name', [inst, name])
       if (deviceName === 'webgpu')
         return ensureModelDevice(inst).then(place)
-      return Module.ccall('poly_model_set_device_name', 'number', ['number', 'string'], [inst, name])
+      return callDevice('poly_model_set_device_name', [inst, name], false)
     },
 
     setDeviceMap(inst, entries) {
@@ -2256,9 +2198,7 @@ function createWasmCoreFromModule(Module, device) {
       }
       // Migration may read back GPU state. Keep both the C call and its
       // argument storage alive through Asyncify rewind, as uniform place does.
-      const place = () => Module.ccall('poly_model_set_device_map_arrays', 'number',
-        ['number', 'number', 'number', 'number'],
-        [inst, modulePtrs, devicePtrs, entries.length], { async: true })
+      const place = () => callDevice('poly_model_set_device_map_arrays', [inst, modulePtrs, devicePtrs, entries.length])
       if (deviceName === 'webgpu') {
         return ensureModelDevice(inst).then(place).finally(cleanup)
       }
@@ -2405,7 +2345,7 @@ function createWasmCoreFromModule(Module, device) {
     resetTransient(instPtr) {
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() =>
-          Module.ccall('poly_model_reset_transient', 'number', ['number'], [instPtr], {async:true}))
+          callDevice('poly_model_reset_transient', [instPtr]))
       }
       return Module._poly_model_reset_transient(instPtr)
     },
@@ -2444,13 +2384,7 @@ function createWasmCoreFromModule(Module, device) {
       if (tensorOutputs) args.push(outputPtr, count)
       if (!capture && deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
-          return Module.ccall(
-            symbol,
-            'number',
-            args.map(() => 'number'),
-            args,
-            { async: true }
-          )
+          return callDevice(symbol, args)
         }).then(finish).finally(cleanup)
       }
       try {
@@ -2510,13 +2444,7 @@ function createWasmCoreFromModule(Module, device) {
       const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >>> 2] : null
       if (deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
-          return Module.ccall(
-            'poly_model_train_step',
-            'number',
-            ['number', 'number', 'number', 'number', 'number'],
-            [instPtr, entryPtr, bindingPtr, n, lossPtr],
-            { async: true }
-          )
+          return callDevice('poly_model_train_step', [instPtr, entryPtr, bindingPtr, n, lossPtr])
         }).then(readLoss).finally(cleanup)
       }
       try {

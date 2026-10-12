@@ -480,6 +480,51 @@ async function runWasmOwnershipTests() {
     }
   })
 
+  await test('generated device calls retain arguments until rejected readback settles', async () => {
+    const pg = polygrad.create({ core: 'wasm' })
+    const { createWasmCoreFromModule } = require('../src/core/wasm_common')
+    const Module = pg._core.Module
+    const cold = createWasmCoreFromModule(Module, 'webgpu')
+    const originalCall = Module.ccall, originalFree = Module._free
+    let input = 0, freed = 0, rejectCall, result
+    let entered
+    const called = new Promise(resolve => { entered = resolve })
+    const bytes = new Uint8Array([1, 3, 5, 7])
+    try {
+      Module._free = ptr => {
+        if (ptr === input) freed++
+        return originalFree(ptr)
+      }
+      Module.ccall = (name, ret, types, args, options) => {
+        if (name !== 'poly_model_import_weights' || ret !== 'number' ||
+            types.join() !== 'number,number,number' || args.length !== 3 || !options.async)
+          throw new Error('generated import signature changed')
+        input = args[1]
+        entered()
+        return new Promise((resolve, reject) => { rejectCall = reject })
+      }
+      // No pending placement: isolate the production import adapter without a GPU.
+      result = cold.model.importWeights(1, bytes).then(
+        () => { entered(); return new Error('injected device rejection was swallowed') },
+        error => { entered(); return error })
+      await called
+      if (!rejectCall) throw new Error('device call did not reach the pending C boundary')
+      if (freed || cold.heapU8().slice(input, input + bytes.length).join() !== bytes.join())
+        throw new Error('input storage was released before the device call settled')
+      rejectCall(new Error('injected device failure'))
+      const error = await result
+      if (error.message !== 'injected device failure' || freed !== 1)
+        throw new Error('device failure did not propagate with exactly one argument release')
+    } finally {
+      if (rejectCall) rejectCall(new Error('test cleanup'))
+      if (result) await result
+      Module.ccall = originalCall
+      Module._free = originalFree
+      await cold.destroy()
+      await pg.dispose()
+    }
+  })
+
   await test('cold WebGPU host registration failure preserves the previous binding', async () => {
     const pg = await polygrad.create({ core: 'wasm' })
     const { createWasmCoreFromModule } = require('../src/core/wasm_common')

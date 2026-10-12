@@ -3,7 +3,23 @@
 
 --core refreshes the resolver/export metadata. --source builds a consumer's
 typed imports and a construction-only entry adapter (ctx, tensors, scalars,
-owned outputs). Pointer semantics below are reviewed, not inferred from types.
+owned outputs). binding_rules.json owns exposure and pointer rules; C headers
+own signatures. Handwritten adapters remain explicit rather than auto-selected.
+
+Rules select a shared frontend adapter (direct, status, owned pair, or optional
+owned output), construction extension metadata, handwritten consumers, or a
+C-only exclusion. Host-only helpers explicitly have no C declaration.
+Arrays name their count argument; a negative count means a
+fixed length. The width is bytes per item on the extension/Wasm wire, and limit
+is a multiple of POLY_MAX_DIMS for frontend dimension arrays. Opaque input
+handles remain nullable at the ABI boundary; C owns operation-specific checks.
+
+may_wait records a reviewed C-level device-wait possibility, not a Promise
+return type. wasm_call selects generated ccall signatures for marshalled args;
+only its named strings are converted by Emscripten. Other pointers are numeric
+addresses owned by the calling adapter. Admission, cleanup and Asyncify's
+internal stack instrumentation remain outside these call-signature adapters.
+An absent may_wait means unaudited, never a nonblocking guarantee.
 """
 
 import argparse
@@ -12,8 +28,16 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+# Declaration roots used by the frontends, including their handwritten adapters.
+# Adding a header audits its transitive C API without granting it exposure.
+CORE_HEADERS = (
+    'polygrad.h', 'model.h', 'frontend.h', 'device.h', 'nn/nn.h', 'nn/optim.h',
+    'models/models.h', 'models/mlp.h', 'models/transformer.h', 'tokenizer.h',
+    'loaders/hf_decode.h', 'loaders/gguf_decode.h', 'loaders/onnx_loader.h',
+    'loaders/gguf_loader.h', 'models/hf_loader.h', 'loaders/import_error.h',
+    'bundle.h', 'engine/schedule.h', 'engine/realize.h', 'codegen/codegen.h',
+)
 OPAQUE = {"PolyCtx *", "PolyTensor *", "PolyUOp *", "PolyTensorCapture *", "PolyModel *"}
-STATUS_CALLS = {"poly_model_set_optimizer_groups"}
 SCALARS = {
     "int",
     "_Bool",
@@ -25,109 +49,17 @@ SCALARS = {
     "PolyOps",
     "PolyDevice",
 }
-ARRAYS = {
-    # Negative counts encode a fixed number of elements, not an argument slot.
-    "poly_tensor_sort": {
-        "out_values": (-1, 4, "out"),
-        "out_indices": (-1, 4, "out"),
-    },
-    **{
-        f"poly_tensor_{op}": {"axes": ("n_axes", 8, "in")}
-        for op in ("sum", "mean", "max", "min", "flip", "var_axes", "prod", "logsumexp",
-                   "all", "any", "sum_dtype_by_id")
-    },
-    **{
-        f"poly_tensor_{op}": {"dims": ("ndim", 8, "in")}
-        for op in ("reshape", "expand", "empty_by_id")
-    },
-    "poly_tensor_permute": {"perm": ("ndim", 8, "in")},
-    **{
-        f"poly_tensor_{op}": {"pairs": ("ndim", 16, "in")}
-        for op in ("shrink", "pad_mode", "pad_value_bool", "pad_value_int", "pad_value_float")
-    },
-    **{
-        f"poly_tensor_{op}": {
-            **{arg: ("n_kernel", 8, "in") for arg in ("kernel", "stride", "dilation")},
-            **({"padding": ("n_padding", 8, "in")} if op != "pool" else {}),
-        }
-        for op in ("pool", "avg_pool2d", "max_pool2d")
-    },
-    "poly_tensor_batchnorm": {"axes": ("n_axes", 8, "in")},
-    "poly_tensor_layernorm_axes_apply": {"axes": ("n_axes", 8, "in")},
-    "poly_tensor_cat": {"tensors": ("n_tensors", 4, "in")},
-    "poly_tensor_capture_wrap": {
-        "states": ("n_states", 4, "in"),
-        "mutable_state": ("n_states", 4, "in"),
-        "outputs": ("n_outputs", 4, "in"),
-        "wrapped": ("n_outputs", 4, "out"),
-    },
-}
-# These C calls publish two independently owned Tensor handles on success.
-# Their final two parameters are output slots, not borrowed input arrays.
-OWNED_PAIRS = {
-    "poly_tensor_sort", "poly_tensor_topk", "poly_tensor_cummax", "poly_tensor_cummin",
-    "poly_tensor_qr_ex", "poly_tensor_lstm_cell", "poly_tensor_batchnorm_stats",
-}
-# Flat padding lists contain up to two entries per dimension; their count is
-# already measured in scalars, unlike the pair-pointer APIs above.
-ARRAY_LIMITS = {(f"poly_tensor_{op}", "padding"): 2 for op in ("avg_pool2d", "max_pool2d")}
-# The JS flag requests an additional owned output; C receives NULL or an output
-# slot. Python keeps the original C signature.
-OPTIONAL_OUTPUTS = {"poly_tensor_max_pool2d"}
-SPECIAL = {
-    "poly_tensor_sort",
-    "poly_abi_version",
-    "poly_tensor_release",
-    "poly_tensor_capture_begin",
-    "poly_tensor_capture_end",
-    "poly_tensor_capture_wrap",
-    "poly_tensor_uop_physical",
-    "poly_uop_ndim",
-}
-# These return borrowed storage or manipulate implementation/lifetime metadata,
-# rather than creating ordinary tensor results. Assign is explicitly supported.
-EXCLUDE = {
-    "poly_tensor_find_storage_identity",
-    "poly_tensor_create_result",
-    "poly_tensor_create_result_like",
-    "poly_tensor_create_with_roots",
-    "poly_tensor_create",
-    "poly_tensor_detach_logical",
-    # This legacy graph adapter returns a shape object, not a raw handle.
-    "poly_uop_causal_mask",
-}
 
-def frontend_bindings(decls):
-    """Generate the common pointer/scalar ABI subset for all three consumers.
 
-    Reviewed dimension arrays use ARRAYS; structs/callbacks stay explicit.
-    Export selection and signatures come from headers, not per-backend lists.
-    """
+def frontend_bindings(decls, rules):
+    """Emit the explicitly selected, common Python/native JS/Wasm adapters."""
     macros = subprocess.check_output(
         ['clang', '-x', 'c', f'-I{ROOT}/src', '-dM', '-E', '-'],
         input=b'#include "polygrad.h"\n',
     ).decode().splitlines()
     max_dims = int(next(line.split()[2] for line in macros if line.startswith('#define POLY_MAX_DIMS ')))
-    selected = {}
-    for name, d in sorted(decls.items()):
-        ret, args = signature(d)
-        pair = name in OWNED_PAIRS
-        optional = name in OPTIONAL_OUTPUTS
-        inputs = args[:-2] if pair else args
-        if pair:
-            assert ret == "int" and all(a["type"]["qualType"] == "PolyTensor **" for a in args[-2:])
-        if ((name.startswith(("poly_tensor_", "poly_uop_")) or name in STATUS_CALLS)
-                and name not in EXCLUDE
-                and (ret in ("PolyTensor *", "PolyUOp *") or pair or (name in STATUS_CALLS and ret == "int"))
-                and all(a["type"]["qualType"].removeprefix("const ") in OPAQUE | SCALARS
-                        or (name in STATUS_CALLS and a["type"]["qualType"] == "const char *")
-                        or (optional and a is args[-1] and a["type"]["qualType"] == "PolyTensor **")
-                        or (a["type"]["qualType"] in ("int64_t *", "const int64_t *", "int64_t (*)[2]")
-                            and ARRAYS.get(name, {}).get(a["name"], (None,0,None))[1:] in ((8, "in"), (16, "in")))
-                        for a in inputs)):
-            selected[name] = (ret, args)
-    if not (OWNED_PAIRS | OPTIONAL_OUTPUTS) <= selected.keys():
-        raise ValueError('owned-result signature changed; review its adapter contract')
+    selected = {name: signature(decls[name]) for name, rule in sorted(rules.items())
+                if 'frontend' in rule}
     native, exports = [], []
     wasm = ["// Generated by scripts/extension_bindings.py --core.\n'use strict'\nconst { integer64 } = require('./integer')\n",
             "module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({"]
@@ -136,8 +68,9 @@ def frontend_bindings(decls):
                     "bool": "c_bool", "_Bool": "c_bool", "int64_t": "c_int64",
                     "uint64_t": "c_uint64", "double": "c_double", "float": "c_float"}
     for name, (ret, args) in selected.items():
-        pair = name in OWNED_PAIRS
-        optional = name in OPTIONAL_OUTPUTS
+        rule = rules[name]
+        pair = rule['frontend'] == 'pair'
+        optional = rule['frontend'] == 'optional'
         inputs = args[:-2] if pair else args
         names = [f"a{i}" for i in range(len(args))]
         input_names = names[:len(inputs)]
@@ -153,10 +86,11 @@ def frontend_bindings(decls):
             n = names[i]
             c_args.append(n)
             if t in ("int64_t *", "const int64_t *", "int64_t (*)[2]"):
-                count_name, width, _ = ARRAYS[name][arg["name"]]
+                array = rule['arrays'][arg['name']]
+                count_name, width = array['length'], array['width']
                 elements = width // 8
                 count = next(j for j, a in enumerate(args) if a['name'] == count_name)
-                limit = ARRAY_LIMITS.get((name, arg["name"]), 1)
+                limit = array.get('limit', 1)
                 arrays.append((i, count, elements, limit))
                 native += [f"  int64_t {n}[POLY_MAX_DIMS * {elements * limit}];", f"  uint32_t length{i};",
                            f"  NAPI_CALL(env, napi_get_array_length(env, argv[{i}], &length{i}));",
@@ -208,7 +142,7 @@ def frontend_bindings(decls):
                        f"  if (status{i} != napi_ok || !a{i}) {{"]
             native += [f"    free(a{j});" for j in strings if j <= i]
             native += ['    napi_throw_type_error(env, NULL, "expected a UTF-8 string"); return NULL;', "  }"]
-        if name in STATUS_CALLS:
+        if rule['frontend'] == 'status':
             native += [f"  int rc = {name}({', '.join(c_args)});"]
             native += [f"  free(a{i});" for i in strings]
             native += ["  napi_value result;", "  NAPI_CALL(env, napi_create_int32(env, rc, &result));",
@@ -246,7 +180,7 @@ def frontend_bindings(decls):
             wasm.append(f"  {name}: ({', '.join(input_names)}) => callTensorPair(Module._{name}, [{', '.join(js_args)}], '{name}'),")
         else:
             wasm.append(f"  {name}: ({', '.join(names)}) => Module._{name}({', '.join(js_args)}),")
-        python += [f"    lib.{name}.restype = ctypes.{'c_int' if pair or name in STATUS_CALLS else 'c_void_p'}",
+        python += [f"    lib.{name}.restype = ctypes.{'c_int' if pair or rule['frontend'] == 'status' else 'c_void_p'}",
                    f"    lib.{name}.argtypes = [{', '.join(py_args)}]"]
     wasm.append("})\n")
     comment = "/* Generated by scripts/extension_bindings.py --core. */\n"
@@ -284,51 +218,204 @@ def signature(d):
     ]
 
 
-def core(check=False):
-    decls = declarations('#include "polygrad.h"\n#include "model.h"\n#include "frontend.h"\n#include "nn/nn.h"\n')
+def core_declarations():
+    # Audit conditional declarations regardless of this machine's devices.
+    # The headers use opaque driver types and do not require either SDK.
+    return declarations('#define POLY_HAS_CUDA 1\n#define POLY_HAS_HIP 1\n'
+                        + ''.join(f'#include "{header}"\n' for header in CORE_HEADERS))
+
+
+def device_call_signature(decl, rule):
+    name = decl['name']
+    if rule.get('may_wait') is not True:
+        raise ValueError(f'{name}: wasm_call requires reviewed may_wait=true')
+    call = rule['wasm_call']
+    if not isinstance(call, dict) or call.keys() - {'strings'}:
+        raise ValueError(f'{name}: invalid wasm_call contract')
+    ret, args = signature(decl)
+    strings = call.get('strings', [])
+    params = {a['name']: a['type']['qualType'] for a in args}
+    if (not isinstance(strings, list) or len(set(strings)) != len(strings)
+            or any(params.get(n) != 'const char *' for n in strings)):
+        raise ValueError(f'{name}: invalid string parameters {strings}')
+
+    def wire_type(t):
+        # size_t is wasm32 here, irrespective of the host running Clang.
+        # i64 scalars require a separate BigInt contract, never Number coercion.
+        if t == 'void':
+            return None
+        if (t.endswith('*') or t in (SCALARS - {'int64_t', 'uint64_t'}) | {'size_t', 'uint32_t'}):
+            return 'number'
+        raise ValueError(f'{name}: unsupported Wasm call type {t}')
+    return wire_type(ret), ['string' if a['name'] in strings else wire_type(a['type']['qualType']) for a in args]
+
+
+def device_call_bindings(decls, rules):
+    lines = ['// Generated by scripts/extension_bindings.py --core.', "'use strict'", '',
+             '// Callers own admission and keep argument allocations alive until settlement.',
+             'module.exports = Module => {', '  const calls = {']
+    for name, rule in sorted(rules.items()):
+        if 'wasm_call' not in rule:
+            continue
+        ret, types = device_call_signature(decls[name], rule)
+        lines += [f'    {name}: (args, options) => {{',
+                  f"      if (args.length !== {len(types)}) throw new TypeError('{name}: wrong argument count')",
+                  f"      return Module.ccall('{name}', {json.dumps(ret)}, {json.dumps(types)}, args, options)",
+                  '    },']
+    lines += ['  }', '  return (name, args, asynchronous = true) => {',
+              "    if (!Object.prototype.hasOwnProperty.call(calls, name)) throw new Error('unreviewed device call: ' + name)",
+              '    return calls[name](args, asynchronous ? { async: true } : undefined)',
+              '  }', '}', '']
+    return '\n'.join(lines)
+
+
+def validate_rules(decls, rules):
+    """Fail closed on new declarations, stale contracts and unsupported adapters.
+
+    The umbrella includes internal declarations too. Each has an explicit
+    C-only or handwritten decision; type compatibility never grants exposure.
+    Widths are extension/Wasm wire widths, not native sizeof(pointer).
+    """
+    if not isinstance(rules, dict):
+        raise ValueError('expected a binding rule table')
+    public = {n: d for n, d in decls.items()
+              if n.startswith('poly_') and d.get('storageClass') != 'static'}
+    for name in sorted(public.keys() - rules.keys()):
+        raise ValueError(f'{name}: missing binding decision')
+    for name in sorted(rules.keys() - public.keys()):
+        if not isinstance(rules[name], dict) or 'host' not in rules[name]:
+            raise ValueError(f'{name}: binding rule has no C declaration')
+    for name, rule in rules.items():
+        if not isinstance(rule, dict):
+            raise ValueError(f'{name}: expected binding rule object')
+        unknown = rule.keys() - {'frontend', 'extension', 'arrays', 'manual', 'exclude', 'host', 'may_wait', 'wasm_call'}
+        if unknown:
+            raise ValueError(f'{name}: unknown binding properties {sorted(unknown)}')
+        if 'host' in rule:
+            consumers = rule['host']
+            if (len(rule) != 1 or name in public or not isinstance(consumers, list)
+                    or not consumers or len(set(consumers)) != len(consumers)
+                    or set(consumers) - {'python', 'native', 'wasm'}):
+                raise ValueError(f'{name}: invalid host-only helper')
+            continue
+        if 'exclude' in rule:
+            if len(rule) != 1 or not isinstance(rule['exclude'], str) or not rule['exclude'].strip():
+                raise ValueError(f'{name}: exclusion needs a reason and cannot expose adapters')
+            continue
+        if not rule.keys() & {'frontend', 'extension', 'manual', 'wasm_call'}:
+            raise ValueError(f'{name}: missing binding decision')
+        if 'may_wait' in rule and type(rule['may_wait']) is not bool:
+            raise ValueError(f'{name}: may_wait must be a C-level boolean')
+        if 'wasm_call' in rule:
+            device_call_signature(public[name], rule)
+        if 'manual' in rule:
+            manual = rule['manual']
+            if (not isinstance(manual, list) or not manual
+                    or len(set(manual)) != len(manual)
+                    or set(manual) - {'python', 'native', 'wasm'} or 'frontend' in rule):
+                raise ValueError(f'{name}: invalid or duplicate handwritten adapter')
+        ret, args = signature(public[name])
+        params = {a['name']: a['type']['qualType'] for a in args}
+        arrays = rule.get('arrays', {})
+        if not isinstance(arrays, dict):
+            raise ValueError(f'{name}: expected named array contracts')
+        for arg, array in arrays.items():
+            if arg not in params:
+                raise ValueError(f'{name}: unknown array argument {arg}')
+            if not isinstance(array, dict) or array.keys() - {'length', 'width', 'direction', 'limit'}:
+                raise ValueError(f'{name}: invalid array contract {arg}')
+            count = array.get('length')
+            if isinstance(count, str):
+                if params.get(count) not in {'int', 'int64_t', 'uint64_t'}:
+                    raise ValueError(f'{name}: invalid array count argument {count}')
+            elif type(count) is not int or count >= 0:
+                raise ValueError(f'{name}: array length must name a count or be a negative fixed count')
+            width = array.get('width')
+            direction = array.get('direction')
+            allowed = {'int64_t *': {(8, 'in'), (16, 'in')},
+                       'const int64_t *': {(8, 'in'), (16, 'in')},
+                       'int64_t (*)[2]': {(16, 'in')}, 'const int *': {(4, 'in')},
+                       'PolyTensor **': {(4, 'in'), (4, 'out')}}
+            if (type(width) is not int or direction not in {'in', 'out'}
+                    or (width, direction) not in allowed.get(params[arg], set())
+                    or (direction == 'out' and params[arg] != 'PolyTensor **')
+                    or type(array.get('limit', 1)) is not int or array.get('limit', 1) < 1):
+                raise ValueError(f'{name}: unsupported array contract {arg}')
+        if 'frontend' in rule:
+            kind = rule['frontend']
+            pair, optional = kind == 'pair', kind == 'optional'
+            if kind not in {'direct', 'pair', 'optional', 'status'}:
+                raise ValueError(f'{name}: unknown frontend adapter {kind}')
+            outputs = 2 if pair else 1 if optional else 0
+            inputs = args[:-outputs] if outputs else args
+            if (outputs and (len(args) < outputs or any(a['type']['qualType'] != 'PolyTensor **'
+                                                       for a in args[-outputs:]))):
+                raise ValueError(f'{name}: unsupported owned-output signature')
+            expected_ret = {'int'} if pair or kind == 'status' else {'PolyTensor *'} if optional else {'PolyTensor *', 'PolyUOp *'}
+            if ret not in expected_ret:
+                raise ValueError(f'{name}: unsupported frontend return {ret}')
+            for arg in inputs:
+                t, n = arg['type']['qualType'], arg['name']
+                if (t.removeprefix('const ') in OPAQUE | SCALARS
+                        or (kind == 'status' and t == 'const char *')):
+                    continue
+                if (t in {'int64_t *', 'const int64_t *', 'int64_t (*)[2]'}
+                        and n in arrays and isinstance(arrays[n]['length'], str)
+                        and arrays[n]['direction'] == 'in'):
+                    continue
+                raise ValueError(f'{name}: unsupported frontend argument {n}: {t}')
+        if 'extension' in rule:
+            ext = rule['extension']
+            if (not isinstance(ext, dict) or set(ext) != {'failure', 'ownership', 'cleanup'}
+                    or type(ext['failure']) is not int
+                    or ext['ownership'] not in {'owned', 'borrowed', 'value'}
+                    or type(ext['cleanup']) is not bool):
+                raise ValueError(f'{name}: invalid extension contract')
+            if ret not in OPAQUE | SCALARS | {'void'}:
+                raise ValueError(f'{name}: unsupported extension return {ret}')
+            for arg in args:
+                if arg['type']['qualType'].removeprefix('const ') not in OPAQUE | SCALARS and arg['name'] not in arrays:
+                    raise ValueError(f'{name}: unsupported extension argument {arg["name"]}')
+
+
+def load_rules(decls):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f'duplicate binding key: {key}')
+            result[key] = value
+        return result
+    rules = json.loads((ROOT / 'scripts/binding_rules.json').read_text(encoding='utf-8'),
+                       object_pairs_hook=unique_object)
+    validate_rules(decls, rules)
+    return rules
+
+
+def core(check=False, output=None):
+    decls = core_declarations()
+    rules = load_rules(decls)
     result = {}
     for name, d in sorted(decls.items()):
+        rule = rules.get(name, {})
+        if 'extension' not in rule:
+            continue
         ret, args = signature(d)
-        if name not in SPECIAL and (
-            not name.startswith("poly_tensor_")
-            or ret != "PolyTensor *"
-            or name in EXCLUDE
-        ):
-            continue
-        if ret not in OPAQUE | SCALARS | {"void"}:
-            continue
         arrays = []
         names = [v["name"] for v in args]
         for i, v in enumerate(args):
             t = v["type"]["qualType"]
             if t.removeprefix("const ") in OPAQUE or t in SCALARS:
                 continue
-            annotation = ARRAYS.get(name, {}).get(v["name"])
-            if not annotation:
-                break
-            count, width, direction = annotation
+            annotation = rule['arrays'][v['name']]
+            count, width, direction = (annotation[k] for k in ('length', 'width', 'direction'))
             arrays.append([i, names.index(count) if isinstance(count, str) else count, width, direction])
-        else:
-            result[name] = {
-                "return": ret,
-                "args": [[v["type"]["qualType"], v["name"]] for v in args],
-                "arrays": arrays,
-                "failure": 0 if ret in OPAQUE or ret == "void" else -1,
-                # Descriptive only: constructors return owned references;
-                # same-object mutators and the UOp accessor are borrowed.
-                "ownership": (
-                    "borrowed"
-                    if name in (
-                        "poly_tensor_assign", "poly_tensor_assign_after",
-                        "poly_tensor_clone_into", "poly_tensor_uop_physical",
-                    )
-                    else "owned" if ret in ("PolyTensor *", "PolyTensorCapture *")
-                    else "value"
-                ),
-                "cleanup": name in ("poly_tensor_release", "poly_tensor_capture_end"),
-            }
-    if not SPECIAL <= result.keys():
-        raise ValueError(f"missing declarations: {SPECIAL - result.keys()}")
+        result[name] = {
+            "return": ret,
+            "args": [[v["type"]["qualType"], v["name"]] for v in args],
+            "arrays": arrays,
+            **{key: rule['extension'][key] for key in ('failure', 'ownership', 'cleanup')},
+        }
     text = json.dumps(result, indent=2) + "\n"
     files = {
         dest: text
@@ -338,15 +425,22 @@ def core(check=False):
         "/* Generated by scripts/extension_bindings.py --core. */\n"
         + "".join(f"POLY_EXTENSION_SYMBOL({name})\n" for name in result)
     )
-    files.update(frontend_bindings(decls))
+    files.update(frontend_bindings(decls, rules))
+    files['js/src/core/generated_device_calls.js'] = device_call_bindings(decls, rules)
+    output = ROOT if output is None else output
     for dest, text in files.items():
+        target = output / dest
         if dest.endswith('.h') and dest.startswith('js/'):
             text = subprocess.check_output(['clang-format-14'], input=text.encode()).decode()
         if check:
-            if (ROOT / dest).read_text() != text:
+            if target.read_text(encoding='utf-8') != text:
                 raise ValueError(f"stale metadata: {dest}; run make extension-bindings")
         else:
-            (ROOT / dest).write_text(text)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # These headers are direct native/Wasm build prerequisites.
+            # A no-op generation must not invalidate every compiled artifact.
+            if not target.exists() or target.read_text(encoding='utf-8') != text:
+                target.write_text(text, encoding='utf-8')
     print(
         f"{'checked' if check else 'generated'} {len(result)} construction API signatures"
     )
@@ -502,7 +596,7 @@ if __name__ == "__main__":
     p.add_argument("--output", type=Path)
     a = p.parse_args()
     if a.core:
-        core(a.check)
+        core(a.check, a.output)
     else:
         if not all(
             v is not None for v in (a.source, a.entry, a.inputs, a.outputs, a.output)
