@@ -21,6 +21,8 @@ char *poly_strfmt(const char *format, ...) __attribute__((format(printf, 1, 2)))
 
 /* Tinygrad-style env helpers */
 int poly_getenv_int(const char *key, int default_value);
+/* Shared CPU/X86 worker budget: explicit override, cgroup quota, affinity. */
+int poly_cpu_thread_count(void);
 bool poly_getenv_flag(const char *key);
 bool poly_getenv_flag_default(const char *key, bool default_value);
 

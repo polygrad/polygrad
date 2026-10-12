@@ -1,5 +1,6 @@
 /* utils.c -- generic C utilities, no polygrad dependencies */
 
+#define _GNU_SOURCE
 #include "utils.h"
 
 _Thread_local double poly_compile_deadline_ms;
@@ -9,6 +10,51 @@ _Thread_local double poly_compile_deadline_ms;
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <errno.h>
+#include <sched.h>
+#endif
+
+int poly_cpu_thread_count(void) {
+  int override = poly_getenv_int("NUM_CPU_THREADS", 0);
+  if (override > 0) return override;
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  /* tinygrad v0.14 helpers._get_cpu_count, Python <=3.12 path: a finite
+   * cgroup-v2 quota takes precedence over affinity. Do not count host CPUs
+   * for a process restricted with taskset/cpuset. */
+  FILE *fp = fopen("/sys/fs/cgroup/cpu.max", "r");
+  if (fp) {
+    long long quota, period;
+    int fields = fscanf(fp, "%lld %lld", &quota, &period);
+    fclose(fp);
+    if (fields == 2 && quota > 0 && period > 0) {
+      long long count = quota / period;
+      return count < 1 ? 1 : count > INT_MAX ? INT_MAX : (int)count;
+    }
+  }
+  /* Kernel CPU masks can exceed CPU_SETSIZE even for a small process cpuset. */
+  for (int bits = CPU_SETSIZE; bits <= INT_MAX / 2; bits *= 2) {
+    cpu_set_t *set = CPU_ALLOC(bits);
+    if (!set) break;
+    size_t size = CPU_ALLOC_SIZE(bits);
+    int status = sched_getaffinity(0, size, set);
+    int error = errno;
+    int count = status == 0 ? CPU_COUNT_S(size, set) : 0;
+    CPU_FREE(set);
+    if (status == 0) return count > 0 ? count : 1;
+    if (error != EINVAL) break;
+  }
+#endif
+#ifdef _SC_NPROCESSORS_ONLN
+  long count = sysconf(_SC_NPROCESSORS_ONLN);
+  if (count > 0 && count < INT_MAX) return (int)count;
+#endif
+  return 1;
+}
 
 char *poly_strfmt(const char *format, ...) {
   va_list args, copy;

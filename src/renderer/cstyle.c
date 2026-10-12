@@ -123,19 +123,9 @@ static void smap_destroy(StrMap *m) {
   free(m->vals);
 }
 
-static int cpu_thread_count(void) {
-  /* tinygrad@2026-08-22/a9069c177a9d renderer/cstyle.py:261-263. */
-  int n_env = poly_getenv_int("NUM_CPU_THREADS", 0);
-  if (n_env > 0) return n_env;
-#ifdef _SC_NPROCESSORS_ONLN
-  long n = sysconf(_SC_NPROCESSORS_ONLN);
-  if (n > 0 && n < INT32_MAX) return (int)n;
-#endif
-  return 1;
-}
-
 PolyRendererCaps poly_c_renderer_caps(void) {
   bool has_threads = poly_getenv_flag_default("THREADS", true);
+  int threads = has_threads ? poly_cpu_thread_count() : 0;
   return (PolyRendererCaps){
       .device = "CPU",
       .has_mulacc = false,
@@ -160,8 +150,8 @@ PolyRendererCaps poly_c_renderer_caps(void) {
        * themselves. */
       .has_simd_int = false,
       .max_vec_width = 4,
-      .max_threads = has_threads ? cpu_thread_count() : 0,
-      .global_max = {has_threads ? cpu_thread_count() : 0, 0, 0},
+      .max_threads = threads,
+      .global_max = {threads, 0, 0},
   };
 }
 

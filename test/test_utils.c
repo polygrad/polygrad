@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "test_harness.h"
 
 TEST_BACKEND(harness, runtime_skip_accounting) {
@@ -12,6 +13,9 @@ TEST_BACKEND(harness, runtime_skip_accounting) {
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <sched.h>
+#endif
 
 TEST(ctx, exact_device_counters_release_empty_entries) {
   PolyCtx *ctx = poly_ctx_new();
@@ -63,6 +67,51 @@ static void restore_env(EnvSave *s) {
   free(s->value);
   s->value = NULL;
 }
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+TEST(utils, cpu_renderer_respects_process_allowance) {
+  EnvSave threads = save_env("NUM_CPU_THREADS");
+  EnvSave enabled = save_env("THREADS");
+  cpu_set_t original, single;
+  ASSERT_INT_EQ(sched_getaffinity(0, sizeof(original), &original), 0);
+  CPU_ZERO(&single);
+  for (int i = 0; i < CPU_SETSIZE; i++) {
+    if (CPU_ISSET(i, &original)) {
+      CPU_SET(i, &single);
+      break;
+    }
+  }
+  ASSERT_INT_EQ(sched_setaffinity(0, sizeof(single), &single), 0);
+  unsetenv("NUM_CPU_THREADS");
+  setenv("THREADS", "1", 1);
+  /* The pinned Python <=3.12 helper gives a finite cgroup-v2 quota priority
+   * over affinity. Without that quota, restricting this thread must give 1. */
+  int expected = 1;
+  FILE *fp = fopen("/sys/fs/cgroup/cpu.max", "r");
+  long long quota, period;
+  if (fp) {
+    if (fscanf(fp, "%lld %lld", &quota, &period) == 2 && quota > 0 && period > 0)
+      expected = quota / period > 0 ? (int)(quota / period) : 1;
+    fclose(fp);
+  }
+  PolyRendererCaps defaults = poly_c_renderer_caps();
+  setenv("NUM_CPU_THREADS", "3", 1);
+  PolyRendererCaps explicit = poly_c_renderer_caps();
+  setenv("THREADS", "0", 1);
+  PolyRendererCaps disabled = poly_c_renderer_caps();
+  int restored = sched_setaffinity(0, sizeof(original), &original);
+  restore_env(&threads);
+  restore_env(&enabled);
+  ASSERT_INT_EQ(restored, 0);
+  ASSERT_INT_EQ(defaults.max_threads, expected);
+  ASSERT_INT_EQ(defaults.global_max[0], expected);
+  ASSERT_INT_EQ(explicit.max_threads, 3);
+  ASSERT_INT_EQ(explicit.global_max[0], 3);
+  ASSERT_INT_EQ(disabled.max_threads, 0);
+  ASSERT_INT_EQ(disabled.global_max[0], 0);
+  PASS();
+}
+#endif
 
 TEST(utils, debug_level_precedence) {
   EnvSave debug = save_env("DEBUG");

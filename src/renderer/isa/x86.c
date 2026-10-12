@@ -5288,18 +5288,9 @@ char *poly_render_x86_source(PolyUOp **uops, int n) {
   return hex;
 }
 
-static int x86_thread_count(void) {
-  int n_env = poly_getenv_int("NUM_CPU_THREADS", 0);
-  if (n_env > 0) return n_env;
-#ifdef _SC_NPROCESSORS_ONLN
-  long n = sysconf(_SC_NPROCESSORS_ONLN);
-  if (n > 0 && n < INT32_MAX) return (int)n;
-#endif
-  return 1;
-}
-
 static PolyRendererCaps poly_x86_caps(void) {
   bool has_threads = poly_getenv_flag_default("THREADS", true);
+  int threads = has_threads ? poly_cpu_thread_count() : 0;
   return (PolyRendererCaps){
       .device = "CPU",
       /* tinygrad X86Renderer does not advertise Ops.MULACC to generic rewrite.
@@ -5316,8 +5307,8 @@ static PolyRendererCaps poly_x86_caps(void) {
       .has_simd_int = true,
       .has_simd_float = true,
       .max_vec_width = 4,
-      .max_threads = has_threads ? x86_thread_count() : 0,
-      .global_max = {has_threads ? x86_thread_count() : 0, 0, 0},
+      .max_threads = threads,
+      .global_max = {threads, 0, 0},
   };
 }
 
