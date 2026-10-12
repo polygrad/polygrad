@@ -17,6 +17,12 @@ here = os.path.dirname(os.path.abspath(__file__))
 csrc = os.path.join(here, 'csrc')
 repo_root = os.path.dirname(here)
 
+# Generate before mirroring headers. Extracted sdists/wheels use the shipped
+# glue and must not need the repository, Clang or the binding generator.
+binding_generator = os.path.join(repo_root, 'scripts', 'extension_bindings.py')
+if os.path.isfile(binding_generator) and os.path.isfile(os.path.join(repo_root, 'src', 'core.h')):
+    subprocess.check_call([sys.executable, binding_generator, '--core'])
+
 
 def _read_version():
     pyproject = os.path.join(here, 'pyproject.toml')

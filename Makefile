@@ -999,7 +999,7 @@ test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Rele
 	PYTHONPATH=py POLY_LIB=$(abspath build/libpolygrad.so) \
 		$(PYTHON) test/test_model_interchange.py --cores native,wasm $(MODEL_INTERCHANGE_ARGS)
 
-js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c js/napi_generated.h js/napi_generated_exports.h
+js/build/Release/polygrad_napi.node: build/libpolygrad.a js/binding.gyp js/napi_api.c js/napi_generated.h js/napi_generated_exports.h js/napi_special_exports.h
 	cd js && npm run build:native
 
 test-js-native-cpu: verify-source-mirrors js/build/Release/polygrad_napi.node
@@ -1179,12 +1179,12 @@ bench-train-py:
 
 build-py: build-py-sdist
 
-build-py-sdist: verify-source-mirrors
+build-py-sdist: extension-bindings
 	cd py && rm -rf csrc dist build *.egg-info && \
 		$(PYTHON) scripts/sync-csrc.py && \
 		$(PYTHON) -m build --sdist
 
-build-py-wheel: verify-source-mirrors
+build-py-wheel: extension-bindings
 	cd py && rm -rf csrc dist build *.egg-info && \
 		$(PYTHON) scripts/sync-csrc.py && \
 		$(PYTHON) -m build --wheel
@@ -1206,12 +1206,16 @@ build-python: build-py
 test-py-sdist-install: build-py-sdist
 	$(PYTHON) test/test_package_install.py python
 
+.PHONY: test-py-wheel-install
+test-py-wheel-install: build-py-wheel
+	$(PYTHON) test/test_package_install.py python-wheel
+
 .PHONY: test-py-min-install
 # Build tooling stays on PYTHON; only the isolated consumer runs on the floor.
 test-py-min-install: build-py-sdist
 	$(PYTHON_MIN) test/test_package_install.py python --require-python 3.9
 
-test-js-package-install: verify-source-mirrors wasm-pkg
+test-js-package-install:
 	$(PYTHON) test/test_package_install.py node --npm $(NPM) --node $(NODE)
 
 # Native JIT compilation uses shared temporary names. Keep these lanes serial
@@ -1233,8 +1237,8 @@ publish-py:
 
 publish-python: publish-py
 
-build-js: verify-source-mirrors wasm-pkg
-	cd js && $(NODE) scripts/sync-csrc.js && $(NPM) run build:browser
+build-js:
+	cd js && $(NODE) scripts/prepack.js
 
 publish-js: build-js
 	cd js && $(NPM) publish

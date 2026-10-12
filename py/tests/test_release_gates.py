@@ -311,6 +311,21 @@ def test_package_gate_rejects_missing_or_ambiguous_artifact(tmp_path):
         select(tmp_path, '*.tgz')
 
 
+@pytest.mark.parametrize('wheel', [False, True])
+def test_python_package_gate_selects_requested_artifact(tmp_path, monkeypatch, wheel):
+    install = runpy.run_path(str(ROOT / 'test/test_package_install.py'))['python_install']
+    dist = tmp_path / 'py/dist'
+    dist.mkdir(parents=True)
+    for suffix in ('whl', 'tar.gz'):
+        (dist / f'polygrad-test.{suffix}').touch()
+    calls = []
+    monkeypatch.setitem(install.__globals__, 'ROOT', tmp_path)
+    monkeypatch.setitem(install.__globals__, 'run', lambda cmd, *a: calls.append(cmd))
+    install(tmp_path, {}, wheel=wheel)
+    suffix = 'whl' if wheel else 'tar.gz'
+    assert calls[1][-1] == str(dist / f'polygrad-test.{suffix}')
+
+
 def test_package_gate_rejects_wrong_floor_before_install():
     result = subprocess.run([sys.executable, str(ROOT / 'test/test_package_install.py'),
                              'python', '--require-python', '0.0'], capture_output=True, text=True)

@@ -19,6 +19,8 @@ function run(cmd, args, extraEnv) {
   }
 }
 
+// Generation is a publisher dependency, never an install-time requirement.
+run('make', ['-C', repoDir, 'extension-bindings'])
 run(process.execPath, [path.join(scriptsDir, 'sync-csrc.js')])
 
 // npm tarballs publish explicit sync/async WASM and browser dist artifacts.

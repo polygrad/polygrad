@@ -759,6 +759,10 @@ cd js
 npm run build:browser
 ```
 
+Package builds regenerate binding glue from C headers and
+`scripts/binding_rules.json`, requiring Python, Clang and `clang-format-14`.
+Published packages include the glue; installing them does not run the generator.
+
 For portable Python wheels, run `make build-py-manylinux` from the host with
 Apptainer installed. It builds from the staged release sdist, audits and tests
 CPython 3.9-3.13 wheels, then stages them under `build/release/<version>/wheels/`.

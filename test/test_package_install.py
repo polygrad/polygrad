@@ -40,8 +40,8 @@ def only_artifact(directory, pattern):
     return matches[0].resolve()
 
 
-def python_install(work, env):
-    artifact = only_artifact(ROOT / 'py/dist', 'polygrad-*.tar.gz')
+def python_install(work, env, wheel=False):
+    artifact = only_artifact(ROOT / 'py/dist', 'polygrad-*.whl' if wheel else 'polygrad-*.tar.gz')
     venv = work / 'venv'
     run([sys.executable, '-m', 'venv', str(venv)], work, env, work / 'venv.log')
     interpreter = venv / 'bin/python'
@@ -105,21 +105,21 @@ rt.dispose();
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('kind', choices=['python', 'node'])
+    parser.add_argument('kind', choices=['python', 'python-wheel', 'node'])
     parser.add_argument('--npm', default='npm')
     parser.add_argument('--node', default='node')
     parser.add_argument('--require-python', help='require this exact major.minor for the Python install lane')
     args = parser.parse_args()
     if args.require_python:
         actual = '.'.join(map(str, sys.version_info[:2]))
-        if args.kind != 'python' or actual != args.require_python:
+        if args.kind not in ('python', 'python-wheel') or actual != args.require_python:
             parser.error(f'Python install lane requires {args.require_python}; running {actual}')
     (ROOT / 'temp').mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=f'package-{args.kind}-', dir=ROOT / 'temp'))
     print('Evidence:', work, flush=True)
     env = clean_environment()
-    if args.kind == 'python':
-        python_install(work, env)
+    if args.kind in ('python', 'python-wheel'):
+        python_install(work, env, wheel=args.kind == 'python-wheel')
     else:
         node_install(work, env, args.npm, args.node)
     print(f'PASS: isolated {args.kind} install; logs: {work}', flush=True)
