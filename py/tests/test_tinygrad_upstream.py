@@ -395,6 +395,20 @@ def test_cpu_ops_environment_uses_numeric_disabled_modes():
     assert int(upstream.ENVIRONMENT['IMAGE']) == 0
 
 
+def test_nn_baseline_promotes_helpers_and_pins_shared_failure():
+    root = Path(__file__).resolve().parents[2]
+    baseline = json.loads((root / 'test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json').read_text())
+    prefix = 'test/backend/test_nn.py::TestNN::test_embedding_one_kernel'
+    for engine in ('tinygrad', 'polygrad'):
+        for suffix in ('', '_fused'):
+            assert baseline['tests'][f'{engine}:{prefix}{suffix}']['expected']['status'] == 'passed'
+        row = baseline['tests'][f'{engine}:{prefix}_fused_noopt']
+        assert row['expected']['status'] == 'failed'
+        assert row['expected']['nonpassing_phases']['call']['detail'].endswith(
+            'AssertionError: 51 not less than or equal to 0')
+        assert 'Shared pinned failure' in row['reason']
+
+
 @pytest.mark.parametrize('filename,count', [('test_nn.py', 43), ('test_optim.py', 39)])
 def test_nn_adapter_preserves_bodies_and_defers_only_private_helpers(filename, count):
     import ast

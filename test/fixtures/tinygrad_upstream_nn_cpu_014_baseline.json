@@ -27,7 +27,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "cfc6369951408146394ff46d1fc51d5f8e3b6727bf04058c7ef043e56f2bcf01",
+    "runner_sha256": "6f6b3c579a64e3f25a30f33d2287c4dc6d8058c8f57cc5b9da213542d40b9845",
     "random_seed": {
       "providers": ["random", "numpy", "torch", "tensor"],
       "scope": "test",
@@ -190,7 +190,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 173, 'Skipped: Takes too long to compile for Compiled backends')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 179, 'Skipped: Takes too long to compile for Compiled backends')",
             "outcome": "skipped"
           }
         }
@@ -220,39 +220,29 @@
     },
     "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel": {
       "expected": {
-        "status": "failed",
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
-            "outcome": "failed"
-          }
-        }
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs."
+      "reason": ""
     },
     "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused": {
       "expected": {
-        "status": "failed",
-        "nonpassing_phases": {
-          "call": {
-            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
-            "outcome": "failed"
-          }
-        }
+        "status": "passed",
+        "nonpassing_phases": {}
       },
-      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs."
+      "reason": ""
     },
     "polygrad:test/backend/test_nn.py::TestNN::test_embedding_one_kernel_fused_noopt": {
       "expected": {
         "status": "failed",
         "nonpassing_phases": {
           "call": {
-            "detail": "<reference>/test/helpers.py:LINE: ImportError: cannot import name 'Ops' from 'polygrad.uop.ops' (<polygrad>/py/polygrad/uop/ops.py)",
+            "detail": "<polygrad>/references/.uv-python/cpython-3.11.12-linux-x86_64-gnu/lib/python3.11/unittest/case.py:LINE: AssertionError: 51 not less than or equal to 0",
             "outcome": "failed"
           }
         }
       },
-      "reason": "Private Python compiler-helper import is unsupported (Ops/check_schedule); this upstream numerical body is unexecuted. Native nn.embedding_cpu_schedule_reuses_table checks the pinned two-then-one SINK schedule, input COPY counts, values and51 operations without emulating compiler APIs. Tinygrad control also fails its <=0 operations assertion with51."
+      "reason": "Shared pinned failure: both engines execute the unchanged NOOPT embedding test and report51 operations against its <=0 assertion. The C-backed adapter preserves the original two-then-one SINK count and operation budget. Any changed failure signature or outcome requires review."
     },
     "polygrad:test/backend/test_nn.py::TestNN::test_embedding_regression": {
       "expected": {
@@ -343,7 +333,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 543, 'Skipped: no multi')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 549, 'Skipped: no multi')",
             "outcome": "skipped"
           }
         }
@@ -355,7 +345,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 521, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "detail": "('<adapted>/test/backend/test_nn.py', 527, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
             "outcome": "skipped"
           }
         }
@@ -367,7 +357,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 582, 'Skipped: no multi')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 588, 'Skipped: no multi')",
             "outcome": "skipped"
           }
         }
@@ -379,7 +369,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 560, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "detail": "('<adapted>/test/backend/test_nn.py', 566, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
             "outcome": "skipped"
           }
         }
@@ -461,7 +451,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_optim.py', 203, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
+            "detail": "('<adapted>/test/backend/test_optim.py', 209, \"Skipped: second device not available: Unsupported device: 'CPU:1'\")",
             "outcome": "skipped"
           }
         }
@@ -809,7 +799,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 173, 'Skipped: Takes too long to compile for Compiled backends')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 179, 'Skipped: Takes too long to compile for Compiled backends')",
             "outcome": "skipped"
           }
         }
@@ -861,7 +851,7 @@
           }
         }
       },
-      "reason": "Reference failure: unchanged Tinygrad NOOPT embedding control reports51 operations against its <=0 assertion. The direct C schedule/value control preserves the measured51; this upstream assertion is unchanged."
+      "reason": "Shared pinned failure: both engines execute the unchanged NOOPT embedding test and report51 operations against its <=0 assertion. The C-backed adapter preserves the original two-then-one SINK count and operation budget. Any changed failure signature or outcome requires review."
     },
     "tinygrad:test/backend/test_nn.py::TestNN::test_embedding_regression": {
       "expected": {
@@ -952,7 +942,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 543, 'Skipped: no multi')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 549, 'Skipped: no multi')",
             "outcome": "skipped"
           }
         }
@@ -971,7 +961,7 @@
         "status": "skipped",
         "nonpassing_phases": {
           "call": {
-            "detail": "('<adapted>/test/backend/test_nn.py', 582, 'Skipped: no multi')",
+            "detail": "('<adapted>/test/backend/test_nn.py', 588, 'Skipped: no multi')",
             "outcome": "skipped"
           }
         }
@@ -1282,7 +1272,7 @@
   },
   "scope_note": "Selected CPU NN/optimizer frontier, not a parity allowance or full compiler API certificate. Test bodies and skips remain unchanged; RUN_SLOW is enabled. Eight Muon controls execute against Torch2.10.0+cpu on both providers.",
   "evidence": {
-    "report": "temp/candidate-reconcile-20260915.Ud7MV5/upstream/nn/report.json",
-    "sha256": "f23f28fd379cabe4d3e07163ffce3fe01a09a01f25625dc0568cfc7bc2e101e7"
+    "report": "temp/tabular-compiled-20261011/upstream-nn-review/report.json",
+    "sha256": "b23d7632af407fed12ad9e99fe3963a93b0819379451ffb6bc7161adbadd75c9"
   }
 }

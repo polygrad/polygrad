@@ -421,9 +421,11 @@ test-compat-tinygrad-ops: build/libpolygrad.so
 		--adapter cpu-ops --test test/backend/test_ops.py $(UPSTREAM_COMPAT_ARGS)
 
 .PHONY: test-compat-tinygrad-nn
+UPSTREAM_NN_BASELINE ?= test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json
 test-compat-tinygrad-nn: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
-		--adapter cpu-nn --test test/backend/test_nn.py --test test/backend/test_optim.py $(UPSTREAM_COMPAT_ARGS)
+		--adapter cpu-nn --baseline $(UPSTREAM_NN_BASELINE) \
+		--test test/backend/test_nn.py --test test/backend/test_optim.py $(UPSTREAM_COMPAT_ARGS)
 
 .PHONY: test-model-workloads test-generative-soak test-whisper
 test-whisper: build/libpolygrad.so

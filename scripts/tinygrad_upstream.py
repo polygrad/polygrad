@@ -29,6 +29,7 @@ import sys
 import sysconfig
 import time
 import traceback
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,10 +146,10 @@ def check_cpu_ops_mode(device, renderer, interface, image):
 
 
 def adapt_cpu_nn(source, path, helpers, reference=REFERENCE):
-    """Keep test bodies; load private compiler helpers only when a test uses them.
+    """Keep test bodies; translate their private schedule helper to C for Polygrad.
 
-    The two affected schedule tests still execute their original assertions:
-    missing compiler APIs fail those tests, rather than preventing collection.
+    Schedule counts and operation budgets remain the upstream assertions.
+    The reference continues to use its original private compiler helpers.
     Capability decorators are extracted verbatim from the locked test helper,
     never from an upstream runtime implementation.
     """
@@ -170,15 +171,66 @@ def adapt_cpu_nn(source, path, helpers, reference=REFERENCE):
     # Insert after the original imports, before @slow can be evaluated.
     pos = source.index('\n@slow') if path.endswith('test_nn.py') else source.index('\nnp.random.seed')
     lazy = ('\ndef check_schedule(*args, **kwargs):\n'
+            '    if hasattr(Tensor, "_core_realize_batch"):\n'
+            '        from _polygrad_nn_schedule import check_schedule as implementation\n'
+            '        return implementation(*args, **kwargs)\n'
             '    import importlib.util\n'
             f'    spec = importlib.util.spec_from_file_location("_upstream_nn_helpers", {str(reference / "test/helpers.py")!r})\n'
             '    module = importlib.util.module_from_spec(spec)\n'
             '    spec.loader.exec_module(module)\n'
             '    return module.check_schedule(*args, **kwargs)\n'
             '\ndef run_linear(*args, **kwargs):\n'
+            '    if hasattr(Tensor, "_core_realize_batch"):\n'
+            '        from _polygrad_nn_schedule import run_linear as implementation\n'
+            '        return implementation(*args, **kwargs)\n'
             '    from tinygrad.engine.realize import run_linear as implementation\n'
             '    return implementation(*args, **kwargs)\n')
     return source[:pos] + '\n' + prelude + lazy + source[pos:]
+
+
+def polygrad_nn_check_schedule(t, allowed, to_prerealize=None, filter_sink=True):
+    """Translate the locked helper's scheduling assertion to the C runtime.
+
+    This is test plumbing, not an implementation of upstream compiler APIs.
+    Like test_nn.c, compile/count the physical schedule, then realize through
+    Tensor ownership so the next lookup sees the materialized shared table.
+    """
+    import ctypes
+    from polygrad import Tensor, _ffi
+    from polygrad.uop.ops import UOp
+    if to_prerealize: Tensor.realize(*to_prerealize)
+    tensors = [t] if isinstance(t, Tensor) else t
+    if not tensors or not all(isinstance(x, Tensor) for x in tensors):
+        raise TypeError('CPU NN schedule adapter requires Tensors')
+    ctx, lib, ptr = tensors[0]._ctx, _ffi.get_lib(), ctypes.c_void_p
+    if any(x._ctx != ctx for x in tensors): raise ValueError('mixed schedule contexts')
+    lib.poly_linear_with_vars.restype = ptr
+    lib.poly_linear_with_vars.argtypes = [ptr, ctypes.POINTER(ptr), ctypes.c_int,
+                                        ctypes.POINTER(ptr), ctypes.POINTER(ptr), ctypes.POINTER(ctypes.c_int)]
+    lib.poly_compile_linear.restype = ptr
+    lib.poly_compile_linear.argtypes = [ptr, ptr, ctypes.c_int]
+    lib.poly_free.restype = None
+    lib.poly_free.argtypes = [ptr]
+    roots = (ptr * len(tensors))(*(x.uop_physical.raw for x in tensors))
+    outputs, bindings, count = (ptr * len(tensors))(), ptr(), ctypes.c_int()
+    raw = lib.poly_linear_with_vars(ctx, roots, len(tensors), outputs,
+                                    ctypes.byref(bindings), ctypes.byref(count))
+    lib.poly_free(bindings)
+    if not raw: raise RuntimeError('poly_linear_with_vars failed')
+    linear = UOp(ctx, raw)
+    if count.value: raise ValueError('CPU NN schedule adapter requires concrete shapes')
+    if not lib.poly_compile_linear(ctx, raw, 0): raise RuntimeError('poly_compile_linear failed')
+    got = sum(len(call.device) if isinstance(call.device, tuple) else 1
+              for call in linear.src if call.src[0].op_name == 'SINK' or not filter_sink)
+    if got != allowed: raise AssertionError(f'SCHEDULE ISSUE, expecting {allowed} got {got}')
+    return (tensors, linear), {}
+
+
+def polygrad_nn_run_linear(checked, var_vals):
+    from polygrad import Tensor
+    tensors, linear = checked
+    if var_vals: raise ValueError('CPU NN schedule adapter requires concrete shapes')
+    Tensor.realize(*tensors)
 
 
 class ProviderAliases(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -341,6 +393,11 @@ def child(request):
             result["library"] = {"path": str(loaded), "sha256": digest(loaded)}
         test, pytest_root, adapted = request['test'], reference, None
         if request.get('adapter') in ('cpu-ops', 'cpu-nn'):
+            if request['adapter'] == 'cpu-nn' and request['engine'] == 'polygrad':
+                helper = types.ModuleType('_polygrad_nn_schedule')
+                helper.check_schedule = polygrad_nn_check_schedule
+                helper.run_linear = polygrad_nn_run_linear
+                sys.modules[helper.__name__] = helper
             from tinygrad.helpers import DEV, IMAGE
             check_cpu_ops_mode(tinygrad.Device.DEFAULT, DEV.renderer, DEV.interface, IMAGE.value)
             if request['engine'] == 'tinygrad' and request['adapter'] == 'cpu-ops':
