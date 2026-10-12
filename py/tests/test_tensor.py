@@ -1719,6 +1719,17 @@ print('leaving_live_instance')
         assert prefix[0:4:2].shape == (2, 8)
         assert prefix[3:0:-1].shape == (3, 8)
 
+    @pytest.mark.parametrize('dim', [-1, 0, 1])
+    def test_scalar_cat_reports_index_error(self, dim):
+        x = Tensor(3.14)
+        try:
+            inputs = (_ffi._ptr * 2)(x._tensor, x._tensor)
+            assert not _ffi._lib.poly_tensor_cat(x._ctx, inputs, 2, dim)
+            with pytest.raises(IndexError):
+                x.cat(x, dim=dim)
+        finally:
+            x.dispose()
+
     def test_instance_cat_and_stack_match_tinygrad_binding(self):
         x = Tensor.arange(6).reshape(2, 3)
         a = Tensor.arange(6, 12).reshape(2, 3)

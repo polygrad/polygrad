@@ -3789,6 +3789,8 @@ class Tensor:
         if not tensors:
             raise ValueError('cat requires at least one tensor')
         dim = tensors[0]._resolve_dim(dim)
+        if tensors[0].ndim == 0:
+            raise IndexError('cat requires a tensor with at least one dimension')
         cores = (_ffi._ptr * len(tensors))(*(t._tensor for t in tensors))
         core = _ffi._lib.poly_tensor_cat(tensors[0]._ctx, cores, len(tensors), dim)
         return tensors[0]._make_result_from_core(core, None)

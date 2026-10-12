@@ -6570,6 +6570,17 @@ async function runTensorTests(pg, createRuntime) {
     assert(Math.abs(loss - expected) < 1e-3, `Expected ~${expected}, got ${loss}`)
   })
 
+  await test('cat scalars reports a dimension error', async () => {
+    const x = new Tensor(3.14)
+    try {
+      for (const dim of [-1, 0, 1]) {
+        let error
+        try { x.cat(x, {dim}) } catch (e) { error = e }
+        assert(error instanceof RangeError, 'scalar cat must report a dimension error')
+      }
+    } finally { x.dispose() }
+  })
+
   await test('cat 1d', async () => {
     const a = new Tensor([1, 2, 3])
     const b = new Tensor([4, 5, 6])

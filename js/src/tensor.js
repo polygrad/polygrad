@@ -3855,6 +3855,7 @@ function createBoundTensorClass(runtime) {
 
       if (tensors.some(t => !(t instanceof Tensor))) throw new TypeError('cat expects tensors')
       dim = tensors[0]._resolveDim(dim)
+      if (tensors[0].ndim === 0) throw new RangeError('cat requires a tensor with at least one dimension')
       const core = tensors[0]._rt._core.ffi.poly_tensor_cat(tensors[0]._ctx, tensors.map(t => t._tensor), dim)
       return tensors[0]._makeResultFromCore(core)
     }
