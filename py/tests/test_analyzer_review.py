@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_verify_uses_reviewed_analysis():
-    rule = next(line for line in (ROOT / 'Makefile').read_text().splitlines() if line.startswith('verify:'))
+    rule = next(line for line in (ROOT / 'Makefile').read_text(encoding='utf-8').splitlines() if line.startswith('verify:'))
     assert 'test-analyze-reviewed' in rule.split()
     assert 'analyze' not in rule.split()
 
