@@ -2146,6 +2146,14 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         ctx, POLY_OP_IDIV, sched_full_shape_prod(&s),
         poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(128LL << 10))
     );
+    /* PG-DIV-026: admit CPU shares using bounded peak work. Only fixed,
+     * divisible axes below can be split; the launcher handles small binds. */
+    if (caps.device && strcmp(caps.device, "CPU") == 0) {
+      int64_t lo, hi;
+      poly_uop_minmax(ctx, work, &lo, &hi);
+      if (lo >= 0 && hi >= lo && hi < INT64_MAX)
+        work = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(hi));
+    }
     for (int ci = 0; ci < (int)(sizeof(candidates) / sizeof(candidates[0])); ci++) {
       int threads = candidates[ci];
       if (threads > caps.global_max[0]) continue;

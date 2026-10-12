@@ -5716,6 +5716,22 @@ static void poly_x86_thread_pool_shutdown(void) {
   }
 }
 
+int poly_x86_program_call_serial(
+    PolyX86Program *prog,
+    void **args,
+    int n_args,
+    int core_id_slot,
+    int shares
+) {
+  if (!prog || !args || core_id_slot < 0 || core_id_slot >= n_args || shares < 1) return -1;
+  /* Keep the compiled partition intact while avoiding pool synchronization. */
+  for (int t = 0; t < shares; t++) {
+    int rc = poly_x86_program_call_core(prog, args, n_args, core_id_slot, t);
+    if (rc != 0) return rc;
+  }
+  return 0;
+}
+
 int poly_x86_program_call_threaded(
     PolyX86Program *prog,
     void **args,

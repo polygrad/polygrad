@@ -23,6 +23,34 @@
 /* Exercise internal cache teardown while the test retains its LINEAR root. */
 extern void poly_engine_ctx_cleanup(PolyCtx *ctx);
 
+TEST(schedule_runtime, cpu_pool_admission_uses_actual_work) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *batch =
+      poly_uop_variable(ctx, "batch", poly_arg_int(1), poly_arg_int(221), POLY_INT64, 1, false);
+  PolyUOp *ops = poly_uop_alu2(
+      ctx, POLY_OP_MUL, batch, poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(131072))
+  );
+  PolyVarBinding bind = {.var = batch, .value = 1};
+  ASSERT_TRUE(poly_cpu_serial_launch(ops, 1, 16, &bind, 1));
+  bind.value = 7;
+  ASSERT_TRUE(poly_cpu_serial_launch(ops, 1, 16, &bind, 1));
+  bind.value = 16;
+  ASSERT_TRUE(!poly_cpu_serial_launch(ops, 1, 16, &bind, 1));
+  bind.value = 221;
+  ASSERT_TRUE(!poly_cpu_serial_launch(ops, 1, 16, &bind, 1));
+  bind.value = 1;
+  ASSERT_TRUE(!poly_cpu_serial_launch(ops, 0, 16, &bind, 1));
+  ASSERT_TRUE(!poly_cpu_serial_launch(ops, 1, 1, &bind, 1));
+  ASSERT_TRUE(!poly_cpu_serial_launch(ops, 1, 16, NULL, 0));
+  ASSERT_TRUE(!poly_cpu_serial_launch(NULL, 1, 16, &bind, 1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(0));
+  ASSERT_TRUE(!poly_cpu_serial_launch(zero, 1, 16, &bind, 1));
+  PolyUOp *negative = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(-1));
+  ASSERT_TRUE(!poly_cpu_serial_launch(negative, 1, 16, &bind, 1));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static int execution_owner_probe(void *self, void **args, int n_args) {
   PolyRunner *runner = self;
   (*(int *)runner->handle)++;

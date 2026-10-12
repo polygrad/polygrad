@@ -363,13 +363,13 @@
       "id": "PG-DIV-026",
       "status": "approved",
       "stages": ["codegen", "optimization"],
-      "area": "CPU bounded-symbolic output upcast threshold",
-      "tinygrad": "The multi-axis output-upcast threshold multiplies only static output extents, even when symbolic extents have finite positive bounds.",
-      "polygrad": "For CPU only, the threshold may count positive bounded symbolic output extents at their maximum. Upcast candidates and divisibility remain static-only. Unknown or nonpositive bounds retain the pinned estimate. Fixed-shape scheduling, non-CPU scheduling, symbolic loop extents and CPU thread admission are unchanged.",
-      "rationale": "Avoid disabling output reuse for bounded batches. This does not pad awkward dimensions or guarantee threading: minimum-work thread admission still leaves some bounded-batch matmuls serial. A separate maximum-bound thread experiment improved full batches but regressed batch-one latency and was not adopted.",
-      "approval": "User 2026-10-12 approved proceeding with the singleton fix and CPU-only upcast rule after reviewing structural, partial-batch and default-thread probes; thread selection remains unchanged.",
-      "evidence": ["src/codegen/codegen.c:sched_output_prod_max_bound", "references/tinygrad_latest/tinygrad/codegen/opt/heuristic.py", "test/test_codegen.c:scheduler_cpu_bounded_batch_upcasts_only_static_axes", "temp/cpu-schedule-20261012/summary.json", "temp/cpu-schedule-20261012/thread-review/report.json"],
-      "close_when": "Pinned tinygrad adopts an equivalent bounded-work estimate, or matched shape/backend evidence supersedes this CPU-only policy. No allowance changes dynamic-axis splitting, thread policy, Tensor graphs or values."
+      "area": "CPU bounded-symbolic size estimates",
+      "tinygrad": "The output-upcast threshold counts static output extents only. Thread admission requires sufficient work at every symbolic binding, even when finite maximum bounds describe much larger workloads.",
+      "polygrad": "Native CPU and X86 may use finite maximum bounds for output tiling and thread admission. Split axes and divisibility remain static-only; unknown bounds retain the pinned estimate. Fixed-shape scheduling, other backends and symbolic loop extents are unchanged. At runtime, symbolic CPU/X86 calls with positive compute estimates below 128K operations per compiled share execute every share serially on the caller. Missing, unresolved or zero-ALU estimates retain pooled execution: a copy can have zero ALU work but large memory traffic. This launcher policy changes neither kernel code nor share count.",
+      "rationale": "Preserve output reuse and parallelism for bounded batches without pool wake-up overhead at small actual sizes. Runtime operation estimates and compiler iteration-volume estimates are distinct cost proxies. No padding or partial-tile GEMM is introduced; awkward static dimensions can still be slow.",
+      "approval": "User 2026-10-12 approved CPU bounded tiling, then maximum-bound thread admission with an actual-work serial fallback within this entry. Freeze further default-heuristic divergences for 0.7.2; GEMM partial tiles, automatic padding and Wasm policy changes are deferred.",
+      "evidence": ["src/codegen/codegen.c:sched_output_prod_max_bound", "src/engine/schedule.c:poly_cpu_serial_launch", "references/tinygrad_latest/tinygrad/codegen/opt/heuristic.py", "test/test_codegen.c:scheduler_cpu_bounded_batch_upcasts_only_static_axes", "test/test_codegen.c:scheduler_policy_threads_prove_symbolic_work", "test/test_schedule_runtime.c:cpu_pool_admission_uses_actual_work", "temp/cpu-schedule-20261012/thread-review/report.json", "temp/cpu-schedule-20261012/launch-review/wakeup-report.json"],
+      "close_when": "The pinned tinygrad reference adopts equivalent bounded CPU tiling and thread admission, or this compiler policy is removed. No allowance changes dynamic-axis splitting, Tensor graphs or values; caller-versus-pool execution remains a C runtime mechanism."
     },
     {
       "id": "PG-PARITY-001",

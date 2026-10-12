@@ -198,6 +198,11 @@ TEST_BACKEND(x86, program_call_stack_arguments) {
     ok &= poly_x86_program_call_threaded(prog, args, n, n - 1, 5) == 0;
     for (int i = 0; i < 5; i++)
       ok &= output[i] == expected + (uint64_t)i;
+    memset(output, 0, sizeof(output));
+    ok &= poly_x86_program_call_serial(prog, args, n, n - 1, 5) == 0;
+    for (int i = 0; i < 5; i++)
+      ok &= output[i] == expected + (uint64_t)i;
+    ok &= args[n - 1] == NULL;
     poly_x86_program_destroy(prog);
     ASSERT_TRUE(ok);
   }

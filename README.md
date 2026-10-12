@@ -679,7 +679,7 @@ The main intentional differences are:
 | WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
 | WebGPU narrow integers | Preserve 8/16-bit integer overflow and cast behavior, correcting lost narrowing in the pinned WGSL renderer |
 | WebGPU scheduling | Use different matrix-vector tiles for small outputs and longer reductions; other shapes and explicit tuning settings retain the reference policy |
-| CPU scheduling | Use maximum bounded batch sizes to choose output tiles; runtime shapes and thread selection stay unchanged |
+| CPU scheduling | Use bounded maximum sizes for native CPU tiling and threading; small runtime batches avoid worker wake-ups |
 | Assignment | Assigning realized data to an unrealized expression produces readable, independent destination storage; the pinned reference can lose that assignment |
 
 </details>

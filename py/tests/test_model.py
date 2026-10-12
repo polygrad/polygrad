@@ -1437,11 +1437,12 @@ def test_dynamic_model_training_captured_at_singleton(device):
         model.dispose(); rt.dispose()
 
 
-def test_cpu_bounded_matmul_training_matches_actual_batch():
+@pytest.mark.parametrize('device', ['cpu', 'x86'])
+def test_cpu_bounded_matmul_training_matches_actual_batch(device):
     from polygrad import create
     rng = np.random.default_rng(42)
     expected = rng.normal(0, 0.1, (16, 256)).astype(np.float32)
-    with create(device='cpu', logical='always') as rt:
+    with create(device=device, logical='always') as rt:
         n = rt.Variable('matmul_training_batch', 1, 221)
         w = rt.Tensor(expected.copy())
         model = Model(lambda x: x.dot(w), inputs={'x':rt.Tensor.empty(n.bind(1), 16)},

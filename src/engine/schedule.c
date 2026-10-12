@@ -1191,6 +1191,21 @@ int poly_estimates_infer(
              : -1;
 }
 
+bool poly_cpu_serial_launch(
+    PolyUOp *ops,
+    int n_vars,
+    int threads,
+    const PolyVarBinding *bindings,
+    int n_bindings
+) {
+  uint64_t work;
+  /* Zero ALU work does not imply a cheap call: copies/fills can move large
+   * buffers. Without a compute estimate, retain the existing pool policy. */
+  return n_vars > 0 && threads > 1 &&
+         poly_estimate_expr_infer(ops, bindings, n_bindings, &work) == 0 && work > 0 &&
+         work / (128u << 10) < (uint64_t)threads;
+}
+
 static int poly_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr) {
   if (!expr) return 1;
   int64_t lo = 0, hi = 1;
@@ -1232,6 +1247,16 @@ static int poly_resolve_runner_launch_dims(
   /* Failed inference must not leave a cached runner with mixed old/new dims. */
   memcpy(runner->grid, grid, sizeof(grid));
   memcpy(runner->block, block, sizeof(block));
+  runner->cpu_serial = false;
+  if (runner->cpu_adaptive) {
+    const PolyEstimates *estimates = poly_program_estimates(runner->program);
+    runner->cpu_serial = poly_cpu_serial_launch(
+        runner->cpu_ops ? runner->cpu_ops
+        : estimates     ? estimates->ops
+                        : NULL,
+        runner->n_vars, grid[0], bindings, n_bindings
+    );
+  }
   return 0;
 }
 
@@ -1374,6 +1399,12 @@ static PolyRuntimeCacheEntry *poly_runtime_cache_entry_new(
   entry->env_stamp = env_stamp;
   entry->runner = *runner;
   if (!entry->runner.program) entry->runner.program = program;
+  /* Reuse the estimate owner already shared by statistics and graph replay.
+   * Launch classification must not walk an unsimplified cost DAG every call. */
+  const PolyEstimates *estimates = poly_program_estimates(entry->runner.program);
+  if (runner->cpu_adaptive && runner->grid[0] > 1 && runtime_estimates_complete(estimates) &&
+      runtime_estimates_simplify(ctx, &entry->estimates, estimates))
+    entry->runner.cpu_ops = entry->estimates.ops;
   if (ctx) {
     ctx->runtime_artifact_entries++;
     ctx->runtime_artifact_live_bytes += entry->accounted_bytes;
@@ -2650,6 +2681,7 @@ static int cpu_lower_item_impl(
   out->block[1] = 1;
   out->block[2] = 1;
   out->execute = cpu_execute_fn;
+  out->cpu_adaptive = true;
   out->free_handle = cpu_free_fn;
   return 0;
 }
@@ -2661,7 +2693,9 @@ static int cpu_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, P
 static int cpu_execute_fn(void *self, void **args, int n_args) {
   PolyRunner *runner = (PolyRunner *)self;
   int threads = runner->grid[0] > 1 ? runner->grid[0] : 1;
-  if (threads > 1)
+  if (threads > 1 && runner->cpu_serial)
+    poly_program_call_serial((PolyProgram *)runner->handle, args, n_args, threads);
+  else if (threads > 1)
     poly_program_call_threaded((PolyProgram *)runner->handle, args, n_args, threads);
   else
     poly_program_call((PolyProgram *)runner->handle, args, n_args);
@@ -3155,7 +3189,11 @@ static int x86_execute_fn(void *self, void **args, int n_args) {
   }
 
   int threads = runner->grid[0] > 1 ? runner->grid[0] : 1;
-  int ret = core_id_slot >= 0
+  int ret = core_id_slot >= 0 && runner->cpu_serial
+                ? poly_x86_program_call_serial(
+                      (PolyX86Program *)runner->handle, abi_args, abi_n_args, core_id_slot, threads
+                  )
+            : core_id_slot >= 0
                 ? poly_x86_program_call_threaded(
                       (PolyX86Program *)runner->handle, abi_args, abi_n_args, core_id_slot, threads
                   )
@@ -3301,6 +3339,7 @@ static int x86_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, P
   out->block[1] = 1;
   out->block[2] = 1;
   out->execute = x86_execute_fn;
+  out->cpu_adaptive = true;
   out->free_handle = x86_free_fn;
   return 0;
 }

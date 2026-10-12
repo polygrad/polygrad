@@ -926,6 +926,10 @@ TEST(codegen, scheduler_cpu_bounded_batch_upcasts_only_static_axes) {
         poly_apply_opts_heuristic_ex(ctx, sink, cpu),
         poly_apply_opts_heuristic_ex(ctx, sink, (PolyRendererCaps){.device = "NULL"})
     );
+    PolyRendererCaps threaded = {.device = "CPU", .has_threads = true, .global_max = {16}};
+    PolyUOp *actual = poly_apply_opts_heuristic_ex(ctx, sink, threaded);
+    threaded.device = "WASM";
+    ASSERT_PTR_EQ(actual, poly_apply_opts_heuristic_ex(ctx, sink, threaded));
   }
   poly_ctx_destroy(ctx);
   PASS();
@@ -971,7 +975,9 @@ static bool policy_thread_case(int lower, bool symbolic, bool legacy_cap) {
       .has_threads = true,
       .global_max = {2, 0, 0},
       .max_threads = legacy_cap ? 2 : 0};
-  bool ok = policy_matches(ctx, sink, caps, opts, symbolic && !lower ? 1 : 2);
+  bool ok = policy_matches(ctx, sink, caps, opts, 2);
+  caps.device = "WASM";
+  ok &= policy_matches(ctx, sink, caps, opts, symbolic && !lower ? 1 : 2);
   poly_ctx_destroy(ctx);
   return ok;
 }
@@ -4002,6 +4008,11 @@ TEST(codegen, render_thread_variable_and_sparse_buffer_slot_do_not_collide) {
     int32_t actual[4] = {0}, input_value = 42;
     void *args[] = {actual, &input_value};
     poly_program_call_threaded(program, args, 2, 4);
+    for (int i = 0; i < 4; i++)
+      ok &= actual[i] == input_value + i;
+    memset(actual, 0, sizeof(actual));
+    input_value = 71;
+    poly_program_call_serial(program, args, 2, 4);
     for (int i = 0; i < 4; i++)
       ok &= actual[i] == input_value + i;
     poly_program_destroy(program);

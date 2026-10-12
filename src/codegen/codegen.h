@@ -243,6 +243,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name);
 /* Execute a compiled program. args is an array of buffer pointers. */
 void poly_program_call(PolyProgram *prog, void **args, int n_args);
 void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int threads);
+void poly_program_call_serial(PolyProgram *prog, void **args, int n_args, int shares);
 
 /* Approximate C runtime artifact bytes retained by a compiled program.
  * Includes the PolyProgram wrapper and backing shared object when available. */

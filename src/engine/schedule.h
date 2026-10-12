@@ -33,6 +33,9 @@ typedef struct {
   bool capture_binary;
   PolyUOp *compiled_binary;
   bool wait;
+  bool cpu_adaptive; /* Native CPU/X86 only; never changes the compiled share count. */
+  bool cpu_serial;
+  PolyUOp *cpu_ops; /* Borrowed from the retained runtime-cache estimate owner. */
   double elapsed_us; /* Device timestamps when wait is requested; otherwise unused. */
   int timing_repeats; /* Scratch timing: 0=once, positive=burst, -1=adaptive with rotated storage.
                        */
@@ -44,6 +47,16 @@ typedef struct {
   int *var_indices;
   int n_vars;
 } PolyRunner;
+
+/* Actual operation estimate, not maximum shape, controls pool wake-up. Unknown
+ * work preserves pooled execution. Fixed programs retain their launch policy. */
+bool poly_cpu_serial_launch(
+    PolyUOp *ops,
+    int n_vars,
+    int threads,
+    const PolyVarBinding *bindings,
+    int n_bindings
+);
 
 /* args_from_ast scratch storage shared by BEAM and optimize_local_size.
  * Buffer slots refer to PARAM identities, never the caller's live buffers.

@@ -531,6 +531,18 @@ static void poly_cpu_thread_pool_shutdown(void) {
   }
 }
 
+void poly_program_call_serial(PolyProgram *prog, void **args, int n_args, int shares) {
+  if (!prog) return;
+  if (shares <= 1 || !prog->call_core_fn) {
+    poly_program_call(prog, args, n_args);
+    return;
+  }
+  /* core_id partitions the output. Serial execution must visit every share,
+   * not call the ordinary wrapper (which executes only core_id zero). */
+  for (int t = 0; t < shares; t++)
+    prog->call_core_fn(args, t);
+}
+
 void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int threads) {
   (void)n_args;
   if (!prog) return;

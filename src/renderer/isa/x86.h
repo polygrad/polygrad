@@ -184,6 +184,13 @@ int poly_x86_program_call_core(
     int core_id_slot,
     int core_id
 );
+int poly_x86_program_call_serial(
+    PolyX86Program *prog,
+    void **args,
+    int n_args,
+    int core_id_slot,
+    int shares
+);
 int poly_x86_program_call_threaded(
     PolyX86Program *prog,
     void **args,
