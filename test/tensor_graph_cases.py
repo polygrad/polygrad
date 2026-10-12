@@ -2717,6 +2717,17 @@ for _method in ('triu', 'tril'):
         CASES[f'composite_{_method}_{_diagonal}'] = ('tensor', lambda m=_method, d=_diagonal: triangular_wide_graph(m, d))
 
 
+def singleton_broadcast_gradient_graph():
+    n = UOp.variable('grad_batch', 1, 221).bind(1) if ENGINE == 'tinygrad' else Variable('grad_batch', 1, 221).bind(1)
+    x = Tensor([[1.]], device='CPU').is_param_(False).expand(n, 3)
+    bias = Tensor([[1., 2., 3.]], device='CPU').is_param_(True)
+    (x+bias).square().mean().backward()
+    return {'physical': bias.grad.uop if ENGINE == 'tinygrad' else bias.grad.uop_physical}
+
+
+CASES['singleton_broadcast_gradient'] = ('tensor', singleton_broadcast_gradient_graph)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", choices=sorted(CASES))

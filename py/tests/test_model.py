@@ -1415,6 +1415,28 @@ def test_import_equivalence_isolation_and_roundtrip(kind, capfd, monkeypatch):
             rt.dispose()
 
 
+@pytest.mark.parametrize('device', ['cpu', 'interp'])
+def test_dynamic_model_training_captured_at_singleton(device):
+    from polygrad import create
+    rt = create(device=device, logical='always')
+    n = rt.Variable('singleton_training_batch', 1, 7)
+    bias = rt.Tensor([[1., 2., 3.]])
+    model = Model(lambda x: x+bias, inputs={'x':rt.Tensor.empty(n.bind(1), 3)},
+                  targets={'y':rt.Tensor.empty(n.bind(1), 3)}, params={'bias':bias},
+                  loss=lambda out,y:(out-y).square().mean())
+    try:
+        model.set_optimizer('sgd', lr=0.01)
+        expected = np.array([[1., 2., 3.]], dtype=np.float32)
+        for size in (1, 3, 7, 1):
+            x = np.arange(size*3, dtype=np.float32).reshape(size, 3)/10
+            np.testing.assert_allclose(model.train_step(x=x, y=np.zeros_like(x)),
+                                       np.mean((x+expected)**2), rtol=1e-5)
+            expected -= 0.02*np.mean(x+expected, axis=0, keepdims=True)/3
+            np.testing.assert_allclose(model.read_buffer('bias'), expected.ravel(), rtol=1e-5)
+    finally:
+        model.dispose(); rt.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_dynamic_model_training_rebinds_cached_loss(device):
     from polygrad import create

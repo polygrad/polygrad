@@ -1092,6 +1092,7 @@ async function checkModelCaptureFailure(pg) {
 
 async function checkModelVariableShapes(pg) {
   await checkModelMultipleAxes(pg)
+  await checkModelSingletonTraining(pg)
   const gpu = String(pg.device).toLowerCase() === 'webgpu'
   const n = pg.uop.variable('model_batch', 1, 32), bound = n.bind(17)
   const x = pg.Tensor.empty([bound, 2]), y = pg.Tensor.empty([bound, 2])
@@ -1163,6 +1164,37 @@ async function checkModelVariableShapes(pg) {
     if(first) await first.dispose()
     await input.dispose(); await model.dispose()
     await x.dispose(); await y.dispose(); bound.dispose(); n.dispose()
+  }
+}
+
+async function checkModelSingletonTraining(pg) {
+  const n = pg.uop.variable('singleton_training_batch', 1, 7), bound = n.bind(1)
+  const bias = new pg.Tensor([[1,2,3]], {dtype:'float32'})
+  const x = pg.Tensor.empty([bound,3]), y = pg.Tensor.empty([bound,3])
+  const options = {inputs:{x}, targets:{y}, params:{bias},
+    loss:(out,{y})=>out.sub(y).square().mean()}
+  const author = ({x})=>x.add(bias)
+  let model
+  try {
+    model = String(pg.device).toLowerCase()==='webgpu'
+      ? await pg.Model.fromCallableAsync(author,options) : new pg.Model(author,options)
+    model.setOptimizer('sgd',0.01)
+    const expected = [1,2,3]
+    for (const size of [1,3,7,1]) {
+      const values = Float32Array.from({length:size*3},(_,i)=>i/10)
+      const wanted = values.reduce((s,v,i)=>s+(v+expected[i%3])**2,0)/values.length
+      const loss = await model.trainStepAsync({x:values,y:new Float32Array(values.length)})
+      assert(Math.abs(loss-wanted)<1e-5*Math.max(1,wanted),'singleton capture lost batch reduction')
+      for (let j=0;j<3;j++) {
+        let gradient=0
+        for (let i=j;i<values.length;i+=3) gradient+=2*(values[i]+expected[j])/values.length
+        expected[j]-=0.01*gradient
+      }
+      assertClose(await model.readBufferAsync('bias'),expected,1e-5)
+    }
+  } finally {
+    if (model) await model.dispose()
+    await bias.dispose(); await x.dispose(); await y.dispose(); bound.dispose(); n.dispose()
   }
 }
 

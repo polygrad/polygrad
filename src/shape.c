@@ -90,19 +90,9 @@ PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim) {
   return e->dim_uops[dim];
 }
 
-static bool resolved_shape_dim(PolyCtx *ctx, const PolyUOp *u, int axis, int64_t *out) {
-  if (!ctx || !u || axis < 0) return false;
-  PolyUOp *dim = poly_uop_shape_dim(ctx, u, axis);
-  if (dim) return poly_uop_bind_value(dim, out) == 0;
-  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
-  if (!dims || axis >= poly_uop_ndim(ctx, u)) return false;
-  if (out) *out = dims[axis];
-  return true;
-}
-
 static bool shape_dim_proven_one(PolyCtx *ctx, const PolyUOp *u, int axis) {
-  int64_t dim = 0;
-  if (resolved_shape_dim(ctx, u, axis, &dim)) return dim == 1;
+  /* A BIND is a runtime value, not a proof that this axis is always singleton.
+   * Gradient reduction must remain valid throughout the variable's range. */
   PolyUOp *sd = poly_uop_shape_dim(ctx, u, axis);
   if (!sd) return false;
   int64_t vmin = 0, vmax = 0;

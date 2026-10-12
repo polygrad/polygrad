@@ -99,6 +99,29 @@ static PolyArg int_tuple(int64_t *vals, int n) {
   return a;
 }
 
+TEST(shape, broadcast_axes_use_symbolic_range_not_bound_value) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one = poly_uop_const_int(ctx, 1), *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *n =
+      poly_uop_variable(ctx, "batch", poly_arg_int(1), poly_arg_int(221), POLY_WEAKINT, 1, false);
+  PolyUOp *src_dims[] = {one, three};
+  PolyUOp *scalar = poly_uop_const_float(ctx, 1);
+  PolyUOp *src = poly_uop_expand_symbolic(ctx, scalar, src_dims, 2);
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *dims[] = {i == 0 ? n : poly_uop_bind(ctx, n, i == 1 ? 1 : 221), three};
+    PolyUOp *out = poly_uop_expand_symbolic(ctx, scalar, dims, 2);
+    int axes[2] = {-1, -1};
+    ASSERT_INT_EQ(poly_uop_broadcast_axes(ctx, src, out, axes, 2), 1);
+    ASSERT_INT_EQ(axes[0], 0);
+    /* A current value of one must not turn a symbolic source into a singleton. */
+    ASSERT_INT_EQ(poly_uop_broadcast_axes(ctx, out, src, axes, 2), 0);
+  }
+  int axes[2];
+  ASSERT_INT_EQ(poly_uop_broadcast_axes(ctx, src, src, axes, 2), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(shape, current_late_value_and_binary_shapes) {
   /* Tinygrad 2026-08-22/a9069c177a9d uop/ops.py:338-386: value CALL/INS
    * are scalar and BINARY's shape is its byte length. */
