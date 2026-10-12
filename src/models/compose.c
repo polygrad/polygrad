@@ -61,16 +61,10 @@ typedef struct {
 } Definition;
 
 static bool def_error(Definition *d, const char *path, const char *fmt, ...) {
-  if (!d->err->code) {
-    d->err->code = POLY_STATUS_INVALID;
-    d->err->func = "poly_model_from_config";
-    int n = snprintf(d->err->message, sizeof(d->err->message), "%s: ", path);
-    if (n < 0 || n >= (int)sizeof(d->err->message)) return false;
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(d->err->message + n, sizeof(d->err->message) - (size_t)n, fmt, ap);
-    va_end(ap);
-  }
+  va_list ap;
+  va_start(ap, fmt);
+  model_factory_verror(d->err, path, fmt, ap);
+  va_end(ap);
   return false;
 }
 
@@ -114,8 +108,10 @@ static bool integer(
     const char *path
 ) {
   if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble) || v->valuedouble < (double)lo ||
-      v->valuedouble > (double)hi || floor(v->valuedouble) != v->valuedouble)
-    return def_error(d, path, "expected integer in [%lld,%lld]", (long long)lo, (long long)hi);
+      v->valuedouble > (double)hi || floor(v->valuedouble) != v->valuedouble) {
+    def_error(d, path, "expected integer in [%lld,%lld]", (long long)lo, (long long)hi);
+    return false;
+  }
   *out = (int64_t)v->valuedouble;
   return true;
 }
@@ -142,24 +138,34 @@ static bool shape(
     int *ndim,
     const char *path
 ) {
-  if (!cJSON_IsArray(spec) || (*ndim = cJSON_GetArraySize(spec)) > 8)
-    return def_error(d, path, "expected shape array of rank 0..8");
+  if (!cJSON_IsArray(spec) || (*ndim = cJSON_GetArraySize(spec)) > 8) {
+    def_error(d, path, "expected shape array of rank 0..8");
+    return false;
+  }
   int64_t elements = 1;
   for (int i = 0; i < *ndim; i++) {
     const cJSON *dim = cJSON_GetArrayItem(spec, i);
     if (cJSON_IsObject(dim)) {
       int64_t lo, hi;
       const cJSON *name = field(dim, "name");
-      if (i != 0) return def_error(d, path, "only the leading dimension may be bounded");
+      if (i != 0) {
+        def_error(d, path, "only the leading dimension may be bounded");
+        return false;
+      }
       if (!fields(d, dim, "|name||min||max|", path)) return false;
-      if (!cJSON_IsString(name)) return def_error(d, path, "bounded dimension requires a name");
+      if (!cJSON_IsString(name)) {
+        def_error(d, path, "bounded dimension requires a name");
+        return false;
+      }
       if (!name_ok(d, name->valuestring, path) ||
           !integer(d, field(dim, "min"), 1, DEF_ELEMENTS, &lo, path) ||
           !integer(d, field(dim, "max"), lo, DEF_ELEMENTS, &hi, path))
         return false;
       if (d->batch &&
-          (strcmp(d->batch_name, name->valuestring) || d->batch_min != lo || d->batch_max != hi))
-        return def_error(d, path, "bounded dimensions must use the same batch name and bounds");
+          (strcmp(d->batch_name, name->valuestring) || d->batch_min != lo || d->batch_max != hi)) {
+        def_error(d, path, "bounded dimensions must use the same batch name and bounds");
+        return false;
+      }
       if (!d->batch) {
         d->batch_name = name->valuestring;
         d->batch_min = lo;
@@ -168,7 +174,10 @@ static bool shape(
             d->ctx, d->batch_name, poly_arg_int(lo), poly_arg_int(hi), POLY_WEAKINT, 1, false
         );
         d->batch = var ? poly_uop_bind(d->ctx, var, hi) : NULL;
-        if (!d->batch) return def_error(d, path, "batch variable construction failed");
+        if (!d->batch) {
+          def_error(d, path, "batch variable construction failed");
+          return false;
+        }
       }
       dims[i] = d->batch;
       max_dims[i] = hi;
@@ -176,8 +185,10 @@ static bool shape(
       if (!integer(d, dim, 1, DEF_ELEMENTS, &max_dims[i], path)) return false;
       dims[i] = poly_uop0(d->ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(max_dims[i]));
     }
-    if (elements > DEF_ELEMENTS / max_dims[i])
-      return def_error(d, path, "shape exceeds element budget");
+    if (elements > DEF_ELEMENTS / max_dims[i]) {
+      def_error(d, path, "shape exceeds element budget");
+      return false;
+    }
     elements *= max_dims[i];
   }
   return true;
@@ -187,12 +198,16 @@ static bool tensor_shape(Definition *d, PolyTensor *t, int64_t *dims, int *ndim,
   PolyUOp *u = poly_tensor_uop_physical(t);
   *ndim = poly_uop_ndim(d->ctx, u);
   const int64_t *s = poly_uop_max_shape_dims(d->ctx, u);
-  if (*ndim < 0 || *ndim > 8 || (*ndim && !s))
-    return def_error(d, path, "expected bounded shape of rank <= 8");
+  if (*ndim < 0 || *ndim > 8 || (*ndim && !s)) {
+    def_error(d, path, "expected bounded shape of rank <= 8");
+    return false;
+  }
   int64_t elements = 1;
   for (int i = 0; i < *ndim; i++) {
-    if (s[i] < 1 || elements > DEF_ELEMENTS / s[i])
-      return def_error(d, path, "shape exceeds element budget");
+    if (s[i] < 1 || elements > DEF_ELEMENTS / s[i]) {
+      def_error(d, path, "shape exceeds element budget");
+      return false;
+    }
     dims[i] = s[i];
     elements *= s[i];
   }
@@ -201,8 +216,10 @@ static bool tensor_shape(Definition *d, PolyTensor *t, int64_t *dims, int *ndim,
 
 static bool dtype(Definition *d, const cJSON *v, PolyDType *dt, const char *path) {
   if (!cJSON_IsString(v) || !poly_dtype_by_id(poly_dtype_id_by_name(v->valuestring), dt) ||
-      poly_dtype_is_weak(*dt) || poly_dtype_itemsize(*dt) == 0)
-    return def_error(d, path, "expected a concrete scalar dtype");
+      poly_dtype_is_weak(*dt) || poly_dtype_itemsize(*dt) == 0) {
+    def_error(d, path, "expected a concrete scalar dtype");
+    return false;
+  }
   return true;
 }
 
@@ -750,16 +767,26 @@ static bool input(Definition *d, const char *name, const cJSON *spec, bool seque
 }
 
 static bool names(Definition *d, const cJSON *array, const char **out, int *n, const char *path) {
-  if (!cJSON_IsArray(array) || (*n = cJSON_GetArraySize(array)) > DEF_IO)
-    return def_error(d, path, "expected at most 64 names");
+  if (!cJSON_IsArray(array)) {
+    def_error(d, path, "expected at most 64 names");
+    return false;
+  }
   int i = 0;
   for (const cJSON *v = array->child; v; v = v->next) {
+    if (i == DEF_IO) {
+      def_error(d, path, "expected at most 64 names");
+      return false;
+    }
     if (!cJSON_IsString(v) || !name_ok(d, v->valuestring, path)) return false;
     for (int j = 0; j < i; j++)
-      if (!strcmp(out[j], v->valuestring))
-        return def_error(d, path, "duplicate name '%s'", v->valuestring);
+      if (!strcmp(out[j], v->valuestring)) {
+        def_error(d, path, "duplicate name '%s'", v->valuestring);
+        return false;
+      }
     out[i++] = v->valuestring;
   }
+  /* Publish the initialized prefix, not a separate traversal's count. */
+  *n = i;
   return true;
 }
 

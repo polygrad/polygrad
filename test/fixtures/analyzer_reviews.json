@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-10-12",
-  "basis": "Fresh Clang14 scan after compiled tabular training and approved CPU symbolic scheduling. All 112 prior diagnostics retain identical statements and rationales; 11 shifted line numbers mapped to unchanged statements against bd95c48. One new TabM bin-count warning is excluded by positive feature/edge validation, documented below. No warnings suppressed or scope reduced. Evidence: temp/tabular-final-20261012/analyzer/report.json and raw.log. HIP device execution is not covered.",
+  "basis": "Fresh 99-unit Clang14 scan after explicit model validator failure paths, single-pass initialized name counts, shared error formatting and positive TabM bin bounds. Removed 26 diagnostics (24 compose, one vision, one TabM); all 87 retained findings have identical diagnostic statements, checked against HEAD, and retain their prior proofs. Two registry locations shifted by four lines. No checkers suppressed or analysis scope reduced. Evidence: temp/analyzer-bindings-20261012/full/report.json and raw.log; focused before/after scans and contract tests alongside. This is a source cleanup, not 26 confirmed runtime defects. HIP device execution is not covered.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -195,12 +195,12 @@
       "src/model.c": "493a68104f92a857986a44633499b0023dff24e2f01f96b9d239a7e0c6aa9631",
       "src/model.h": "5e2510a40a31ef2d0ba2438b555fa132b7c98f271bedd69edf374336ee33c107",
       "src/models/clip.c": "7c11cb85149abc6c591a4188480dac7b69a17b5ff4141877bf7611652fdf225c",
-      "src/models/compose.c": "0543d91d2394bd5676027a32e6ddaecae0cc0ccb9a6cd2defa7371a7f7b437f0",
+      "src/models/compose.c": "80a56cb0a9d2f1fa2c0a39b6854df1180343015414491e8f41ee3338b824336e",
       "src/models/dinov2.c": "887b0281c2dce847e9f91a7c80f4439d2d02afbdc1d5232ccd5fd35c754abae4",
       "src/models/dinov3.c": "5b0748c51075cb4fa610fbc675269299ae20dcc3141ab83f2a5dc7ce9d278a0c",
       "src/models/distilgpt2.c": "7af6f7685dd5e516f25da26fd82934adab89dc0c2c02a1ecd41be872a96c1314",
       "src/models/embeddinggemma2.c": "2726cf51658ba8b839381671eff2a8c0b948b26d9d8d35e40ef4dfb78025df2f",
-      "src/models/factory.h": "64f284ce9ea7ef0123ddf66313ae8c99eee8a4c5cec0ce57c426383df3aabda1",
+      "src/models/factory.h": "b2f9b4a6613b4e8b3578f864dcde05a819d5ce66f43af96a4c2a41f44b99f8bb",
       "src/models/gemma.c": "ad2ff76b1d66f6a64fbd3ee4d54b3ab62f14038a79930d0dd92cffd3a1c3ada2",
       "src/models/gemma.h": "7555ab3b414b47137a563ace1ee52413a6130744bb384ec428f92d8644ae6506",
       "src/models/gemma4_audio.c": "7f3531748c23968ce59184ca5843b6e80f445fb4eb42d532632277ab517a8e0a",
@@ -218,12 +218,12 @@
       "src/models/nam.c": "74b62e776ce3566f930c17d64e0a21e59b5e446140b545df74c9a7ace81be9b9",
       "src/models/qwen3.c": "2317c7feb6943ed1ac0036f5ef7c480c712e7012795b7cb06cf71443a0262197",
       "src/models/qwen3.h": "1eb535a7deaa29a8fc7e07ad15ff4565a9bc4ec14b170336b7e07862fffb70a1",
-      "src/models/registry.c": "778bff3ea922586cadf282ce514b784f989bdf895694991f28c0431b079e800b",
+      "src/models/registry.c": "61003533cc690d8177ae19439a44784a00f87b4143853936fcdd5d7c5aa57646",
       "src/models/registry.h": "07fbdde0b41764250b84d0fd9fa3dea4617398f5b7c7bc9018d7c6ed3ee2c963",
-      "src/models/tabm.c": "58da5af09f1c536ae003cb3f4c751ba8cf8cc0a2580064b4f0630718819a6ffc",
+      "src/models/tabm.c": "9e788f78728e9e7e646f51a54c6e29115613cc35ef3f2295543e37a30da235d9",
       "src/models/transformer.c": "11af5d0c0edb50d762cc33c81dd2eb6710d52dda1cee914bc7a31d949a15144a",
       "src/models/transformer.h": "7307adf61560af72bcda06286929d1a4a8f03ab084fd3b884b3956966177165f",
-      "src/models/vision.c": "0c541e36e36a00f4f9acf9a434c3c5daa6cb23d4a043a3986d06d95b6d180899",
+      "src/models/vision.c": "23d11222dcd50251c295f6d998d77ab7a8f998c96457eaf064d645b33fb6425b",
       "src/models/vision.h": "4dbe54f1619e5688f4ebc91afe4747f3cea3a50fdb5d4e2237fea4454c5013b7",
       "src/models/vit.c": "6438daabd05034897fc1a088dcff16d79808d77633ef7c401fca24e2699b3713",
       "src/models/whisper.c": "a72621c55cad1968923ab144747a4ee9e3e005529e0a2568cecf93eed105028e",
@@ -774,222 +774,6 @@
       "rationale": "Immutable by_slot count/fill; allocation checked before use."
     },
     {
-      "path": "src/models/compose.c",
-      "line": 158,
-      "column": 12,
-      "message": "3rd function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 161,
-      "column": 91,
-      "message": "The right operand of '!=' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 166,
-      "column": 22,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 177,
-      "column": 64,
-      "message": "1st function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "shape short-circuits on integer failure; integer writes its out parameter before returning true. Both def_error return paths are false, including an already-set error or a truncated error prefix. The trace returns from integer through def_error without writing lo/hi/max_dims, then assumes success. That path cannot reach the bound comparison, variable creation or dimension store."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 221,
-      "column": 14,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "tensor_shape returns true only after validating rank 0..8, a nonnull shape for positive rank, and writing dims[0:rank]. publish_output checks its return. The trace takes the rank>8 error path through def_error, then assumes tensor_shape succeeded; def_error always returns false."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 342,
-      "column": 60,
-      "message": "The left operand of '<=' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 342,
-      "column": 60,
-      "message": "The right operand of '<=' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 343,
-      "column": 23,
-      "message": "The right operand of '+' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "arange checks start, stop and step through short-circuited integer calls before arithmetic. A successful integer writes the result; failures return def_error, which is always false. The trace continues after those failures with an unwritten bound/step. Accepted values are within +/-DEF_ELEMENTS and step>=1, so the subsequent difference/addition is also bounded."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 349,
-      "column": 9,
-      "message": "Passed-by-value struct argument contains uninitialized data (e.g., field: 'priority')",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "dtype returns true only after poly_dtype_by_id has written a concrete scalar PolyDType. Both arange and cast short-circuit on failure before passing the struct. The trace takes the non-string error path through def_error, then assumes dtype succeeded; def_error is always false."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 410,
-      "column": 27,
-      "message": "The right operand of '<' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 527,
-      "column": 38,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 654,
-      "column": 11,
-      "message": "Array subscript is undefined",
-      "checker": "core.uninitialized.ArraySubscript",
-      "disposition": "false_positive",
-      "rationale": "The repeat count, linear out_features and permute axis are each consumed only after integer succeeds and writes the output. integer error paths return def_error, which is always false. The trace treats that error return as success and consumes an unwritten value. Permute also restricts axes to 0..rank-1 before indexing its seen array."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 664,
-      "column": 11,
-      "message": "Passed-by-value struct argument contains uninitialized data (e.g., field: 'priority')",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "dtype returns true only after poly_dtype_by_id has written a concrete scalar PolyDType. Both arange and cast short-circuit on failure before passing the struct. The trace takes the non-string error path through def_error, then assumes dtype succeeded; def_error is always false."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 738,
-      "column": 21,
-      "message": "The right operand of '<' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 739,
-      "column": 14,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 781,
-      "column": 23,
-      "message": "The right operand of '<' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 782,
-      "column": 12,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
-      "disposition": "false_positive",
-      "rationale": "input and declare_state_controls both stop when shape fails. Successful shape validates an array of rank<=8 and initializes every dimension in that rank; empty arrays have rank zero and execute no dimension reads. The trace rejects a missing/oversized shape through def_error but assumes success, using rank or dims that the rejecting path did not write."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 798,
-      "column": 10,
-      "message": "3rd function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "Control bounds are parsed by two short-circuited integer calls: min is written before it is used as the max lower bound, and max before variable construction. The trace assumes success after an integer error through def_error; both def_error return paths are false."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 801,
-      "column": 46,
-      "message": "1st function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "Control bounds are parsed by two short-circuited integer calls: min is written before it is used as the max lower bound, and max before variable construction. The trace assumes success after an integer error through def_error; both def_error return paths are false."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 834,
-      "column": 24,
-      "message": "2nd function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "entry_outputs receives outs/no from either the validated output-object child traversal or a successful names call. names uses cJSON_GetArraySize and walks the same immutable child list, filling exactly out[0:n]; any invalid/duplicate name returns false. The trace skips that fill yet admits positive no. cJSON_GetArraySize counts exactly that list; empty means zero."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 1027,
-      "column": 25,
-      "message": "The right operand of '<' is a garbage value",
-      "checker": "core.UndefinedBinaryOperatorResult",
-      "disposition": "false_positive",
-      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 1029,
-      "column": 37,
-      "message": "1st function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 1031,
-      "column": 40,
-      "message": "4th function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
-    },
-    {
-      "path": "src/models/compose.c",
-      "line": 1032,
-      "column": 13,
-      "message": "3rd function call argument is an uninitialized value",
-      "checker": "core.CallAndMessage",
-      "disposition": "false_positive",
-      "rationale": "The controls names call is checked before nc or cn is read. A non-array error returns def_error (always false). On success, cJSON_GetArraySize counts the same immutable child list used to initialize cn[0:nc]. The traces either assume success on the non-array error path, or skip the empty-list fill while assuming nc>0. Neither path reaches these consumers."
-    },
-    {
       "path": "src/models/dinov3.c",
       "line": 29,
       "column": 58,
@@ -1009,7 +793,7 @@
     },
     {
       "path": "src/models/registry.c",
-      "line": 147,
+      "line": 151,
       "column": 25,
       "message": "Access to field 'child' results in a dereference of a null pointer (loaded from variable 'v')",
       "checker": "core.NullDereference",
@@ -1018,21 +802,12 @@
     },
     {
       "path": "src/models/registry.c",
-      "line": 243,
+      "line": 247,
       "column": 44,
       "message": "Access to field 'valuestring' results in a dereference of a null pointer (loaded from variable 'type')",
       "checker": "core.NullDereference",
       "disposition": "false_positive",
       "rationale": "With family==NULL the preceding condition requires cJSON_IsString(type). The vendor implementation returns false for NULL. The trace assumes both a successful string check and type==NULL."
-    },
-    {
-      "path": "src/models/vision.c",
-      "line": 59,
-      "column": 14,
-      "message": "Division by zero",
-      "checker": "core.DivideZero",
-      "disposition": "false_positive",
-      "rationale": "model_vision_int uses min=1 for heads and patch size and returns false if the value/default is below that minimum. model_factory_error always returns false. The trace assumes that error return is true and proceeds with zero; model_vision_config actually exits before division."
     },
     {
       "path": "src/nn/nn.c",
@@ -1303,15 +1078,6 @@
       "checker": "core.NonNullParamChecker",
       "disposition": "false_positive",
       "rationale": "Validated nonnegative counts and checked concat sizing; both copies cover exactly the initialized rule arrays. Warning functions unchanged except scoped raw-operation renames."
-    },
-    {
-      "path": "src/models/tabm.c",
-      "line": 98,
-      "column": 57,
-      "message": "Division by zero",
-      "checker": "core.DivideZero",
-      "disposition": "false_positive",
-      "rationale": "tabm_embeddings is static and its sole caller passes layers[0] only after model_config_sizes validates every layer dimension as a positive integer (registry.c). Thus features >= 1. The loop visits at least one feature and rejects every edge array with count < 2 before updating nb = max(nb, count - 1). Reaching this division proves nb >= 1; no accepted configuration divides by zero. Invalid bin and feature configurations are covered by the TabM factory tests."
     }
   ]
 }

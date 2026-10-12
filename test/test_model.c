@@ -6,6 +6,7 @@
 #include "../src/model.h"
 #include "../src/models/models.h"
 #include "../src/models/layers.h"
+#include "../src/models/factory.h"
 #include "../src/models/mlp.h"
 #include "../src/models/gpt2.h"
 #include "../src/models/qwen3.h"
@@ -28,6 +29,25 @@
 #include "../src/models/transformer.h"
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
+
+TEST(model, factory_error_is_always_failure_and_preserves_first_error) {
+  ASSERT_FALSE(model_factory_error(NULL, "layers", "invalid dimension %d", 0));
+  PolyModelError err = {0};
+  ASSERT_FALSE(model_factory_error(&err, "layers", "invalid dimension %d", 0));
+  ASSERT_INT_EQ(err.code, POLY_STATUS_INVALID);
+  ASSERT_STR_EQ(err.func, "poly_model_from_config");
+  ASSERT_STR_EQ(err.message, "layers: invalid dimension 0");
+  ASSERT_FALSE(model_factory_error(&err, "loss", "later error"));
+  ASSERT_STR_EQ(err.message, "layers: invalid dimension 0");
+  char path[sizeof(err.message) + 1];
+  memset(path, 'x', sizeof(path) - 1);
+  path[sizeof(path) - 1] = '\0';
+  err = (PolyModelError){0};
+  ASSERT_FALSE(model_factory_error(&err, path, "truncated"));
+  ASSERT_INT_EQ(err.code, POLY_STATUS_INVALID);
+  ASSERT_INT_EQ(err.message[sizeof(err.message) - 1], 0);
+  PASS();
+}
 
 TEST(model, tabm_member_loss_batch_and_learning_rate) {
   PolyCtx *ctx = poly_ctx_new();

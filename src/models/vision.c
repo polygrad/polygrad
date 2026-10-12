@@ -17,7 +17,11 @@ bool model_vision_int(
   if (!model_config_integer(j, key, min, 65536, false, err)) return false;
   const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, key);
   *out = v ? v->valueint : fallback;
-  return *out >= min || model_factory_error(err, key, "missing positive dimension");
+  if (*out < min) {
+    model_factory_error(err, key, "missing positive dimension");
+    return false;
+  }
+  return true;
 }
 bool model_vision_float(
     const cJSON *j,

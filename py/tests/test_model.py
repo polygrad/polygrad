@@ -2571,6 +2571,39 @@ class TestModelDefinition:
         with pytest.raises(ValueError, match=error):
             Graph(spec)
 
+    @pytest.mark.parametrize('names,error', [
+        (None, 'expected at most 64 names'),
+        (['x', 'x'], 'duplicate name'),
+        ([f'x{i}' for i in range(65)], 'expected at most 64 names'),
+    ])
+    def test_entrypoint_name_validation_does_not_publish_partial_lists(self, names, error):
+        from polygrad import Runtime
+        spec = definition_fixture()
+        spec['entrypoints'][0]['inputs'] = names
+        with Runtime(device='INTERP') as rt:
+            with pytest.raises(ValueError, match=error):
+                Graph(spec, runtime=rt)
+            # Failed parsing must leave the context usable, without a partial Model.
+            model = Graph(definition_fixture(), runtime=rt)
+            try:
+                assert model.param_count > 0
+            finally:
+                model.dispose()
+
+    def test_entrypoint_names_accept_full_capacity(self):
+        spec = definition_fixture()
+        names = [f'output{i}' for i in range(64)]
+        spec['outputs'] = dict.fromkeys(names, 'residual')
+        spec['entrypoints'] = [{'name': 'forward', 'inputs': ['x'], 'outputs': names}]
+        model = Graph(spec)
+        try:
+            outputs = model.forward(x=np.array([[1, 2]], np.float32))
+            assert list(outputs) == names
+            for value in outputs.values():
+                np.testing.assert_array_equal(value, outputs[names[0]])
+        finally:
+            model.dispose()
+
     @pytest.mark.parametrize('field,value,error', [
         ('count', 0, 'integer'), ('count', 1.5, 'integer'),
         ('count', 1025, 'integer'), ('count', {'config': 'depth'}, 'integer'),

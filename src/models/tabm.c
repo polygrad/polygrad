@@ -88,7 +88,8 @@ static PolyTensor *tabm_embeddings(
   else {
     const cJSON *bins = cJSON_GetObjectItemCaseSensitive(spec, "bins");
     if (!cJSON_IsArray(bins) || cJSON_GetArraySize(bins) != features) goto invalid_bins;
-    int nb = 0;
+    /* Every accepted feature has at least one bin. */
+    int nb = 1;
     for (int f = 0; f < features; f++) {
       const cJSON *edges = cJSON_GetArrayItem(bins, f);
       int count = cJSON_GetArraySize(edges);

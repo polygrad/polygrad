@@ -7,7 +7,11 @@
 #include "../tensor.h"
 #include "gpt2.h"
 #include "../../vendor/cjson/cJSON.h"
+#include <stdarg.h>
 
+/* Reporting must never turn a rejected configuration into success, including
+ * when no error sink exists or a previous error has already been recorded. */
+void model_factory_verror(PolyModelError *err, const char *path, const char *fmt, va_list ap);
 bool model_factory_error(PolyModelError *err, const char *path, const char *fmt, ...);
 cJSON *model_factory_parse(const char *json, int len, PolyModelError *err);
 bool model_config_integer(

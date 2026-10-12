@@ -12,17 +12,21 @@
 #include <limits.h>
 #include <stdarg.h>
 
-bool model_factory_error(PolyModelError *err, const char *path, const char *fmt, ...) {
+void model_factory_verror(PolyModelError *err, const char *path, const char *fmt, va_list ap) {
   if (err && !err->code) {
     err->code = POLY_STATUS_INVALID;
     err->func = "poly_model_from_config";
     int n = snprintf(err->message, sizeof(err->message), "%s: ", path);
-    if (n < 0 || n >= (int)sizeof(err->message)) return false;
-    va_list ap;
-    va_start(ap, fmt);
+    if (n < 0 || n >= (int)sizeof(err->message)) return;
     vsnprintf(err->message + n, sizeof(err->message) - (size_t)n, fmt, ap);
-    va_end(ap);
   }
+}
+
+bool model_factory_error(PolyModelError *err, const char *path, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  model_factory_verror(err, path, fmt, ap);
+  va_end(ap);
   return false;
 }
 
