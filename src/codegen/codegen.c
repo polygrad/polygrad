@@ -941,6 +941,28 @@ static int64_t sched_output_prod_upcastable(const OptScheduler *s) {
   return prod;
 }
 
+/* PG-DIV-026: CPU output reuse is sized for the admitted maximum, but this
+ * estimate is never an execution extent or a divisibility proof. Candidate
+ * axes below remain static-only; thread admission keeps its minimum-work test. */
+static int64_t sched_output_prod_max_bound(const OptScheduler *s) {
+  int64_t product = 1;
+  for (int i = 0; i < s->n_rngs; i++) {
+    PolyAxisType type = s->types[i];
+    if (type != POLY_AXIS_GLOBAL && type != POLY_AXIS_LOCAL && type != POLY_AXIS_WEAK) continue;
+    int64_t size = s->shape[i];
+    if (size <= 0) {
+      int64_t lo, hi;
+      poly_uop_minmax(s->ctx, s->rngs[i]->src[0], &lo, &hi);
+      if (lo < 1 || hi < lo || hi == INT64_MAX) return sched_output_prod_upcastable(s);
+      size = hi;
+    }
+    if (size <= 1) continue;
+    if (product > INT64_MAX / size) return INT64_MAX;
+    product *= size;
+  }
+  return product;
+}
+
 /* heuristic.py sum_strides is a Python integer even when index terms are
  * large and cancel. Use the shared integer owner, not int64 or float scores. */
 static bool sched_stride_score(const OptScheduler *s, int axis, int *num_strides, PolyInt *sum) {
@@ -1880,7 +1902,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     bool *upcasted_axis = calloc((size_t)n_axis_flags, sizeof(*upcasted_axis));
     if (!upcasted_axis) goto done;
 
-    while (sched_output_prod_upcastable(&s) >= 1024) {
+    bool cpu = caps.device && !strcmp(caps.device, "CPU");
+    while ((cpu ? sched_output_prod_max_bound(&s) : sched_output_prod_upcastable(&s)) >= 1024) {
       int below = sched_upcast_size_lt(&s, 32);
       if (below < 0) {
         free(upcasted_axis);

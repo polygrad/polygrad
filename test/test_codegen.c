@@ -875,6 +875,62 @@ TEST(codegen, scheduler_policy_masked_upcast_history) {
   PASS();
 }
 
+static PolyUOp *policy_batch_matmul(PolyCtx *ctx, int maximum, bool symbolic) {
+  PolyUOp *size =
+      symbolic ? poly_uop_variable(
+                     ctx, "batch", poly_arg_int(1), poly_arg_int(maximum), POLY_WEAKINT, 1, false
+                 )
+               : policy_const(ctx, maximum);
+  PolyUOp *m =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, size, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *n = policy_range(ctx, 256, 1, POLY_AXIS_GLOBAL);
+  PolyUOp *r = policy_range(ctx, 256, 2, POLY_AXIS_REDUCE);
+  PolyUOp *a = poly_test_program_param(ctx, POLY_FLOAT32, maximum * 256, 0);
+  PolyUOp *b = poly_test_program_param(ctx, POLY_FLOAT32, 256 * 256, 1);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, maximum * 256, 2);
+  PolyUOp *row = poly_uop_alu2(ctx, POLY_OP_MUL, m, policy_const(ctx, 256));
+  PolyUOp *ai = poly_uop_alu2(ctx, POLY_OP_ADD, row, r);
+  PolyUOp *bi = poly_uop_alu2(
+      ctx, POLY_OP_ADD, poly_uop_alu2(ctx, POLY_OP_MUL, r, policy_const(ctx, 256)), n
+  );
+  PolyUOp *oi = poly_uop_alu2(ctx, POLY_OP_ADD, row, n);
+  PolyUOp *mul = poly_uop_alu2(
+      ctx, POLY_OP_MUL, poly_uop_index(ctx, a, &ai, 1), poly_uop_index(ctx, b, &bi, 1)
+  );
+  PolyUOp *sum =
+      poly_uop2(ctx, POLY_OP_REDUCE, POLY_FLOAT32, mul, r, poly_arg_reduce(POLY_OP_ADD, 0));
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &oi, 1), sum, poly_arg_none()
+  );
+  PolyUOp *end =
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, (PolyUOp *[]){store, m, n}, 3, poly_arg_none());
+  return poly_test_kernel_sink(ctx, &end, 1, "bounded_batch");
+}
+
+TEST(codegen, scheduler_cpu_bounded_batch_upcasts_only_static_axes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyOpt opts[] = {
+      {.op = POLY_OPT_UPCAST, .has_axis = true, .axis = 1, .arg_kind = POLY_OPT_ARG_INT, .arg = 4},
+      {.op = POLY_OPT_UNROLL, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 4}};
+  PolyRendererCaps cpu = {.device = "CPU"};
+  PolyUOp *symbolic = policy_batch_matmul(ctx, 221, true);
+  ASSERT_TRUE(policy_matches(ctx, symbolic, cpu, opts, 2));
+  ASSERT_TRUE(policy_matches(ctx, policy_batch_matmul(ctx, 221, false), cpu, opts, 2));
+  /* Non-CPU and small bounds retain the pinned unroll-only policy. */
+  ASSERT_TRUE(policy_matches(ctx, symbolic, (PolyRendererCaps){.device = "NULL"}, opts + 1, 1));
+  ASSERT_TRUE(policy_matches(ctx, policy_batch_matmul(ctx, 2, true), cpu, opts + 1, 1));
+  /* Fixed-shape optimized ASTs are identical, not merely numerically close. */
+  for (int maximum = 1; maximum <= 256; maximum++) {
+    PolyUOp *sink = policy_batch_matmul(ctx, maximum, false);
+    ASSERT_PTR_EQ(
+        poly_apply_opts_heuristic_ex(ctx, sink, cpu),
+        poly_apply_opts_heuristic_ex(ctx, sink, (PolyRendererCaps){.device = "NULL"})
+    );
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, scheduler_policy_fallback_ignores_vector_cap) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 64);

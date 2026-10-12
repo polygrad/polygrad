@@ -1437,6 +1437,30 @@ def test_dynamic_model_training_captured_at_singleton(device):
         model.dispose(); rt.dispose()
 
 
+def test_cpu_bounded_matmul_training_matches_actual_batch():
+    from polygrad import create
+    rng = np.random.default_rng(42)
+    expected = rng.normal(0, 0.1, (16, 256)).astype(np.float32)
+    with create(device='cpu', logical='always') as rt:
+        n = rt.Variable('matmul_training_batch', 1, 221)
+        w = rt.Tensor(expected.copy())
+        model = Model(lambda x: x.dot(w), inputs={'x':rt.Tensor.empty(n.bind(1), 16)},
+                      targets={'y':rt.Tensor.empty(n.bind(1), 256)}, params={'w':w},
+                      loss=lambda out,y:(out-y).square().mean())
+        try:
+            model.set_optimizer('sgd', lr=0.01)
+            for size in (1, 7, 221, 3, 1):
+                x = rng.normal(0, 0.1, (size, 16)).astype(np.float32)
+                prediction = x @ expected
+                loss = model.train_step(x=x, y=np.zeros((size, 256), np.float32))
+                np.testing.assert_allclose(loss, np.mean(prediction**2), rtol=1e-5)
+                expected -= 0.02*(x.T @ prediction)/(size*256)
+                np.testing.assert_allclose(model.read_buffer('w').reshape(expected.shape),
+                                           expected, rtol=1e-5, atol=1e-7)
+        finally:
+            model.dispose()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_dynamic_model_training_rebinds_cached_loss(device):
     from polygrad import create

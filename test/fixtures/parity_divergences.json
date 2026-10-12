@@ -360,6 +360,18 @@
       "close_when": "Pinned tinygrad adopts equivalent shape-dependent matvec selection, or broader matched adapter/model evidence supersedes this scoped tile policy. No allowance changes Tensor graphs, values, non-WebGPU default scheduling or explicit tuning settings."
     },
     {
+      "id": "PG-DIV-026",
+      "status": "approved",
+      "stages": ["codegen", "optimization"],
+      "area": "CPU bounded-symbolic output upcast threshold",
+      "tinygrad": "The multi-axis output-upcast threshold multiplies only static output extents, even when symbolic extents have finite positive bounds.",
+      "polygrad": "For CPU only, the threshold may count positive bounded symbolic output extents at their maximum. Upcast candidates and divisibility remain static-only. Unknown or nonpositive bounds retain the pinned estimate. Fixed-shape scheduling, non-CPU scheduling, symbolic loop extents and CPU thread admission are unchanged.",
+      "rationale": "Avoid disabling output reuse for bounded batches. This does not pad awkward dimensions or guarantee threading: minimum-work thread admission still leaves some bounded-batch matmuls serial. A separate maximum-bound thread experiment improved full batches but regressed batch-one latency and was not adopted.",
+      "approval": "User 2026-10-12 approved proceeding with the singleton fix and CPU-only upcast rule after reviewing structural, partial-batch and default-thread probes; thread selection remains unchanged.",
+      "evidence": ["src/codegen/codegen.c:sched_output_prod_max_bound", "references/tinygrad_latest/tinygrad/codegen/opt/heuristic.py", "test/test_codegen.c:scheduler_cpu_bounded_batch_upcasts_only_static_axes", "temp/cpu-schedule-20261012/summary.json", "temp/cpu-schedule-20261012/thread-review/report.json"],
+      "close_when": "Pinned tinygrad adopts an equivalent bounded-work estimate, or matched shape/backend evidence supersedes this CPU-only policy. No allowance changes dynamic-axis splitting, thread policy, Tensor graphs or values."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],
