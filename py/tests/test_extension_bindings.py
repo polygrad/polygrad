@@ -210,6 +210,12 @@ def test_binding_rules_handwritten_consumers_are_explicit(generator):
         'native': set(re.findall(r'DECLARE_NAPI_METHOD\(\s*"(poly_\w+)"', native_exports)),
         'wasm': set(re.findall(r'^    (poly_\w+):', wasm, re.M)),
     }
+    # High-level adapters may use JS names (hfImportNew, etc.), rather than
+    # expose a same-named ffi property. Require an actual reviewed C callsite.
+    wasm_calls = set(re.findall(r'Module\._(poly_\w+)\b', wasm))
+    wasm_calls.update(re.findall(r"callDevice\('(poly_\w+)'", wasm))
+    consumers['wasm'].update(n for n, r in rules.items()
+                             if 'wasm' in r.get('manual', []) and n in wasm_calls)
     for consumer, names in consumers.items():
         assert names == {n for n, r in rules.items()
                          if consumer in r.get('manual', []) + r.get('host', [])}
