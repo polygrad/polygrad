@@ -433,7 +433,7 @@ test-compat-tinygrad-nn: build/libpolygrad.so
 
 .PHONY: test-model-workloads test-generative-soak test-whisper
 .PHONY: test-gated-delta
-.PHONY: test-qwen35 qwen35-fixture
+.PHONY: test-qwen35 qwen35-fixture qwen35-image-fixture
 test-qwen35: build/libpolygrad.so build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test --filter typed_weight_binding
 	$(SAN_RUN) ./build/polygrad_test --filter qwen35_config
@@ -441,6 +441,9 @@ test-qwen35: build/libpolygrad.so build/polygrad_test
 
 qwen35-fixture:
 	$(HF_PYTHON) test/generate_qwen35_fixture.py
+
+qwen35-image-fixture:
+	$(HF_PYTHON) test/generate_qwen35_fixture.py --vision
 
 test-gated-delta: build/libpolygrad.so build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test --filter gated_delta

@@ -3,15 +3,27 @@ import base64
 import hashlib
 import inspect
 import json
+import sys
 from pathlib import Path
 import torch
 import transformers
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from safetensors.torch import save
-from external.test_qwen35_hf import reference, cached_reference, composite_reference
+from external.test_qwen35_hf import reference, cached_reference, composite_reference, packed_image_reference
 
 
 def main():
+    if '--vision' in sys.argv:
+        config,weights,inputs,expected=packed_image_reference(cached=True)
+        fixture={'config':config,'weights':base64.b64encode(save(weights)).decode(),
+                 'inputs':{k:v.reshape(-1).tolist() for k,v in inputs.items()},
+                 'expected':[x.reshape(-1).tolist() for x in expected],
+                 'reference':{'transformers':transformers.__version__,
+                    'source_sha256':hashlib.sha256(Path(inspect.getfile(modeling_qwen3_5)).read_bytes()).hexdigest()}}
+        path=Path(__file__).parent/'fixtures/qwen35_image.json'
+        path.write_text(json.dumps(fixture,indent=2)+'\n')
+        print(f'{path}: {path.stat().st_size} bytes')
+        return
     fixture={'reference':{'transformers':transformers.__version__,
         'source_sha256':hashlib.sha256(Path(inspect.getfile(modeling_qwen3_5)).read_bytes()).hexdigest()},
         'models':[]}

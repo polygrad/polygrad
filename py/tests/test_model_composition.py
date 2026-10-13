@@ -5,6 +5,35 @@ import pytest
 from polygrad import create
 
 
+def test_late_embedding_composition_preserves_query_and_document_masks():
+    from pathlib import Path
+    import runpy
+    compose = runpy.run_path(str(Path(__file__).parents[1] / 'examples/late_embeddings.py'))['compose_token_embeddings']
+    with create(device='CPU') as rt:
+        T, M = rt.Tensor, rt.Model
+        inputs = {k:T.empty(1,4,dtype='int32') for k in ('input_ids','attention_mask','position_ids')}
+        table = T(np.array([[0,0],[1,2],[3,4],[5,6]],'float32')).realize()
+        child = M(lambda input_ids,attention_mask,position_ids: {'last_hidden_state': table[input_ids]},
+                  inputs=inputs,params={'table':table})
+        matrix = np.array([[1,0],[0,1],[1,1]],'float32')
+        projection = T(matrix).realize()
+        parent = compose(rt,child,projection,inputs,[2])
+        child.dispose()
+        data = dict(input_ids=np.array([[1,2,3,0]],'int32'),attention_mask=np.array([[1,1,1,0]],'int32'),
+                    position_ids=np.arange(4,dtype='int32')[None,:])
+        try:
+            query = parent.forward(**data,exclude_tokens=np.array([0],'int32'))
+            document = parent.forward(**data,exclude_tokens=np.array([1],'int32'))
+            np.testing.assert_array_equal(query['token_mask'],[[True,True,True,False]])
+            np.testing.assert_array_equal(document['token_mask'],[[True,False,True,False]])
+            np.testing.assert_array_equal(query['token_embeddings'],document['token_embeddings'])
+            expected = np.array([[[1,2],[3,4],[5,6],[0,0]]],'float32')
+            expected = expected @ matrix.T
+            expected /= np.maximum(np.linalg.norm(expected,axis=-1,keepdims=True),1e-12)
+            np.testing.assert_allclose(query['token_embeddings'],expected,atol=1e-6)
+        finally: parent.dispose()
+
+
 @pytest.fixture(params=['until_realize', 'always'])
 def rt(request):
     with create(device='CPU', logical=request.param) as runtime:

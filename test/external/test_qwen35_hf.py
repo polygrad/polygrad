@@ -45,9 +45,15 @@ def cached_reference(dtype=torch.float32):
             outputs.append(result.last_hidden_state)
         np.testing.assert_allclose(torch.cat(outputs,dim=1).float().numpy(),expected,
             atol=.04 if dtype==torch.bfloat16 else 7e-5,rtol=.02 if dtype==torch.bfloat16 else 7e-4)
-    states={'layers.0.cache.conv':cache.conv_states[0].float().numpy(),
-            'layers.0.cache.delta':cache.recurrent_states[0].float().numpy(),
-            'layers.1.cache.kv':torch.stack([cache.key_cache[1],cache.value_cache[1]]).float().numpy()}
+    if hasattr(cache,'conv_states'):  # Transformers 5.3's hybrid cache.
+        conv,delta=cache.conv_states[0],cache.recurrent_states[0]
+        keys,values=cache.key_cache[1],cache.value_cache[1]
+    else:  # Transformers 5.19 stores each attention layer's state separately.
+        conv,delta=cache.layers[0].conv_states[0],cache.layers[0].recurrent_states[0]
+        keys,values=cache.layers[1].keys,cache.layers[1].values
+    states={'layers.0.cache.conv':conv.float().numpy(),
+            'layers.0.cache.delta':delta.float().numpy(),
+            'layers.1.cache.kv':torch.stack([keys,values]).float().numpy()}
     return config,ref,ids,expected,states
 
 
@@ -69,6 +75,126 @@ def composite_reference(generation=False, tied=True, dtype=torch.float32):
         out = model(input_ids=ids, attention_mask=mask, position_ids=positions, use_cache=False)
         expected = (out.logits if generation else out.last_hidden_state).float().numpy()
     return config, model, ids, mask, positions, expected
+
+
+def packed_image_reference(generation=True, dtype=torch.float32, cached=False):
+    config, ref, *_ = composite_reference(generation, dtype=dtype)
+    config.image_token_id = 30
+    config.video_token_id = 31
+    ref.config.image_token_id = 30
+    child = ref.model if generation else ref
+    child.config.image_token_id = 30
+    grid = torch.tensor([[1, 2, 2], [1, 2, 4]])
+    pixels = torch.randn(12, 12)
+    ids = torch.tensor([[1, 30, 2, 30, 30, 3, 4]])
+    positions = torch.tensor([0,1,2,3,3,4,5]).reshape(1, 1, 7).expand(3, -1, -1).clone()
+    positions[1, 0, 4] = 2
+    positions[2, 0, 4] = 3
+    with torch.no_grad():
+        out = ref(input_ids=ids, attention_mask=torch.ones_like(ids), position_ids=positions,
+                  pixel_values=pixels, image_grid_thw=grid, use_cache=cached)
+    expected = (out.logits if generation else out.last_hidden_state).float().numpy()
+    cfg = config.to_dict()
+    cfg.update(modalities=['text', 'image'], image_grid_thw=grid.tolist())
+    if cached:
+        expected = [expected[:,-1]]
+        cache = out.past_key_values
+        with torch.no_grad():
+            for i, token in enumerate([5,6]):
+                decoded = ref(input_ids=torch.tensor([[token]]),past_key_values=cache,use_cache=True,
+                    position_ids=torch.full((3,1,1),int(positions.max())+i+1))
+                expected.append(decoded.logits[:,-1].float().numpy())
+        cfg['cache_capacity'] = 12
+    weights = {k:v.contiguous() for k,v in ref.state_dict().items()
+               if not (generation and k == 'lm_head.weight')}
+    inputs = dict(input_ids=ids.numpy().astype('int32'), attention_mask=np.ones((1,7),'int32'),
+                  image_position_ids=positions.numpy().astype('int32'),
+                  pixel_values=pixels.numpy(), image_grid_thw=grid.numpy().astype('int32'))
+    return cfg, weights, inputs, expected
+
+
+@pytest.mark.parametrize('dtype',[torch.float32,torch.bfloat16])
+def test_qwen35_image_cache_positions_reset_and_sampling(dtype):
+    import polygrad as pg
+    cfg,weights,inputs,expected = packed_image_reference(dtype=dtype,cached=True)
+    with pg.create(device='CPU') as rt:
+        model = rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)],max_seq_len=7)
+        restored = None
+        try:
+            data = {k:v for k,v in inputs.items() if k != 'attention_mask'}
+            first = model.call('prefill_image',**data)['logits_prefill_image']
+            tol = .05 if dtype==torch.bfloat16 else 6e-5
+            np.testing.assert_allclose(first,expected[0],atol=tol,rtol=tol)
+            for i,token in enumerate([5,6]):
+                got = model.call('decode',tokens_decode=np.array([[token]],'int32'),controls={'start_pos':7+i})['logits_decode']
+                np.testing.assert_allclose(got,expected[i+1],atol=tol,rtol=tol)
+            restored = rt.Model.load(model.save())
+            model.reset_transient()
+            for candidate in (model,restored):
+                np.testing.assert_array_equal(candidate.call('prefill_image',**data)['logits_prefill_image'],first)
+                sample = candidate.call('decode_sample',inputs={'tokens_decode':np.array([[5]],'int32'),
+                    'sampling.temperature':np.array([0],'float32')},controls={'start_pos':7})['sampling.decode_token']
+                np.testing.assert_array_equal(sample,expected[1].argmax(-1).reshape(1,1))
+        finally:
+            if restored: restored.dispose()
+            model.dispose()
+
+
+@pytest.mark.parametrize('generation', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
+def test_qwen35_packed_image_forward(generation,dtype):
+    import polygrad as pg
+    cfg,weights,inputs,expected = packed_image_reference(generation,dtype)
+    with pg.create(device='CPU') as rt:
+        model = rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)],max_seq_len=7)
+        try:
+            key = 'logits_image' if generation else 'hidden_image'
+            got = model.call('forward_image', **inputs)[key]
+            np.testing.assert_allclose(got, expected, atol=6e-5 if dtype==torch.float32 else .05,
+                                       rtol=6e-4 if dtype==torch.float32 else .03)
+            restored = rt.Model.load(model.save())
+            try: np.testing.assert_array_equal(restored.call('forward_image', **inputs)[key], got)
+            finally: restored.dispose()
+            bad = {**inputs, 'input_ids': inputs['input_ids'].copy()}
+            bad['input_ids'][0, 1] = 2
+            with pytest.raises(RuntimeError, match='image.*slots'):
+                model.call('forward_image', **bad)
+            bad = {**inputs, 'image_grid_thw': np.array([[1,2,4],[1,2,2]],'int32')}
+            with pytest.raises(RuntimeError, match='image_grid_thw'):
+                model.call('forward_image', **bad)
+        finally: model.dispose()
+
+
+def test_qwen35_bf16_document_attention_materializes_rotary_inputs():
+    """Document-sized attention must not inline BF16 rotary work into every QK score."""
+    import polygrad as pg
+    from transformers import Qwen3_5Config, Qwen3_5ForConditionalGeneration
+    text, *_ = reference(layers=['full_attention', 'full_attention'])
+    cfg = Qwen3_5Config(text_config=text.to_dict(), image_token_id=30, video_token_id=31,
+        vision_config=dict(depth=1,hidden_size=768,intermediate_size=32,num_heads=12,
+            patch_size=2,temporal_patch_size=1,spatial_merge_size=2,
+            out_hidden_size=16,num_position_embeddings=576),tie_word_embeddings=True)
+    cfg._attn_implementation = 'eager'
+    cfg.architectures = ['Qwen3_5ForConditionalGeneration']
+    ref = Qwen3_5ForConditionalGeneration(cfg).to(torch.bfloat16).eval()
+    grid = torch.tensor([[1,12,24]])
+    ids = torch.full((1,72),30)
+    pixels = torch.randn(288,12)
+    positions = torch.arange(72).reshape(1,1,72).expand(3,1,72)
+    with torch.no_grad():
+        expected = ref(input_ids=ids,position_ids=positions,pixel_values=pixels,
+            image_grid_thw=grid,use_cache=False).logits.float().numpy()
+    config = cfg.to_dict()
+    config.update(modalities=['text','image'],image_grid_thw=grid.tolist())
+    weights = {k:v.contiguous() for k,v in ref.state_dict().items() if k != 'lm_head.weight'}
+    with pg.create(device='CPU') as rt:
+        model = rt.Model.from_hf(config_json=json.dumps(config),weight_bytes_list=[save(weights)],max_seq_len=72)
+        try:
+            got = model.call('forward_image',input_ids=ids.numpy().astype('int32'),
+                attention_mask=np.ones((1,72),'int32'),image_position_ids=positions.numpy().astype('int32'),
+                pixel_values=pixels.numpy(),image_grid_thw=grid.numpy().astype('int32'))['logits_image']
+            np.testing.assert_allclose(got,expected,atol=.025,rtol=.03)
+        finally: model.dispose()
 
 
 @pytest.mark.parametrize('generation,tied', [(False,True),(True,True),(True,False)])
@@ -155,7 +281,7 @@ def test_qwen35_composite_selection_and_weight_errors():
         missing_vision=dict(cfg);missing_vision.pop('vision_config')
         with pytest.raises(RuntimeError,match='modalities'):
             rt.Model.from_hf(config_json=json.dumps(missing_vision),weight_bytes_list=[save(weights)])
-        for selection in (None,[],['image'],['text','text'],['text','image']):
+        for selection in (None,[],['image'],['text','text'],['text','video']):
             bad=dict(cfg)
             if selection is not None: bad['modalities']=selection
             with pytest.raises(RuntimeError,match='modalities'):

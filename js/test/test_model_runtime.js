@@ -6,6 +6,60 @@ const embeddingGemma2ImageFixture = require('../../test/fixtures/embeddinggemma2
 const embeddingGemma2AudioFixture = require('../../test/fixtures/embeddinggemma2_audio.json')
 const torchFixture = require('../../test/fixtures/torch.json')
 const qwen35Fixture = require('../../test/fixtures/qwen35.json')
+const qwen35ImageFixture = require('../../test/fixtures/qwen35_image.json')
+const {composeTokenEmbeddings} = require('../examples/late_embeddings')
+
+async function checkQwen35Image(pg) {
+  const f = qwen35ImageFixture
+  const inputs = Object.fromEntries(Object.entries(f.inputs).filter(([k]) => k !== 'attention_mask')
+    .map(([k,v]) => [k, k === 'pixel_values' ? Float32Array.from(v) : Int32Array.from(v)]))
+  const model = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(f.config)),
+    [Uint8Array.from(atob(f.weights),v => v.charCodeAt(0))], {maxSeqLen:7})
+  let restored
+  try {
+    const first = (await model.callAsync('prefill_image',inputs)).logits_prefill_image
+    assertClose(first,f.expected[0],8e-5)
+    for (let i=0;i<2;i++) {
+      const got = await model.callAsync('decode',{tokens_decode:Int32Array.of(5+i)}, {controls:{start_pos:7+i}})
+      assertClose(got.logits_decode,f.expected[i+1],8e-5)
+    }
+    restored = pg.Model.load(await model.saveAsync())
+    await model.resetTransientAsync()
+    for (const candidate of [model,restored]) {
+      let error
+      const bad = {...inputs,input_ids:inputs.input_ids.slice()}; bad.input_ids[1]=2
+      try { await candidate.callAsync('prefill_image',bad) } catch(e) { error=e }
+      assert(error && /image.*slots/.test(error.message),'mismatched image slots accepted')
+      assertClose((await candidate.callAsync('prefill_image',inputs)).logits_prefill_image,first,0)
+      const result = await candidate.callAsync('decode_sample',
+        {tokens_decode:Int32Array.of(5),'sampling.temperature':Float32Array.of(0)}, {controls:{start_pos:7}})
+      assert(result['sampling.decode_token'][0] === f.expected[1].indexOf(Math.max(...f.expected[1])),
+        'image-conditioned greedy sample')
+    }
+  } finally { if(restored) await restored.dispose(); await model.dispose() }
+}
+
+async function checkLateEmbeddings(pg) {
+  const inputs = Object.fromEntries(['input_ids','attention_mask','position_ids']
+    .map(k=>[k,pg.Tensor.empty([1,4],{dtype:'int32'})]))
+  const projection = new pg.Tensor([[1,0],[0,1],[1,1]],{dtype:'float32'})
+  const child = await pg.Model.fromCallableAsync(({input_ids}) => {
+    const x = input_ids.cast('float32')
+    return {last_hidden_state:pg.Tensor.stack([x,x.mul(2)],{dim:-1})}
+  }, {inputs})
+  const model = await composeTokenEmbeddings(pg,child,projection,inputs,[2])
+  await child.dispose()
+  try {
+    for (const exclude of [0,1]) {
+      const out = await model.forwardAsync({input_ids:Int32Array.of(1,2,3,0),
+        attention_mask:Int32Array.of(1,1,1,0),position_ids:Int32Array.of(0,1,2,3),
+        exclude_tokens:Int32Array.of(exclude)})
+      assertClose(out.token_mask,[1,exclude ? 0 : 1,1,0],0)
+      const expected = [1,2,3,1,2,3,1,2,3].map(v=>v/Math.sqrt(14)).concat([0,0,0])
+      assertClose(out.token_embeddings,expected,1e-6)
+    }
+  } finally { await model.dispose(); for(const t of Object.values(inputs)) t.dispose(); projection.dispose() }
+}
 
 async function checkQwen35Text(pg) {
   const f = qwen35Fixture
@@ -2828,6 +2882,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
   await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
+  await test('Qwen3.5 packed images cached generation and admission', () => checkQwen35Image(pg))
+  await test('Late embeddings public composition and document masking', () => checkLateEmbeddings(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
@@ -3622,6 +3678,8 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
   await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
+  await test('Qwen3.5 packed images cached generation and admission', () => checkQwen35Image(pg))
+  await test('Late embeddings public composition and document masking', () => checkLateEmbeddings(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))

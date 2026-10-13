@@ -83,6 +83,43 @@ TEST(hf, qwen35_config_ownership_and_required_weights) {
     lm_parameters += poly_model_buf_role(m, i) == POLY_ROLE_PARAM;
   ASSERT_INT_EQ(lm_parameters, parameters); /* Tied head shares storage. */
   poly_model_free(m);
+  cJSON *image = cJSON_Parse(composite);
+  cJSON_ReplaceItemInObject(image, "modalities", cJSON_Parse("[\"text\",\"image\"]"));
+  cJSON_AddNumberToObject(image, "image_token_id", 30);
+  cJSON_AddItemToObject(image, "image_grid_thw", cJSON_Parse("[[1,2,2],[1,2,4]]"));
+  cJSON_ReplaceItemInObject(image, "max_seq_len", cJSON_CreateNumber(7));
+  cJSON *text = cJSON_GetObjectItemCaseSensitive(image, "text_config");
+  cJSON_AddItemToObject(
+      cJSON_GetObjectItemCaseSensitive(text, "rope_parameters"), "mrope_section",
+      cJSON_Parse("[1,1,0]")
+  );
+  cJSON_ReplaceItemInObject(
+      image, "vision_config",
+      cJSON_Parse("{\"depth\":1,\"hidden_size\":16,\"intermediate_size\":32,\"num_heads\":2,"
+                  "\"patch_size\":2,\"temporal_patch_size\":1,\"spatial_merge_size\":2,"
+                  "\"out_hidden_size\":16,\"num_position_embeddings\":16}")
+  );
+  char *image_json = cJSON_PrintUnformatted(image);
+  m = poly_model_from_config(
+      ctx, "Qwen35", image_json, (int)strlen(image_json), POLY_DEVICE_INTERP, &err
+  );
+  free(image_json);
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "forward_image"), 5);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "prefill_image"), 4);
+  ASSERT_INT_EQ(poly_model_control_count(m, "decode_sample"), 1);
+  poly_model_free(m);
+  cJSON_ReplaceItemInObject(image, "image_grid_thw", cJSON_Parse("[[1,3,2]]"));
+  image_json = cJSON_PrintUnformatted(image);
+  m = poly_model_from_config(
+      ctx, "Qwen35", image_json, (int)strlen(image_json), POLY_DEVICE_INTERP, &err
+  );
+  free(image_json);
+  cJSON_Delete(image);
+  ASSERT_TRUE(m == NULL);
+  ASSERT_TRUE(strstr(err.message, "image_grid_thw") != NULL);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
   poly_ctx_destroy(ctx);
   PASS();
 }

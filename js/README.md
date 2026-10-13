@@ -467,13 +467,33 @@ or `decode` with `tokens_decode` for one token. These return `hidden_prefill` or
 caches. This is a text backbone, not a token generator, vision model or complete
 embedding pipeline.
 
-Experimental composite `qwen3_5` support uses the same importer with `modalities: ['text']`
+Composite `qwen3_5` support uses the same importer with `modalities: ['text']`
 in their configuration. `Qwen3_5Model` returns hidden states;
 `Qwen3_5ForConditionalGeneration` returns `logits`, `logits_prefill` and
 `logits_decode` (the latter shaped `[batch, vocabulary]`). A cached single-batch
 generator also exposes `decode_sample` with the same inputs as Whisper above.
-Tied heads share embedding storage. Vision and the complete Perplexity embedding
-pipeline are not yet supported; do not interpret text-only support as OCR support.
+Tied heads share embedding storage.
+
+For images, select `modalities: ['text', 'image']` and set `image_grid_thw` in the
+configuration to the processor's grid array. This specializes the graph to those
+grids; a different grid requires another import. `forward_image` takes int32
+`input_ids`, `attention_mask`, `image_position_ids` (`[3, batch, sequence]`) and
+`image_grid_thw`, plus float32 packed `pixel_values` from the checkpoint's image
+processor. It returns `logits_image` or `hidden_image`. Incorrect image-slot counts
+and grids are rejected before execution. With caches, `prefill_image` takes the
+same inputs except `attention_mask`, requires an unpadded prompt, and returns
+`logits_prefill_image` (`[batch, vocabulary]`) or `hidden_prefill_image`.
+Follow it with `decode`/`decode_sample` at `start_pos=maxSeqLen`; rotary offsets
+are retained internally. Reset caches before a new prompt. Tokenization, image
+processing and multimodal position IDs remain the caller's responsibility.
+
+[Late token embeddings](examples/late_embeddings.js) composes a backbone, a
+checkpoint projection and normalization through the public Model API, with a
+document-only token mask. The same recipe supports Perplexity's late-embedding
+checkpoint; use its original tokenizer, prompts and skip-token IDs. The importer
+does not automatically interpret Sentence Transformers pipeline metadata.
+Large checkpoints can exceed browser download or Wasm-memory limits even when
+their weights fit on the GPU; loading a full multi-gigabyte file is not streaming.
 
 For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
 {cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
