@@ -2,6 +2,8 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Backport tinygrad #18278 to preserve accumulator storage in emulated-float
+  reductions, fixing invalid graphs in BF16 attention and looped max/min.
 - Collect unused buffer storage without repeatedly scanning retained models;
   preserve shared views and verify incremental ownership in debug checks.
 - Import regular ONNX ScatterND writes without expanding computed indices or

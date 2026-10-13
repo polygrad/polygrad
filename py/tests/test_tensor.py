@@ -564,6 +564,38 @@ def test_execution_scalar_reduction_axes(method, expected, axis):
         getattr(x, method)(1)
 
 
+@pytest.mark.parametrize('dtype', ['float16', 'bfloat16', 'fp8e4m3', 'fp8e5m2',
+                                  'fp8e4m3fnuz', 'fp8e5m2fnuz'])
+def test_emulated_dtype_looped_max(dtype):
+    # tinygrad #18278: NOOPT retains the accumulator instead of unrolling it.
+    with Context(NOOPT=1):
+        x = Tensor(list(range(8))).cast(dtype).reshape(2, 4).contiguous().realize()
+        np.testing.assert_array_equal(x.max(axis=1).float().numpy(), [3, 7])
+
+
+@pytest.mark.parametrize('dtype', ['float16', 'bfloat16', 'fp8e5m2'])
+def test_emulated_dtype_looped_min(dtype):
+    with Context(NOOPT=1):
+        x = Tensor(list(range(8))).cast(dtype).reshape(2, 4).contiguous().realize()
+        np.testing.assert_array_equal(x.min(axis=1).float().numpy(), [0, 4])
+
+
+def test_emulated_bfloat16_symbolic_attention_prefix():
+    with Runtime(device='CPU') as rt:
+        q_data = np.arange(16, dtype=np.float32).reshape(1, 1, 2, 8) / 16
+        kv_data = np.arange(64, dtype=np.float32).reshape(1, 1, 8, 8) / 16
+        q = rt.Tensor(q_data).bfloat16().realize()
+        kv = rt.Tensor(kv_data).bfloat16().realize()
+        for length in (2, 5, 8):
+            n = rt.Variable('attention_prefix', 2, 8).bind(length)
+            actual = q.scaled_dot_product_attention(kv[:, :, :n], kv[:, :, :n]).float().numpy()
+            scores = q_data @ kv_data[:, :, :length].swapaxes(-1, -2) / np.sqrt(8)
+            weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+            expected = (weights / weights.sum(axis=-1, keepdims=True)) @ kv_data[:, :, :length]
+            # Loop and unrolled reductions need not round at the same points.
+            np.testing.assert_allclose(actual, expected, atol=.02, rtol=.01)
+
+
 def test_execution_noopt_context_restores_after_error():
     from polygrad.helpers import NOOPT
     before = NOOPT.value

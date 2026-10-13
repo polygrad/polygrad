@@ -506,6 +506,37 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await x.toArray(), [0,1,0,0,0,0, 0,0,1,0,0,0, 0,0,0,0,1,0])
   })
 
+  await test('emulated dtype looped max and min preserve accumulator storage', async () => {
+    const before = pg.noopt
+    try {
+      pg.noopt = 1
+      for (const dtype of ['float16', 'bfloat16', 'fp8e4m3', 'fp8e5m2', 'fp8e4m3fnuz', 'fp8e5m2fnuz']) {
+        // tinygrad #18278: retain a looped accumulator, including on small inputs.
+        if (dtype === 'float16' && !supportsF16) {
+          // WebGPU's public half API requires shader-f16 even though core
+          // lowering can emulate it (covered by the forced-emulation C test).
+          const input = new Tensor([1])
+          let error
+          try { input.cast(dtype) } catch (e) { error = e }
+          finally { input.dispose() }
+          assert(error && /float16 is not supported/.test(error.message), 'unsupported half must reject')
+          continue
+        }
+        const x = new Tensor([0,1,2,3,4,5,6,7]).cast(dtype).reshape(2,4).contiguous()
+        await x.realizeAsync()
+        const maximum = x.max(1).cast('float32')
+        try {
+          assertClose(await maximum.toArray(), [3,7], 0)
+          if (['float16', 'bfloat16', 'fp8e5m2'].includes(dtype)) {
+            const minimum = x.min(1).cast('float32')
+            try { assertClose(await minimum.toArray(), [0,4], 0) }
+            finally { minimum.dispose() }
+          }
+        } finally { maximum.dispose(); x.dispose() }
+      }
+    } finally { pg.noopt = before }
+  })
+
   await test('execution NOOPT policy restores and computes product', async () => {
     const before = pg.noopt
     try {

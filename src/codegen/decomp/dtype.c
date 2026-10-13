@@ -1223,13 +1223,10 @@ PolyPatternMatcher *poly_pm_float_decomp(void) {
       POLY_FP8E4M3, POLY_FP8E5M2,  POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
       POLY_FLOAT16, POLY_BFLOAT16, POLY_FLOAT32,     POLY_FLOAT64,
   };
-  PolyOpSet float_ops = {{0, 0}};
-  for (int op = 1; op < POLY_OP_COUNT; op++) {
-    if (poly_opset_has(POLY_GROUP_DEFINES, (PolyOps)op) || op == POLY_OP_CAST ||
-        op == POLY_OP_BITCAST || op == POLY_OP_CONST)
-      continue;
-    float_ops = poly_opset_add(float_ops, (PolyOps)op);
-  }
+  /* Backport tinygrad 6dfca0b79e (#18278): AFTER carries storage, not an
+   * arithmetic value. Casting its first source destroys accumulator identity. */
+  PolyOpSet float_ops = poly_opset_add(POLY_GROUP_ALU, POLY_OP_STACK);
+  float_ops = poly_opset_add(float_ops, POLY_OP_INDEX);
   PolyUPat *load = poly_upat_allow_any_len(poly_upat_op(POLY_OP_LOAD, NULL, 0, "ld"));
   PolyUPat *bitcast_load_src[] = {load};
   PolyUPat *float_src = poly_upat_dtype("x", floats, 8);

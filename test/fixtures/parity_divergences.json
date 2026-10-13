@@ -384,6 +384,18 @@
       "close_when": "The pinned tinygrad reference adopts equivalent bounded CPU tiling and thread admission, or this compiler policy is removed. No allowance changes dynamic-axis splitting, Tensor graphs or values; caller-versus-pool execution remains a C runtime mechanism."
     },
     {
+      "id": "PG-DIV-027",
+      "status": "approved",
+      "stages": ["codegen", "dtype-lowering"],
+      "area": "Upstream float-emulation AFTER backport",
+      "tinygrad": "The v0.14.0 float-decomposition catch-all includes AFTER and casts its storage source, producing an invalid AFTER(CAST(...)) for looped emulated-float accumulators. Upstream commit 6dfca0b79ecfafb4a9f43d34693225c8391e255e (#18278, 2026-09-18) narrows that rule to GroupOp.ALU | {STACK, INDEX}.",
+      "polygrad": "Backports exactly that operator-set change. Storage and ordering nodes are not arithmetic casts. Native supported dtypes and all other lowering rules are unchanged.",
+      "rationale": "Fix fixed-size NOOPT max/min reductions and variable-prefix cached attention on emulated dtypes without weakening graph verification or changing model precision.",
+      "approval": "User 2026-10-13 approved the exact #18278 backport, separate from Qwen3.5, with C/Python/JS regressions and parity checks.",
+      "evidence": ["https://github.com/tinygrad/tinygrad/commit/6dfca0b79ecfafb4a9f43d34693225c8391e255e", "src/codegen/decomp/dtype.c:poly_pm_float_decomp", "test/test_codegen.c:emulated_dtype_looped_max_preserves_accumulator_storage", "py/tests/test_tensor.py:test_emulated_dtype_looped_max", "py/tests/test_tensor.py:test_emulated_bfloat16_symbolic_attention_prefix", "js/test/test_tensor.js", "temp/bf16-after-backport-20261013/upstream.json", "temp/bf16-after-backport-20261013/pin-red.log", "temp/bf16-after-backport-20261013/pin-backport.log"],
+      "close_when": "The pinned reference incorporates 6dfca0b79ecfafb4a9f43d34693225c8391e255e. This allowance does not cover other emulation or reduction-value defects."
+    },
+    {
       "id": "PG-PARITY-001",
       "status": "resolved",
       "stages": ["placement", "realize"],

@@ -365,9 +365,9 @@ TEST(codegen, packed_gemm_function_and_thread_boundaries) {
   PASS();
 }
 
-TEST(codegen, release014_float_value_slices_are_not_storage_views) {
-  /* v0.14.0 pm_float_decomp excludes both LOAD and STACK parents for
-   * INDEX/SHRINK. Value slices must not acquire a storage dtype tag. */
+TEST(codegen, float_value_slices_are_not_storage_views) {
+  /* #18278 leaves SHRINK to inherit its rewritten source dtype. LOAD/STACK
+   * value slices still must not acquire storage tags or a cast around storage. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *values[] = {poly_uop_const_float(ctx, 1.0f), poly_uop_const_float(ctx, 2.0f)};
   for (int i = 0; i < 2; i++)
@@ -381,13 +381,19 @@ TEST(codegen, release014_float_value_slices_are_not_storage_views) {
   for (int i = 0; i < 2; i++) {
     PolyUOp *slice = poly_uop_shrink(ctx, sources[i], (int64_t[][2]){{0, 1}}, 1);
     PolyFloatDecompContext fctx = {.from = POLY_FLOAT16, .to = POLY_FLOAT32};
-    /* The bottom-up walk short-circuits on replacement: one matcher result,
-     * matching the paired upstream pm.rewrite probe before further passes. */
+    /* Match the pinned walk with the upstream hunk: SHRINK no longer matches
+     * the catch-all, so the single pass descends into its value source. */
     PolyUOp *out = poly_graph_walk_rewrite(ctx, slice, NULL, poly_pm_float_decomp(), &fctx, true);
     correct &= out && out->op == POLY_OP_SHRINK && out->tag_arg.kind == POLY_ARG_NONE &&
-               poly_dtype_eq(out->dtype, POLY_FLOAT32) && out->src[0]->op == POLY_OP_CAST &&
-               out->src[0]->src[0] == sources[i] && out->src[1] == slice->src[1] &&
+               poly_dtype_eq(out->dtype, POLY_FLOAT32) && out->src[0]->op == POLY_OP_STACK &&
+               out->src[0]->n_src == 2 && out->src[1] == slice->src[1] &&
                out->src[2] == slice->src[2];
+    for (int j = 0; correct && j < 2; j++) {
+      PolyUOp *lane = out->src[0]->src[j];
+      correct &= poly_dtype_eq(lane->dtype, POLY_FLOAT32) &&
+                 lane->op == (i ? POLY_OP_BITCAST : POLY_OP_CAST);
+      if (!i) correct &= lane->src[0] == values[j];
+    }
   }
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(correct);
@@ -5019,6 +5025,60 @@ TEST(codegen, webgpu_without_shader_f16_emulates_fp8_through_float32) {
   ASSERT_INT_EQ(fp8_nodes, 0);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, emulated_dtype_looped_max_preserves_accumulator_storage) {
+  /* tinygrad #18278: even a four-element max needs a storage AFTER when
+   * NOOPT keeps its reduction loop. Force emulation, including native half. */
+  PolyDType types[] = {POLY_FLOAT16,     POLY_BFLOAT16,    POLY_FP8E4M3, POLY_FP8E5M2,
+                       POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ, POLY_FLOAT32};
+  for (size_t d = 0; d < sizeof(types) / sizeof(*types); d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *input = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *output = poly_test_uop_param(ctx, POLY_FLOAT32, 1, 1, POLY_ADDR_GLOBAL);
+    PolyUOp *range = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_WEAKINT, poly_uop_const_int(ctx, 4),
+        poly_arg_range(0, POLY_AXIS_REDUCE)
+    );
+    PolyUOp *load = poly_uop1(
+        ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop_index(ctx, input, &range, 1), poly_arg_none()
+    );
+    PolyUOp *sources[] = {poly_uop_cast(ctx, load, types[d]), range};
+    PolyUOp *maximum =
+        poly_uop(ctx, POLY_OP_REDUCE, types[d], sources, 2, poly_arg_reduce(POLY_OP_MAX, 0));
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *sink = poly_uop_sink1(
+        ctx,
+        poly_uop_store(
+            ctx, poly_uop_index(ctx, output, &zero, 1), poly_uop_cast(ctx, maximum, POLY_FLOAT32)
+        )
+    );
+    PolyRendererCaps caps = poly_c_renderer_caps();
+    caps.supports_float16 = caps.supports_bfloat16 = false;
+    PolyUOp *lowered = poly_full_rewrite_to_sink_ex(
+        ctx, sink, (PolyRewriteOpts){.optimize = false, .caps = caps, .device = POLY_DEVICE_CPU}
+    );
+    int n = 0;
+    PolyUOp **linear = lowered ? poly_do_linearize(ctx, lowered, &n) : NULL;
+    char *code = linear ? poly_render_c(ctx, linear, n, "emulated_max") : NULL;
+    PolyProgram *program = code ? poly_compile_c(code, "emulated_max") : NULL;
+    bool ok = program && count_reg_storage_ops(linear, n) == 1 &&
+              count_lin_ops(linear, n, POLY_OP_END) == 1;
+    if (program) {
+      float input_values[] = {0, 1, 2, 3, 4, 5, 6, 7}, result = -1;
+      for (int row = 0; row < 2; row++) {
+        void *args[] = {input_values + row * 4, &result};
+        poly_program_call(program, args, 2);
+        ok &= result == (float)(row * 4 + 3);
+      }
+      poly_program_destroy(program);
+    }
+    free(code);
+    free(linear);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(ok);
+  }
   PASS();
 }
 

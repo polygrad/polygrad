@@ -2,6 +2,8 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Backport tinygrad #18278 to preserve accumulator storage in emulated-float
+  reductions, fixing invalid graphs in BF16 attention and looped max/min.
 - Reduce repeated-call collection overhead when other large models stay loaded.
 - Import regular ONNX ScatterND writes without expanding index arrays or storing
   lookup maps; bound host evaluation for irregular computed maps.
