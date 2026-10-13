@@ -205,8 +205,21 @@ def test_tabm_predictions_gradients_and_updates_match_torch(loss, optimizer, dev
             model.dispose()
 
 
-@pytest.mark.parametrize('option', ['dropout', 'num_emb_type', 'n_ensembles'])
+@pytest.mark.parametrize('option', ['num_emb_type', 'n_ensembles'])
 def test_tabm_rejects_unknown_options(option):
     with pg.create(device='CPU') as rt:
         with pytest.raises(ValueError, match=option):
             rt.models.TabM(dict(layers=[2, 3, 1], **{option: .5}))
+
+
+@pytest.mark.parametrize('dropout', [-.1, 1.1, 'invalid'])
+def test_tabm_rejects_invalid_dropout(dropout):
+    with pg.create(device='CPU') as rt:
+        with pytest.raises(ValueError, match='dropout'):
+            rt.models.TabM(dict(layers=[2, 3, 1], dropout=dropout))
+
+
+def test_tabm_accepts_dropout():
+    with pg.create(device='CPU') as rt:
+        model = rt.models.TabM(dict(layers=[2, 3, 1], dropout=.5))
+        model.dispose()
