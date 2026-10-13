@@ -2,8 +2,129 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Import safetensors incrementally from original files, uploading each tensor
+  directly to device storage without staging an entire checkpoint in Wasm.
+
+- Backport upstream fixes for X86 narrow indices and NaN/mixed-width selections,
+  integer bitwise simplification, native half-cast rounding and padded constants.
+- Fix infinite log reductions, large-input activation values and gradients,
+  low-precision max-gradient tie counts and integer-input variance.
+- Preserve writes through strided and reshape views; fix repeated-axis einsum
+  output ordering and aligned interpolation to a single element.
 - Backport tinygrad #18278 to preserve accumulator storage in emulated-float
   reductions, fixing invalid graphs in BF16 attention and looped max/min.
+- Add Qwen3.5 text-backbone prefill with separate full/linear attention masks
+  and dtype-preserving checkpoint weights. Add composite text/image import,
+  tied/untied language heads, packed vision and cached on-device sampling.
+  Image grids are specialized explicitly; preprocessing stays outside the core.
+- Add public Python/JavaScript composition examples for projected, normalized
+  token embeddings with document-only filtering, validated against Perplexity's
+  original Sentence Transformers pipeline.
+- Share finite FP8 bounds across reductions, sort/pool padding and symbolic
+  queries, fixing incorrect negative-value sorting and padded pooling.
+- Add shared gated-delta attention with chunked prefill and explicit recurrent
+  state, exposed through Python and JavaScript NN APIs.
+- Require explicit binding exposure and pointer rules, checked against C
+  declarations, without changing existing generated frontend adapters.
+- Generate Wasm device-call signatures from C declarations and reviewed wait
+  rules; preserve argument cleanup on asynchronous failures. Avoid rebuilding
+  native and Wasm artifacts when regenerated bindings are unchanged.
+- Generate remaining Python C signatures and native adapter registrations from
+  the shared binding rules. Regenerate glue during package preparation, not
+  installation; verify isolated source-package, wheel and npm installs.
+- Clarify model configuration validation and share error formatting, reducing
+  static-analysis false alarms without suppressing checks.
+- Report a dimension error for scalar concatenation in Python and JavaScript.
+- Fix gradient reduction when a bounded batch is initially bound to one.
+- Improve native CPU tiling and multithreading for bounded batches. Avoid
+  worker wake-ups for small runtime compute workloads.
+
+- Respect process CPU affinity and container CPU quotas when choosing default
+  worker counts for the CPU and X86 backends.
+- Support compiled training dropout with fresh, reproducible masks for actual
+  partial batches; checkpoint its random state and keep inference dropout-free.
+- Add state-preserving Model optimizer groups for per-parameter learning-rate
+  and weight-decay schedules, shared by Python and JavaScript.
+  Loaded grouped checkpoints reject training until their groups are reapplied.
+- Add optional linear/ReLU and piecewise-linear numerical embeddings to TabM.
+- Preserve symbolic extents when concatenating Tensors.
+- Fix WebGPU readback of float32 slices with nonzero buffer offsets.
+- Validate padding and pooling arrays consistently across JavaScript backends;
+  support 64-dimensional padding and preserve large int64 padding values.
+- Generate shared array and owned-result bindings, including cleanup when
+  Wasm argument allocation or a Tensor-pair call fails.
+- Preserve long identifiers and expressions in generated CPU and GPU kernels;
+  reject missing operands instead of emitting fabricated values.
+- Share reduction-axis bindings across frontends, support all 64 dimensions in
+  native JavaScript reductions, and reject fractional or wrapped axis counts.
+- Reject lossy integer arguments consistently in generated JavaScript bindings.
+- Synchronize shared compiler-setting access across native threads.
+- Generate common Python, native JavaScript and Wasm bindings from C declarations.
+  Share gradient-target and custom-gradient discovery in C, and fix the native
+  graph-level logsumexp return type to match Wasm.
+- Share variance construction in C using the current reference's accumulator
+  and correction rules. Integer variance values change; excessive correction
+  no longer silently uses a divisor of one in the C API.
+- Reject floating-point bitwise operands in the C Tensor API and unsupported
+  interpreter operations instead of returning fabricated values.
+- Include dependencies and source links in graph diagnostics, not just the root.
+- Require complete, correctly named parameter checkpoints in weight imports.
+  Missing or unknown names fail before weights change; use named buffer writes
+  for partial updates.
+- Fix C activation and rounding scalar promotion: preserve large integers in
+  `relu`, `floor` and `ceil`, and accept integer inputs in `leaky_relu`, `mish`
+  and `hardswish`. Python and JavaScript now use these shared implementations.
+- Fix C ELU promotion for integer inputs and JavaScript softplus/logaddexp
+  scalar and broadcast construction to match the reference.
+- Consolidate activation, comparison, clamp, triangular, repeat and layernorm
+  graph construction in C for Python and JavaScript. Preserve scalar/Tensor
+  parameters, wide integer values and optional bounds; add delegation checks.
+- Route Python and JavaScript concatenation through the shared implementation,
+  preserving the reference graph and avoiding redundant skip-tensor storage.
+- Reject unsupported or misspelled TabM options instead of silently ignoring them.
+- Add a Whisper Model factory and HF weight import, with internal self/cross
+  attention caches, bounded prefill, decoding and fused token sampling.
+  Audio preprocessing and transcription policy remain external.
+- Fix assigning realized data to an unrealized Tensor expression, preserving
+  independent source and destination storage.
+- Use smaller WebGPU matrix-vector tiles for small outputs with sufficiently
+  long reductions; retain existing schedules for large outputs and short reductions.
+
+- Correct TabM batching, per-member training losses, independent output heads
+  and member initialization. Classification averages probabilities, not logits.
+  Newly constructed TabM models have different parameter names/shapes and seeded
+  values; existing saved graphs retain their original behavior.
+- Support partial batches and multi-output pinball loss in MLP, NAM and TabM.
+- Change a Model's learning rate without rebuilding its training graph or
+  resetting optimizer moments. Place training diagnostics and optimizer storage
+  with the model rather than the runtime's default device.
+
+- Compose existing Models inside Python/JavaScript author functions without
+  executing intermediate calls; share captured weights across repeated calls.
+  Initially supports static value entrypoints with explicit state inputs/outputs.
+  Preserve child placement when the Runtime's default device changes.
+
+- Share on-device Gumbel sampling between Tensor programs and transformer
+  models, with optional top-k threshold filtering and captured RNG state.
+- Avoid sorting small vocabularies during sampling; select block candidates
+  for large vocabularies while preserving threshold ties and seeded results.
+- Compare WebGPU tuned kernels under queued load instead of idle round trips;
+  calibrate search samples and rotate scratch storage to limit cache bias.
+  Reject failed final candidates rather than caching them.
+
+- Preserve declared output shapes when composing imported Models through the C API.
+
+- Compare tuned kernels with the default schedule at full size before caching
+  the selection; allow opting out through BEAM_COMPARE.
+
+- Reject invalid WebGPU pipelines before caching or dispatching them, and use
+  supported workgroup limits when testing optimized kernels.
+- Batch WebGPU dispatches while preserving upload/readback ordering and report
+  command validation failures before returning Model results.
+  Submit long batches incrementally so the GPU can execute while the host
+  encodes subsequent work; retain validation across all chunks.
+- Avoid preliminary Model input copies when realized Tensors cannot alias any
+  input destination; preserve snapshots for conflicting inputs and views.
 - Collect unused buffer storage without repeatedly scanning retained models;
   preserve shared views and verify incremental ownership in debug checks.
 - Import regular ONNX ScatterND writes without expanding computed indices or

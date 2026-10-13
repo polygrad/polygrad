@@ -2,8 +2,78 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Read local safetensors checkpoints one tensor at a time; add `load_hf_sources`
+  for caller-owned seekable files and upload directly to device storage.
+
+- Fix X86 index crashes and incorrect selections, padded constants and native
+  half-cast rounding using upstream corrections shared with JavaScript and C.
+- Fix infinite log reductions, activation edge cases, max-gradient tie counts
+  and integer variance. Preserve view assignments and correct repeated-axis
+  einsum and single-element aligned interpolation.
 - Backport tinygrad #18278 to preserve accumulator storage in emulated-float
   reductions, fixing invalid graphs in BF16 attention and looped max/min.
+- Add Qwen3.5 text-backbone prefill and preserve F32/F16/BF16 checkpoint weights.
+- Add composite Qwen3.5 text/image import, language heads and cached on-device
+  sampling, including packed vision with explicit image-grid specialization.
+- Add a public composition example for projected token embeddings and query/
+  document masking, validated against Perplexity's Sentence Transformers pipeline.
+- Fix negative-value sorting and padded pooling in finite-only FP8 formats.
+- Add `nn.gated_delta_rule` for causal chunked attention with explicit state.
+- Restore `IndexError` when concatenating scalar tensors.
+- Fix training captured at batch size one when later batches can be larger.
+- Improve native CPU tiling and multithreading for bounded batches, avoiding
+  worker wake-ups for small runtime batches.
+
+- Respect process CPU affinity and container CPU quotas for CPU and X86 workers.
+- Add compiled partial-batch dropout and optional numerical embeddings to TabM.
+  Saved models preserve training random state; inference shares parameters
+  without dropout.
+- Add `Model.set_optimizer_groups` for learning-rate and weight-decay schedules
+  that preserve optimizer moments.
+  Loaded grouped checkpoints reject training until their groups are reapplied.
+- Preserve symbolic extents when concatenating Tensors.
+- Generate array and multi-output layer bindings from the shared C declarations.
+- Preserve long identifiers and expressions in generated CPU and GPU kernels;
+  reject missing operands instead of emitting fabricated values.
+- Synchronize shared compiler-setting access across native threads.
+- Generate common bindings from C declarations; use shared C gradient discovery
+  and variance. Integer variance values now follow the reference accumulator rules.
+- Reject incomplete or misspelled weight checkpoints before changing parameters.
+  Use `write_buffer` for partial updates.
+- Reject float bitwise operands and unsupported interpreter operations in C.
+- Use shared C implementations for `relu`, `floor`, `ceil`, `leaky_relu`,
+  `mish` and `hardswish`, with integer precision and scalar-promotion tests.
+- Share remaining activation, comparison, clamp, triangular, repeat and layernorm
+  construction with the C core, including optional and Tensor parameters.
+- Use shared Tensor concatenation so equal-width inputs retain the reference
+  graph instead of creating redundant intermediate storage.
+- Reject unsupported or misspelled TabM options instead of silently ignoring them.
+- Add Whisper HF import and a Model factory with internal attention caches,
+  prefill, decode and on-device sampling. Audio preprocessing remains external.
+- Fix assigning realized data to an unrealized Tensor expression without
+  aliasing the source. Adjust WebGPU matrix-vector tiles for small outputs;
+  large outputs and short reductions retain their existing schedules.
+
+- Correct TabM batches, member losses, initialization and independent output
+  heads; classification averages probabilities. New TabM parameter names/shapes
+  and seeded values change; saved graphs retain their original behavior.
+- MLP, NAM and TabM support partial batches and multi-quantile pinball loss.
+- Add `Model.set_learning_rate(lr)` without resetting optimizer moments or
+  rebuilding the training graph. Training storage follows Model placement.
+
+- Inline existing Models during authoring capture, sharing weights across
+  repeated calls and retaining Tensor slicing/sampling in the combined graph.
+  Preserve child placement when the runtime's default device changes.
+
+- Add `Tensor.sample_logits(temperature=1, top_k=0, keepdim=False)` for
+  on-device sampling, including Model RNG capture and checkpoint resume.
+  Top-k keeps threshold ties, avoids sorting small vocabularies and uses block
+  candidates for large vocabularies.
+
+- Compare tuned kernels with the default schedule before caching the selection;
+  `Context(BEAM_COMPARE=0)` disables the comparison.
+
+- Avoid redundant snapshots when passing independent Tensors to a Model.
 - Reduce repeated-call collection overhead when other large models stay loaded.
 - Import regular ONNX ScatterND writes without expanding index arrays or storing
   lookup maps; bound host evaluation for irregular computed maps.
