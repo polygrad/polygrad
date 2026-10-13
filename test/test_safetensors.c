@@ -4,10 +4,55 @@
 
 #include "test_harness.h"
 #include "../src/safetensors.h"
+#include "../src/models/hf_loader.h"
 #include <string.h>
 #include <stdlib.h>
 
 /* Round-trip: single tensor */
+
+TEST(safetensors, index_large_file_without_payload) {
+  const char *json =
+      "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[3000000000,3000000004]}}";
+  uint8_t header[256] = {0};
+  header[0] = (uint8_t)strlen(json);
+  memcpy(header + 8, json, strlen(json));
+  int n = -1;
+  uint64_t *offsets = NULL;
+  int64_t size = 8 + (int64_t)strlen(json);
+  PolySafetensorViewEx *views =
+      poly_safetensors_index(header, size, size + 3000000004LL, &n, &offsets);
+  ASSERT_TRUE(views != NULL);
+  ASSERT_EQ(n, 1);
+  ASSERT_EQ(views[0].raw_data, NULL);
+  ASSERT_EQ(offsets[0], (uint64_t)size + 3000000000ULL);
+  free(views[0].name);
+  free(views);
+  free(offsets);
+  ASSERT_EQ(poly_safetensors_index(header, size, size + 3000000003LL, &n, &offsets), NULL);
+  ASSERT_EQ(n, 0);
+  ASSERT_EQ(offsets, NULL);
+  ASSERT_EQ(poly_safetensors_index(header, size - 1, size + 3000000004LL, &n, &offsets), NULL);
+  PASS();
+}
+
+TEST(safetensors, incremental_import_abort_states) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_TRUE(ctx != NULL);
+  PolyHfImport *s = poly_hf_import_new(
+      ctx,
+      "{\"model_type\":\"gpt2\",\"n_embd\":16,\"n_head\":2,\"n_layer\":1,\"vocab_size\":32,\"n_"
+      "positions\":4}",
+      1, 4, POLY_DEVICE_INTERP
+  );
+  ASSERT_TRUE(s != NULL);
+  ASSERT_EQ(poly_hf_import_request(s), NULL);
+  ASSERT_EQ(poly_hf_import_finish(s), NULL);
+  ASSERT_EQ(poly_hf_import_build(s), -1);
+  poly_hf_import_free(s);
+  poly_hf_import_free(NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(safetensors, f32_byte_count_cannot_wrap_to_empty_payload) {
   const char *header =

@@ -18,6 +18,27 @@ extern "C" {
 
 typedef struct PolyBindIndex PolyBindIndex;
 
+/* A model adapter records exactly the same binds/checks before payload delivery.
+ * The plan borrows decoded metadata until its unpublished Model is completed. */
+typedef struct PolyImportPlan {
+  void *user;
+  int (*bind)(void *, const char *, const PolyDecodedTensor *, int, int);
+  int (*equal)(void *, const PolyDecodedTensor *, const PolyDecodedTensor *, bool);
+} PolyImportPlan;
+
+#if defined(__GNUC__)
+__attribute__((visibility("hidden")))
+#endif
+PolyBindIndex *
+poly_bind_index_create_planned(PolyModel *inst, PolyImportPlan *plan);
+
+#if defined(__GNUC__)
+__attribute__((visibility("hidden")))
+#endif
+int poly_import_tensors_equal(
+    PolyBindIndex *idx, const PolyDecodedTensor *a, const PolyDecodedTensor *b, bool as_f32
+);
+
 PolyBindIndex *poly_bind_index_create(PolyModel *inst);
 void poly_bind_index_destroy(PolyBindIndex *idx);
 /* Buffer index, or -1 if absent. Used for duplicate/role validation at import. */

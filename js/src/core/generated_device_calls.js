@@ -8,6 +8,14 @@ module.exports = Module => {
       if (args.length !== 4) throw new TypeError('poly_buffer_read: wrong argument count')
       return Module.ccall('poly_buffer_read', "number", ["number", "number", "number", "number"], args, options)
     },
+    poly_hf_import_build: (args, options) => {
+      if (args.length !== 1) throw new TypeError('poly_hf_import_build: wrong argument count')
+      return Module.ccall('poly_hf_import_build', "number", ["number"], args, options)
+    },
+    poly_hf_import_feed: (args, options) => {
+      if (args.length !== 3) throw new TypeError('poly_hf_import_feed: wrong argument count')
+      return Module.ccall('poly_hf_import_feed', "number", ["number", "number", "number"], args, options)
+    },
     poly_jit_end_capture: (args, options) => {
       if (args.length !== 3) throw new TypeError('poly_jit_end_capture: wrong argument count')
       return Module.ccall('poly_jit_end_capture', "number", ["number", "number", "number"], args, options)

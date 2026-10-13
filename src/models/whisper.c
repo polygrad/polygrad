@@ -407,7 +407,7 @@ PolyModel *model_whisper_from_hf_decoded(
   }
   int count = poly_model_buf_count(m);
   bool *seen = calloc((size_t)count, sizeof(bool));
-  PolyBindIndex *index = poly_bind_index_create(m);
+  PolyBindIndex *index = poly_bind_index_create_planned(m, opts->plan);
   if (!seen || !index) goto fail;
   const PolyDecodedTensor *embedding = NULL;
   for (int i = 0; i < hf->n_tensors; i++)
@@ -426,7 +426,7 @@ PolyModel *model_whisper_from_hf_decoded(
           t->dtype != embedding->dtype || t->numel != embedding->numel ||
           t->shape[0] != embedding->shape[0] || t->shape[1] != embedding->shape[1] ||
           (uint64_t)t->numel > SIZE_MAX / width ||
-          memcmp(t->data, embedding->data, (size_t)t->numel * width)) {
+          !poly_import_tensors_equal(index, t, embedding, false)) {
         poly_import_error_set(
             POLY_IMPORT_ERR_WEIGHT_MISMATCH,
             "Whisper proj_out.weight must match tied decoder embeddings"

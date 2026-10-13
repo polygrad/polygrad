@@ -512,23 +512,26 @@ static int parse_safetensor_dtype(const char *s, PolySafetensorDType *out) {
   return -1;
 }
 
-PolySafetensorViewEx *poly_safetensors_decode_ex(
+static PolySafetensorViewEx *safetensors_decode_index(
     const uint8_t *data,
+    int64_t available,
     int64_t len,
     int *n_out,
-    char **metadata_out
+    char **metadata_out,
+    uint64_t **offsets_out
 ) {
   if (!n_out) return NULL;
   *n_out = 0;
   if (metadata_out) *metadata_out = NULL;
 
-  if (!data || len < 8) {
+  if (offsets_out) *offsets_out = NULL;
+  if (!data || len < 8 || available < 8 || available > len) {
     fprintf(stderr, "poly_safetensors_decode_ex: data too short\n");
     return NULL;
   }
 
   uint64_t header_size = read_le64(data);
-  if (header_size > (uint64_t)len - 8 || header_size >= SIZE_MAX) {
+  if (header_size > (uint64_t)available - 8 || header_size >= SIZE_MAX) {
     fprintf(
         stderr,
         "poly_safetensors_decode_ex: header_size %" PRIu64 " exceeds data length %" PRId64 "\n",
@@ -574,7 +577,9 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   uint64_t data_region_len = (uint64_t)len - 8 - header_size;
 
   char *metadata = NULL;
+  uint64_t *offsets = offsets_out ? calloc(count ? (size_t)count : 1, sizeof(*offsets)) : NULL;
   int vi = 0;
+  if (offsets_out && !offsets) goto fail_ex;
   cJSON_ArrayForEach(item, root) {
     if (strcmp(item->string, "__metadata__") == 0) {
       if (metadata_out) {
@@ -647,13 +652,17 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
 
     views[vi].name = strdup(item->string);
     if (!views[vi].name) goto fail_ex;
-    views[vi].raw_data = data_region + start;
+    if (offsets)
+      offsets[vi] = 8 + header_size + start;
+    else
+      views[vi].raw_data = data_region + start;
     vi++;
   }
 
   cJSON_Delete(root);
   *n_out = count;
   if (metadata_out) *metadata_out = metadata;
+  if (offsets_out) *offsets_out = offsets;
   return views;
 
 fail_root_ex:
@@ -661,12 +670,33 @@ fail_root_ex:
   return NULL;
 
 fail_ex:
+  free(offsets);
   free(metadata);
   for (int i = 0; i < vi; i++)
     free(views[i].name);
   free(views);
   cJSON_Delete(root);
   return NULL;
+}
+
+PolySafetensorViewEx *poly_safetensors_decode_ex(
+    const uint8_t *data,
+    int64_t len,
+    int *n_out,
+    char **metadata_out
+) {
+  return safetensors_decode_index(data, len, len, n_out, metadata_out, NULL);
+}
+
+PolySafetensorViewEx *poly_safetensors_index(
+    const uint8_t *header,
+    int64_t header_len,
+    int64_t file_len,
+    int *n_out,
+    uint64_t **offsets_out
+) {
+  if (!offsets_out) return NULL;
+  return safetensors_decode_index(header, header_len, file_len, n_out, NULL, offsets_out);
 }
 
 /* F16/BF16 to F32 conversion */

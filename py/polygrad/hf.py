@@ -19,6 +19,7 @@ import ctypes
 import json
 import os
 import pathlib
+from contextlib import ExitStack
 import numpy as np
 from . import _ffi
 from .device import _device_id
@@ -55,12 +56,65 @@ def load_hf(model_path, max_batch=1, max_seq_len=0, device=None, *, runtime=None
         plan = plan_hf(names, (model_path / plan['index']).read_text(encoding='utf-8'))
     weight_files = [model_path / name for name in plan['files']]
 
-    # Read all weight files into memory
+    if plan['format'] == 'safetensors':
+        with ExitStack() as stack:
+            sources = [stack.enter_context(wf.open('rb')) for wf in weight_files]
+            return load_hf_sources(config_bytes, sources, max_batch, max_seq_len, device, runtime=runtime)
+
+    # Restricted PyTorch ZIP import retains its existing whole-file path.
     weight_data = []
     for wf in weight_files:
         weight_data.append(wf.read_bytes())
 
     return _load_from_bytes(config_bytes, weight_data, max_batch, max_seq_len, device, runtime)
+
+
+def load_hf_sources(config_json, sources, max_batch=1, max_seq_len=0, device=None, *, runtime=None):
+    """Import safetensors from immutable seekable binary files, one tensor at a time.
+
+    Files stay caller-owned. Conversion may need tensor-sized scratch storage;
+    device weights are uploaded without staging the entire checkpoint.
+    """
+    config = config_json.encode('utf-8') if isinstance(config_json, str) else bytes(config_json)
+    sources = tuple(sources)
+    if b'\0' in config:
+        raise ValueError('checkpoint config contains NUL')
+    lib, ctx = _get_lib(), _import_context(runtime)
+    session = lib.poly_hf_import_new(ctx, config, max_batch, max_seq_len,
+                                     _device_id(device) if device is not None else 0)
+
+    def check(ok):
+        if not ok:
+            detail = lib.poly_import_last_error_message()
+            raise RuntimeError('HF import failed: ' + (detail.decode('utf-8', 'replace') if detail else 'unknown error'))
+
+    def read(source, offset, length):
+        source.seek(offset)
+        data = source.read(length)
+        if len(data) != length:
+            raise ValueError('short safetensors range')
+        return data
+
+    check(session)
+    try:
+        for source in sources:
+            size = source.seek(0, os.SEEK_END)
+            prefix = read(source, 0, 8)
+            length = int.from_bytes(prefix, 'little')
+            if length > 100_000_000 or length > size - 8:
+                raise ValueError('invalid safetensors header size')
+            header = prefix + read(source, 8, length)
+            check(lib.poly_hf_import_add_file(session, ctypes.cast(ctypes.c_char_p(header), _u8p), len(header), size) == 0)
+        check(lib.poly_hf_import_build(session) == 0)
+        while (request := lib.poly_hf_import_request(session)):
+            item = json.loads(request)
+            data = read(sources[item['file']], item['offset'], item['length'])
+            check(lib.poly_hf_import_feed(session, ctypes.cast(ctypes.c_char_p(data), _u8p), len(data)) == 0)
+        model = lib.poly_hf_import_finish(session)
+        check(model)
+        return Model._from_handle(model, ctx)
+    finally:
+        lib.poly_hf_import_free(session)
 
 
 def load_hf_bytes(config_json, weight_bytes_list, max_batch=1, max_seq_len=0, device=None, *, runtime=None):

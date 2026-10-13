@@ -520,7 +520,7 @@ PolyModel *model_embeddinggemma2_from_hf_decoded(
   }
   int n = poly_model_buf_count(m);
   bool *seen = calloc((size_t)n, sizeof(bool));
-  PolyBindIndex *index = poly_bind_index_create(m);
+  PolyBindIndex *index = poly_bind_index_create_planned(m, opts->plan);
   if (!seen || !index) goto fail;
   for (int i = 0; i < hf->n_tensors; i++) {
     const PolyDecodedTensor *t = &hf->tensors[i];

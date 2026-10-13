@@ -3508,7 +3508,7 @@ int poly_model_require_weights(PolyModel *inst) {
   return 0;
 }
 
-static bool model_weights_ready(PolyModel *inst) {
+bool model_weights_ready(PolyModel *inst) {
   if (!inst) return false;
   if (!inst->n_uninitialized) return true;
   for (int i = 0; i < inst->n_bufs; i++)
@@ -3584,6 +3584,16 @@ int poly_model_readback_buf(PolyModel *inst, int i, void *host_dst, size_t dst_l
 }
 
 int poly_model_upload_buf(PolyModel *inst, int i, const void *host_src, size_t src_len) {
+  if (!inst || i < 0 || i >= inst->n_bufs || !host_src ||
+      src_len > named_buf_nbytes(&inst->bufs[i]))
+    return -1;
+  PolyUOp *buffer = inst->bufs[i].buffer;
+  PolyDevice device = poly_uop_device(buffer);
+  /* Allocate the placed destination first so an upload does not create a
+   * checkpoint-sized retained host mirror before the first device execution. */
+  if (!poly_device_is_host_addressable(device) &&
+      poly_buffer_ensure_device_allocated(inst->ctx, buffer, device))
+    return -1;
   return poly_model_write_buf(inst, i, host_src, src_len);
 }
 

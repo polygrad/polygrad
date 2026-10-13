@@ -4998,6 +4998,88 @@ static napi_value napi_poly_hf_plan(napi_env env, napi_callback_info info) {
   return result;
 }
 
+static napi_value napi_poly_hf_import_new(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char *config = read_utf8_arg(env, argv[1], NULL);
+  if (!config) return NULL;
+  int32_t batch, length, device;
+  napi_status status = napi_get_value_int32(env, argv[2], &batch);
+  if (status == napi_ok) status = napi_get_value_int32(env, argv[3], &length);
+  if (status == napi_ok) status = napi_get_value_int32(env, argv[4], &device);
+  if (status != napi_ok) {
+    free(config);
+    NAPI_CALL(env, status);
+  }
+  PolyHfImport *s = poly_hf_import_new(get_external(env, argv[0]), config, batch, length, device);
+  free(config);
+  return make_external(env, s);
+}
+
+static napi_value napi_poly_hf_import_add_file(napi_env env, napi_callback_info info) {
+  napi_value argv[3], result;
+  size_t argc = 3, length;
+  void *data;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[1], &data, &length));
+  int64_t size;
+  NAPI_CALL(env, napi_get_value_int64(env, argv[2], &size));
+  int rc = length > INT_MAX
+               ? -1
+               : poly_hf_import_add_file(get_external(env, argv[0]), data, (int)length, size);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_hf_import_feed(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2, length;
+  void *data;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[1], &data, &length));
+  int rc = poly_hf_import_feed(get_external(env, argv[0]), data, length);
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_hf_import_build(napi_env env, napi_callback_info info) {
+  napi_value arg, result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, &arg, NULL, NULL));
+  NAPI_CALL(env, napi_create_int32(env, poly_hf_import_build(get_external(env, arg)), &result));
+  return result;
+}
+
+static napi_value napi_poly_hf_import_request(napi_env env, napi_callback_info info) {
+  napi_value arg, result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, &arg, NULL, NULL));
+  const char *request = poly_hf_import_request(get_external(env, arg));
+  if (request) {
+    NAPI_CALL(env, napi_create_string_utf8(env, request, NAPI_AUTO_LENGTH, &result));
+  } else {
+    NAPI_CALL(env, napi_get_null(env, &result));
+  }
+  return result;
+}
+
+static napi_value napi_poly_hf_import_finish(napi_env env, napi_callback_info info) {
+  napi_value arg;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, &arg, NULL, NULL));
+  return make_external(env, poly_hf_import_finish(get_external(env, arg)));
+}
+
+static napi_value napi_poly_hf_import_free(napi_env env, napi_callback_info info) {
+  napi_value arg, result;
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, &arg, NULL, NULL));
+  poly_hf_import_free(get_external(env, arg));
+  NAPI_CALL(env, napi_get_undefined(env, &result));
+  return result;
+}
+
 static napi_value napi_poly_hf_load_into(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;

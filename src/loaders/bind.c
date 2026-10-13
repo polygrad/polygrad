@@ -38,7 +38,41 @@ struct PolyBindIndex {
   PolyModel *inst;
   BindEntry *entries;
   int capacity;
+  PolyImportPlan *plan;
 };
+
+PolyBindIndex *poly_bind_index_create_planned(PolyModel *inst, PolyImportPlan *plan) {
+  PolyBindIndex *idx = poly_bind_index_create(inst);
+  if (idx) idx->plan = plan;
+  return idx;
+}
+
+int poly_import_tensors_equal(
+    PolyBindIndex *idx,
+    const PolyDecodedTensor *a,
+    const PolyDecodedTensor *b,
+    bool as_f32
+) {
+  if (!a || !b || a->ndim < 0 || a->ndim > 8 || a->ndim != b->ndim || a->numel < 0 ||
+      a->numel != b->numel || memcmp(a->shape, b->shape, a->ndim * sizeof(int64_t)))
+    return 0;
+  if (idx && idx->plan) return idx->plan->equal(idx->plan->user, a, b, as_f32);
+  if (!a->data || !b->data) return 0;
+  if (as_f32) {
+    float *x = poly_decoded_tensor_to_f32(a), *y = poly_decoded_tensor_to_f32(b);
+    bool equal = x && y && (uint64_t)a->numel <= SIZE_MAX / sizeof(float) &&
+                 !memcmp(x, y, (size_t)a->numel * sizeof(float));
+    free(x);
+    free(y);
+    return equal;
+  }
+  int width = a->dtype == POLY_DECODED_F32                                    ? 4
+              : a->dtype == POLY_DECODED_F64                                  ? 8
+              : a->dtype == POLY_DECODED_F16 || a->dtype == POLY_DECODED_BF16 ? 2
+                                                                              : 0;
+  return width && a->dtype == b->dtype && (uint64_t)a->numel <= SIZE_MAX / (size_t)width &&
+         !memcmp(a->data, b->data, (size_t)a->numel * (size_t)width);
+}
 
 static unsigned int hash_name(const char *s, int cap) {
   unsigned int h = 2166136261u;
@@ -177,6 +211,11 @@ int poly_import_bind_tensor(
     return -1;
   }
   if (!tensor) return -1;
+  if (idx->plan) {
+    int rc = idx->plan->bind(idx->plan->user, name, tensor, transpose_2d, crop_axis);
+    if (rc == 1) entry->bound = true;
+    return rc;
+  }
   PolyDType dtype;
   if (!transpose_2d && crop_axis == -1 && weight_dtype(tensor->dtype, &dtype) &&
       poly_model_buf_dtype_id(idx->inst, entry->buf_idx) ==
@@ -197,7 +236,7 @@ int poly_import_bind_tensor(
     }
     /* BF16 range is preserved; unsupported arithmetic is decomposed by the
      * backend, never by silently narrowing stored weights to F16. */
-    if (bytes && poly_model_write_buf(idx->inst, entry->buf_idx, tensor->data, bytes)) {
+    if (bytes && poly_model_upload_buf(idx->inst, entry->buf_idx, tensor->data, bytes)) {
       poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", name);
       return -1;
     }
@@ -294,7 +333,7 @@ int poly_import_copy_named_tensor(
     for (int64_t r = 0; r < R; r++)
       for (int64_t c = 0; c < C; c++)
         dst_data[c * R + r] = src_data[r * C + c];
-    int rc = dst_bytes ? poly_model_write_buf(idx->inst, bi, dst_data, dst_bytes) : 0;
+    int rc = dst_bytes ? poly_model_upload_buf(idx->inst, bi, dst_data, dst_bytes) : 0;
     free(dst_data);
     if (rc == 0) return 1;
     poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", dst_name);
@@ -303,7 +342,7 @@ int poly_import_copy_named_tensor(
 
   if (dst_numel <= src_numel) {
     /* Only a validated leading-axis crop is contiguous in source storage. */
-    if (!dst_bytes || poly_model_write_buf(idx->inst, bi, src_data, dst_bytes) == 0) return 1;
+    if (!dst_bytes || poly_model_upload_buf(idx->inst, bi, src_data, dst_bytes) == 0) return 1;
     poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", dst_name);
     return -1;
   }

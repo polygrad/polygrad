@@ -157,6 +157,12 @@ typedef struct {
  * export. Reading a raw pointer does not initialize state. */
 int poly_model_require_weights(PolyModel *inst);
 
+/* Internal import publication check; reports the missing weight on the Model. */
+#if defined(__GNUC__)
+__attribute__((visibility("hidden")))
+#endif
+bool model_weights_ready(PolyModel *inst);
+
 PolyStatus poly_model_scope_push(PolyModel *inst, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 PolyStatus poly_model_scope_pop(PolyModel *inst);

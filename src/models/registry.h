@@ -6,11 +6,14 @@
 #include "../loaders/gguf_decode.h"
 #include "../../vendor/cjson/cJSON.h"
 
+typedef struct PolyImportPlan PolyImportPlan;
+
 typedef struct {
   PolyCtx *ctx; /* NULL requests a standalone owning Model. */
   int max_batch, max_seq_len;
   int cache_capacity, prefill_chunk_size;
   PolyDevice device;
+  PolyImportPlan *plan; /* Optional deferred weight delivery; library-internal. */
 } PolyGenericImportOpts;
 
 /* One static descriptor for config construction and decoded imports. A missing

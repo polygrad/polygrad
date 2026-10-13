@@ -326,6 +326,102 @@ def llama_weights(case):
             for name, shape in case['weights'].items()}
 
 
+@pytest.mark.parametrize('device', ['CPU', 'INTERP', 'CUDA'])
+@pytest.mark.parametrize('case', LLAMA_CASES, ids=['llama2-gqa', 'llama2-mha', 'llama3', 'llama32-tied'])
+def test_incremental_hf_matches_whole_file(case, device):
+    import io
+    import polygrad as pg
+    from polygrad.hf import load_hf_sources
+    weights = llama_weights(case)
+    if case['config'].get('tie_word_embeddings'):
+        weights['lm_head.weight'] = weights['model.embed_tokens.weight'].copy()
+    shards = [make_safetensors({name: ('F32', data.shape, data)}) for name, data in weights.items()]
+    reads = []
+    class Source(io.BytesIO):
+        def read(self, n=-1):
+            assert n >= 0
+            reads.append(n)
+            return super().read(n)
+    with pg.create(device=device) as rt, ExitStack() as cleanup:
+        config = json.dumps({**case['config'], 'model_type': 'llama'})
+        whole = load_hf_bytes(config, shards, max_seq_len=5, device=device, runtime=rt)
+        cleanup.callback(whole.dispose)
+        streamed = load_hf_sources(config, [Source(s) for s in shards], max_seq_len=5, device=device, runtime=rt)
+        cleanup.callback(streamed.dispose)
+        assert streamed.save() == whole.save()
+        tokens = np.array([[1, 4, 7, 2, 9]], np.int32)
+        np.testing.assert_array_equal(streamed.forward(tokens=tokens)['logits'], whole.forward(tokens=tokens)['logits'])
+        assert max(reads) < max(map(len, shards))
+
+
+@pytest.mark.parametrize('damage', ['short', 'read_error', 'missing', 'duplicate', 'tied'])
+def test_incremental_hf_failure_preserves_runtime(damage):
+    import io
+    import polygrad as pg
+    from polygrad.hf import load_hf_sources
+    case = LLAMA_CASES[-1]
+    weights = llama_weights(case)
+    weights['lm_head.weight'] = weights['model.embed_tokens.weight'].copy()
+    if damage == 'tied': weights['lm_head.weight'] += 1
+    if damage == 'missing': del weights['model.layers.0.mlp.down_proj.weight']
+    data = make_safetensors({name: ('F32', a.shape, a) for name, a in weights.items()})
+    header_end = 8 + int.from_bytes(data[:8], 'little')
+    class Source(io.BytesIO):
+        def read(self, n=-1):
+            if self.tell() >= header_end:
+                if damage == 'read_error': raise OSError('range unavailable')
+                if damage == 'short': return super().read(max(0, n-1))
+            return super().read(n)
+    with pg.create(device='INTERP') as rt:
+        live = rt.Tensor([19.0]).realize()
+        try:
+            sources = [Source(data)] * (2 if damage == 'duplicate' else 1)
+            with pytest.raises((RuntimeError, ValueError, OSError), match='short|range unavailable|missing|duplicate|tied'):
+                load_hf_sources(json.dumps({**case['config'], 'model_type': 'llama'}), sources, max_seq_len=5, runtime=rt)
+            assert (live + 1).item() == 20
+        finally: live.dispose()
+
+
+def test_incremental_hf_preserves_checkpoint_dtypes():
+    import io
+    import polygrad as pg
+    from polygrad.hf import load_hf_sources
+    fixture = json.loads((Path(__file__).resolve().parents[2] / 'test/fixtures/qwen35.json').read_text())
+    inputs = {k: np.array(v, np.int32).reshape(2, 5) for k, v in fixture['inputs'].items()}
+    with pg.create(device='CPU') as rt:
+        for row in fixture['models']:
+            config = {**fixture['config'], 'is_causal': row['cases'][0]['causal']}
+            model = load_hf_sources(json.dumps(config), [io.BytesIO(base64.b64decode(row['weights']))],
+                                    max_batch=2, max_seq_len=5, runtime=rt)
+            try:
+                assert all(b['dtype'] == row['dtype'] for b in model.bindings() if b['role'] == 0)
+                actual = model.forward(**inputs)['last_hidden_state'].reshape(-1)
+                np.testing.assert_allclose(actual, row['cases'][0]['expected'], rtol=0,
+                                           atol=.04 if row['dtype'] == 'bfloat16' else 5e-5)
+            finally: model.dispose()
+
+
+def test_local_hf_does_not_read_whole_safetensors(tmp_path, monkeypatch):
+    import polygrad as pg
+    from polygrad.hf import load_hf
+    case = LLAMA_CASES[0]
+    weights = llama_weights(case)
+    data = make_safetensors({k: ('F32', v.shape, v) for k, v in weights.items()})
+    (tmp_path / 'config.json').write_text(json.dumps({**case['config'], 'model_type': 'llama'}))
+    (tmp_path / 'model.safetensors').write_bytes(data)
+    read_bytes = Path.read_bytes
+    def bounded(path):
+        assert path.suffix != '.safetensors', 'whole-file checkpoint read'
+        return read_bytes(path)
+    monkeypatch.setattr(Path, 'read_bytes', bounded)
+    with pg.create(device='INTERP') as rt:
+        model = load_hf(tmp_path, max_seq_len=5, runtime=rt)
+        try:
+            np.testing.assert_array_equal(model.read_buffer('model.embed_tokens.weight'),
+                                           weights['model.embed_tokens.weight'].reshape(-1))
+        finally: model.dispose()
+
+
 def test_transformer_specialization_owns_one_model():
     import polygrad as pg
     from polygrad.models import Transformer

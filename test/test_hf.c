@@ -23,6 +23,79 @@
 #include <stdlib.h>
 #include <math.h>
 
+TEST(hf, incremental_delivery_publication_and_abort) {
+  const char *config = "{\"model_type\":\"gpt2\",\"n_embd\":8,\"n_head\":2,\"n_layer\":1,\"vocab_"
+                       "size\":16,\"n_positions\":4}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModelError error = {0};
+  PolyModel *template =
+      poly_model_from_config(ctx, "GPT2", config, strlen(config), POLY_DEVICE_INTERP, &error);
+  ASSERT_NOT_NULL(template);
+  PolySafetensorEntry entries[32] = {0};
+  int64_t shapes[32][8];
+  float data[4096];
+  for (int i = 0; i < 4096; i++)
+    data[i] = 1;
+  int count = 0;
+  for (int i = 0; i < poly_model_buf_count(template); i++) {
+    if (poly_model_buf_role(template, i) != POLY_ROLE_PARAM) continue;
+    ASSERT_TRUE(count < 32);
+    int ndim = poly_model_buf_shape(template, i, shapes[count], 8);
+    const char *name = poly_model_buf_name(template, i);
+    if (ndim == 2 && (strstr(name, "c_attn.weight") || strstr(name, "c_proj.weight") ||
+                      strstr(name, "c_fc.weight"))) {
+      int64_t tmp = shapes[count][0];
+      shapes[count][0] = shapes[count][1];
+      shapes[count][1] = tmp;
+    }
+    entries[count] = (PolySafetensorEntry){name, data, shapes[count], ndim, POLY_ST_F32};
+    ASSERT_TRUE(poly_model_buf_nbytes(template, i) <= sizeof(data));
+    count++;
+  }
+  int size = 0;
+  uint8_t *bytes = poly_safetensors_encode(entries, count, NULL, &size);
+  ASSERT_NOT_NULL(bytes);
+  poly_model_free(template);
+  uint64_t header = 8;
+  for (int i = 0; i < 8; i++)
+    header += (uint64_t)bytes[i] << (8 * i);
+  for (int abort_after = 0; abort_after < 3; abort_after++) {
+    PolyHfImport *s = poly_hf_import_new(ctx, config, 1, 4, POLY_DEVICE_INTERP);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(poly_hf_import_add_file(s, bytes, (int)header, size), 0);
+    ASSERT_EQ(poly_hf_import_build(s), 0);
+    int fed = 0;
+    const char *request;
+    while ((request = poly_hf_import_request(s))) {
+      if (abort_after < 2 && fed == abort_after) break;
+      cJSON *j = cJSON_Parse(request);
+      ASSERT_NOT_NULL(j);
+      size_t offset = cJSON_GetObjectItem(j, "offset")->valuedouble;
+      size_t length = cJSON_GetObjectItem(j, "length")->valuedouble;
+      cJSON_Delete(j);
+      ASSERT_TRUE(offset <= (size_t)size && length <= (size_t)size - offset);
+      ASSERT_EQ(poly_hf_import_feed(s, bytes + offset, length), 0);
+      fed++;
+    }
+    PolyModel *model = poly_hf_import_finish(s);
+    if (abort_after < 2)
+      ASSERT_EQ(model, NULL);
+    else
+      ASSERT_NOT_NULL(model);
+    poly_hf_import_free(s);
+    if (model) {
+      int length = 0;
+      uint8_t *bundle = poly_model_save_bundle(model, &length);
+      ASSERT_NOT_NULL(bundle);
+      free(bundle);
+      poly_model_free(model);
+    }
+  }
+  free(bytes);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(hf, qwen35_config_ownership_and_required_weights) {
   const char *config =
       "{\"hidden_size\":16,\"intermediate_size\":32,\"vocab_size\":32,"

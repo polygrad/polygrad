@@ -379,6 +379,12 @@ finally:
     model.dispose()
 ```
 
+Local safetensors imports read and upload one tensor at a time. For other
+seekable binary sources, use `polygrad.hf.load_hf_sources(config_json, sources,
+max_seq_len=16)`. Sources remain caller-owned and must not change during import.
+Staging is bounded by the largest tensor, with additional conversion or
+tied-weight scratch; PyTorch ZIP imports still read whole files.
+
 `load_hf` uses the same checkpoint importer as `Model.from_hf`, including the
 vision and embedding models below, with F32/F16/BF16 safetensors or supported
 PyTorch ZIP state dictionaries.

@@ -9,6 +9,78 @@ const qwen35Fixture = require('../../test/fixtures/qwen35.json')
 const qwen35ImageFixture = require('../../test/fixtures/qwen35_image.json')
 const {composeTokenEmbeddings} = require('../examples/late_embeddings')
 
+async function checkIncrementalHF(pg) {
+  const f = qwen35ImageFixture, bytes = Uint8Array.from(atob(f.weights), v => v.charCodeAt(0))
+  const reads = []
+  const source = { size: bytes.length, async read(offset, length) {
+    reads.push(length)
+    return bytes.subarray(offset, offset + length)
+  } }
+  const config = JSON.stringify(f.config)
+  const model = await pg.Model.fromHFAsync(config, [source], {maxSeqLen:7})
+  try {
+    const inputs = Object.fromEntries(Object.entries(f.inputs).filter(([k]) => k !== 'attention_mask')
+      .map(([k,v]) => [k, k === 'pixel_values' ? Float32Array.from(v) : Int32Array.from(v)]))
+    assertClose((await model.callAsync('prefill_image', inputs)).logits_prefill_image, f.expected[0], 8e-5)
+    assert(Math.max(...reads) < bytes.length, 'checkpoint was read as one allocation')
+  } finally { await model.dispose() }
+  const headerEnd = 8 + Number(new DataView(bytes.buffer).getBigUint64(0, true))
+  for (const mode of ['short', 'throw', 'abort']) {
+    const controller = new AbortController()
+    const bad = {size:bytes.length, async read(offset, length) {
+      if (offset >= headerEnd) {
+        if (mode === 'throw') throw new Error('range unavailable')
+        if (mode === 'short') return bytes.subarray(offset, offset + length - 1)
+        controller.abort()
+      }
+      return bytes.subarray(offset, offset + length)
+    } }
+    let error
+    try { const m = await pg.Model.fromHFAsync(config, [bad], {maxSeqLen:7, signal:controller.signal}); await m.dispose() }
+    catch (e) { error = e }
+    assert(error && /short|range unavailable|abort/i.test(error.message), `failed ${mode} admission`)
+    const t = pg.Tensor.ones([1]).add(2)
+    try { assert((await t.toArrayAsync())[0] === 3, 'runtime unusable after aborted import') }
+    finally { t.dispose() }
+  }
+  const fetch = globalThis.fetch
+  try {
+    for (const mode of ['valid', 'whole-file', 'changed', 'oversized']) {
+      let requests = 0
+      globalThis.fetch = async (_url, options) => {
+        requests++
+        const [,lo,hi] = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range)
+        const start = Number(lo), end = Number(hi)
+        const data = mode === 'oversized' ? new Uint8Array(end-start+2) : bytes.slice(start,end+1)
+        return new Response(data, {status:mode === 'whole-file' ? 200 : 206, headers:{
+          'Content-Range':`bytes ${start}-${end}/${bytes.length}`,
+          ETag:mode === 'changed' && requests > 1 ? '"new"' : '"original"'
+        }})
+      }
+      let error, imported
+      try { imported = await pg.Model.fromHFAsync(config, ['/checkpoint'], {maxSeqLen:7}) }
+      catch (e) { error = e }
+      finally { if (imported) await imported.dispose() }
+      assert(mode === 'valid' ? !error : error && /Content-Range|oversized/.test(error.message), `HTTP range contract ${mode}: ${error}`)
+    }
+  } finally { globalThis.fetch = fetch }
+  for (const row of qwen35Fixture.models) {
+    const c = row.cases[0]
+    const checkpoint = Uint8Array.from(atob(row.weights), v => v.charCodeAt(0))
+    const m = await pg.Model.fromHFAsync(JSON.stringify({...qwen35Fixture.config, is_causal:c.causal}),
+      [checkpoint], {maxBatch:2, maxSeqLen:5})
+    try {
+      const inputs = Object.fromEntries(Object.entries(qwen35Fixture.inputs).map(([k,v]) => [k, Int32Array.from(v)]))
+      assertClose((await m.forwardAsync(inputs)).last_hidden_state, c.expected, row.dtype === 'bfloat16' ? .04 : 5e-5)
+      assert(m.bindings().filter(b => b.role === pg.Model.ROLE_PARAM).every(b => b.dtype === row.dtype), 'incremental dtype changed')
+    } finally { await m.dispose() }
+  }
+  await checkVisionModels(pg, true)
+  await checkEmbeddingGemma2(pg, true)
+  await checkWhisperCaches(pg, true)
+  await checkTorchCheckpoint(pg)
+}
+
 async function checkQwen35Image(pg) {
   const f = qwen35ImageFixture
   const inputs = Object.fromEntries(Object.entries(f.inputs).filter(([k]) => k !== 'attention_mask')
@@ -182,17 +254,37 @@ async function checkQwen35Generation(pg) {
   }
 }
 
-async function checkWhisperCaches(pg) {
-  const model = await pg.models.WhisperAsync({d_model:8, num_mel_bins:4,
+async function checkWhisperCaches(pg, incremental = false) {
+  const config = {d_model:8, num_mel_bins:4,
     max_source_positions:4, max_target_positions:8, max_seq_len:3, vocab_size:16,
     encoder_layers:1, decoder_layers:1, encoder_attention_heads:2, decoder_attention_heads:2,
-    encoder_ffn_dim:16, decoder_ffn_dim:16})
+    encoder_ffn_dim:16, decoder_ffn_dim:16}
+  let model = await pg.models.WhisperAsync(config)
   let restored, phase = 'weights'
   try {
+    const header = {}, payloads = []
+    let payloadBytes = 0
     for (const b of model.bindings()) if (b.role === pg.Model.ROLE_PARAM) {
       const values = Float32Array.from({length:b.shape.reduce((a,v)=>a*v,1)},
         (_,i)=>b.name.includes('layer_norm.weight') ? 1 : ((i*7)%19-9)/64)
       await model.writeBufferAsync(b.name, values)
+      // A Hugging Face checkpoint contains model weights, not Polygrad's
+      // runtime sampling state exported by Model.exportWeights.
+      if (b.name.startsWith('model.')) {
+        header[b.name] = {dtype:'F32', shape:b.shape, data_offsets:[payloadBytes, payloadBytes+values.byteLength]}
+        payloads.push(new Uint8Array(values.buffer)); payloadBytes += values.byteLength
+      }
+    }
+    if (incremental) {
+      const json = new TextEncoder().encode(JSON.stringify(header))
+      const checkpoint = new Uint8Array(8+json.length+payloadBytes)
+      new DataView(checkpoint.buffer).setBigUint64(0, BigInt(json.length), true)
+      checkpoint.set(json,8)
+      let offset=8+json.length
+      for (const bytes of payloads) { checkpoint.set(bytes,offset); offset+=bytes.length }
+      const imported = await pg.Model.fromHFAsync(JSON.stringify({...config, model_type:'whisper'}),
+        [checkpoint], {maxSeqLen:3})
+      await model.dispose(); model = imported
     }
     const features = Float32Array.from({length:32}, (_,i)=>(i-16)/32)
     const tokens = new Int32Array([1,5,7])
@@ -244,7 +336,7 @@ async function checkTorchCheckpoint(pg) {
   const bytes = Uint8Array.from(atob(f.archive), c => c.charCodeAt(0))
   const config = new TextEncoder().encode(JSON.stringify(f.config))
   const model = pg.Model.fromHF(config, [bytes], {maxSeqLen: 4})
-  let restored, reference
+  let restored, reference, streamed
   try {
     const header = {}, payload = []
     for (const t of f.tensors) {
@@ -257,14 +349,17 @@ async function checkTorchCheckpoint(pg) {
     new DataView(safe.buffer).setUint32(0, encoded.length, true)
     safe.set(encoded, 8); safe.set(payload, 8 + encoded.length)
     reference = pg.Model.fromHF(config, [safe], {maxSeqLen: 4})
+    streamed = await pg.Model.fromHFAsync(config, [safe], {maxSeqLen: 4})
     // GPT-2's builder transposes Conv1D weights in both formats. Compare the
     // canonical Model state, not the raw checkpoint orientation.
     for (const t of f.tensors) {
       const name = t.name.replace('transformer.', '')
       assertClose(await model.readBufferAsync(name), await reference.readBufferAsync(name), 0)
+      assertClose(await streamed.readBufferAsync(name), await reference.readBufferAsync(name), 0)
     }
     const inputs = {x: new Int32Array([1, 2, 3, 4]), positions: new Int32Array([0, 1, 2, 3])}
     const expected = (await reference.forwardAsync(inputs)).output
+    assertClose((await streamed.forwardAsync(inputs)).output, expected, 0)
     assertClose((await model.forwardAsync(inputs)).output, expected, 0)
     restored = pg.Model.load(await model.saveAsync())
     assertClose((await restored.forwardAsync(inputs)).output, expected, 0)
@@ -277,14 +372,17 @@ async function checkTorchCheckpoint(pg) {
   } finally {
     if (restored) await restored.dispose()
     if (reference) await reference.dispose()
+    if (streamed) await streamed.dispose()
     await model.dispose()
   }
 }
 
-async function checkEmbeddingGemma2(pg) {
+async function checkEmbeddingGemma2(pg, incremental = false) {
   for (const f of [embeddingGemma2Fixture, embeddingGemma2ImageFixture, embeddingGemma2AudioFixture]) {
     const weights = Uint8Array.from(atob(f.weights), c => c.charCodeAt(0))
-    const m = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(f.config)), [weights], {maxBatch: 2, maxSeqLen: f.config.max_seq_len || 6})
+    const config = new TextEncoder().encode(JSON.stringify(f.config))
+    const options = {maxBatch: 2, maxSeqLen: f.config.max_seq_len || 6}
+    const m = incremental ? await pg.Model.fromHFAsync(config, [weights], options) : pg.Model.fromHF(config, [weights], options)
     let restored
     try {
       restored = pg.Model.load(await m.saveAsync())
@@ -1019,11 +1117,12 @@ async function checkQwenRotaryState(pg) {
   }
 }
 
-async function checkVisionModels(pg) {
+async function checkVisionModels(pg, incremental = false) {
   for (const packed of require('../../test/fixtures/vision.json').cases) {
     const item = await require('./vision_fixture').expandVisionCase(packed)
     const weights = item.weights
-    const model = pg.Model.fromHF(new TextEncoder().encode(JSON.stringify(item.config)), [weights], {maxBatch: 2})
+    const config = new TextEncoder().encode(JSON.stringify(item.config))
+    const model = incremental ? await pg.Model.fromHFAsync(config, [weights], {maxBatch:2}) : pg.Model.fromHF(config, [weights], {maxBatch:2})
     let restored
     try {
       const inputs = Object.fromEntries(Object.entries(item.inputs).map(([k,v]) =>
@@ -2883,6 +2982,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
   await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
   await test('Qwen3.5 packed images cached generation and admission', () => checkQwen35Image(pg))
+  await test('Incremental HF range loading and failure ownership', () => checkIncrementalHF(pg))
   await test('Late embeddings public composition and document masking', () => checkLateEmbeddings(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
@@ -3680,6 +3780,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
   await test('Qwen3.5 packed images cached generation and admission', () => checkQwen35Image(pg))
   await test('Late embeddings public composition and document masking', () => checkLateEmbeddings(pg))
+  await test('Incremental HF range loading and failure ownership', () => checkIncrementalHF(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))

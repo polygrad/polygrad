@@ -176,6 +176,34 @@ def bind(lib, types, only=None):
         fn = lib.poly_gguf_load_into
         fn.restype = ctypes.c_void_p
         fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int64, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    if only is None or only == 'poly_hf_import_add_file':
+        fn = lib.poly_hf_import_add_file
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int64]
+    if only is None or only == 'poly_hf_import_build':
+        fn = lib.poly_hf_import_build
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p]
+    if only is None or only == 'poly_hf_import_feed':
+        fn = lib.poly_hf_import_feed
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+    if only is None or only == 'poly_hf_import_finish':
+        fn = lib.poly_hf_import_finish
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+    if only is None or only == 'poly_hf_import_free':
+        fn = lib.poly_hf_import_free
+        fn.restype = None
+        fn.argtypes = [ctypes.c_void_p]
+    if only is None or only == 'poly_hf_import_new':
+        fn = lib.poly_hf_import_new
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    if only is None or only == 'poly_hf_import_request':
+        fn = lib.poly_hf_import_request
+        fn.restype = ctypes.c_char_p
+        fn.argtypes = [ctypes.c_void_p]
     if only is None or only == 'poly_hf_load_into':
         fn = lib.poly_hf_load_into
         fn.restype = ctypes.c_void_p

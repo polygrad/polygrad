@@ -2,6 +2,7 @@
 
 const { PolyAsyncRequired } = require('./errors')
 const { getStateDict } = require('./nn/state')
+const { importSources } = require('./hf_sources')
 
 const ROLE_PARAM = 0
 const ROLE_INPUT = 1
@@ -758,6 +759,18 @@ function createBoundModelClass(runtime) {
       if (listing.includes('\0') || (text != null && text.includes('\0')))
         throw new Error('checkpoint metadata contains NUL')
       return JSON.parse(_runtime._core.model.planHF(listing, text))
+    }
+
+    static async fromHFAsync(configBytes, weightSources, opts = {}) {
+      if (_runtime._closing || !_runtime._core) throw new Error('polygrad runtime has been disposed')
+      const config = typeof configBytes === 'string' ? configBytes : new TextDecoder('utf-8', { fatal: true }).decode(normalizeBytes(configBytes, 'config'))
+      if (config.includes('\0')) throw new TypeError('checkpoint config contains NUL')
+      if (!Array.isArray(weightSources) || !weightSources.length) throw new TypeError('weightSources must be a nonempty array')
+      for (const value of [opts.maxBatch ?? 1, opts.maxSeqLen ?? 0])
+        if (!Number.isInteger(value) || value < 0 || value > 2147483647) throw new TypeError('HF dimensions must fit a nonnegative int32')
+      const core = _runtime._core
+      const run = async () => Model._fromHandle(await importSources(core.model, config, weightSources, opts))
+      return _runtime._withAsync(() => core.enqueueAsync ? core.enqueueAsync(run) : run())
     }
 
     static fromHF(configBytes, weightFiles, opts = {}) {

@@ -977,7 +977,7 @@ PolyModel *model_qwen35_from_hf_decoded(
       );
     return NULL;
   }
-  PolyBindIndex *index = poly_bind_index_create(m);
+  PolyBindIndex *index = poly_bind_index_create_planned(m, opts->plan);
   if (!index) goto fail;
   const PolyDecodedTensor *embedding = NULL;
   char embedding_name[192];
@@ -998,7 +998,7 @@ PolyModel *model_qwen35_from_hf_decoded(
           embedding->ndim != 2 || t->numel != embedding->numel ||
           t->shape[0] != embedding->shape[0] || t->shape[1] != embedding->shape[1] ||
           (uint64_t)t->numel > SIZE_MAX / width ||
-          memcmp(t->data, embedding->data, (size_t)t->numel * width)) {
+          !poly_import_tensors_equal(index, t, embedding, false)) {
         poly_import_error_set(
             POLY_IMPORT_ERR_WEIGHT_MISMATCH, "Qwen3.5 lm_head.weight must match tied embeddings"
         );

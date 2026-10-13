@@ -492,8 +492,8 @@ checkpoint projection and normalization through the public Model API, with a
 document-only token mask. The same recipe supports Perplexity's late-embedding
 checkpoint; use its original tokenizer, prompts and skip-token IDs. The importer
 does not automatically interpret Sentence Transformers pipeline metadata.
-Large checkpoints can exceed browser download or Wasm-memory limits even when
-their weights fit on the GPU; loading a full multi-gigabyte file is not streaming.
+Use `Model.fromHFAsync` with safetensors URLs to avoid whole-file allocations.
+Available device memory and the largest individual tensor still limit model size.
 
 For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
 {cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
@@ -514,14 +514,22 @@ executes Python code. It supports ordinary tensor dictionaries, storage offsets
 and nonnegative strides; it rejects pickled model objects, custom classes,
 compressed entries and legacy non-ZIP files. See the
 [checkpoint limits](https://github.com/polygrad/polygrad/blob/main/py/README.md#hugging-face-checkpoints).
-Pass complete file bytes, not URLs; downloading, progress and caching belong
-to the caller. This does not add model architectures or tokenizers.
+`fromHF` takes complete file bytes; use `fromHFAsync` below for range loading.
+Neither method adds model architectures or tokenizers.
 
 Use `pg.Model.planHF(filenames)` to select files before fetching weights.
 `filenames` is the repository's list of relative paths; the result contains
 `format`, `index` and `files`. When `index` is non-null and `files` is empty,
 fetch that index and call `pg.Model.planHF(filenames, indexJSON)` again.
-Fetch the returned `files` plus `config.json`, then pass their bytes to `fromHF`.
+For safetensors, fetch `config.json` and pass the selected file URLs to
+`await pg.Model.fromHFAsync(configBytes, urls, {maxBatch, maxSeqLen})`.
+This uploads one tensor at a time instead of allocating the entire checkpoint.
+URLs must support HTTP ranges with a CORS-exposed `Content-Range`; use a pinned
+revision. Sources may also be `Blob`s or immutable `{size, read(offset, length)}`
+readers returning bytes. Pass an `AbortSignal` as `signal` to cancel an import.
+Staging is bounded by the largest tensor, with additional scratch for conversion
+or tied-weight checks; it does not remove device-memory limits.
+For PyTorch ZIP files, fetch the selected files and pass their bytes to `fromHF`.
 Use one pinned repository revision for the listing and all downloads.
 The shared C planner prefers `model.safetensors` over `pytorch_model.bin`, with
 each format's single file taking precedence over its `.index.json`. It rejects

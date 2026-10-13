@@ -317,7 +317,7 @@ PolyModel *model_gpt2_from_hf_decoded(const PolyHfDecoded *hf, const PolyGeneric
   PolyModel *inst = poly_gpt2_into(ctx, &cfg, device);
   if (!inst) return NULL;
 
-  PolyBindIndex *idx = poly_bind_index_create(inst);
+  PolyBindIndex *idx = poly_bind_index_create_planned(inst, opts->plan);
   if (!idx) {
     poly_model_free(inst);
     return NULL;

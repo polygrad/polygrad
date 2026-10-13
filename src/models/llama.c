@@ -171,7 +171,7 @@ PolyModel *model_llama_from_hf_decoded(const PolyHfDecoded *hf, const PolyGeneri
   if (!m) goto invalid;
   int n = poly_model_buf_count(m);
   bool *seen = calloc((size_t)n, sizeof(bool));
-  PolyBindIndex *idx = poly_bind_index_create(m);
+  PolyBindIndex *idx = poly_bind_index_create_planned(m, opts->plan);
   if (!seen || !idx) goto fail;
   const PolyDecodedTensor *embed = NULL, *head = NULL;
   for (int i = 0; i < hf->n_tensors; i++) {
@@ -212,11 +212,7 @@ PolyModel *model_llama_from_hf_decoded(const PolyHfDecoded *hf, const PolyGeneri
     bool equal = head->ndim == embed->ndim && head->numel == embed->numel;
     for (int i = 0; equal && i < head->ndim; i++)
       equal = head->shape[i] == embed->shape[i];
-    float *a = equal ? poly_decoded_tensor_to_f32(embed) : NULL;
-    float *b = equal ? poly_decoded_tensor_to_f32(head) : NULL;
-    equal = a && b && !memcmp(a, b, (size_t)head->numel * sizeof(float));
-    free(a);
-    free(b);
+    equal = equal && poly_import_tensors_equal(idx, embed, head, true);
     if (!equal) {
       poly_import_error_set(
           POLY_IMPORT_ERR_WEIGHT_MISMATCH, "Llama: tied lm_head disagrees with embedding"

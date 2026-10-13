@@ -224,6 +224,13 @@ function createNativeCore(device) {
       return binding.poly_hf_load_into(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0, deviceId, ctx)
     },
+    hfImportNew(config, batch, length) { return binding.poly_hf_import_new(ctx, config, batch, length, deviceId) },
+    hfImportAddFile(session, header, size) { return binding.poly_hf_import_add_file(session, Buffer.from(header.buffer, header.byteOffset, header.byteLength), size) },
+    hfImportBuild(session) { return binding.poly_hf_import_build(session) },
+    hfImportRequest(session) { return binding.poly_hf_import_request(session) },
+    hfImportFeed(session, bytes) { return binding.poly_hf_import_feed(session, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)) },
+    hfImportFinish(session) { return binding.poly_hf_import_finish(session) },
+    hfImportFree(session) { binding.poly_hf_import_free(session) },
     loadGGUF(ggufBytes, maxBatch, maxSeqLen, capacity, chunk) {
       return binding.poly_gguf_load_into(
         ggufBytes, maxBatch || 1, maxSeqLen || 0, capacity, chunk, deviceId, ctx)

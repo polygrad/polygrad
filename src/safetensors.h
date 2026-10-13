@@ -101,6 +101,17 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     char **metadata_out
 );
 
+/* Parse only the length-prefixed header, validating ranges against file_len.
+ * raw_data is NULL. Caller frees the views/names and the absolute file offsets.
+ * Payloads need not be addressable together (e.g. remote range reads). */
+PolySafetensorViewEx *poly_safetensors_index(
+    const uint8_t *header,
+    int64_t header_len,
+    int64_t file_len,
+    int *n_out,
+    uint64_t **offsets_out
+);
+
 /* Convert a multi-dtype view to F32 data.
  * Returns malloc'd float array (numel elements). Caller frees.
  * Handles F16, BF16 -> F32 conversion with IEEE 754 correctness.

@@ -2207,6 +2207,30 @@ function createWasmCoreFromModule(Module, device) {
       return rc
     },
 
+    async hfImportNew(config, batch, length) {
+      if (deviceName === 'webgpu') await ensureWebGPU()
+      const ptr = allocString(config)
+      try { return Module._poly_hf_import_new(ctx, ptr, batch, length, deviceId) >>> 0 }
+      finally { Module._free(ptr) }
+    },
+    hfImportAddFile(session, header, size) {
+      const ptr = allocBytes(header)
+      try { return Module._poly_hf_import_add_file(session, ptr, header.length, BigInt(size)) }
+      finally { Module._free(ptr) }
+    },
+    hfImportBuild(session) { return callDevice('poly_hf_import_build', [session]) },
+    hfImportRequest(session) {
+      const ptr = Module._poly_hf_import_request(session)
+      return ptr ? readCString(ptr >>> 0) : null
+    },
+    async hfImportFeed(session, bytes) {
+      const ptr = allocBytes(bytes)
+      try { return await callDevice('poly_hf_import_feed', [session, ptr, bytes.length]) }
+      finally { Module._free(ptr) }
+    },
+    hfImportFinish(session) { return Module._poly_hf_import_finish(session) >>> 0 },
+    hfImportFree(session) { Module._poly_hf_import_free(session) },
+
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const cfgPtr = allocBytes(configBytes)
       const n = weightFilesBytes.length
