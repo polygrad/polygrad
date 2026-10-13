@@ -2,6 +2,10 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Improve error-function and inverse-normal accuracy, including small tail
+  probabilities and center gradients. Fix log-gamma higher derivatives and
+  negative arguments, and improve digamma precision in the shared C core.
+
 - Add `Model.fromHFAsync` for safetensors URLs, Blobs and range readers, with
   cancellation, strict HTTP range validation and tensor-sized staging.
 

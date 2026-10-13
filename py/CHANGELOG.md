@@ -2,6 +2,10 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Improve error-function and inverse-normal accuracy, including small tail
+  probabilities and center gradients. Fix log-gamma higher derivatives and
+  negative arguments, and improve digamma precision in the shared C core.
+
 - Read local safetensors checkpoints one tensor at a time; add `load_hf_sources`
   for caller-owned seekable files and upload directly to device storage.
 
