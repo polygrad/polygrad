@@ -84,6 +84,7 @@ module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   poly_tensor_detach: (a0, a1) => Module._poly_tensor_detach((a0 || 0), (a1 || 0)),
   poly_tensor_diag: (a0, a1) => Module._poly_tensor_diag((a0 || 0), (a1 || 0)),
   poly_tensor_diagonal: (a0, a1, a2, a3, a4) => Module._poly_tensor_diagonal((a0 || 0), (a1 || 0), integer64(a2, false), Number(a3), Number(a4)),
+  poly_tensor_digamma: (a0, a1) => Module._poly_tensor_digamma((a0 || 0), (a1 || 0)),
   poly_tensor_div: (a0, a1, a2, a3) => Module._poly_tensor_div((a0 || 0), (a1 || 0), (a2 || 0), Number(a3)),
   poly_tensor_dot: (a0, a1, a2) => Module._poly_tensor_dot((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_dot_dtype_by_id: (a0, a1, a2, a3) => Module._poly_tensor_dot_dtype_by_id((a0 || 0), (a1 || 0), (a2 || 0), Number(a3)),
@@ -98,6 +99,8 @@ module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   },
   poly_tensor_eq: (a0, a1, a2) => Module._poly_tensor_eq((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_erf: (a0, a1) => Module._poly_tensor_erf((a0 || 0), (a1 || 0)),
+  poly_tensor_erfc: (a0, a1) => Module._poly_tensor_erfc((a0 || 0), (a1 || 0)),
+  poly_tensor_erfinv: (a0, a1) => Module._poly_tensor_erfinv((a0 || 0), (a1 || 0)),
   poly_tensor_exp: (a0, a1) => Module._poly_tensor_exp((a0 || 0), (a1 || 0)),
   poly_tensor_expand: (a0, a1, a2, a3) => {
     if (!Array.isArray(a2) || !Number.isInteger(a3) || a3 < 0 || a3 > 64 || a2.length !== a3 * 1) throw new RangeError('invalid dimension array')
@@ -139,6 +142,7 @@ module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   poly_tensor_leaky_relu: (a0, a1, a2) => Module._poly_tensor_leaky_relu((a0 || 0), (a1 || 0), a2),
   poly_tensor_leaky_relu_tensor: (a0, a1, a2) => Module._poly_tensor_leaky_relu_tensor((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_lerp: (a0, a1, a2, a3, a4) => Module._poly_tensor_lerp((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), +!!a4),
+  poly_tensor_lgamma: (a0, a1) => Module._poly_tensor_lgamma((a0 || 0), (a1 || 0)),
   poly_tensor_linear_apply: (a0, a1, a2, a3) => Module._poly_tensor_linear_apply((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0)),
   poly_tensor_linspace_by_id: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_linspace_by_id((a0 || 0), a1, a2, integer64(a3, false), Number(a4), Number(a5)),
   poly_tensor_log: (a0, a1) => Module._poly_tensor_log((a0 || 0), (a1 || 0)),
@@ -185,6 +189,7 @@ module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   poly_tensor_minimum: (a0, a1, a2) => Module._poly_tensor_minimum((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_mish: (a0, a1) => Module._poly_tensor_mish((a0 || 0), (a1 || 0)),
   poly_tensor_mse_loss: (a0, a1, a2) => Module._poly_tensor_mse_loss((a0 || 0), (a1 || 0), (a2 || 0)),
+  poly_tensor_ndtri: (a0, a1) => Module._poly_tensor_ndtri((a0 || 0), (a1 || 0)),
   poly_tensor_neg: (a0, a1) => Module._poly_tensor_neg((a0 || 0), (a1 || 0)),
   poly_tensor_nll_loss: (a0, a1, a2, a3, a4, a5) => Module._poly_tensor_nll_loss((a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), Number(a5)),
   poly_tensor_normalize: (a0, a1, a2, a3, a4) => Module._poly_tensor_normalize((a0 || 0), (a1 || 0), a2, Number(a3), a4),

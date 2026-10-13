@@ -142,6 +142,11 @@ z = y.relu().sum(axis=1)
 picked = x.gather(1, Tensor([[0, 2], [1, 3], [0, 1]], dtype="int32"))
 ```
 
+Probability math uses shared C implementations: `x.erf()`, `x.erfc()`,
+`x.erfinv()`, `x.ndtri()` (standard Normal quantile), `x.digamma()` and
+`x.lgamma()` (log absolute Gamma). These support autograd and Model capture;
+derivatives at domain endpoints and poles are not defined.
+
 ### NumPy And Data Updates
 
 ```python

@@ -267,6 +267,16 @@ PolyTensor *poly_tensor_cosh(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_erf(PolyCtx *ctx, PolyTensor *x);
 
+PolyTensor *poly_tensor_erfc(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_erfinv(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_ndtri(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_digamma(PolyCtx *ctx, PolyTensor *x);
+
+PolyTensor *poly_tensor_lgamma(PolyCtx *ctx, PolyTensor *x);
+
 PolyTensor *poly_tensor_softsign(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_isfinite(PolyCtx *ctx, PolyTensor *x);

@@ -32,6 +32,8 @@ from polygrad.uop.ops import UOp as OpsUOp, resolve
     ('repeat_interleave', 'repeatInterleave', 'repeat_interleave'),
     ('layernorm', 'layernorm', 'layernorm_axes_apply'),
     ('var', 'var', 'var_axes'),
+    ('erf', 'erf', 'erf'), ('erfc', 'erfc', 'erfc'), ('erfinv', 'erfinv', 'erfinv'),
+    ('ndtri', 'ndtri', 'ndtri'), ('digamma', 'digamma', 'digamma'), ('lgamma', 'lgamma', 'lgamma'),
 ])
 def test_composite_frontends_delegate_to_core(python_name, js_name, core_name):
     # Reviewed ownership inventory, not a ban on host argument normalization.

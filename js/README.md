@@ -152,6 +152,11 @@ const z = y.relu().sum(1)
 const picked = x.gather(1, new Tensor([[0, 2], [1, 3], [0, 1]], { dtype: 'int32' }))
 ```
 
+Probability math uses shared C implementations: `x.erf()`, `x.erfc()`,
+`x.erfinv()`, `x.ndtri()` (standard Normal quantile), `x.digamma()` and
+`x.lgamma()` (log absolute Gamma). These support autograd and Model capture;
+derivatives at domain endpoints and poles are not defined.
+
 ### Reading And Updating Data
 
 Polygrad tensors are lazy. Build expressions freely, then call `realize()` or

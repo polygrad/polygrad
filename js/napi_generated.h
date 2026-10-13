@@ -1080,6 +1080,18 @@ static napi_value napi_poly_tensor_diagonal(napi_env env, napi_callback_info inf
   NAPI_CALL(env, napi_get_value_int32(env, v4, &a4));
   return make_external(env, poly_tensor_diagonal(a0, a1, a2, a3, a4));
 }
+static napi_value napi_poly_tensor_digamma(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_digamma: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_digamma(a0, a1));
+}
 static napi_value napi_poly_tensor_div(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -1247,6 +1259,30 @@ static napi_value napi_poly_tensor_erf(napi_env env, napi_callback_info info) {
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_erf(a0, a1));
+}
+static napi_value napi_poly_tensor_erfc(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_erfc: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_erfc(a0, a1));
+}
+static napi_value napi_poly_tensor_erfinv(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_erfinv: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_erfinv(a0, a1));
 }
 static napi_value napi_poly_tensor_exp(napi_env env, napi_callback_info info) {
   napi_value argv[2];
@@ -1747,6 +1783,18 @@ static napi_value napi_poly_tensor_lerp(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_value_bool(env, b4, &a4));
   return make_external(env, poly_tensor_lerp(a0, a1, a2, a3, a4));
 }
+static napi_value napi_poly_tensor_lgamma(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_lgamma: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_lgamma(a0, a1));
+}
 static napi_value napi_poly_tensor_linear_apply(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -2194,6 +2242,18 @@ static napi_value napi_poly_tensor_mse_loss(napi_env env, napi_callback_info inf
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   PolyTensor *a2 = get_external_nullable(env, argv[2]);
   return make_external(env, poly_tensor_mse_loss(a0, a1, a2));
+}
+static napi_value napi_poly_tensor_ndtri(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_ndtri: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_ndtri(a0, a1));
 }
 static napi_value napi_poly_tensor_neg(napi_env env, napi_callback_info info) {
   napi_value argv[2];

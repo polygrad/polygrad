@@ -6,6 +6,25 @@ from polygrad.model import Model, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
+def test_probability_methods_capture_and_roundtrip():
+    from polygrad import create
+    names = ('erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma')
+    with create(device='CPU') as rt:
+        data = np.array([0.1, 0.5, 0.9], np.float32)
+        x = rt.Tensor(data)
+        expected = {name: getattr(x, name)().numpy() for name in names}
+        model = rt.Model(lambda x: {name: getattr(x, name)() for name in names}, inputs={'x': x})
+        restored = rt.Model.load(model.save())
+        try:
+            x.dispose()
+            for current in (model, restored):
+                actual = current.call('forward', {'x': data})
+                for name in names:
+                    np.testing.assert_allclose(actual[name], expected[name], rtol=5e-6, atol=1e-7)
+        finally:
+            restored.dispose()
+            model.dispose()
+
 def test_portable_sort_preserves_materialization_boundaries():
     from polygrad import create
     def barriers(root):

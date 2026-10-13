@@ -8128,6 +8128,51 @@ PolyTensor *poly_tensor_erf(PolyCtx *ctx, PolyTensor *x) {
   return tensor_composite_result(ctx, logical, physical, inputs, n_inputs);
 }
 
+PolyTensor *poly_tensor_erfc(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_erfc(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_erfc(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
+PolyTensor *poly_tensor_erfinv(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_erfinv(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_erfinv(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
+PolyTensor *poly_tensor_ndtri(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_ndtri(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_ndtri(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
+PolyTensor *poly_tensor_digamma(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_digamma(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_digamma(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
+PolyTensor *poly_tensor_lgamma(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_lgamma(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_lgamma(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
 PolyTensor *poly_tensor_softsign(PolyCtx *ctx, PolyTensor *x) {
   PolyTensor *inputs[1] = {x};
   int n_inputs = 1;

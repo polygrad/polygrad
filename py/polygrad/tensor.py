@@ -2104,6 +2104,26 @@ class Tensor:
         core = _ffi._lib.poly_tensor_erf(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)
 
+    def erfc(self):
+        core = _ffi._lib.poly_tensor_erfc(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
+    def erfinv(self):
+        core = _ffi._lib.poly_tensor_erfinv(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
+    def ndtri(self):
+        core = _ffi._lib.poly_tensor_ndtri(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
+    def digamma(self):
+        core = _ffi._lib.poly_tensor_digamma(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
+    def lgamma(self):
+        core = _ffi._lib.poly_tensor_lgamma(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
     def softsign(self):
         core = _ffi._lib.poly_tensor_softsign(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)

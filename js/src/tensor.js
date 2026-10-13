@@ -1945,6 +1945,31 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core)
     }
 
+    erfc() {
+      const core = this._rt._core.ffi.poly_tensor_erfc(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    erfinv() {
+      const core = this._rt._core.ffi.poly_tensor_erfinv(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    ndtri() {
+      const core = this._rt._core.ffi.poly_tensor_ndtri(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    digamma() {
+      const core = this._rt._core.ffi.poly_tensor_digamma(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    lgamma() {
+      const core = this._rt._core.ffi.poly_tensor_lgamma(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
     softsign() {
       const core = this._rt._core.ffi.poly_tensor_softsign(this._ctx, this._tensor)
       return this._makeResultFromCore(core)

@@ -5556,9 +5556,11 @@ TEST(pe, pointwise_owners_sign_dtype_and_graph) {
 
 TEST(tensor, pointwise_owners_lifetime_and_admission) {
   PolyTensor *(*unary[])(PolyCtx *, PolyTensor *) = {
-      poly_tensor_log10, poly_tensor_atanh, poly_tensor_asinh, poly_tensor_acosh,
-      poly_tensor_asin,  poly_tensor_acos,  poly_tensor_atan,  poly_tensor_logsigmoid,
-      poly_tensor_sinh,  poly_tensor_cosh,  poly_tensor_erf,   poly_tensor_softsign};
+      poly_tensor_log10, poly_tensor_atanh,  poly_tensor_asinh, poly_tensor_acosh,
+      poly_tensor_asin,  poly_tensor_acos,   poly_tensor_atan,  poly_tensor_logsigmoid,
+      poly_tensor_sinh,  poly_tensor_cosh,   poly_tensor_erf,   poly_tensor_softsign,
+      poly_tensor_erfc,  poly_tensor_erfinv, poly_tensor_ndtri, poly_tensor_digamma,
+      poly_tensor_lgamma};
   for (int logical = 0; logical < 2; logical++) {
     PolyCtx *ctx = poly_ctx_new(), *other = poly_ctx_new();
     poly_ctx_set_logical_policy(ctx, logical ? POLY_LOGICAL_ALWAYS : POLY_LOGICAL_NEVER);

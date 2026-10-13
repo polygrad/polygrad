@@ -18,8 +18,7 @@ from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])
 def test_core_probability_special_functions(dtype):
-    # Core UOp APIs precede Tensor convenience methods. Wrap their placed graphs;
-    # this exercises the same C composition a construction extension consumes.
+    # Public methods must use the same composition as direct C graph callers.
     with Runtime(device='CPU') as rt:
         cases = {
             'erf': ([0, 0.1, -1, 3], [0, 0.1124629160182849, -0.8427007929497149, 0.9999779095030014]),
@@ -32,7 +31,8 @@ def test_core_probability_special_functions(dtype):
         for name, (values, expected) in cases.items():
             x = rt.Tensor(np.array(values, dtype=dtype)).realize()
             raw = getattr(_ffi._lib, 'poly_uop_' + name)(x._ctx, x.uop.raw)
-            y = Tensor(UOp(x._ctx, raw), device=x.device)
+            y = getattr(x, name)()
+            assert y.uop.raw == raw
             np.testing.assert_allclose(y.numpy(), expected, rtol=4e-6 if dtype == 'float32' else 3e-13, atol=0)
         for name, value, first, second in [
             ('lgamma', 3.2, 0.9988388912865996, 0.3663211907314008),
@@ -41,7 +41,7 @@ def test_core_probability_special_functions(dtype):
             ('ndtri', 0.5, 2.5066282746310005, 0),
         ]:
             x = rt.Tensor(np.array([value], dtype=dtype)).realize()
-            y = Tensor(UOp(x._ctx, getattr(_ffi._lib, 'poly_uop_' + name)(x._ctx, x.uop.raw)), device=x.device)
+            y = getattr(x, name)()
             d1, = y.sum().gradient(x)
             d2, = d1.sum().gradient(x)
             tol = 4e-6 if dtype == 'float32' else 3e-12

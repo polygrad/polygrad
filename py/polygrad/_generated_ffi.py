@@ -120,6 +120,8 @@ def bind(lib):
     lib.poly_tensor_diag.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_diagonal.restype = ctypes.c_void_p
     lib.poly_tensor_diagonal.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int, ctypes.c_int]
+    lib.poly_tensor_digamma.restype = ctypes.c_void_p
+    lib.poly_tensor_digamma.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_div.restype = ctypes.c_void_p
     lib.poly_tensor_div.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
     lib.poly_tensor_dot.restype = ctypes.c_void_p
@@ -140,6 +142,10 @@ def bind(lib):
     lib.poly_tensor_eq.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_erf.restype = ctypes.c_void_p
     lib.poly_tensor_erf.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_erfc.restype = ctypes.c_void_p
+    lib.poly_tensor_erfc.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_erfinv.restype = ctypes.c_void_p
+    lib.poly_tensor_erfinv.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_exp.restype = ctypes.c_void_p
     lib.poly_tensor_exp.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_expand.restype = ctypes.c_void_p
@@ -198,6 +204,8 @@ def bind(lib):
     lib.poly_tensor_leaky_relu_tensor.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_lerp.restype = ctypes.c_void_p
     lib.poly_tensor_lerp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+    lib.poly_tensor_lgamma.restype = ctypes.c_void_p
+    lib.poly_tensor_lgamma.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_linear_apply.restype = ctypes.c_void_p
     lib.poly_tensor_linear_apply.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_linspace_by_id.restype = ctypes.c_void_p
@@ -238,6 +246,8 @@ def bind(lib):
     lib.poly_tensor_mish.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_mse_loss.restype = ctypes.c_void_p
     lib.poly_tensor_mse_loss.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_ndtri.restype = ctypes.c_void_p
+    lib.poly_tensor_ndtri.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_neg.restype = ctypes.c_void_p
     lib.poly_tensor_neg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_nll_loss.restype = ctypes.c_void_p

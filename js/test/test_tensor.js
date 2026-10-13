@@ -7142,7 +7142,12 @@ async function runTensorTests(pg, createRuntime) {
       digamma: [[-6.5, 1, 6], [1.9467574842460869, -0.5772156649015329, 1.7061176684318005]],
       lgamma: [[-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]]
     }
-    const coreFn = (name, x) => new Tensor(pg.uop.wrap(pg._core.ffi[`poly_uop_${name}`](x._ctx, x.uop.raw)))
+    const coreFn = (name, x) => {
+      const y = x[name]()
+      const raw = pg._core.ffi[`poly_uop_${name}`](x._ctx, x.uop.raw)
+      assert(y.uop.key === String(pg._core.ffi.poly_uop_key(raw)), `${name}: frontend and core graphs differ`)
+      return y
+    }
     for (const [name, [values, expected]] of Object.entries(cases)) {
       const x = new Tensor(values, { dtype: 'float32' })
       await x.realize()
@@ -7166,6 +7171,30 @@ async function runTensorTests(pg, createRuntime) {
       assertClose(await d1.toArray(), [first], 5e-6)
       assertClose(await d2.toArray(), [second], 5e-5)
       d2.dispose(); gradSum.dispose(); d1.dispose(); loss.dispose(); y.dispose(); x.dispose()
+    }
+  })
+  await test('core probability Model capture and roundtrip', async () => {
+    const names = ['erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma']
+    const data = new Float32Array([0.1, 0.5, 0.9]), x = new Tensor(data), expected = {}
+    for (const name of names) {
+      const y = x[name]()
+      expected[name] = await y.toArray()
+      y.dispose()
+    }
+    const net = {forward({x}) { return Object.fromEntries(names.map(name => [name, x[name]()])) }}
+    const model = await pg.Model.fromCallableAsync(net, {inputs: {x}})
+    let restored
+    try {
+      restored = pg.Model.load(await model.saveAsync())
+      x.dispose()
+      for (const current of [model, restored]) {
+        const actual = await current.forwardAsync({x: data})
+        for (const name of names) assertClose(actual[name], expected[name], 5e-6)
+      }
+    } finally {
+      if (restored) await restored.dispose()
+      await model.dispose()
+      x.dispose()
     }
   })
   await test('raw UOp sub matches C composed helper', async () => {

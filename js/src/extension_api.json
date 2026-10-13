@@ -1472,6 +1472,23 @@
     "ownership": "owned",
     "cleanup": false
   },
+  "poly_tensor_digamma": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
   "poly_tensor_div": {
     "return": "PolyTensor *",
     "args": [
@@ -1689,6 +1706,40 @@
     "cleanup": false
   },
   "poly_tensor_erf": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_erfc": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_erfinv": {
     "return": "PolyTensor *",
     "args": [
       [
@@ -2361,6 +2412,23 @@
     "ownership": "owned",
     "cleanup": false
   },
+  "poly_tensor_lgamma": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
   "poly_tensor_linear_apply": {
     "return": "PolyTensor *",
     "args": [
@@ -2784,6 +2852,23 @@
       [
         "PolyTensor *",
         "target"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_ndtri": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
       ]
     ],
     "arrays": [],
