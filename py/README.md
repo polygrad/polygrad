@@ -470,6 +470,8 @@ same inputs except `attention_mask`, requires an unpadded prompt, and returns
 Follow it with `decode`/`decode_sample` at `start_pos=max_seq_len`; rotary offsets
 are retained internally. Reset caches before a new prompt. Tokenization, image
 processing and multimodal position IDs remain the caller's responsibility.
+Use the checkpoint's `generation_config.json` for stopping tokens; nested text
+configuration defaults can differ.
 
 [Late token embeddings](examples/late_embeddings.py) composes a backbone, a
 checkpoint projection and normalization through the public Model API, with a
