@@ -204,6 +204,13 @@ test-autograd-wasm: build/test_schedule_runtime.js
 test-nn-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips nn
 
+# SciPy is an explicit dependency of this independent numerical reference gate.
+SPECIAL_PYTHON ?= $(PYTHON)
+.PHONY: test-special-math
+test-special-math: build/libpolygrad.so build/polygrad_test
+	$(SAN_RUN) ./build/polygrad_test --filter special_math
+	POLY_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(SPECIAL_PYTHON) test/external/check_special_math.py
+
 test-indexing-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips indexing_owner
 

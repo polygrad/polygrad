@@ -16,6 +16,39 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+@pytest.mark.parametrize('dtype', ['float32', 'float64'])
+def test_core_probability_special_functions(dtype):
+    # Core UOp APIs precede Tensor convenience methods. Wrap their placed graphs;
+    # this exercises the same C composition a construction extension consumes.
+    with Runtime(device='CPU') as rt:
+        cases = {
+            'erf': ([0, 0.1, -1, 3], [0, 0.1124629160182849, -0.8427007929497149, 0.9999779095030014]),
+            'erfc': ([0, 3, 8], [1, 2.209049699858544e-5, 1.1224297172982928e-29]),
+            'erfinv': ([0, 1e-8, -0.5, 0.99], [0, 8.86226925452758e-9, -0.4769362762044699, 1.8213863677184495]),
+            'ndtri': ([0.5, 1e-8, 1e-4], [0, -5.612001244174789, -3.7190164854556804]),
+            'digamma': ([-6.5, 1, 6], [1.9467574842460869, -0.5772156649015329, 1.7061176684318005]),
+            'lgamma': ([-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]),
+        }
+        for name, (values, expected) in cases.items():
+            x = rt.Tensor(np.array(values, dtype=dtype)).realize()
+            raw = getattr(_ffi._lib, 'poly_uop_' + name)(x._ctx, x.uop.raw)
+            y = Tensor(UOp(x._ctx, raw), device=x.device)
+            np.testing.assert_allclose(y.numpy(), expected, rtol=4e-6 if dtype == 'float32' else 3e-13, atol=0)
+        for name, value, first, second in [
+            ('lgamma', 3.2, 0.9988388912865996, 0.3663211907314008),
+            ('lgamma', -6.5, 1.9467574842460869, 9.726988504392654),
+            ('erfinv', 0, 0.8862269254527580, 0),
+            ('ndtri', 0.5, 2.5066282746310005, 0),
+        ]:
+            x = rt.Tensor(np.array([value], dtype=dtype)).realize()
+            y = Tensor(UOp(x._ctx, getattr(_ffi._lib, 'poly_uop_' + name)(x._ctx, x.uop.raw)), device=x.device)
+            d1, = y.sum().gradient(x)
+            d2, = d1.sum().gradient(x)
+            tol = 4e-6 if dtype == 'float32' else 3e-12
+            np.testing.assert_allclose(d1.numpy(), [first], rtol=tol, atol=tol)
+            np.testing.assert_allclose(d2.numpy(), [second], rtol=tol, atol=tol)
+
+
 @pytest.mark.parametrize('dtype', ['int32', 'float32'])
 @pytest.mark.parametrize('correction', [0, 1, 3, 4])
 def test_core_variance_matches_tensor_graph(dtype, correction):

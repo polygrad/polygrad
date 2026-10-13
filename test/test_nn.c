@@ -1392,6 +1392,93 @@ static double eval_scalar_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double xval)
   return (rc == 0) ? result : (double)NAN;
 }
 
+static double eval_derivative_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double value, int order) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop_buffer_f64(ctx, 1), *y = fn(ctx, x);
+  for (int i = 0; y && i < order; i++)
+    y = poly_uop_grad(ctx, y, x);
+  double result = NAN;
+  if (y) {
+    PolyUOp *out = poly_uop_buffer_f64(ctx, 1);
+    PolyTestBufferView binds[] = {
+        POLY_TEST_HOST_VIEW(x, &value), POLY_TEST_HOST_VIEW(out, &result)};
+    if (poly_test_realize_buffer_views(
+            ctx, poly_uop_sink1(ctx, poly_test_store_to_buffer(ctx, out, y)), binds, 2
+        ))
+      result = NAN;
+  }
+  poly_ctx_destroy(ctx);
+  return result;
+}
+
+TEST(nn, special_math_probability_gamma_derivatives) {
+  /* SciPy polygamma, independently checked with 80-digit mpmath. */
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_lgamma, 3.2, 1) - 0.9988388912865998) < 2e-12);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_lgamma, 3.2, 2) - 0.3663211907314009) < 2e-12);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_lgamma, 1, 2) - 1.6449340668482264) < 2e-12);
+  PASS();
+}
+
+TEST(nn, special_math_probability_gamma_domain) {
+  double values[] = {-20.25, -6.5, -5.5, -0.5, 0.1, 0.5, 1, 6, 100};
+  for (int i = 0; i < 9; i++)
+    ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_lgamma, values[i]) - lgamma(values[i])) < 2e-11);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_lgamma, 0) == INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_lgamma, -6) == INFINITY);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_digamma, -6.5) - 1.946757484246087) < 2e-12);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_digamma, 6) - 1.7061176684318005) < 2e-12);
+  PASS();
+}
+
+TEST(nn, special_math_probability_gaussian_tails) {
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_erf, 0.1) - erf(0.1)) < 2e-15);
+  double values[] = {-3, -1, 0, 0.1, 1, 3, 8, 20, 26};
+  for (int i = 0; i < 9; i++)
+    ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_erfc, values[i]) / erfc(values[i]) - 1) < 3e-13);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_ndtri, 1e-20) + 9.262340089798409) < 2e-13);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_ndtri, 1e-4) + 3.7190164854556804) < 2e-13);
+  ASSERT_TRUE(fabsf(eval_scalar_f32(poly_uop_ndtri, 1e-8f) + 5.6120012452f) < 2e-6f);
+  PASS();
+}
+
+TEST(nn, special_math_probability_inverse_derivatives) {
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_erfinv, 0, 1) - 0.8862269254527580) < 2e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_erfinv, 0, 2)) < 2e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri, 0.5, 1) - 2.5066282746310005) < 2e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri, 0.5, 2)) < 2e-13);
+  PASS();
+}
+
+TEST(nn, special_math_probability_endpoints_and_topology) {
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_erf, INFINITY) == 1);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_erfc, INFINITY) == 0);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_erfc, -INFINITY) == 2);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_erfc, NAN)));
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_ndtri, 0) == -INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_ndtri, 1) == INFINITY);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri, -0.1)));
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri, 1.1)));
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri, NAN)));
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_erfinv, -1) == -INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_erfinv, 1) == INFINITY);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_erfinv, 1.1)));
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_erfinv, NAN)));
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_erfinv, 1e-100) / 1e-100 - 0.8862269254527580) < 2e-15);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_ndtri, 1e-300) + 37.0470962993612) < 2e-13);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_digamma, -6)));
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop_buffer_f64(ctx, 1);
+  PolyUOp *y = poly_uop_lgamma(ctx, x);
+  int count = 0;
+  PolyUOp **nodes = poly_uop_toposort_alloc(ctx, y, &count);
+  ASSERT_NOT_NULL(nodes);
+  for (int i = 0; i < count; i++)
+    ASSERT_TRUE(nodes[i]->op != POLY_OP_DETACH);
+  poly_uop_toposort_free(nodes);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, special_math_erf) {
   /* Reference: A&S Table 7.1, DLMF 7.2.1 */
   struct {
@@ -1409,8 +1496,7 @@ TEST(nn, special_math_erf) {
 }
 
 TEST(nn, special_math_erfc) {
-  /* Reference: erfc(x) = 1 - erf(x). Tail values from DLMF 7.2.2.
-   * Uses A&S tau directly (no 1-erf cancellation). */
+  /* Tail values from DLMF 7.2.2, evaluated without 1-erf cancellation. */
   struct {
     float x;
     float ref;
@@ -1430,7 +1516,7 @@ TEST(nn, special_math_erfc) {
     /* For very small tail values, check relative error instead */
     if (cases[i].ref < 1e-4f && cases[i].ref > 0.0f) {
       float rel_err = fabsf(got - cases[i].ref) / cases[i].ref;
-      ASSERT_TRUE(rel_err < 0.5f); /* within 50% relative error for f32 tails */
+      ASSERT_TRUE(rel_err < 5e-6f);
     } else {
       ASSERT_FLOAT_EQ(got, cases[i].ref, cases[i].tol);
     }

@@ -68,6 +68,9 @@ PolyUOp *poly_uop_cosh(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_softsign(PolyCtx *ctx, PolyUOp *x);
 
+/* Gaussian functions use central/tail rational approximations. Interior
+ * derivatives come from their graph expressions; endpoint derivatives are
+ * not defined. erfc is a tail probability, not a stable log-tail API. */
 PolyUOp *poly_uop_erf(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_erfc(PolyCtx *ctx, PolyUOp *x);
@@ -76,6 +79,9 @@ PolyUOp *poly_uop_erfinv(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_ndtri(PolyCtx *ctx, PolyUOp *x);
 
+/* Real digamma and log|Gamma|, with reflection for negative nonintegers.
+ * lgamma poles return +inf; digamma negative-integer poles return NaN.
+ * First and higher derivatives are supported away from poles. */
 PolyUOp *poly_uop_digamma(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_lgamma(PolyCtx *ctx, PolyUOp *x);

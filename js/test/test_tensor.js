@@ -7133,6 +7133,41 @@ async function runTensorTests(pg, createRuntime) {
     assert(error, 'disposed input succeeded')
     assertClose(await pg.function(a => a.add(1))(x).toArray(), [4])
   })
+  await test('core probability special functions and higher derivatives', async () => {
+    const cases = {
+      erf: [[0, 0.1, -1, 3], [0, 0.1124629160182849, -0.8427007929497149, 0.9999779095030014]],
+      erfc: [[0, 3, 8], [1, 2.209049699858544e-5, 1.1224297172982928e-29]],
+      erfinv: [[0, 1e-8, -0.5, 0.99], [0, 8.86226925452758e-9, -0.4769362762044699, 1.8213863677184495]],
+      ndtri: [[0.5, 1e-8, 1e-4], [0, -5.612001244174789, -3.7190164854556804]],
+      digamma: [[-6.5, 1, 6], [1.9467574842460869, -0.5772156649015329, 1.7061176684318005]],
+      lgamma: [[-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]]
+    }
+    const coreFn = (name, x) => new Tensor(pg.uop.wrap(pg._core.ffi[`poly_uop_${name}`](x._ctx, x.uop.raw)))
+    for (const [name, [values, expected]] of Object.entries(cases)) {
+      const x = new Tensor(values, { dtype: 'float32' })
+      await x.realize()
+      const y = coreFn(name, x), got = await y.toArray()
+      for (let i = 0; i < expected.length; i++) {
+        assert(Number.isFinite(got[i]) && Math.abs(got[i] - expected[i]) <= 5e-6 * Math.abs(expected[i]),
+          `${name}[${i}]: ${got[i]} != ${expected[i]}`)
+      }
+      y.dispose(); x.dispose()
+    }
+    for (const [name, value, first, second] of [
+      ['lgamma', 3.2, 0.9988388912865996, 0.3663211907314008],
+      ['lgamma', -6.5, 1.9467574842460869, 9.726988504392654],
+      ['erfinv', 0, 0.8862269254527580, 0],
+      ['ndtri', 0.5, 2.5066282746310005, 0]
+    ]) {
+      const x = new Tensor([value], { dtype: 'float32' })
+      await x.realize()
+      const y = coreFn(name, x), loss = y.sum(), [d1] = loss.gradient(x)
+      const gradSum = d1.sum(), [d2] = gradSum.gradient(x)
+      assertClose(await d1.toArray(), [first], 5e-6)
+      assertClose(await d2.toArray(), [second], 5e-5)
+      d2.dispose(); gradSum.dispose(); d1.dispose(); loss.dispose(); y.dispose(); x.dispose()
+    }
+  })
   await test('raw UOp sub matches C composed helper', async () => {
     const a = pg.uop.variable('sp', 0, 12)
     const b = pg.uop.variable('toks', 1, 4)
