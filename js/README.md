@@ -467,6 +467,14 @@ or `decode` with `tokens_decode` for one token. These return `hidden_prefill` or
 caches. This is a text backbone, not a token generator, vision model or complete
 embedding pipeline.
 
+Experimental composite `qwen3_5` support uses the same importer with `modalities: ['text']`
+in their configuration. `Qwen3_5Model` returns hidden states;
+`Qwen3_5ForConditionalGeneration` returns `logits`, `logits_prefill` and
+`logits_decode` (the latter shaped `[batch, vocabulary]`). A cached single-batch
+generator also exposes `decode_sample` with the same inputs as Whisper above.
+Tied heads share embedding storage. Vision and the complete Perplexity embedding
+pipeline are not yet supported; do not interpret text-only support as OCR support.
+
 For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
 {cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
 contract; `pg.Model.fromGGUF` accepts the same cache options but stays generic.

@@ -445,6 +445,14 @@ tokens. Supply consecutive offsets; `reset_transient()` clears the caches, and
 saved models load with empty caches. This is a text backbone, not a token
 generator, vision model or complete sentence-embedding pipeline.
 
+Experimental composite `qwen3_5` support uses the same importer with `modalities: ['text']`
+in their configuration. `Qwen3_5Model` returns hidden states;
+`Qwen3_5ForConditionalGeneration` returns `logits`, `logits_prefill` and
+`logits_decode` (the latter shaped `[batch, vocabulary]`). A cached single-batch
+generator also exposes `decode_sample` with the same inputs as Whisper above.
+Tied heads share embedding storage. Vision and the complete Perplexity embedding
+pipeline are not yet supported; do not interpret text-only support as OCR support.
+
 For cached Qwen3 generation, use `models.Transformer.from_gguf(data,
 cache_capacity=4096, prefill_chunk_size=64)`, or the runtime-bound
 `rt.models.Transformer.from_gguf(...)`. The loader validates the generation

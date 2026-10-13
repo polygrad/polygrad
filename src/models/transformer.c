@@ -18,6 +18,27 @@ typedef struct {
   PolyTensor *qkv[3], *qk_norm[2], *out, *attn_norm, *ffn_norm, *gate, *up, *down, *cache;
 } TransformerBlock;
 
+static PolyUOp *sample_decoder_output(
+    PolyCtx *ctx,
+    PolyUOp *sample,
+    PolyUOp *input,
+    PolyUOp *decode
+) {
+  /* Captured recurrent decoders carry cache writes on their output. Keep those
+   * effects on the final token, rather than inside the sampler's reductions. */
+  bool effects = decode->op == POLY_OP_AFTER;
+  PolyUOp *value = effects ? decode->src[0] : decode;
+  PolyUOp *result = poly_uop_substitute(ctx, sample, &input, &value, 1);
+  if (!result || !effects) return result;
+  PolyUOp **sources = malloc((size_t)decode->n_src * sizeof(*sources));
+  if (!sources) return NULL;
+  memcpy(sources, decode->src, (size_t)decode->n_src * sizeof(*sources));
+  sources[0] = result;
+  result = poly_uop(ctx, POLY_OP_AFTER, result->dtype, sources, decode->n_src, poly_arg_none());
+  free(sources);
+  return result;
+}
+
 /* tinygrad llm/model.py: Transformer.forward sampling. RNG capture uses the
  * same Model AUX/effect contract as Tensor-authored models, not a host sampler. */
 int model_decoder_sampler(PolyModel *m, int vocab, PolyTensor *decode, PolyUOp *position) {
@@ -50,10 +71,9 @@ int model_decoder_sampler(PolyModel *m, int vocab, PolyTensor *decode, PolyUOp *
    * Substituting logits fuses rollout like Tinygrad.forward without introducing
    * a second RNG stream or an owned output snapshot between Model calls. */
   PolyUOp *logical =
-      poly_uop_substitute(ctx, wrapped->uop_logical, &logits->uop_logical, &decode->uop_logical, 1);
-  PolyUOp *physical = poly_uop_substitute(
-      ctx, wrapped->uop_physical, &logits->uop_physical, &decode->uop_physical, 1
-  );
+      sample_decoder_output(ctx, wrapped->uop_logical, logits->uop_logical, decode->uop_logical);
+  PolyUOp *physical =
+      sample_decoder_output(ctx, wrapped->uop_physical, logits->uop_physical, decode->uop_physical);
   PolyTensor *fused =
       logical && physical
           ? poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, decode->device)

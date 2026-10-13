@@ -179,6 +179,7 @@ bool model_config_training(const cJSON *root, PolyModelError *err) {
 
 static const PolyModelType model_types[] = {
     {"Qwen35Text", "qwen3_5_text", model_qwen35_from_config, model_qwen35_from_hf_decoded, NULL},
+    {"Qwen35", "qwen3_5", model_qwen35_from_config, model_qwen35_from_hf_decoded, NULL},
     {"Whisper", "whisper", model_whisper_from_config, model_whisper_from_hf_decoded, NULL},
     {"EmbeddingGemma2", "embedding_gemma2", model_embeddinggemma2_from_config,
      model_embeddinggemma2_from_hf_decoded, NULL},

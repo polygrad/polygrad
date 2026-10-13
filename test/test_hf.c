@@ -63,6 +63,26 @@ TEST(hf, qwen35_config_ownership_and_required_weights) {
   ASSERT_INT_EQ(poly_model_control_count(m, "prefill"), 1);
   ASSERT_INT_EQ(poly_model_control_count(m, "decode"), 1);
   poly_model_free(m);
+  char composite[1536];
+  snprintf(
+      composite, sizeof(composite),
+      "{\"text_config\":%s,\"vision_config\":{},\"modalities\":[\"text\"],"
+      "\"architectures\":[\"Qwen3_5ForConditionalGeneration\"],\"tie_word_embeddings\":true,"
+      "\"max_seq_len\":2,\"cache_capacity\":8}",
+      config
+  );
+  m = poly_model_from_config(
+      ctx, "Qwen35", composite, (int)strlen(composite), POLY_DEVICE_INTERP, &err
+  );
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "decode_sample"), 2);
+  ASSERT_INT_EQ(poly_model_control_count(m, "decode_sample"), 1);
+  int lm_parameters = 0;
+  for (int i = 0; i < poly_model_buf_count(m); i++)
+    lm_parameters += poly_model_buf_role(m, i) == POLY_ROLE_PARAM;
+  ASSERT_INT_EQ(lm_parameters, parameters); /* Tied head shares storage. */
+  poly_model_free(m);
   poly_ctx_destroy(ctx);
   PASS();
 }

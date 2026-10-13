@@ -191,6 +191,7 @@ troubleshooting sections for installation and runtime errors.
 | Llama | Yes | Yes | No | C-backed Transformer in Python/JS |
 | Qwen3 | No | No | Yes | C-backed Transformer in Python/JS |
 | Qwen35Text | Yes | Text backbone only | No | Hidden states with optional caches; no token generation |
+| Qwen35 | Yes | Experimental text-only selection | No | Composite checkpoints: hidden states or cached language-model logits/sampling; no vision yet |
 | Whisper | Yes | Yes | No | Internal caches and fused token sampling; external audio preprocessing |
 | CLIP, ViT, DINOv2, DINOv3 | Yes | Yes | No | No |
 | EmbeddingGemma2 (text/image/audio), EmbeddingGemma2Text | Yes | Yes | No | No |

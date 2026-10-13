@@ -79,6 +79,55 @@ async function checkQwen35Cache(pg, dtype) {
   }
 }
 
+async function checkQwen35Generation(pg) {
+  const f = qwen35Fixture
+  for (const row of f.models) {
+    // Reuse the reference's text weights under the composite checkpoint names.
+    // The explicitly disabled vision tower does not need checkpoint storage.
+    const original = Uint8Array.from(atob(row.weights), v => v.charCodeAt(0))
+    const n = new DataView(original.buffer).getUint32(0, true)
+    const old = JSON.parse(new TextDecoder().decode(original.subarray(8, 8 + n)))
+    const renamed = Object.fromEntries(Object.entries(old).map(([k,v]) =>
+      [k === '__metadata__' ? k : `model.language_model.${k}`, v]))
+    const header = new TextEncoder().encode(JSON.stringify(renamed))
+    const aligned = Math.ceil(header.length / 8) * 8
+    const bytes = new Uint8Array(8 + aligned + original.length - 8 - n)
+    new DataView(bytes.buffer).setUint32(0, aligned, true)
+    bytes.fill(32, 8, 8 + aligned); bytes.set(header, 8)
+    bytes.set(original.subarray(8 + n), 8 + aligned)
+    const config = new TextEncoder().encode(JSON.stringify({
+      ...f.composite_config, modalities:['text'], cache_capacity:8}))
+    const model = pg.Model.fromHF(config, [bytes], {maxBatch:1, maxSeqLen:2})
+    let restored
+    const tol = row.dtype === 'bfloat16' ? .04 : 7e-5
+    try {
+      const forward = await model.forwardAsync({input_ids:new Int32Array([1,2]),
+        attention_mask:new Int32Array([1,1]), position_ids:new Int32Array([0,1])})
+      assertClose(forward.logits, row.generation.slice(0,64), tol)
+      const logits = []
+      for (const pos of [0,2,4]) {
+        const entry = pos === 4 ? 'decode' : 'prefill'
+        const tokens = Int32Array.from(f.cached_inputs.slice(pos, pos + (pos === 4 ? 1 : 2)))
+        const out = await model.callAsync(entry, {[`tokens_${entry}`]:tokens}, {controls:{start_pos:pos}})
+        logits.push(...out[`logits_${entry}`])
+      }
+      assertClose(logits, row.generation, tol)
+      restored = pg.Model.load(await model.saveAsync())
+      await model.resetTransientAsync()
+      for (const candidate of [model, restored]) for (let pos = 0; pos < 5; pos++) {
+        const out = await candidate.callAsync('decode_sample', {
+          tokens_decode:Int32Array.of(f.cached_inputs[pos]), 'sampling.temperature':Float32Array.of(0)
+        }, {controls:{start_pos:pos}})
+        const values = row.generation.slice(pos*32,(pos+1)*32)
+        assert(out['sampling.decode_token'][0] === values.indexOf(Math.max(...values)), 'fused greedy token')
+      }
+    } finally {
+      if (restored) await restored.dispose()
+      await model.dispose()
+    }
+  }
+}
+
 async function checkWhisperCaches(pg) {
   const model = await pg.models.WhisperAsync({d_model:8, num_mel_bins:4,
     max_source_positions:4, max_target_positions:8, max_seq_len:3, vocab_size:16,
@@ -2778,6 +2827,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
+  await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
@@ -3571,6 +3621,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
   await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
+  await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))

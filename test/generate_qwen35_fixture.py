@@ -8,7 +8,7 @@ import torch
 import transformers
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from safetensors.torch import save
-from external.test_qwen35_hf import reference, cached_reference
+from external.test_qwen35_hf import reference, cached_reference, composite_reference
 
 
 def main():
@@ -31,6 +31,9 @@ def main():
         row['cached']={'expected':expected.reshape(-1).tolist(),
                        'states':{name:value.reshape(-1).tolist() for name,value in states.items()}}
         fixture['cached_inputs']=ids.numpy().reshape(-1).tolist()
+        composite,_,_,_,_,logits=composite_reference(True,True,dtype)
+        fixture['composite_config']=composite.to_dict()
+        row['generation']=logits[0].reshape(-1).tolist()
         fixture['models'].append(row)
     path=Path(__file__).parent/'fixtures/qwen35.json'
     path.write_text(json.dumps(fixture,indent=2)+'\n')

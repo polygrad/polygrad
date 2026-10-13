@@ -15,7 +15,8 @@
 typedef struct {
   int dim, hidden, vocab, layers, heads, kv, hd, kh, vh, kd, vd, conv, batch, length, rotary;
   int capacity;
-  bool causal, linear[256];
+  bool causal, linear[256], composite, lm, tied;
+  const char *prefix, *vision_prefix;
   double eps, theta;
 } Qwen35Config;
 
@@ -28,16 +29,47 @@ typedef struct {
   PolyCtx *ctx;
   PolyModel *model;
   const PolyHfDecoded *weights;
+  const char *prefix;
   Qwen35Parameter *parameters;
   int n_parameters, max_parameters;
   PolyTensor *freq, *conv[256], *delta[256], *kv[256];
 } Qwen35Build;
 
-static bool config(const cJSON *j, Qwen35Config *c, PolyModelError *err) {
+static bool config(const cJSON *root, Qwen35Config *c, PolyModelError *err) {
   memset(c, 0, sizeof(*c));
-  if (cJSON_GetObjectItemCaseSensitive(j, "text_config") ||
-      cJSON_GetObjectItemCaseSensitive(j, "vision_config"))
-    return model_factory_error(err, "Qwen3.5", "text prefill expects a text-only configuration");
+  const cJSON *j = cJSON_GetObjectItemCaseSensitive(root, "text_config");
+  c->composite = j != NULL;
+  if (!j) j = root;
+  if (!cJSON_IsObject(j)) return model_factory_error(err, "text_config", "expected object");
+  const cJSON *architectures = cJSON_GetObjectItemCaseSensitive(root, "architectures");
+  if (architectures && !cJSON_IsNull(architectures)) {
+    const cJSON *arch = cJSON_GetArrayItem(architectures, 0);
+    if (!cJSON_IsArray(architectures) || cJSON_GetArraySize(architectures) != 1 ||
+        !cJSON_IsString(arch))
+      return model_factory_error(err, "architectures", "expected one Qwen3.5 architecture");
+    c->lm = !strcmp(arch->valuestring, "Qwen3_5ForConditionalGeneration");
+    if (!c->lm && strcmp(arch->valuestring, c->composite ? "Qwen3_5Model" : "Qwen3_5TextModel"))
+      return model_factory_error(err, "architectures", "unsupported Qwen3.5 architecture");
+    if (c->lm && !c->composite)
+      return model_factory_error(err, "text_config", "conditional generation needs text_config");
+  }
+  const cJSON *selection = cJSON_GetObjectItemCaseSensitive(root, "modalities");
+  const cJSON *vision = cJSON_GetObjectItemCaseSensitive(root, "vision_config");
+  if (c->composite || (vision && !cJSON_IsNull(vision)) || selection) {
+    const cJSON *text = cJSON_GetArrayItem(selection, 0);
+    if (!c->composite || !cJSON_IsArray(selection) || cJSON_GetArraySize(selection) != 1 ||
+        !cJSON_IsString(text) || strcmp(text->valuestring, "text"))
+      return model_factory_error(
+          err, "modalities", "Qwen3.5 currently requires explicit [\"text\"] for composite models"
+      );
+  }
+  c->prefix = c->composite ? (c->lm ? "model.language_model." : "language_model.") : "";
+  c->vision_prefix = c->lm ? "model.visual." : "visual.";
+  const cJSON *tied = cJSON_GetObjectItemCaseSensitive(root, "tie_word_embeddings");
+  if (!tied) tied = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
+  if (tied && !cJSON_IsBool(tied))
+    return model_factory_error(err, "tie_word_embeddings", "expected boolean");
+  c->tied = tied && cJSON_IsTrue(tied);
 #define DIM(field, key, max)                                                                       \
   if (!model_config_integer(j, key, 1, max, true, err)) return false;                              \
   c->field = cJSON_GetObjectItemCaseSensitive(j, key)->valueint
@@ -54,13 +86,13 @@ static bool config(const cJSON *j, Qwen35Config *c, PolyModelError *err) {
   DIM(vd, "linear_value_head_dim", 1024);
   DIM(conv, "linear_conv_kernel_dim", 64);
 #undef DIM
-  if (!model_config_integer(j, "batch_size", 1, 1024, false, err) ||
-      !model_config_integer(j, "max_seq_len", 1, 32768, false, err) ||
+  if (!model_config_integer(root, "batch_size", 1, 1024, false, err) ||
+      !model_config_integer(root, "max_seq_len", 1, 32768, false, err) ||
       !model_config_choice(j, "hidden_act", "|silu|", err))
     return false;
-  const cJSON *v = cJSON_GetObjectItemCaseSensitive(j, "batch_size");
+  const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "batch_size");
   c->batch = v ? v->valueint : 1;
-  v = cJSON_GetObjectItemCaseSensitive(j, "max_seq_len");
+  v = cJSON_GetObjectItemCaseSensitive(root, "max_seq_len");
   c->length = v ? v->valueint : 32;
   v = cJSON_GetObjectItemCaseSensitive(j, "attention_bias");
   if (v && !cJSON_IsFalse(v))
@@ -68,8 +100,8 @@ static bool config(const cJSON *j, Qwen35Config *c, PolyModelError *err) {
   v = cJSON_GetObjectItemCaseSensitive(j, "is_causal");
   if (v && !cJSON_IsBool(v)) return model_factory_error(err, "is_causal", "expected boolean");
   c->causal = !v || cJSON_IsTrue(v);
-  if (!model_config_integer(j, "cache_capacity", 0, 65536, false, err)) return false;
-  v = cJSON_GetObjectItemCaseSensitive(j, "cache_capacity");
+  if (!model_config_integer(root, "cache_capacity", 0, 65536, false, err)) return false;
+  v = cJSON_GetObjectItemCaseSensitive(root, "cache_capacity");
   c->capacity = v ? v->valueint : 0;
   if (c->capacity && (!c->causal || c->capacity < c->length))
     return model_factory_error(
@@ -125,7 +157,9 @@ static PolyTensor *parameter(
     int ndim
 ) {
   char name[192];
-  if (snprintf(name, sizeof(name), "%s%s", base, suffix) >= (int)sizeof(name)) return NULL;
+  const char *prefix = !strcmp(base, "lm_head") ? "" : b->prefix;
+  if (snprintf(name, sizeof(name), "%s%s%s", prefix, base, suffix) >= (int)sizeof(name))
+    return NULL;
   /* Authoring-only handles: entrypoints share each declared weight, not copies.
    * The factory scope owns their lifetime; this table is freed before returning. */
   for (int i = 0; i < b->n_parameters; i++)
@@ -377,6 +411,11 @@ static PolyTensor *qwen35_forward(
     if (!x) return NULL;
   }
   x = norm(b, "", "norm", x, c.dim, c.eps, true);
+  if (c.lm) {
+    PolyTensor *head =
+        c.tied ? table : parameter(b, "lm_head", ".weight", (int64_t[]){c.vocab, c.dim}, 2);
+    x = poly_tensor_linear_apply(ctx, x, head, NULL);
+  }
   /* Host readback is F32; source weights and intermediate rounding stay typed. */
   return poly_tensor_cast(ctx, x, POLY_FLOAT32);
 }
@@ -393,7 +432,8 @@ static PolyModel *qwen35_build(
       .ctx = ctx,
       .model = poly_model_new(ctx, NULL),
       .weights = hf,
-      .max_parameters = c.layers * 24 + 2};
+      .prefix = c.prefix,
+      .max_parameters = c.layers * 24 + 3};
   b.parameters = calloc((size_t)b.max_parameters, sizeof(*b.parameters));
   PolyModel *m = b.model;
   if (!m || !b.parameters) goto fail;
@@ -409,10 +449,11 @@ static PolyModel *qwen35_build(
   PolyTensor *valid = poly_model_input(m, "attention_mask", POLY_INT32, shape, 2);
   PolyTensor *positions = poly_model_input(m, "position_ids", POLY_INT32, shape, 2);
   PolyTensor *x = qwen35_forward(&b, &c, ids, valid, positions, NULL);
-  if (!x || poly_model_output(m, "last_hidden_state", x) != POLY_STATUS_OK ||
+  const char *forward_output = c.lm ? "logits" : "last_hidden_state";
+  if (!x || poly_model_output(m, forward_output, x) != POLY_STATUS_OK ||
       poly_model_entrypoint(
           m, "forward", (const char *[]){"input_ids", "attention_mask", "position_ids"}, 3,
-          (const char *[]){"last_hidden_state"}, 1, NULL
+          &forward_output, 1, NULL
       ) != POLY_STATUS_OK)
     goto fail;
   if (c.capacity) {
@@ -444,7 +485,8 @@ static PolyModel *qwen35_build(
     for (int step = 0; step < 2; step++) {
       const char *entry = step ? "decode" : "prefill";
       const char *input = step ? "tokens_decode" : "tokens_prefill";
-      const char *output = step ? "hidden_decode" : "hidden_prefill";
+      const char *output = c.lm ? (step ? "logits_decode" : "logits_prefill")
+                                : (step ? "hidden_decode" : "hidden_prefill");
       char variable[64];
       snprintf(variable, sizeof(variable), "%s.start_pos", entry);
       Qwen35Config current = c;
@@ -467,12 +509,15 @@ static PolyModel *qwen35_build(
       PolyTensorCapture *capture = poly_tensor_capture_begin(ctx);
       if (!capture) goto fail;
       x = qwen35_forward(&b, &current, ids, valid, positions, position);
+      if (c.lm && step) x = poly_tensor_reshape(ctx, x, (int64_t[]){c.batch, c.vocab}, 2);
       PolyTensor *wrapped = NULL;
       bool ok = x && !poly_tensor_capture_wrap(capture, states, mutable, count, &x, 1, &wrapped);
       poly_tensor_capture_end(capture);
       if (!ok || !wrapped || poly_model_output(m, output, wrapped) != POLY_STATUS_OK ||
           poly_model_entrypoint(m, entry, &input, 1, &output, 1, NULL) != POLY_STATUS_OK ||
           poly_model_control(m, entry, "start_pos", position) != POLY_STATUS_OK)
+        goto fail;
+      if (c.lm && step && c.batch == 1 && model_decoder_sampler(m, c.vocab, wrapped, position))
         goto fail;
     }
   }
@@ -511,6 +556,12 @@ PolyModel *model_qwen35_from_hf_decoded(
     cJSON_AddNumberToObject(j, "max_seq_len", opts->max_seq_len);
   }
   PolyModelError err = {0};
+  Qwen35Config c;
+  if (!config(j, &c, &err)) {
+    poly_import_error_set(POLY_IMPORT_ERR_UNSUPPORTED_MODEL, "%s", err.message);
+    cJSON_Delete(j);
+    return NULL;
+  }
   PolyModelFactoryScope scope;
   PolyModel *m = NULL;
   if (model_factory_begin(&scope, opts->ctx, opts->device))
@@ -526,8 +577,33 @@ PolyModel *model_qwen35_from_hf_decoded(
   }
   PolyBindIndex *index = poly_bind_index_create(m);
   if (!index) goto fail;
+  const PolyDecodedTensor *embedding = NULL;
+  char embedding_name[192];
+  snprintf(embedding_name, sizeof(embedding_name), "%sembed_tokens.weight", c.prefix);
+  for (int i = 0; i < hf->n_tensors; i++)
+    if (!strcmp(hf->tensors[i].name, embedding_name)) embedding = &hf->tensors[i];
   for (int i = 0; i < hf->n_tensors; i++) {
     const PolyDecodedTensor *t = &hf->tensors[i];
+    /* Only the explicitly disabled tower may be omitted. Text and head names
+     * stay strict; a tied alias must contain the same checkpoint bytes. */
+    if (c.composite && !strncmp(t->name, c.vision_prefix, strlen(c.vision_prefix))) continue;
+    if (c.lm && c.tied && !strcmp(t->name, "lm_head.weight")) {
+      size_t width = t->dtype == POLY_DECODED_F32                                    ? 4
+                     : t->dtype == POLY_DECODED_F16 || t->dtype == POLY_DECODED_BF16 ? 2
+                                                                                     : 0;
+      if (!embedding || !width || t->dtype != embedding->dtype || t->ndim != 2 ||
+          embedding->ndim != 2 || t->numel != embedding->numel ||
+          t->shape[0] != embedding->shape[0] || t->shape[1] != embedding->shape[1] ||
+          (uint64_t)t->numel > SIZE_MAX / width ||
+          memcmp(t->data, embedding->data, (size_t)t->numel * width)) {
+        poly_import_error_set(
+            POLY_IMPORT_ERR_WEIGHT_MISMATCH, "Qwen3.5 lm_head.weight must match tied embeddings"
+        );
+        poly_bind_index_destroy(index);
+        goto fail;
+      }
+      continue;
+    }
     int bi = poly_bind_index_find(index, t->name);
     if (bi < 0 || poly_model_buf_role(m, bi) != POLY_ROLE_PARAM ||
         poly_import_bind_tensor(index, t->name, t, 0, -1) != 1) {

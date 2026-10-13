@@ -51,6 +51,129 @@ def cached_reference(dtype=torch.float32):
     return config,ref,ids,expected,states
 
 
+def composite_reference(generation=False, tied=True, dtype=torch.float32):
+    from transformers import Qwen3_5Config, Qwen3_5Model, Qwen3_5ForConditionalGeneration
+    text, backbone, ids, mask, positions, _ = reference(dtype=dtype)
+    config = Qwen3_5Config(text_config=text.to_dict(), vision_config=dict(
+        depth=1, hidden_size=16, intermediate_size=32, num_heads=2,
+        patch_size=2, temporal_patch_size=1, spatial_merge_size=2,
+        out_hidden_size=16, num_position_embeddings=16), tie_word_embeddings=tied)
+    config.text_config.tie_word_embeddings = tied
+    config._attn_implementation = 'eager'
+    cls = Qwen3_5ForConditionalGeneration if generation else Qwen3_5Model
+    config.architectures = [cls.__name__]
+    model = cls(config).to(dtype).eval()
+    child = model.model if generation else model
+    child.language_model.load_state_dict(backbone.state_dict())
+    with torch.no_grad():
+        out = model(input_ids=ids, attention_mask=mask, position_ids=positions, use_cache=False)
+        expected = (out.logits if generation else out.last_hidden_state).float().numpy()
+    return config, model, ids, mask, positions, expected
+
+
+@pytest.mark.parametrize('generation,tied', [(False,True),(True,True),(True,False)])
+@pytest.mark.parametrize('dtype',[torch.float32,torch.bfloat16])
+def test_qwen35_composite_text_import_and_head(generation,tied,dtype):
+    import polygrad as pg
+    config, ref, ids, mask, positions, expected = composite_reference(generation,tied,dtype)
+    cfg = config.to_dict(); cfg['modalities'] = ['text']
+    # Safetensors omits the duplicate tied head in published checkpoints.
+    weights = {k:v.contiguous() for k,v in ref.state_dict().items()
+               if not (generation and tied and k == 'lm_head.weight')}
+    inputs = {k:v.numpy().astype('int32') for k,v in zip(
+        ['input_ids','attention_mask','position_ids'],[ids,mask,positions])}
+    key = 'logits' if generation else 'last_hidden_state'
+    with pg.create(device='CPU') as rt:
+        model = rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)],
+                                 max_batch=2,max_seq_len=5)
+        try:
+            got = model.forward(**inputs)[key]
+            np.testing.assert_allclose(got,expected,atol=.04 if dtype==torch.bfloat16 else 5e-5,
+                                       rtol=.02 if dtype==torch.bfloat16 else 5e-4)
+            assert not any('visual.' in b['name'] for b in model.bindings())
+            restored = rt.Model.load(model.save())
+            try: np.testing.assert_array_equal(restored.forward(**inputs)[key],got)
+            finally: restored.dispose()
+        finally: model.dispose()
+
+
+@pytest.mark.parametrize('dtype',[torch.float32,torch.bfloat16,torch.float16])
+@pytest.mark.parametrize('tied',[True,False])
+def test_qwen35_composite_cached_logits_and_sampling(dtype,tied):
+    import polygrad as pg
+    config, ref, ids, _, _, _ = composite_reference(True,tied,dtype)
+    ids = ids[:1]
+    with torch.no_grad(): expected = ref(input_ids=ids,use_cache=False).logits.float().numpy()
+    cfg = config.to_dict(); cfg.update(modalities=['text'],cache_capacity=8)
+    weights = {k:v.contiguous().clone() for k,v in ref.state_dict().items()}
+    with pg.create(device='CPU') as rt:
+        model = rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)],max_seq_len=2)
+        try:
+            outputs=[]
+            for pos in (0,2,4):
+                entry = 'decode' if pos == 4 else 'prefill'
+                n = 1 if pos == 4 else 2
+                out = model.call(entry,{f'tokens_{entry}':ids[:,pos:pos+n].numpy().astype('int32')},
+                                 controls={'start_pos':pos})[f'logits_{entry}']
+                outputs.append(out.reshape(1,n,-1))
+            np.testing.assert_allclose(np.concatenate(outputs,axis=1),expected,
+                atol=7e-5 if dtype==torch.float32 else .04,rtol=7e-4 if dtype==torch.float32 else .02)
+            states={b['name']:model.read_buffer(b['name']).copy() for b in model.bindings()
+                    if '.cache.' in b['name']}
+            restored=rt.Model.load(model.save())
+            try:
+                model.reset_transient()
+                for candidate in (model,restored):
+                    codes=[]
+                    for pos in range(ids.shape[1]):
+                        out=candidate.call('decode_sample',{
+                            'tokens_decode':ids[:,pos:pos+1].numpy().astype('int32'),
+                            'sampling.temperature':np.array([0.],np.float32)},controls={'start_pos':pos})
+                        codes.append(int(out['sampling.decode_token'].reshape(-1)[0]))
+                    np.testing.assert_array_equal(codes,expected.argmax(-1)[0])
+                    for name,value in states.items():
+                        actual=candidate.read_buffer(name)
+                        if value.dtype==np.uint16:
+                            if dtype==torch.bfloat16:
+                                actual=(actual.astype(np.uint32)<<16).view(np.float32)
+                                value=(value.astype(np.uint32)<<16).view(np.float32)
+                            else:
+                                actual=actual.view(np.float16).astype(np.float32)
+                                value=value.view(np.float16).astype(np.float32)
+                        np.testing.assert_allclose(actual,value,atol=3e-5 if dtype==torch.float32 else .04,
+                                                   rtol=5e-4 if dtype==torch.float32 else .02)
+            finally: restored.dispose()
+        finally: model.dispose()
+
+
+def test_qwen35_composite_selection_and_weight_errors():
+    import polygrad as pg
+    config,ref,*_ = composite_reference(True)
+    cfg=config.to_dict()
+    weights={k:v.clone() for k,v in ref.state_dict().items()}
+    with pg.create(device='CPU') as rt:
+        missing_vision=dict(cfg);missing_vision.pop('vision_config')
+        with pytest.raises(RuntimeError,match='modalities'):
+            rt.Model.from_hf(config_json=json.dumps(missing_vision),weight_bytes_list=[save(weights)])
+        for selection in (None,[],['image'],['text','text'],['text','image']):
+            bad=dict(cfg)
+            if selection is not None: bad['modalities']=selection
+            with pytest.raises(RuntimeError,match='modalities'):
+                rt.Model.from_hf(config_json=json.dumps(bad),weight_bytes_list=[save(weights)])
+        cfg['modalities']=['text']
+        weights['lm_head.weight'][0,0]+=1
+        with pytest.raises(RuntimeError,match='must match tied embeddings'):
+            rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)])
+        del weights['lm_head.weight']
+        for key in ('model.language_model.unrelated.weight','visual.unrelated.weight'):
+            bad=dict(weights);bad[key]=torch.ones(1)
+            with pytest.raises(RuntimeError,match='unexpected weight'):
+                rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(bad)])
+        del weights['model.language_model.layers.0.linear_attn.dt_bias']
+        with pytest.raises(RuntimeError,match='weight'):
+            rt.Model.from_hf(config_json=json.dumps(cfg),weight_bytes_list=[save(weights)])
+
+
 @pytest.mark.parametrize('causal',[True,False])
 @pytest.mark.parametrize('dtype',[torch.float32,torch.bfloat16])
 def test_qwen35_text_prefill(causal,dtype):
