@@ -827,9 +827,10 @@ static PolyBoundValue bound_dtype_max(PolyDType dtype) {
 static PolyTypedMinMax cast_minmax(PolyCtx *ctx, PolyUOp *u) {
   bool floating = poly_dtype_is_float(u->dtype);
   bool integer = poly_dtype_is_int(u->dtype) && !poly_dtype_eq(u->dtype, POLY_BOOL);
+  double bound = floating ? poly_dtype_float_max(u->dtype) : INFINITY;
   PolyTypedMinMax fallback =
       floating || poly_dtype_eq(u->dtype, POLY_WEAKINT)
-          ? (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)}
+          ? (PolyTypedMinMax){bound_float(-bound), bound_float(bound)}
           : (PolyTypedMinMax){bound_int(dtype_min(u->dtype)), bound_dtype_max(u->dtype)};
   if (poly_dtype_eq(u->dtype, POLY_WEAKFLOAT) || (!floating && !integer)) return fallback;
   PolyTypedMinMax bounds = poly_uop_typed_minmax(ctx, u->src[0]);
@@ -935,7 +936,8 @@ static PolyTypedMinMax poly_uop_typed_minmax(PolyCtx *ctx, PolyUOp *u) {
     return result;
   }
 
-  return (PolyTypedMinMax){bound_float(-INFINITY), bound_float(INFINITY)};
+  double bound = poly_dtype_float_max(u->dtype);
+  return (PolyTypedMinMax){bound_float(-bound), bound_float(bound)};
 }
 
 /* Rewrite callbacks */

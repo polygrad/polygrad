@@ -3353,13 +3353,9 @@ PolyUOp *poly_uop_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
   if (!ctx || (op != POLY_OP_ADD && op != POLY_OP_MUL && op != POLY_OP_MAX)) return NULL;
   PolyDType scalar = dtype;
   if (poly_dtype_is_float(scalar)) {
-    double value = op == POLY_OP_ADD ? 0.0 : op == POLY_OP_MUL ? 1.0 : -INFINITY;
-    /* These FP8 formats have no infinity (upstream 99fc6102d). */
-    if (op == POLY_OP_MAX) {
-      if (poly_dtype_eq(scalar, POLY_FP8E4M3)) value = -448.0;
-      if (poly_dtype_eq(scalar, POLY_FP8E4M3FNUZ)) value = -240.0;
-      if (poly_dtype_eq(scalar, POLY_FP8E5M2FNUZ)) value = -57344.0;
-    }
+    double value = op == POLY_OP_ADD   ? 0.0
+                   : op == POLY_OP_MUL ? 1.0
+                                       : -poly_dtype_float_max(scalar);
     return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(value));
   }
   if (poly_dtype_is_bool(scalar)) {

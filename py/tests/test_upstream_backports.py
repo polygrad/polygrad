@@ -43,6 +43,18 @@ def test_weak_source_keeps_full_width():
         assert t.item() == 16
 
 
+@pytest.mark.parametrize('name', ['fp8e4m3', 'fp8e4m3fnuz', 'fp8e5m2fnuz'])
+def test_fp8_pool_and_sort_padding(name):
+    dt = getattr(dtypes, name)
+    x = Tensor([-3., -1., -2.], dtype=dt)
+    for descending in (False, True):
+        values, _ = x.sort(descending=descending)
+        np.testing.assert_array_equal(values.float().numpy(),
+                                      [-1., -2., -3.] if descending else [-3., -2., -1.])
+    pooled = x.reshape(1, 1, 1, 3).max_pool2d((1, 2), stride=1, padding=(1, 1, 0, 0))
+    np.testing.assert_array_equal(pooled.float().numpy(), [[[[-3., -1., -1., -2.]]]])
+
+
 def test_infinite_log_reductions():
     x = Tensor([-np.inf, -np.inf, 0.])
     np.testing.assert_array_equal(x[:2].logsumexp().numpy(), -np.inf)

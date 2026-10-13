@@ -979,12 +979,13 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
         ),
         to_uint
     );
+    bool fnuz = poly_dtype_is_fp8_fnuz(to);
     PolyUOp *finite = binary(
         ctx, POLY_OP_OR, to_uint, cast(ctx, sign, to_uint),
-        where(ctx, to_uint, underflow, weakint(ctx, 0), norm)
+        fnuz ? norm : where(ctx, to_uint, underflow, weakint(ctx, 0), norm)
     );
     PolyUOp *is_nan = eq(ctx, exp, weakint(ctx, (INT64_C(1) << fe) - 1));
-    return poly_dtype_is_fp8_fnuz(to)
+    return fnuz
                /* FNUZ has no signed zero: bit 7 alone encodes NaN. */
                ? where(
                      ctx, to_uint, is_nan, shl(ctx, weakint(ctx, 1), ts - 1),

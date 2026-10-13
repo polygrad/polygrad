@@ -582,14 +582,14 @@
     {
       "id": "PG-DIV-032",
       "status": "approved",
-      "stages": ["tensor", "codegen"],
+      "stages": ["tensor", "codegen", "symbolic"],
       "area": "Upstream low-precision extrema, emulation and accumulation backports",
       "graph_pairs": {
         "default_dtype_float16_linspace": {"tinygrad": "1795c7d0127ea1babfe48249383622b3a9e40bf2d835bc45a55b741f08fce330", "polygrad": "a88052ef6e10264b168aaac55e7b186ee058ced8c498f2927a338ada4a16d875"}
       },
       "tinygrad": "v0.14 uses infinite MAX identities for finite-only FP8 formats and emulates FP8 through half when available, losing small e5m2fnuz normals.",
       "polygrad": "Backports 99fc6102d finite FP8 extrema, 988651638 float32 FP8 emulation and 6de721f1e float32 accumulation for low-precision floating arange. FNUZ underflow clears the sign exactly as in the pin; this latter correction repairs a porting error, not a divergence.",
-      "rationale": "Keep reduction identities representable, preserve normal FP8 values without an intermediate half conversion, and round arange only after float32 accumulation.",
+      "rationale": "Keep reduction, pooling, scatter, sort and symbolic bounds consistent with the finite FP8 dtype range; preserve normal FP8 values without an intermediate half conversion; round arange only after float32 accumulation.",
       "approval": "User 2026-10-13 approved upstream bug fixes and requested investigation of both FP8 commits before committing.",
       "evidence": ["https://github.com/tinygrad/tinygrad/commit/99fc6102d", "https://github.com/tinygrad/tinygrad/commit/988651638", "https://github.com/tinygrad/tinygrad/commit/6de721f1e", "src/codegen/decomp/dtype.c", "src/uop/ops.c", "py/tests/test_upstream_backports.py", "test/test_codegen.c:fp8_dtype_decomposition_uses_float32_even_with_native_half", "temp/upstream-backports-20261013/review-red.log", "temp/upstream-backports-20261013/review-extra-red.log", "temp/upstream-backports-20261013/review-arange-red.log"],
       "close_when": "The pin incorporates the three upstream fixes. No other emulated floating-point conversion or accumulation change is permitted."

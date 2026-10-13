@@ -8895,7 +8895,8 @@ static bool poly_sort_bound_arg(PolyDType dt, bool use_min, PolyArg *out) {
   if (!out) return false;
   dt = dt;
   if (poly_dtype_is_float(dt)) {
-    *out = poly_arg_float(use_min ? -INFINITY : INFINITY);
+    double bound = poly_dtype_float_max(dt);
+    *out = poly_arg_float(use_min ? -bound : bound);
     return true;
   }
   if (poly_dtype_is_bool(dt)) {

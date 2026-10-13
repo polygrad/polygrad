@@ -169,6 +169,15 @@ bool poly_dtype_is_fp8_fnuz(PolyDType dt) {
   return poly_dtype_eq(dt, POLY_FP8E4M3FNUZ) || poly_dtype_eq(dt, POLY_FP8E5M2FNUZ);
 }
 
+double poly_dtype_float_max(PolyDType dt) {
+  /* Upstream 99fc6102d: these formats have no infinity. Keep all bound
+   * consumers consistent, not just reduction accumulator initialization. */
+  if (poly_dtype_eq(dt, POLY_FP8E4M3)) return 448.0;
+  if (poly_dtype_eq(dt, POLY_FP8E4M3FNUZ)) return 240.0;
+  if (poly_dtype_eq(dt, POLY_FP8E5M2FNUZ)) return 57344.0;
+  return INFINITY;
+}
+
 bool poly_dtype_is_index(PolyDType dt) {
   /* Polygrad stores DTypes by value, so non-canonical weak metadata can reach
    * the current pm_lower_index_dtype boundary. Name and priority identify it. */

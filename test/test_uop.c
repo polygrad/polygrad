@@ -21,6 +21,34 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/codegen/codegen.h"
+#include "../src/mixin/elementwise.h"
+
+TEST(uop, fp8_bounds_are_shared_by_constants_and_symbolic_queries) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_FP8E4M3, POLY_FP8E5M2,  POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ,
+                       POLY_FLOAT16, POLY_BFLOAT16, POLY_FLOAT32,     POLY_FLOAT64};
+  double maxima[] = {448., INFINITY, 240., 57344., INFINITY, INFINITY, INFINITY, INFINITY};
+  for (int i = 0; i < 8; i++) {
+    PolyUOp *lo = NULL, *hi = NULL;
+    ASSERT_TRUE(poly_dtype_bound_const(ctx, types[i], true, &lo));
+    ASSERT_TRUE(poly_dtype_bound_const(ctx, types[i], false, &hi));
+    ASSERT_TRUE(lo->arg.f == -maxima[i]);
+    ASSERT_TRUE(hi->arg.f == maxima[i]);
+    PolyUOp *value = poly_test_uop_param(ctx, types[i], 1, i, POLY_ADDR_ALU);
+    PolyUOp *bounded = poly_uop_variable_like_bounds(ctx, "fp8_bound", value);
+    ASSERT_NOT_NULL(bounded);
+    ASSERT_TRUE(
+        bounded->arg.param->min_val.kind == POLY_ARG_FLOAT &&
+        bounded->arg.param->min_val.f == -maxima[i]
+    );
+    ASSERT_TRUE(
+        bounded->arg.param->max_val.kind == POLY_ARG_FLOAT &&
+        bounded->arg.param->max_val.f == maxima[i]
+    );
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 #include "../src/interp.h"
 #include <float.h>
 

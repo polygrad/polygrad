@@ -144,6 +144,19 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(selu, [1.0507009873554805 * 1.6732632423543772 * Math.expm1(-1), 1.0507009873554805], 2e-7)
   }))
 
+  await test('upstream backports: finite FP8 pool and sort padding', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    for (const dtype of ['fp8e4m3', 'fp8e4m3fnuz', 'fp8e5m2fnuz']) {
+      const x = new Tensor([-3, -1, -2], {dtype})
+      for (const descending of [false, true]) {
+        const [values] = x.sort(-1, descending)
+        assertClose(await values.cast('float32').toArray(), descending ? [-1, -2, -3] : [-3, -2, -1], 0)
+      }
+      const pooled = x.reshape([1, 1, 1, 3]).maxPool2d([1, 2], {stride: 1, padding: [1, 1, 0, 0]})
+      assertClose(await pooled.cast('float32').toArray(), [-3, -1, -1, -2], 0)
+    }
+  }))
+
   await test('upstream backports: activation values and gradients', isolatedRuntime(async runtime => {
     const Tensor = runtime.Tensor
     for (const [op, input, expected] of [

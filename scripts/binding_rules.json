@@ -139,6 +139,7 @@
   "poly_dtype_can_lossless_cast": {"manual":["python"]},
   "poly_dtype_count": {"manual":["python"]},
   "poly_dtype_eq": {"exclude":"C-only"},
+  "poly_dtype_float_max": {"exclude":"C-only"},
   "poly_dtype_from_uop": {"exclude":"C-only"},
   "poly_dtype_id_by_name": {"manual":["python","native"]},
   "poly_dtype_is_bool": {"exclude":"C-only"},

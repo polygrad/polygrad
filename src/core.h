@@ -230,6 +230,8 @@ bool poly_dtype_eq(PolyDType a, PolyDType b);
 bool poly_dtype_is_float(PolyDType dt);
 bool poly_dtype_is_fp8(PolyDType dt);
 bool poly_dtype_is_fp8_fnuz(PolyDType dt);
+/* DType.max for floating types, including infinity where representable. */
+double poly_dtype_float_max(PolyDType dt);
 bool poly_dtype_is_int(PolyDType dt);
 bool poly_dtype_is_index(PolyDType dt);
 bool poly_dtype_is_weak(PolyDType dt);

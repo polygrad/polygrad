@@ -5282,6 +5282,27 @@ TEST(codegen, float_narrowing_keeps_sign_outside_underflow_magnitude) {
   PASS();
 }
 
+TEST(codegen, fnuz_narrowing_masks_sign_and_magnitude_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *f32 = poly_test_uop_param(ctx, POLY_FLOAT32, 1, i, POLY_ADDR_ALU);
+    PolyUOp *raw = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT8, f32, poly_arg_none());
+    PolyFloatDecompContext fctx = {.from = types[i], .to = POLY_FLOAT32};
+    PolyUOp *out = poly_graph_rewrite_ctx_ex(ctx, raw, poly_pm_float_decomp(), &fctx, true);
+    ASSERT_NOT_NULL(out);
+    ASSERT_INT_EQ(out->op, POLY_OP_BITCAST);
+    PolyUOp *finite = out->src[0]->src[2];
+    ASSERT_INT_EQ(finite->op, POLY_OP_WHERE);
+    ASSERT_INT_EQ(finite->src[2]->op, POLY_OP_OR);
+    /* Pinned f2f: underflow.where(0, sign | norm), not sign | where(...). */
+    ASSERT_TRUE(finite->src[2]->src[0]->op != POLY_OP_WHERE);
+    ASSERT_TRUE(finite->src[2]->src[1]->op != POLY_OP_WHERE);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, long_to_float_decomposition_keeps_weak_constants) {
   /* Tinygrad 2026-08-22/a9069c177a9d dtype.py:34-37 constructs the range
    * checks from Python 0/-1 and the 2**32 scale, hence weak constants. */

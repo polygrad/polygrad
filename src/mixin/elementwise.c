@@ -180,7 +180,8 @@ bool poly_dtype_bound_const(PolyCtx *ctx, PolyDType dt, bool use_min, PolyUOp **
   if (!ctx || !out) return false;
   dt = dt;
   if (poly_dtype_is_float(dt)) {
-    *out = poly_uop_const_exact_float(ctx, dt, use_min ? -INFINITY : INFINITY);
+    double bound = poly_dtype_float_max(dt);
+    *out = poly_uop_const_exact_float(ctx, dt, use_min ? -bound : bound);
     return *out != NULL;
   }
   if (poly_dtype_is_bool(dt)) {
