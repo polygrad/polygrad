@@ -30,8 +30,8 @@ def test_core_variance_matches_tensor_graph(dtype, correction):
         else:
             data = x.numpy().astype(np.float32)
             squares = (data - data.mean(axis=1, keepdims=True)) ** 2
-            # The pin accumulates using the input dtype even for integer variance.
-            numerator = squares.astype(dtype).sum(axis=1)
+            # Upstream #18150 retains fractional squared deviations for integer input.
+            numerator = squares.sum(axis=1)
             np.testing.assert_allclose(values, numerator / (3 - correction), rtol=1e-6)
 
 
@@ -76,7 +76,7 @@ def test_core_composites_match_scalar_program(dtype, name):
         'leaky_relu': lambda x: (x < 0).where(.01 * x, x),
         'mish': lambda x: x * x.softplus().tanh(),
         'hardswish': lambda x: x * (x + 3).relu6() * (1 / 6),
-        'elu': lambda x: x.relu() - 1.0 * (1 - x.exp()).relu(),
+        'elu': lambda x: (x > 0).where(x, 1.0 * ((x - x.relu()).exp() - 1)),
     }
     with Runtime(device=os.environ.get('POLY_DEV', 'CPU')) as rt:
         values = [-16777217, -3, -1, 0, 1, 3, 16777217]
@@ -2905,7 +2905,7 @@ class TestElementwise:
             np.array([[0.0, -np.inf], [-np.inf, 0.0]], dtype=np.float32),
         )
 
-    def test_logaddexp_softplus_mish_match_pinned_graph(self):
+    def test_logaddexp_softplus_mish_match_backported_graph(self):
         assert not hasattr(Tensor, '_physicalize_result_for')
         x = Tensor([
             [-20.0, -3.0, -0.0, 2.0, 20.0],
@@ -2916,6 +2916,7 @@ class TestElementwise:
         def pinned_logaddexp(a, b):
             a, b, _ = a._broadcasted(b)
             m = a.maximum(b)
+            m = m.isfinite().where(m, 0)  # Upstream e3c4b3d9b infinity guard.
             return ((a - m).exp() + (b - m).exp()).log() + m
 
         def pinned_softplus(value, beta=1.0):
@@ -3871,10 +3872,9 @@ class TestSpatialOwners:
             runtime.dispose()
 
     def test_interpolate_empty_and_aligned_singleton(self):
-        # Pinned linear align_corners divides by size-1: a singleton is NaN,
-        # not a silently substituted nearest sample; zero output stays empty.
+        # Upstream #17790 clamps the aligned denominator; zero output stays empty.
         x = Tensor([1., 3., 7.])
-        assert np.isnan(x.interpolate((1,), align_corners=True).item())
+        assert x.interpolate((1,), align_corners=True).item() == 1.
         for align in (False, True):
             out = x.interpolate((0,), align_corners=align)
             assert out.shape == (0,)
@@ -4444,9 +4444,9 @@ class TestMatmulAndLoss:
         np.testing.assert_array_equal(mixed.numpy(), expected_float)
         np.testing.assert_array_equal(half_default.numpy(), expected_half)
         np.testing.assert_array_equal(half_explicit.numpy(), expected_half_float)
-        # Tinygrad 2026-08-22/a9069c177a9d coalesce.py:95-101 removes the
-        # float-half-float roundtrip after float-bias promotion at codegen.
-        np.testing.assert_array_equal(half_float_bias.numpy(), expected_half_float)
+        # Upstream #18294 preserves the half result before float-bias promotion.
+        # The bias is exactly representable, so these values match half + half.
+        np.testing.assert_array_equal(half_float_bias.numpy(), expected_half)
 
         for case_index, (result, expected_casts) in enumerate((
             (mixed, 1), (half_default, 2), (half_explicit, 2), (half_float_bias, 3),

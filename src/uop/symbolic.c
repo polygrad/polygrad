@@ -2956,7 +2956,8 @@ static _Thread_local PolyPatternMatcher *g_pm_drop_and_clauses = NULL;
 PolyPatternMatcher *poly_pm_simplify_valid(void) {
   if (g_pm_simplify_valid) return g_pm_simplify_valid;
   PolyRule rules[] = {
-      {poly_upat_op(POLY_OP_AND, NULL, 0, "valid"), rule_simplify_valid},
+      {poly_upat_set_dtype(poly_upat_op(POLY_OP_AND, NULL, 0, "valid"), &POLY_BOOL, 1),
+       rule_simplify_valid},
       {poly_upat_op(POLY_OP_WHERE, NULL, 0, "root"), rule_gated_given_valid},
   };
   g_pm_simplify_valid =

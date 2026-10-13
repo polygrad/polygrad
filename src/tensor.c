@@ -325,19 +325,29 @@ static bool tensor_assign_anchor_op(PolyOps op) {
   return poly_opset_has(POLY_GROUP_MOVEMENT, op) || op == POLY_OP_BITCAST || op == POLY_OP_DETACH;
 }
 
-static PolyUOp *tensor_assign_view_anchor(PolyUOp *u, bool logical) {
-  if (!u || poly_uop_has_buffer_identity(u)) return NULL;
+static bool tensor_holds_root(PolyCtx *ctx, PolyUOp *root, bool logical) {
+  for (int i = 0; i < ctx->n_tensors; i++) {
+    PolyTensor *t = ctx->tensors[i];
+    if (t && (logical ? t->uop_logical : t->uop_physical) == root) return true;
+  }
+  return false;
+}
 
-  /* tinygrad retargets view assigns at the nearest buffer-identity level:
-   * SHRINK(BUFFER) maps BUFFER -> AFTER(BUFFER, assign), while
-   * PERMUTE(RESHAPE(BUFFER)) maps RESHAPE(BUFFER) -> AFTER(...)
-   * (Tensor.assign).  The retained logical twin is not collapsed by
+static PolyUOp *tensor_assign_view_anchor(PolyCtx *ctx, PolyUOp *u, bool logical) {
+  if (!u || !tensor_assign_anchor_op(u->op)) return NULL;
+
+  /* Retarget the deepest buffer identity held by a Tensor (upstream #18641).
+   * The retained logical twin is not collapsed by
    * realization, so its explicit CONTIGUOUS provenance node is the matching
    * materialization occurrence after the physical twin becomes BUFFER.  Stop
    * at that existing Polygrad boundary, or at AFTER when chaining a pending
    * view write; the physical graph never takes this CONTIGUOUS-only branch. */
-  PolyUOp *cur = u;
-  while (cur && !poly_uop_has_buffer_identity(cur)) {
+  PolyUOp *cur = u, *anchor = NULL;
+  while (cur) {
+    /* Upstream #18641 selects the deepest identity owned by a live Tensor,
+     * not an incidental reshape manufactured while constructing the view. */
+    if (poly_uop_has_buffer_identity(cur) && (cur == u || tensor_holds_root(ctx, cur, logical)))
+      anchor = cur;
     if (logical && (cur->op == POLY_OP_AFTER || cur->op == POLY_OP_CONTIGUOUS))
       return cur != u ? cur : NULL;
     if (cur->op == POLY_OP_AFTER) {
@@ -352,10 +362,10 @@ static PolyUOp *tensor_assign_view_anchor(PolyUOp *u, bool logical) {
       return cur != u && (identity->op == POLY_OP_BUFFER || identity->op == POLY_OP_PARAM) ? cur
                                                                                            : NULL;
     }
-    if (!tensor_assign_anchor_op(cur->op) || cur->n_src < 1) return NULL;
+    if (!tensor_assign_anchor_op(cur->op) || cur->n_src < 1) break;
     cur = cur->src[0];
   }
-  return (cur && cur != u) ? cur : NULL;
+  return anchor && anchor != u ? anchor : NULL;
 }
 
 static PolyUOp *tensor_substitute_once(
@@ -2161,9 +2171,9 @@ PolyTensor *poly_tensor_assign_after(
                         logical_after->src[0] != target_logical))
     return NULL;
   if (tensor_capture_record(ctx) != 0) return NULL;
-  PolyUOp *physical_view_anchor = tensor_assign_view_anchor(target_physical, false);
+  PolyUOp *physical_view_anchor = tensor_assign_view_anchor(ctx, target_physical, false);
   PolyUOp *logical_view_anchor =
-      build_logical ? tensor_assign_view_anchor(target_logical, true) : NULL;
+      build_logical ? tensor_assign_view_anchor(ctx, target_logical, true) : NULL;
   /* Tensor.assign's branch is determined by the eager physical graph. A
    * creation COPY is not storage even when its portable twin is a BUFFER;
    * logical retention must not turn that simple assign into a view write. */
@@ -3921,7 +3931,7 @@ static PolyUOp *interpolate_root(
       if (!align_corners) p = poly_uop_sub(ctx, p, poly_uop_const_typed(ctx, calc, 0.5));
       x = cubic_sample_axis_root(ctx, x, p, axis, -.75, false);
     } else if (linear) {
-      int64_t den = align_corners ? out - 1 : out * 2;
+      int64_t den = align_corners ? (out > 1 ? out - 1 : 1) : out * 2;
       int64_t upper_value;
       if (__builtin_mul_overflow(in - 1, den, &upper_value)) return NULL;
       PolyUOp *arr = arange_default_int(ctx, 0, out, 1);
@@ -5228,7 +5238,10 @@ PolyUOp *poly_uop_arange_float_dtype(
   }
 
   int64_t shape[1] = {n};
-  PolyUOp *base = poly_uop_full_float_dtype(ctx, shape, 1, step, supplied_dtype);
+  /* Upstream 6de721f1e: do not round each cumulative step to FP8/half. */
+  PolyDType acc_dtype;
+  if (!poly_dtype_least_upper(dt, POLY_FLOAT32, &acc_dtype)) return NULL;
+  PolyUOp *base = poly_uop_full_float_dtype(ctx, shape, 1, step, acc_dtype);
   PolyUOp *cumsum = poly_uop_cumalu(ctx, base, 0, POLY_OP_ADD);
   PolyUOp *bias = poly_uop_const_exact_float(ctx, poly_dtype_weak(dt), start - step);
   PolyUOp *result = cumsum && bias ? poly_uop_add(ctx, cumsum, bias) : NULL;
@@ -7187,12 +7200,12 @@ PolyUOp *poly_uop_var_axes(
     } else
       count = poly_uop_mul(ctx, count, dim);
   }
-  /* OpMixin.var casts squares to sum_acc_dtype(input), not the mean's dtype.
+  /* Upstream #18150: integer inputs produce floating squared deviations.
    * Keep the scalar denominator scalar, including zero for excessive correction. */
   PolyUOp *diff = poly_uop_sub(ctx, x, poly_uop_mean_axes(ctx, x, axes, n_axes, true));
   PolyUOp *squares = diff ? poly_uop_mul(ctx, diff, diff) : NULL;
   PolyDType acc;
-  if (!squares || !poly_sum_acc_dtype(x->dtype, &acc)) return NULL;
+  if (!squares || !poly_sum_acc_dtype(squares->dtype, &acc)) return NULL;
   PolyUOp *numerator = sum_axes_root(ctx, poly_uop_cast(ctx, squares, acc), axes, n_axes, keepdim);
   PolyUOp *denominator;
   int64_t n;
@@ -9457,15 +9470,18 @@ PolyUOp *poly_uop_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, i
         final_shape[d] = uf_shape[d];
       x = poly_uop_reshape(ctx, x, final_shape, final_ndim);
 
-      for (int k = ki; k < slen - 1; k++)
-        s[k] = s[k + 1];
-      s[slen - 1] = '\0';
-      slen--;
+      /* Diagonal extraction moves the surviving repeated axis to the end. */
+      int dst = 0;
+      for (int k = 0; k < slen; k++)
+        if (k != ci2 && k != ki) s[dst++] = s[k];
+      s[dst++] = c;
+      s[dst] = '\0';
+      slen = dst;
 
       x_ndim = final_ndim;
       memcpy(x_shape, final_shape, final_ndim * sizeof(int64_t));
 
-      ci2--;
+      ci2 = -1;
     }
 
     trace_tensors[t] = x;
@@ -10531,6 +10547,7 @@ static PolyUOp *logsumexp_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_ax
   PolyUOp *m = max_axes_root(ctx, x, axes, n_axes, true);
   if (poly_uop_ndim(ctx, x) == 0) n_axes = 0;
   m = m ? poly_uop_detach(ctx, m) : NULL;
+  m = m ? poly_uop_where(ctx, poly_uop_isfinite(ctx, m), m, poly_uop_const_int(ctx, 0)) : NULL;
   PolyUOp *e = m ? poly_uop_exp(ctx, poly_uop_sub(ctx, x, m)) : NULL;
   PolyUOp *s = e ? sum_axes_root(ctx, e, axes, n_axes, keepdim) : NULL;
   if (!s) return NULL;
@@ -10574,6 +10591,7 @@ static PolyUOp *logcumsumexp_root(PolyCtx *ctx, PolyUOp *x, int axis) {
   int64_t n = sh[ndim - 1], a = -1;
   PolyUOp *m = poly_uop_split_cumalu(ctx, xt, -1, POLY_OP_MAX);
   m = m ? poly_uop_detach(ctx, m) : NULL;
+  m = m ? poly_uop_where(ctx, poly_uop_isfinite(ctx, m), m, poly_uop_const_int(ctx, 0)) : NULL;
   PolyUOp *xu = poly_unsqueeze_axis(ctx, xt, ndim - 1);
   PolyUOp *mu = m ? poly_unsqueeze_axis(ctx, m, ndim) : NULL;
   PolyUOp *ones = poly_uop_full_int_dtype(ctx, (int64_t[]){n, n}, 2, 1, POLY_BOOL);

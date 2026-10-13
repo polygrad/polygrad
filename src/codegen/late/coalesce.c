@@ -844,6 +844,15 @@ static PolyUOp *poly_image_load_to_float(
   return float_load ? poly_uop_cast(ctx, float_load, POLY_FLOAT16) : NULL;
 }
 
+static PolyUOp *image_store_value(PolyCtx *ctx, PolyUOp *index, PolyUOp *value) {
+  /* Half images round on store. Ordinary half casts must retain their rounding. */
+  if (index->n_src && poly_dtype_eq(index->src[0]->dtype, POLY_FLOAT16) &&
+      value->op == POLY_OP_CAST && value->n_src == 1 &&
+      poly_dtype_eq(value->src[0]->dtype, POLY_FLOAT32))
+    return value->src[0];
+  return poly_uop_cast(ctx, value, POLY_FLOAT32);
+}
+
 static PolyUOp *poly_image_store_to_float(
     PolyCtx *ctx,
     PolyUOp *store,
@@ -854,26 +863,17 @@ static PolyUOp *poly_image_store_to_float(
       store->src[0]->op != POLY_OP_INDEX || !poly_dtype_eq(store->src[0]->dtype, POLY_FLOAT32) ||
       !poly_dtype_eq(store->src[1]->dtype, POLY_FLOAT16))
     return NULL;
-  PolyUOp *value = poly_uop_cast(ctx, store->src[1], POLY_FLOAT32);
+  PolyUOp *value = store->src[1];
+  if (value->op == POLY_OP_STACK) {
+    PolyUOp **lanes = malloc((size_t)value->n_src * sizeof(*lanes));
+    if (!lanes) return NULL;
+    for (int i = 0; i < value->n_src; i++)
+      lanes[i] = image_store_value(ctx, store->src[0], value->src[i]);
+    value = poly_uop_stack(ctx, lanes, value->n_src);
+    free(lanes);
+  } else
+    value = image_store_value(ctx, store->src[0], value);
   return value ? poly_uop_store_val(ctx, store->src[0], value) : NULL;
-}
-
-static PolyUOp *poly_remove_image_cast_roundtrip(
-    PolyCtx *ctx,
-    PolyUOp *cast,
-    const PolyBindings *bindings
-) {
-  (void)ctx;
-  (void)bindings;
-  if (!cast || cast->op != POLY_OP_CAST || cast->n_src != 1 ||
-      !poly_dtype_eq(cast->dtype, POLY_FLOAT32))
-    return NULL;
-  PolyUOp *inner = cast->src[0];
-  if (!inner || inner->op != POLY_OP_CAST || inner->n_src != 1 ||
-      !poly_dtype_eq(inner->dtype, POLY_FLOAT16) ||
-      !poly_dtype_eq(inner->src[0]->dtype, POLY_FLOAT32))
-    return NULL;
-  return inner->src[0];
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_simplify_add_image = NULL;
@@ -885,7 +885,6 @@ PolyPatternMatcher *poly_pm_simplify_add_image(void) {
       POLY_RULE(poly_upat_op(POLY_OP_SHRINK, NULL, 0, "shrink"), poly_transform_to_image),
       POLY_RULE(poly_upat_op(POLY_OP_LOAD, NULL, 0, "load"), poly_image_load_to_float),
       POLY_RULE(poly_upat_op(POLY_OP_STORE, NULL, 0, "store"), poly_image_store_to_float),
-      POLY_RULE(poly_upat_op(POLY_OP_CAST, NULL, 0, "cast"), poly_remove_image_cast_roundtrip),
   };
   g_pm_simplify_add_image =
       poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));

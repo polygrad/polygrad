@@ -24,6 +24,32 @@
 #include "../src/interp.h"
 #include <float.h>
 
+TEST(uop, validity_simplification_rejects_integer_and) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = poly_uop_cast(ctx, poly_uop_range(ctx, 16, 0, POLY_AXIS_LOOP), POLY_INT32);
+  PolyUOp *k = poly_uop_cast(ctx, poly_uop_const_int(ctx, 12), POLY_INT32);
+  PolyUOp *inner = poly_uop_alu2(ctx, POLY_OP_AND, r, k);
+  PolyUOp *root = poly_uop_alu2(ctx, POLY_OP_AND, inner, r);
+  PolyUOp *out = poly_graph_rewrite(ctx, root, poly_pm_simplify_valid());
+  ASSERT_PTR_EQ(out, root);
+  ASSERT_TRUE(poly_dtype_eq(out->dtype, POLY_INT32));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, fp8_max_identity_is_representable) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType types[] = {POLY_FP8E4M3, POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ};
+  double expected[] = {-448., -INFINITY, -240., -57344.};
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *identity = poly_uop_identity_element(ctx, POLY_OP_MAX, types[i]);
+    ASSERT_NOT_NULL(identity);
+    ASSERT_TRUE(identity->arg.f == expected[i]);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static bool content_keys_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   size_t na = 0, nb = 0;
   uint8_t *ka = poly_uop_key(ctx, a, &na), *kb = poly_uop_key(ctx, b, &nb);

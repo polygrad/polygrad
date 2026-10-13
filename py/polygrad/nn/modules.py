@@ -158,7 +158,7 @@ class Conv2d:
             if stride != 1:
                 raise ValueError("padding='same' is not supported for strided convolutions")
             dilation_tuple = (dilation,) * len(kernel_size) if isinstance(dilation, int) else tuple(dilation)
-            padding = tuple(v for d, k in zip(dilation_tuple, kernel_size[::-1])
+            padding = tuple(v for d, k in zip(dilation_tuple[::-1], kernel_size[::-1])
                             for v in (d * (k - 1) // 2, d * (k - 1) - d * (k - 1) // 2))
         self.stride = stride
         self.dilation = dilation

@@ -27,6 +27,51 @@
 
 int poly_test_x86_program_call_entry(void *entry, void **args, int n_args);
 
+TEST_BACKEND(x86, upstream_narrow_index_and_float_selections) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
+  float data[] = {NAN, 1, 2, -1};
+  uint8_t indices[] = {1, 2, 3, 0};
+  PolyTensor *x = poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, (int64_t[]){4}, 1);
+  PolyTensor *idx =
+      poly_tensor_from_host(ctx, indices, sizeof(indices), POLY_UINT8, (int64_t[]){4}, 1);
+  x = poly_tensor_to_device(ctx, x, POLY_DEVICE_X86);
+  idx = poly_tensor_to_device(ctx, idx, POLY_DEVICE_X86);
+  PolyTensor *one = poly_tensor_const_like_int(ctx, x, 1);
+  PolyTensor *less = poly_tensor_alu2(ctx, POLY_OP_CMPLT, x, one);
+  bool ok = true;
+  for (int d = 0; d < 3; d++) {
+    PolyDType dt = d == 1 ? POLY_FLOAT64 : POLY_INT32;
+    PolyTensor *a = poly_tensor_cast(ctx, one, dt);
+    PolyTensor *b = poly_tensor_cast(ctx, poly_tensor_const_like_int(ctx, x, -1), dt);
+    PolyTensor *out = d == 2 ? poly_tensor_index_select(ctx, x, 0, idx)
+                             : poly_tensor_alu3(ctx, POLY_OP_WHERE, less, a, b);
+    PolyTensor *realized = NULL;
+    bool ran = out && poly_realize_tensors(ctx, &out, 1, &realized) == 0 && realized;
+    const PolyUOp *buf = ran ? poly_uop_get_buffer_identity(poly_tensor_uop(realized)) : NULL;
+    double wide[4] = {0};
+    int32_t narrow[4] = {0};
+    float gathered[4] = {0};
+    ran = buf && poly_buffer_read(
+                     ctx, (PolyUOp *)buf,
+                     d == 1   ? (void *)wide
+                     : d == 2 ? (void *)gathered
+                              : (void *)narrow,
+                     d == 1 ? sizeof(wide) : sizeof(narrow)
+                 ) == 0;
+    ok &= ran;
+    for (int i = 0; ran && i < 4; i++) {
+      if (d == 2)
+        ok &= i == 3 ? isnan(gathered[i]) : gathered[i] == data[indices[i]];
+      else
+        ok &= (d == 1 ? wide[i] : narrow[i]) == (i == 3 ? 1 : -1);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST_BACKEND(x86, constrained_loop_live_ins_survive_nested_ranges) {
   /* Unsigned division requires a zero high dividend in RDX on every outer
    * iteration, even when an inner range reuses RDX for its counter. */

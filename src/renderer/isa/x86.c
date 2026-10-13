@@ -1150,7 +1150,7 @@ static PolyUOp *rule_x86_float16_alu_legalize(PolyCtx *ctx, PolyUOp *u, const Po
 static PolyUOp *rule_x86_float16_cmp_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || !x86_op_is_comparison(u->op) || u->n_src != 2 ||
-      !x86_dtype_is_float16(u->src[0]->dtype))
+      (!x86_dtype_is_float16(u->src[0]->dtype) && !x86_dtype_is_float16(u->src[1]->dtype)))
     return NULL;
   PolyDType f32 = POLY_FLOAT32;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, f32, u->src[0], poly_arg_none());
@@ -1216,7 +1216,11 @@ static PolyUOp *rule_x86_float_where_mask_legalize(
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || !x86_is_float_dtype(u->dtype)) return NULL;
   PolyUOp *m = u->src[0];
   if (!m || !poly_dtype_is_bool(m->dtype)) return NULL;
-  if (m->n_src > 0 && x86_is_float_dtype(m->src[0]->dtype)) return NULL;
+  PolyDType mask_dtype = m->n_src ? m->src[0]->dtype : POLY_BOOL;
+  for (int i = 1; i < m->n_src; i++)
+    if (!poly_dtype_least_upper(mask_dtype, m->src[i]->dtype, &mask_dtype)) return NULL;
+  /* A blend's mask lanes must have the same width as its values (#17789). */
+  if (poly_dtype_eq(mask_dtype, u->dtype)) return NULL;
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, u->dtype, m, poly_arg_none());
   PolyUOp *zero = poly_uop_const_like_float(ctx, cast, 0.0);
   PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, cast, zero, poly_arg_none());
@@ -1389,21 +1393,25 @@ static PolyUOp *rule_x86_pre_isel_bitcast_noop(PolyCtx *ctx, PolyUOp *u, const P
   return x86_pre_isel_noop(ctx, u->dtype, u->src[0]);
 }
 
-static PolyUOp *rule_x86_pre_isel_where_gate_compare(
+static PolyUOp *x86_flag_gate(PolyCtx *ctx, PolyUOp *m) {
+  if (!m || !poly_dtype_is_bool(m->dtype)) return NULL;
+  if (x86_op_is_comparison(m->op) && m->n_src && !x86_is_float_dtype(m->src[0]->dtype)) return NULL;
+  /* Float flags conflate unordered with below/equal. Materialize a boolean
+   * mask first, then compare it as an integer (upstream #17801). */
+  PolyUOp *m_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, m, poly_arg_dtype(POLY_INT32));
+  PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
+  return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, m_int, zero, poly_arg_none());
+}
+
+static PolyUOp *rule_x86_pre_isel_end_gate_compare(
     PolyCtx *ctx,
     PolyUOp *u,
     const PolyBindings *b
 ) {
   (void)b;
-  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) return NULL;
-  PolyUOp *m = u->src[0];
-  if (!m || !poly_dtype_is_bool(m->dtype) || x86_op_is_comparison(m->op)) return NULL;
-  /* Tinygrad v0.14 pre_isel_matcher calls m.ne(cconst(0, int)) for all
-   * boolean gates. A shaped address carries its load extent, not GPR lanes. */
-  PolyUOp *m_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, m, poly_arg_dtype(POLY_INT32));
-  PolyUOp *zero = x86_cconst(ctx, POLY_INT32, poly_arg_int(0));
-  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, m_int, zero, poly_arg_none());
-  return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, cmp, u->src[1], u->src[2], u->arg);
+  if (!u || u->op != POLY_OP_END || u->n_src != 3) return NULL;
+  PolyUOp *cmp = x86_flag_gate(ctx, u->src[2]);
+  return cmp ? poly_uop3(ctx, u->op, u->dtype, u->src[0], u->src[1], cmp, u->arg) : NULL;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_x86_pre_isel = NULL;
@@ -1415,7 +1423,7 @@ static PolyPatternMatcher *poly_pm_x86_pre_isel(void) {
       {poly_upat_op(POLY_OP_BITCAST, NULL, 0, NULL), rule_x86_pre_isel_bitcast_noop},
       {poly_upat_op(POLY_OP_LOAD, NULL, 0, NULL), rule_x86_pre_isel_gated_load},
       {poly_upat_op(POLY_OP_STORE, NULL, 0, NULL), rule_x86_pre_isel_gated_store},
-      {poly_upat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_where_gate_compare},
+      {poly_upat_op(POLY_OP_END, NULL, 0, NULL), rule_x86_pre_isel_end_gate_compare},
   };
   g_pm_x86_pre_isel =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
@@ -1879,10 +1887,12 @@ static PolyUOp *x86_graph_scalar_low_lane(PolyUOp *u) {
 static PolyUOp *x86_graph_address_index_src(PolyCtx *ctx, PolyUOp *idx) {
   if (!idx) return NULL;
   PolyDType s = idx->dtype;
-  if (!poly_dtype_is_int(s) || poly_dtype_is_unsigned(s) || s.bitsize >= 64) return idx;
+  if (!poly_dtype_is_int(s)) return idx;
   int64_t vmin = 0, vmax = 0;
   poly_uop_minmax(ctx, idx, &vmin, &vmax);
-  return vmin < 0 ? poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, idx, poly_arg_none()) : idx;
+  if (vmin < 0) return poly_uop_cast(ctx, idx, POLY_INT64);
+  /* Byte/half registers do not define the upper address bits (#17787). */
+  return s.bitsize < 32 ? poly_uop_cast(ctx, idx, POLY_UINT32) : idx;
 }
 
 static int x86_graph_fold_address(PolyCtx *ctx, PolyUOp *addr, PolyUOp *out[4]) {
@@ -2135,7 +2145,7 @@ static PolyUOp *x86_graph_flag_compare(PolyCtx *ctx, PolyUOp *mask) {
   PolyX86Op cmp_op = 0;
   PolyUOp *srcs[2] = {lhs, mask->src[1]};
   if (x86_is_float_dtype(lhs_dt)) {
-    cmp_op = x86_dtype_is_float_bits(lhs_dt, 64) ? POLY_X86_VUCOMISD : POLY_X86_VUCOMISS;
+    return NULL; /* Float comparisons must reach this path through x86_flag_gate. */
   } else {
     PolyUOp *imm = x86_to_imm(ctx, mask->src[1]);
     if (imm) {
@@ -2152,7 +2162,12 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   (void)b;
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) return NULL;
   PolyUOp *mask = u->src[0];
-  if (!mask || !x86_op_is_comparison(mask->op) || mask->n_src != 2) return NULL;
+  if (!mask) return NULL;
+  if (!x86_op_is_comparison(mask->op) || mask->n_src != 2) {
+    PolyUOp *gate = x86_flag_gate(ctx, mask);
+    return gate ? poly_uop3(ctx, POLY_OP_WHERE, u->dtype, gate, u->src[1], u->src[2], u->arg)
+                : NULL;
+  }
   bool vec = poly_uop_max_numel(ctx, u) > 1;
 
   if (x86_is_float_dtype(u->dtype) && x86_is_float_dtype(mask->src[0]->dtype)) {
@@ -2184,6 +2199,8 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   /* Pinned isel_matcher's packed integer set excludes uint64. Address-valued
    * WHERE uses a scalar conditional move even when its pointed-to shape is wide. */
   {
+    PolyUOp *gate = x86_flag_gate(ctx, mask);
+    if (gate) return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, gate, u->src[1], u->src[2], u->arg);
     PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
     if (!flag) return NULL;
     PolyDType mask_src = mask->src[0]->dtype;

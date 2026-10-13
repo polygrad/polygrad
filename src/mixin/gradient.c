@@ -1103,14 +1103,17 @@ static PolyMap *compute_gradient(
         for (int i = 0; i < n_axes; i++)
           axes[i] = i;
         PolyUOp *mask = poly_uop_eq(ctx, u->src[0], u);
-        PolyUOp *fmask = mask ? cast_to(ctx, mask, g->dtype) : NULL;
+        PolyDType acc;
+        if (!poly_sum_acc_dtype(g->dtype, &acc)) GRAD_REVERSE_FAIL();
+        PolyUOp *fmask = mask ? cast_to(ctx, mask, acc) : NULL;
         PolyUOp *count = fmask ? poly_uop_reduce_axis(ctx, POLY_OP_ADD, fmask, axes, n_axes) : NULL;
         PolyUOp *reciprocal =
             count ? poly_uop1(ctx, POLY_OP_RECIPROCAL, count->dtype, count, poly_arg_none()) : NULL;
         PolyUOp *scaled_mask =
             fmask && reciprocal
-                ? poly_uop2(ctx, POLY_OP_MUL, g->dtype, fmask, reciprocal, poly_arg_none())
+                ? poly_uop2(ctx, POLY_OP_MUL, acc, fmask, reciprocal, poly_arg_none())
                 : NULL;
+        if (scaled_mask) scaled_mask = cast_to(ctx, scaled_mask, g->dtype);
         PolyUOp *gx = scaled_mask
                           ? poly_uop2(ctx, POLY_OP_MUL, g->dtype, scaled_mask, g, poly_arg_none())
                           : NULL;

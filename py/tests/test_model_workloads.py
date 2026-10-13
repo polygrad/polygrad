@@ -108,7 +108,9 @@ def test_unet_odd_spatial_work_budget(runtime):
 
     # Pinned cat uses stack/flatten for equal widths, leaving concatenation
     # fused into the final convolution instead of storing a doubled skip tensor.
-    got = measure(rt, forward, dict(kernel_count=3, global_ops=18594, global_mem=3720, copies=0))
+    # Upstream 1c183e6de's overflow-safe ELU adds 190 ops versus v0.14;
+    # the pin with that exact formula also measures 18784, with unchanged traffic.
+    got = measure(rt, forward, dict(kernel_count=3, global_ops=18784, global_mem=3720, copies=0))
     torch = pytest.importorskip('torch')
     f = torch.nn.functional
     tx, td, tu, tm = [torch.from_numpy(v) for v in values]

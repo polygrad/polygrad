@@ -9,6 +9,8 @@
 #include "bigint.h"
 #include <math.h>
 #include <limits.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -16,6 +18,31 @@
 #ifndef M_LN2
 #define M_LN2 0.693147180559945309417
 #endif
+
+/* For a movement chain rooted at CONST, PAD is the only operation that can
+ * add a different value. This is upstream's vmin == vmax proof specialized
+ * to that chain, without projecting float bounds through the int64 cache. */
+static bool weak_const_uniform(PolyUOp *root, PolyUOp *base) {
+  if (base->arg.kind == POLY_ARG_FLOAT && isnan(base->arg.f)) return false;
+  bool zero = (base->arg.kind == POLY_ARG_INT && base->arg.i == 0) ||
+              (base->arg.kind == POLY_ARG_FLOAT && base->arg.f == 0.0);
+  for (PolyUOp *u = root; u != base; u = u->src[0])
+    if (u->op == POLY_OP_PAD && !zero) return false;
+  return true;
+}
+
+static PolyUOp *remint_weak_const(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
+  if (u->op == POLY_OP_CONST) return poly_uop_const_like_dtype(ctx, u, u->arg, dt);
+  PolyUOp **src = malloc((size_t)u->n_src * sizeof(*src));
+  if (!src) return NULL;
+  memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
+  src[0] = remint_weak_const(ctx, src[0], dt);
+  PolyUOp *out =
+      src[0] ? poly_uop_tagged_arg(ctx, u->op, dt, src, u->n_src, u->arg, u->tag, u->tag_arg)
+             : NULL;
+  free(src);
+  return out;
+}
 
 /* C helper for current ElementwiseMixin._broadcasted.promote. It is public
  * inside the core because Polygrad applies one promotion to each retained
@@ -25,8 +52,9 @@ PolyUOp *poly_uop_elementwise_promote(PolyCtx *ctx, PolyUOp *root, PolyDType com
   PolyUOp *base = poly_uop_base(root);
   /* Invalid is a sentinel, not a bool value to cast to the common dtype. */
   if (base->op == POLY_OP_CONST && base->arg.kind == POLY_ARG_INVALID) return root;
-  if (poly_dtype_is_weak(root->dtype) && base->op == POLY_OP_CONST) {
-    return poly_uop_const_like_dtype(ctx, root, base->arg, poly_dtype_weak(common));
+  if (poly_dtype_is_weak(root->dtype) && base->op == POLY_OP_CONST &&
+      weak_const_uniform(root, base)) {
+    return remint_weak_const(ctx, root, poly_dtype_weak(common));
   }
   return poly_dtype_eq(root->dtype, common) ? root : poly_uop_cast(ctx, root, common);
 }
@@ -480,10 +508,19 @@ PolyUOp *poly_uop_atanh(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_asinh(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *negative =
+      poly_uop_elementwise_scalar_binop(ctx, POLY_OP_CMPLT, x, POLY_INT32, 0, false);
+  PolyUOp *sign =
+      poly_uop_where(ctx, negative, poly_uop_const_float(ctx, -1), poly_uop_const_float(ctx, 1));
   PolyUOp *a = poly_uop_elementwise_scalar_binop(
       ctx, POLY_OP_ADD, poly_uop_square(ctx, x), POLY_INT32, 1, false
   );
-  return poly_uop_log(ctx, poly_uop_add(ctx, x, poly_uop_alu1(ctx, POLY_OP_SQRT, a)));
+  return poly_uop_mul(
+      ctx, sign,
+      poly_uop_log(
+          ctx, poly_uop_add(ctx, poly_uop_mul(ctx, x, sign), poly_uop_alu1(ctx, POLY_OP_SQRT, a))
+      )
+  );
 }
 
 PolyUOp *poly_uop_acosh(PolyCtx *ctx, PolyUOp *x) {
@@ -505,15 +542,19 @@ static PolyUOp *pointwise_polyn(PolyCtx *ctx, PolyUOp *x, const double *coeffici
 
 PolyUOp *poly_uop_asin(PolyCtx *ctx, PolyUOp *x) {
   const double coefficients[] = {-0.0012624911, 0.0066700901, -0.0170881256, 0.0308918810,
-                                 -0.0501743046, 0.0889789874, -0.2145988016, 1.5707963050};
-  PolyUOp *ax = poly_uop_abs(ctx, x);
+                                 -0.0501743046, 0.0889789874, -0.2145988016, M_PI / 2};
+  PolyUOp *sign = poly_uop_where(
+      ctx, poly_uop_ge(ctx, x, poly_uop_const_int(ctx, 0)), poly_uop_const_float(ctx, 1),
+      poly_uop_const_float(ctx, -1)
+  );
+  PolyUOp *ax = poly_uop_mul(ctx, sign, x);
   PolyUOp *root = poly_uop_alu1(
       ctx, POLY_OP_SQRT,
       poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, ax, POLY_FLOAT32, 1.0, true)
   );
   PolyUOp *p = poly_uop_mul(ctx, root, pointwise_polyn(ctx, ax, coefficients, 8));
   return poly_uop_mul(
-      ctx, poly_uop_sign(ctx, x),
+      ctx, sign,
       poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, p, POLY_FLOAT32, M_PI / 2, true)
   );
 }
@@ -532,25 +573,11 @@ PolyUOp *poly_uop_atan(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_celu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha) {
-  PolyUOp *negative = poly_uop_mul(
-      ctx, alpha,
-      poly_uop_elementwise_scalar_binop(
-          ctx, POLY_OP_SUB, poly_uop_exp(ctx, poly_uop_div(ctx, x, alpha)), POLY_INT32, 1, false
-      )
-  );
-  PolyUOp *zero = poly_uop_const_exact_int(ctx, POLY_WEAKINT, 0);
-  return poly_uop_add(ctx, poly_uop_maximum(ctx, x, zero), poly_uop_minimum(ctx, negative, zero));
+  return poly_uop_mul(ctx, alpha, poly_uop_elu(ctx, poly_uop_div(ctx, x, alpha), 1.0));
 }
 
 PolyUOp *poly_uop_selu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *gamma) {
-  PolyUOp *zero = poly_uop_const_exact_int(ctx, POLY_WEAKINT, 0);
-  PolyUOp *negative = poly_uop_mul(
-      ctx, alpha,
-      poly_uop_elementwise_scalar_binop(
-          ctx, POLY_OP_SUB, poly_uop_exp(ctx, x), POLY_INT32, 1, false
-      )
-  );
-  return poly_uop_mul(ctx, gamma, poly_uop_where(ctx, poly_uop_ge(ctx, x, zero), x, negative));
+  return poly_uop_mul(ctx, gamma, poly_uop_elu_tensor(ctx, x, alpha));
 }
 
 PolyUOp *poly_uop_sinh(PolyCtx *ctx, PolyUOp *x) {
@@ -574,9 +601,13 @@ PolyUOp *poly_uop_softsign(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_uop_erf(PolyCtx *ctx, PolyUOp *x) {
   const double coefficients[] = {1.061405429, -1.453152027, 1.421413741, -0.284496736, 0.254829592};
-  PolyUOp *a = poly_uop_elementwise_scalar_binop(
-      ctx, POLY_OP_MUL, poly_uop_abs(ctx, x), POLY_FLOAT32, 0.3275911, true
+  PolyUOp *sign = poly_uop_where(
+      ctx, poly_uop_ge(ctx, x, poly_uop_const_int(ctx, 0)), poly_uop_const_float(ctx, 1),
+      poly_uop_const_float(ctx, -1)
   );
+  PolyUOp *a =
+      poly_uop_elementwise_scalar_binop(ctx, POLY_OP_MUL, sign, POLY_FLOAT32, 0.3275911, true);
+  a = poly_uop_mul(ctx, a, x);
   PolyUOp *t = poly_uop_elementwise_scalar_binop(
       ctx, POLY_OP_FDIV,
       poly_uop_elementwise_scalar_binop(ctx, POLY_OP_ADD, a, POLY_FLOAT32, 1.0, true), POLY_FLOAT32,
@@ -587,8 +618,7 @@ PolyUOp *poly_uop_erf(PolyCtx *ctx, PolyUOp *x) {
       ctx, p, poly_uop_exp(ctx, poly_uop_elementwise_neg(ctx, poly_uop_square(ctx, x)))
   );
   return poly_uop_mul(
-      ctx, poly_uop_sign(ctx, x),
-      poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, tail, POLY_FLOAT32, 1.0, true)
+      ctx, sign, poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, tail, POLY_FLOAT32, 1.0, true)
   );
 }
 
@@ -931,9 +961,8 @@ PolyUOp *poly_uop_relu(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_relu6(PolyCtx *ctx, PolyUOp *x) {
-  /* relu6(x) = relu(x) - relu(x - 6) */
-  PolyUOp *shifted = poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, x, POLY_INT32, 6, false);
-  return poly_uop_sub(ctx, poly_uop_relu(ctx, x), poly_uop_relu(ctx, shifted));
+  PolyUOp *r = poly_uop_relu(ctx, x), *six = poly_uop_const_int(ctx, 6);
+  return poly_uop_where(ctx, poly_uop_binop(ctx, POLY_OP_CMPLT, r, six), r, six);
 }
 
 PolyUOp *poly_uop_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope) {
@@ -992,11 +1021,14 @@ PolyUOp *poly_uop_elu(PolyCtx *ctx, PolyUOp *x, double alpha) {
 }
 
 PolyUOp *poly_uop_elu_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha) {
+  /* Bound the unselected exponential too: WHERE gradients multiply it by 0. */
+  PolyUOp *bounded = poly_uop_sub(ctx, x, poly_uop_relu(ctx, x));
   PolyUOp *tail = poly_uop_elementwise_scalar_binop(
-      ctx, POLY_OP_SUB, poly_uop_exp(ctx, x), POLY_INT32, 1, true
+      ctx, POLY_OP_SUB, poly_uop_exp(ctx, bounded), POLY_INT32, 1, false
   );
-  tail = poly_uop_mul(ctx, alpha, poly_uop_relu(ctx, tail));
-  return poly_uop_sub(ctx, poly_uop_relu(ctx, x), tail);
+  return poly_uop_where(
+      ctx, poly_uop_gt(ctx, x, poly_uop_const_int(ctx, 0)), x, poly_uop_mul(ctx, alpha, tail)
+  );
 }
 
 /* ElementwiseMixin.softplus/logaddexp, with the pinned floating beta. */
@@ -1011,6 +1043,7 @@ PolyUOp *poly_uop_softplus(PolyCtx *ctx, PolyUOp *x, double beta) {
 PolyUOp *poly_uop_logaddexp(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!poly_uop_broadcasted_pair(ctx, &a, &b)) return NULL;
   PolyUOp *m = poly_uop_maximum(ctx, a, b);
+  m = poly_uop_where(ctx, poly_uop_isfinite(ctx, m), m, poly_uop_const_int(ctx, 0));
   PolyUOp *sum = poly_uop_add(
       ctx, poly_uop_exp(ctx, poly_uop_sub(ctx, a, m)), poly_uop_exp(ctx, poly_uop_sub(ctx, b, m))
   );
@@ -1058,13 +1091,9 @@ PolyUOp *poly_uop_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_hardsigmoid_tensor(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha, PolyUOp *beta) {
-  PolyUOp *t = poly_uop_add(ctx, poly_uop_mul(ctx, alpha, x), beta);
-  return poly_uop_sub(
-      ctx, poly_uop_relu(ctx, t),
-      poly_uop_relu(
-          ctx, poly_uop_elementwise_scalar_binop(ctx, POLY_OP_SUB, t, POLY_INT32, 1, false)
-      )
-  );
+  PolyUOp *y = poly_uop_relu(ctx, poly_uop_add(ctx, poly_uop_mul(ctx, alpha, x), beta));
+  PolyUOp *one = poly_uop_const_int(ctx, 1);
+  return poly_uop_where(ctx, poly_uop_binop(ctx, POLY_OP_CMPLT, y, one), y, one);
 }
 
 PolyUOp *poly_uop_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {

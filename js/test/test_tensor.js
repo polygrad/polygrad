@@ -99,6 +99,103 @@ async function runTensorTests(pg, createRuntime) {
     }
   }
 
+  await test('upstream backports: infinities and padded constants', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const x = new Tensor([-Infinity, -Infinity, 0])
+    const outputs = [x.getitem({stop: 2}).logsumexp(), x.logcumsumexp(0),
+      new Tensor([-Infinity, Infinity, 1, -Infinity]).logaddexp(new Tensor([-Infinity, Infinity, -Infinity, 1]))]
+    const expected = [[-Infinity], [-Infinity, -Infinity, 0], [-Infinity, Infinity, 1, 1]]
+    for (let j = 0; j < outputs.length; j++) {
+      const values = Array.from(await outputs[j].toArray())
+      assert(values.length === expected[j].length && values.every((v, i) => v === expected[j][i]), 'infinite log result')
+    }
+    const padded = new Tensor(5).reshape([1, 1]).expand([1, 2]).pad([[0, 2], [0, 0]])
+    assertClose(await padded.add(new Tensor([[1], [2], [3]])).toArray(), [6, 6, 2, 2, 3, 3])
+    assertClose(await new Tensor(1).expand([1]).cat(new Tensor(2).expand([2]), new Tensor(3).expand([3])).toArray(), [1, 2, 2, 3, 3, 3])
+    assertClose(await new Tensor([1, 2, 3, 4], {dtype: 'int32'}).var().toArray(), [5 / 3])
+  }))
+
+  await test('upstream backports: FP8 zero signs and smallest normals', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    for (const [dtype, m, bias] of [['fp8e4m3', 3, 7], ['fp8e5m2', 2, 15], ['fp8e4m3fnuz', 3, 8], ['fp8e5m2fnuz', 2, 16]]) {
+      const zero = new Tensor([0, -0], {dtype: 'float32'}).cast(dtype).bitcast('uint8')
+      assertClose(await zero.toArray(), [0, dtype.includes('fnuz') ? 0 : 128], 0)
+      const bits = Array.from({length: 1 << m}, (_, i) => (1 << m) + i)
+      const expected = bits.map((_, i) => (1 + i / (1 << m)) * 2 ** (1 - bias))
+      assertClose(await new Tensor(bits, {dtype: 'uint8'}).bitcast(dtype).cast('float32').toArray(), expected, 0)
+      const x = new Tensor([[-1, 0, 1], [0, 2, 4]], {dtype: 'float32'}).cast(dtype).contiguous()
+      assertClose(await x.max(1).cast('float32').toArray(), [1, 4], 0)
+      assertClose(await x.min(1).cast('float32').toArray(), [-1, 0], 0)
+      const range = Tensor.arange(0, 10, .1, {dtype}).cast('float32')
+      const expectedRange = Tensor.arange(0, 10, .1).cast(dtype).cast('float32')
+      assertClose(await range.toArray(), await expectedRange.toArray(), 0)
+    }
+  }))
+
+  await test('upstream backports: dilated same padding and SELU constants', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const conv = new runtime.nn.Conv2d(1, 1, [3, 5], {padding: 'same', dilation: [2, 3], bias: false})
+    assert(conv.padding.join(',') === '6,6,2,2', 'dilation and kernel axes must reverse together')
+    const x = Tensor.arange(28 * 31).cast('float32').reshape([1, 1, 28, 31])
+    const actual = conv.call(x)
+    assert(actual.shape.join(',') === '1,1,28,31', 'same padding changed spatial shape')
+    assertClose(await actual.toArray(), await x.conv2d(conv.weight, null, {padding: [6, 6, 2, 2], dilation: [2, 3]}).toArray(), 0)
+    const selu = await new Tensor([-1, 1], {dtype: 'float32'}).selu().toArray()
+    assertClose(selu, [1.0507009873554805 * 1.6732632423543772 * Math.expm1(-1), 1.0507009873554805], 2e-7)
+  }))
+
+  await test('upstream backports: activation values and gradients', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    for (const [op, input, expected] of [
+      ['elu', [100, 300], [1, 1]], ['celu', [100, 300], [1, 1]],
+      ['selu', [100, 300], [1.0507, 1.0507]], ['erf', [0], [2 / Math.sqrt(Math.PI)]],
+      ['asin', [0], [1]], ['asinh', [0], [1]], ['relu6', [0, 6, 7], [0, 0, 0]]
+    ]) {
+      const x = new Tensor(input, {dtype: 'float32'})
+      await x[op]().sum().backward()
+      assertClose(await x.grad.toArray(), expected, 2e-5)
+    }
+    const x = new Tensor([-1e10, 0, 1e10], {dtype: 'float32'})
+    assertClose(await x.asinh().toArray(), [-Math.asinh(1e10), 0, Math.asinh(1e10)])
+    assertClose(await x.relu6().toArray(), [0, 0, 6])
+    assertClose(await x.hardsigmoid().toArray(), [0, .5, 1])
+  }))
+
+  await test('upstream backports: view assignments and shape operations', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const x = await new Tensor([1, 2, 3, 4], {dtype: 'float32'}).realize()
+    x.reshape([2, 2]).assign(new Tensor([[5, 6], [7, 8]], {dtype: 'float32'}))
+    assertClose(await x.toArray(), [5, 6, 7, 8])
+    for (const realized of [false, true]) {
+      const y = Tensor.zeros(6, 6).contiguous()
+      if (realized) await y.realize()
+      y.setitem([{step: 1}, {step: 2}], 1)
+      assertClose(await y.toArray(), Array.from({length: 36}, (_, i) => i % 2 === 0 ? 1 : 0))
+    }
+    const data = Tensor.arange(36).cast('float32').reshape([3, 3, 4])
+    assertClose(await Tensor.einsum('iij->ij', data).toArray(), [0, 1, 2, 3, 16, 17, 18, 19, 32, 33, 34, 35])
+    assertClose(await new Tensor([[[1, 2, 3]]]).interpolate([1], {mode: 'linear', alignCorners: true}).toArray(), [1])
+  }))
+
+  if (supportsF16) await test('upstream backports: half rounding and max gradient', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const rounded = Array.from(await new Tensor([70000, 1.0001, -70000]).cast('float16').cast('float32').toArray())
+    // Pinned software emulation clamps fused casts; mantissa rounding happens
+    // at storage. Native half instructions round at the cast itself.
+    const middle = runtime.device.toLowerCase() === 'wasm' ? Math.fround(1.0001) : 1
+    assert(rounded[0] === Infinity && rounded[1] === middle && rounded[2] === -Infinity, `half roundtrip: ${rounded}`)
+    const stored = await new Tensor([1.0001]).cast('float16').contiguous().cast('float32').toArray()
+    assert(stored[0] === 1, 'stored half must round on every backend')
+    const cmp = new Tensor([-1, 1], {dtype: 'float16'}).gt(0)
+    assertClose(await cmp.where(Tensor.ones(2, {dtype: 'float16'}), Tensor.zeros(2, {dtype: 'float16'})).cast('float32').toArray(), [0, 1], 0)
+    const x = Tensor.ones(70000, {dtype: 'float16'}).contiguous()
+    await x.max().backward()
+    const values = await x.grad.cast('float32').toArray()
+    // Test the count overflow independently of emulation's storage rounding.
+    const expected = runtime.device.toLowerCase() === 'wasm' ? Math.fround(1 / 70000) : 240 / 16777216
+    assert(values.length === 70000 && values.every(v => v === expected), 'half tie gradient')
+  }))
+
   async function testIf(cond, name, fn) {
     if (!cond) {
       console.log(`  [SKIP] ${name}`)
@@ -276,7 +373,7 @@ async function runTensorTests(pg, createRuntime) {
       const v = x.var(1, false, 0)
       const excessive = x.var(1, false, 3)
       try {
-        assertClose(await v.toArray(), dtype === 'int32' ? [2 / 3, 4] : [2 / 3, 38 / 9], 1e-5)
+        assertClose(await v.toArray(), [2 / 3, 38 / 9], 1e-5)
         assert((await excessive.toArray()).every(v => v === Infinity))
       } finally { x.dispose(); v.dispose(); excessive.dispose() }
     }
@@ -527,11 +624,9 @@ async function runTensorTests(pg, createRuntime) {
         const maximum = x.max(1).cast('float32')
         try {
           assertClose(await maximum.toArray(), [3,7], 0)
-          if (['float16', 'bfloat16', 'fp8e5m2'].includes(dtype)) {
-            const minimum = x.min(1).cast('float32')
-            try { assertClose(await minimum.toArray(), [0,4], 0) }
-            finally { minimum.dispose() }
-          }
+          const minimum = x.min(1).cast('float32')
+          try { assertClose(await minimum.toArray(), [0,4], 0) }
+          finally { minimum.dispose() }
         } finally { maximum.dispose(); x.dispose() }
       }
     } finally { pg.noopt = before }
@@ -2714,7 +2809,7 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(arr, [0, 1], 1e-3)
   })
 
-  await test('logaddexp softplus mish match pinned graph', async () => {
+  await test('logaddexp softplus mish match backported graph', async () => {
     assert(Tensor.prototype._physicalizeResult === undefined,
       'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([
@@ -2724,7 +2819,8 @@ async function runTensorTests(pg, createRuntime) {
       const other = new Tensor([[-2], [3]])
       const pinnedLogaddexp = (lhs, rhs) => {
         const a = lhs, b = lhs._ensureTensor(rhs)
-        const m = a.maximum(b)
+        let m = a.maximum(b)
+        m = m.isfinite().where(m, 0)
         return a.sub(m).exp().add(b.sub(m).exp()).log().add(m)
       }
       const scalarFloat = value => new Tensor(value, {dtype: 'weakfloat', _ctx: x._ctx, device: x.device})
@@ -3920,7 +4016,7 @@ async function runTensorTests(pg, createRuntime) {
     assert(Math.abs(v - 4) < 1e-4, `Expected 4, got ${v}`)
   })
 
-  await test('var matches pinned expression without substitution', async () => {
+  await test('var matches backported expression without substitution', async () => {
     assert(Tensor.prototype._physicalizeResult === undefined,
       'legacy frontend substitution helper must stay deleted')
       const x = new Tensor([[1, 2, 4], [3, 5, 9]])
@@ -3928,9 +4024,9 @@ async function runTensorTests(pg, createRuntime) {
         const squares = x.sub(x.mean(axis, true)).square()
         const reducedShape = squares.sum(axis, true).shape
         const n = x.shape.filter((si, i) => si !== reducedShape[i]).reduce((a, b) => a * b, 1)
-        // This fixture's input is int32; the pin casts squares to the
-        // input's accumulator dtype before summing, then returns float32.
-        const reduced = squares.cast('int32').sum(axis, keepdim)
+        // Upstream 34eabf657 accumulates the floating squares without
+        // truncating them to the integer input dtype.
+        const reduced = squares.sum(axis, keepdim)
         return reduced.div(Math.max(n - correction, 0)).cast('float32')
       }
       for (const [axis, keepdim, correction] of [
@@ -4862,7 +4958,7 @@ async function runTensorTests(pg, createRuntime) {
       },
       isnan: x => x.ne(x),
       silu: x => x.mul(x.sigmoid()),
-      relu6: x => x.relu().sub(x.sub(6).relu()),
+      relu6: x => x.relu().lt(6).where(x.relu(), 6),
       logicalNot: x => x.cast('bool').ne(true),
       neg: x => x.mul(-1)
     }
@@ -4905,8 +5001,8 @@ async function runTensorTests(pg, createRuntime) {
     const x = await new Tensor([[-3., -1., 0.], [1., 3., 5.]], {dtype: 'float32'}).realize()
     const alpha = new Tensor([[.25], [.5]], {dtype: 'float32'})
     const cases = [
-      [x.elu(alpha), x.relu().sub(x.exp().sub(1, true).relu().mul(alpha, true))],
-      [x.hardsigmoid(alpha, .5), alpha.mul(x).add(.5).relu().sub(alpha.mul(x).add(.5).sub(1).relu())],
+      [x.elu(alpha), x.gt(0).where(x, alpha.mul(x.sub(x.relu()).exp().sub(1)))],
+      [x.hardsigmoid(alpha, .5), alpha.mul(x).add(.5).relu().lt(1).where(alpha.mul(x).add(.5).relu(), 1)],
       [x.softplus(alpha), alpha.div(1, undefined, true).mul(x.mul(alpha).logaddexp(0.0))],
       [x.clamp(alpha, undefined), x.lt(alpha).where(alpha, x)],
       [x.clamp(undefined, alpha), x.gt(alpha).where(alpha, x)],
@@ -5114,16 +5210,19 @@ async function runTensorTests(pg, createRuntime) {
     assert(raw.dtype === 'weakint', `unbuffered integer full should stay weakint, got ${raw.dtype}`)
     assert(raw.uop.op === pg._core.ops.EXPAND, 'unbuffered full should stay EXPAND')
 
-    // Current ElementwiseMixin._broadcasted promotes shaped weak constants
-    // through const_like(root), rebuilding each as direct CONST -> EXPAND
-    // (mixin/elementwise.py:19-29, uop/ops.py:581-583).
+    // Upstream f5b00de31 preserves the movement chain during promotion;
+    // rebuilding only CONST -> EXPAND would lose padding values.
     const zeroBroadcast = Tensor.full([0, 3], 1.5, { buffer: false })
       .add(Tensor.full([1, 3], 2.5, { buffer: false }))
     assertShape(zeroBroadcast.shape, [0, 3])
     assert(zeroBroadcast.uop.op === pg._core.ops.ADD, 'weak full add should stay ADD')
-    for (const source of zeroBroadcast.uop.src) {
-      assert(source.op === pg._core.ops.EXPAND, 'promoted weak full should be direct EXPAND')
-      assert(source.src[0].op === pg._core.ops.CONST, 'promoted weak full should drop old movement chain')
+    const chains = [['EXPAND', 'RESHAPE', 'RESHAPE', 'CONST'], ['PERMUTE', 'EXPAND', 'RESHAPE', 'RESHAPE', 'CONST']]
+    for (let i = 0; i < chains.length; i++) {
+      let source = zeroBroadcast.uop.src[i]
+      for (const op of chains[i]) {
+        assert(source.op === pg._core.ops[op], `promoted weak full must preserve ${op}`)
+        if (op !== 'CONST') source = source.src[0]
+      }
     }
     assertClose(await zeroBroadcast.toArray(), [])
     const nonempty = Tensor.full([2, 3], 1.5, { buffer: false })
@@ -6743,7 +6842,7 @@ async function runTensorTests(pg, createRuntime) {
   await test('spatial owners interpolation empty and singleton', async () => {
     const x = new Tensor([1, 3, 7], { dtype: 'float32' })
     const singleton = await x.interpolate([1], { alignCorners: true }).toArray()
-    assert(Number.isNaN(singleton[0]))
+    assert(singleton[0] === 1)
     for (const alignCorners of [false, true]) {
       const out = x.interpolate([0], { alignCorners })
       assertShape(out.shape, [0])

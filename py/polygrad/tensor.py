@@ -2117,7 +2117,7 @@ class Tensor:
         core = _ffi._lib.poly_tensor_celu(self._ctx, self._tensor, alpha._tensor)
         return self._make_result_from_core(core, None)
 
-    def selu(self, alpha=1.67326, gamma=1.0507):
+    def selu(self, alpha=1.6732632423543772, gamma=1.0507009873554805):
         alpha, gamma = self._ensure_tensor(alpha), self._ensure_tensor(gamma)
         core = _ffi._lib.poly_tensor_selu(self._ctx, self._tensor, alpha._tensor, gamma._tensor)
         return self._make_result_from_core(core, None)

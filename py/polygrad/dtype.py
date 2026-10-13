@@ -126,12 +126,14 @@ class DType(metaclass=DTypeMetaClass):
     def min(self):
         if dtypes.is_int(self):
             return 0 if dtypes.is_unsigned(self) else -2 ** (self.bitsize - 1)
-        return -float("inf") if dtypes.is_float(self) else False
+        return -self.max if dtypes.is_float(self) else False
 
     @functools.cached_property
     def max(self):
         if dtypes.is_int(self):
             return 2 ** self.bitsize - 1 + self.min
+        if self in (dtypes.fp8e4m3, dtypes.fp8e4m3fnuz, dtypes.fp8e5m2fnuz):
+            return {dtypes.fp8e4m3: 448., dtypes.fp8e4m3fnuz: 240., dtypes.fp8e5m2fnuz: 57344.}[self]
         return float("inf") if dtypes.is_float(self) else True
 
     def const(self, val):

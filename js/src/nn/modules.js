@@ -77,7 +77,7 @@ function createBoundModules(runtime) {
         }
         this.padding = []
         for (let i = 0; i < k.length; i++) {
-          const d = this.dilation[i]
+          const d = this.dilation[k.length - 1 - i]
           const kk = k[k.length - 1 - i]
           this.padding.push(Math.floor(d * (kk - 1) / 2), d * (kk - 1) - Math.floor(d * (kk - 1) / 2))
         }

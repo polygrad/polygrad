@@ -923,11 +923,8 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
           ctx, POLY_OP_OR, to_uint, shl(ctx, weakint(ctx, (INT64_C(1) << te) - 1), tm),
           shl(ctx, weakint(ctx, 1), tm - 1)
       );
-      int bias_floor = (fb > tb ? fb - tb : 0) + 1;
-      PolyUOp *magnitude = where(
-          ctx, to_uint, cmp(ctx, POLY_OP_CMPLT, exp, weakint(ctx, bias_floor)), weakint(ctx, 0),
-          norm
-      );
+      PolyUOp *magnitude =
+          where(ctx, to_uint, eq(ctx, exp, weakint(ctx, 0)), weakint(ctx, 0), norm);
       return bitcast(
           ctx,
           where(ctx, to_uint, fnuz_nan, qnan, binary(ctx, POLY_OP_OR, to_uint, sign, magnitude)), to
@@ -988,7 +985,11 @@ static PolyUOp *f2f(PolyCtx *ctx, PolyUOp *v, PolyDType from, PolyDType to) {
     );
     PolyUOp *is_nan = eq(ctx, exp, weakint(ctx, (INT64_C(1) << fe) - 1));
     return poly_dtype_is_fp8_fnuz(to)
-               ? where(ctx, to_uint, is_nan, shl(ctx, weakint(ctx, 1), ts - 1), finite)
+               /* FNUZ has no signed zero: bit 7 alone encodes NaN. */
+               ? where(
+                     ctx, to_uint, is_nan, shl(ctx, weakint(ctx, 1), ts - 1),
+                     where(ctx, to_uint, underflow, weakint(ctx, 0), finite)
+                 )
                : where(ctx, to_uint, is_nan, nan, finite);
   }
   return NULL;
@@ -1296,9 +1297,8 @@ static PolyUOp *do_dtype_decomps(PolyCtx *ctx, PolyUOp *sink, const PolyBindings
   for (int i = 0; ret && i < 4; i++) {
     if (!(dctx->seen_fp8 & (1u << i)) || poly_renderer_supports_dtype(dctx->caps, fp8s[i]))
       continue;
-    PolyDType to =
-        poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16) ? POLY_FLOAT16 : POLY_FLOAT32;
-    PolyFloatDecompContext float_ctx = {.from = fp8s[i], .to = to};
+    /* Upstream 988651638: half loses the smallest e5m2fnuz normals. */
+    PolyFloatDecompContext float_ctx = {.from = fp8s[i], .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
   if (ret && dctx->seen_float16 && !poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16)) {

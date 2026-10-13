@@ -1967,7 +1967,7 @@ function createBoundTensorClass(runtime) {
       } finally { if (alpha !== input) releaseTensorTemporaries([alpha]) }
     }
 
-    selu(alpha = 1.67326, gamma = 1.0507) {
+    selu(alpha = 1.6732632423543772, gamma = 1.0507009873554805) {
       return this._withTensorOperands([alpha, gamma], (a, g) => this._makeResultFromCore(
         this._rt._core.ffi.poly_tensor_selu(this._ctx, this._tensor, a._tensor, g._tensor)
       ))

@@ -288,6 +288,12 @@ static PolyUOp *cast_weak_srcs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) 
 
   PolyDType dtype = u->dtype, def = default_dtype(ctx, weak);
   if (!poly_dtype_least_upper(dtype, def, &dtype)) return NULL;
+  /* The result may fit int32 even when a source does not (0bd725376).
+   * Commit the operation at a common source width, then narrow its result. */
+  for (int i = 0; i < weak->n_src; i++)
+    if (poly_dtype_is_weak(weak->src[i]->dtype) &&
+        !poly_dtype_least_upper(dtype, default_dtype(ctx, weak->src[i]), &dtype))
+      return NULL;
   PolyUOp *committed = commit_srcs_at(ctx, weak, dtype);
   if (!committed) return NULL;
   return poly_dtype_eq(committed->dtype, u->dtype)

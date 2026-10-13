@@ -5222,9 +5222,8 @@ TEST(codegen, dtype_decomposition_matchers_match_current_row_counts) {
   PASS();
 }
 
-TEST(codegen, fp8_dtype_decomposition_matches_current_half_storage_topology) {
-  /* Tinygrad 2026-08-22/a9069c177a9d codegen/decomp/dtype.py:198-206
-   * emulates unsupported FP8 as half when half is supported. */
+TEST(codegen, fp8_dtype_decomposition_uses_float32_even_with_native_half) {
+  /* Upstream 988651638 preserves small FNUZ normals by avoiding half. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *shape = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(2));
@@ -5242,14 +5241,16 @@ TEST(codegen, fp8_dtype_decomposition_matches_current_half_storage_topology) {
   int n = 0;
   PolyUOp **topo = poly_uop_toposort_alloc(ctx, rewritten, &n);
   ASSERT_NOT_NULL(topo);
-  int u8_load = 0, half_bitcast = 0, fp8_nodes = 0;
+  int u8_load = 0, half_bitcast = 0, float_bitcast = 0, fp8_nodes = 0;
   for (int i = 0; i < n; i++) {
     u8_load += topo[i]->op == POLY_OP_LOAD && poly_dtype_eq(topo[i]->dtype, POLY_UINT8);
     half_bitcast += topo[i]->op == POLY_OP_BITCAST && poly_dtype_eq(topo[i]->dtype, POLY_FLOAT16);
+    float_bitcast += topo[i]->op == POLY_OP_BITCAST && poly_dtype_eq(topo[i]->dtype, POLY_FLOAT32);
     fp8_nodes += poly_dtype_is_fp8(topo[i]->dtype);
   }
   ASSERT_INT_EQ(u8_load, 1);
-  ASSERT_INT_EQ(half_bitcast, 1);
+  ASSERT_INT_EQ(half_bitcast, 0);
+  ASSERT_INT_EQ(float_bitcast, 1);
   ASSERT_INT_EQ(fp8_nodes, 0);
   poly_uop_toposort_free(topo);
   poly_ctx_destroy(ctx);
@@ -10060,12 +10061,12 @@ TEST(codegen, image_valid_index_simplifies_two_coordinates_like_tinygrad) {
   PASS();
 }
 
-TEST(codegen, simplify_add_image_matches_current_four_rule_topology) {
-  /* Tinygrad 2026-08-22/a9069c177a9d
-   * codegen/late/coalesce.py:95-101 has exactly four ordered rows. */
+TEST(codegen, simplify_add_image_preserves_nonimage_cast_rounding) {
+  /* Upstream #18294 removes the global roundtrip fold; half images still
+   * round when stored, so only those stores may omit the intermediate cast. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
-  ASSERT_INT_EQ(poly_pm_rule_count(poly_pm_simplify_add_image()), 4);
+  ASSERT_INT_EQ(poly_pm_rule_count(poly_pm_simplify_add_image()), 3);
 
   PolyUOp *shape_src[3] = {
       poly_uop_const_int(ctx, 2), poly_uop_const_int(ctx, 3), poly_uop_const_int(ctx, 4)};
@@ -10095,7 +10096,10 @@ TEST(codegen, simplify_add_image_matches_current_four_rule_topology) {
   PolyUOp *half = poly_uop_cast(ctx, value, POLY_FLOAT16);
   PolyUOp *roundtrip = poly_uop_cast(ctx, half, POLY_FLOAT32);
   PolyUOp *roundtrip_out = poly_graph_rewrite(ctx, roundtrip, poly_pm_simplify_add_image());
-  ASSERT_PTR_EQ(roundtrip_out, value);
+  ASSERT_PTR_EQ(roundtrip_out, roundtrip);
+  PolyUOp *image_store = poly_uop_store_val(ctx, index, half);
+  PolyUOp *image_out = poly_graph_rewrite(ctx, image_store, poly_pm_simplify_add_image());
+  ASSERT_PTR_EQ(image_out->src[1], value);
 
   poly_ctx_destroy(ctx);
   PASS();
