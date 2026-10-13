@@ -112,6 +112,7 @@ module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
     return callWithInt64(Module._poly_tensor_flip, (a0 || 0), (a1 || 0), a2, Number(a3))
   },
   poly_tensor_floor: (a0, a1) => Module._poly_tensor_floor((a0 || 0), (a1 || 0)),
+  poly_tensor_gated_delta_rule: (a0, a1, a2, a3, a4, a5, a6, a7, a8) => callTensorPair(Module._poly_tensor_gated_delta_rule, [(a0 || 0), (a1 || 0), (a2 || 0), (a3 || 0), (a4 || 0), (a5 || 0), (a6 || 0), Number(a7), +!!a8], 'poly_tensor_gated_delta_rule'),
   poly_tensor_gather_dim: (a0, a1, a2, a3) => Module._poly_tensor_gather_dim((a0 || 0), (a1 || 0), Number(a2), (a3 || 0)),
   poly_tensor_ge: (a0, a1, a2) => Module._poly_tensor_ge((a0 || 0), (a1 || 0), (a2 || 0)),
   poly_tensor_gelu: (a0, a1) => Module._poly_tensor_gelu((a0 || 0), (a1 || 0)),

@@ -6144,6 +6144,77 @@ async function runTensorTests(pg, createRuntime) {
     assertShape(layer.call(Tensor.ones(1, 2, 5)).shape, [1, 3, 3])
   })
 
+  await test('nn gated delta rejects foreign runtime and oversized chunks', async () => {
+    const other = await createRuntime()
+    try {
+      const q = other.Tensor.ones(1, 1, 1, 1), g = other.Tensor.zeros(1, 1, 1)
+      let failure
+      try { pg.nn.gatedDeltaRule(q, q, q, g, g) } catch (e) { failure = e }
+      assert(failure && /another Runtime/.test(failure.message), 'foreign handles reached the bound FFI')
+      failure = null
+      try { other.nn.gatedDeltaRule(q, q, q, g, g, null, {chunkSize: 2 ** 32 + 64}) } catch (e) { failure = e }
+      assert(failure && /chunkSize/.test(failure.message), 'chunkSize narrowed before validation')
+      q.dispose(); g.dispose()
+    } finally { await other.dispose() }
+  })
+
+  await test('nn gated delta chunk state and bfloat storage', async () => {
+    for (const dtype of ['float32', 'bfloat16']) {
+      const q = Tensor.ones(1, 8, 1, 1).cast(dtype)
+      const k = Tensor.ones(1, 8, 1, 1).cast(dtype)
+      const v = new Tensor([1, 2, 3, 4, 5, 6, 7, 8]).reshape(1, 8, 1, 1).cast(dtype)
+      const g = Tensor.zeros(1, 8, 1)
+      const beta = Tensor.full([1, 8, 1], 0.5)
+      const state = Tensor.full([1, 1, 1, 1], 3, {dtype: 'float32'})
+      const [out, next] = pg.nn.gatedDeltaRule(q, k, v, g, beta, state,
+        {chunkSize: 4, normalizeQk: false})
+      const expected = []; let s = 3
+      for (let i = 1; i <= 8; i++) { s = (s + i) * 0.5; expected.push(s) }
+      const fp32 = out.cast('float32')
+      assertClose(await fp32.toArray(), expected, dtype === 'float32' ? 1e-5 : 0.04)
+      assertClose(await next.toArray(), [s], 1e-5)
+      assertClose(await state.toArray(), [3])
+      for (const tensor of [q, k, v, g, beta, state, out, next, fp32]) tensor.dispose()
+    }
+  })
+
+  await test('nn gated delta representative prefill', async () => {
+    const length = 64, heads = 16, width = 128
+    const size = length * heads * width
+    const arrays = [0.01, 0.013, 0.017].map(f => Float32Array.from({length: size}, (_, i) => Math.sin(i * f) * 0.2))
+    const inputs = arrays.map(a => new Tensor(a).reshape(1, length, heads, width))
+    inputs.push(Tensor.full([1, length, heads], -0.2), Tensor.full([1, length, heads], 0.5))
+    for (const t of inputs) await t.realize()
+    const [out, state] = pg.nn.gatedDeltaRule(...inputs)
+    const expected = new Float32Array(size), carried = new Float32Array(heads * width * width)
+    const query = new Float64Array(width), key = new Float64Array(width), prediction = new Float64Array(width)
+    for (let t = 0; t < length; t++) for (let h = 0; h < heads; h++) {
+      const offset = (t * heads + h) * width, base = h * width * width
+      let qs = 1e-6, ks = 1e-6
+      for (let d = 0; d < width; d++) { qs += arrays[0][offset + d] ** 2; ks += arrays[1][offset + d] ** 2 }
+      for (let d = 0; d < width; d++) {
+        query[d] = arrays[0][offset + d] / Math.sqrt(qs * width)
+        key[d] = arrays[1][offset + d] / Math.sqrt(ks)
+      }
+      prediction.fill(0)
+      for (let k = 0; k < width; k++) for (let v = 0; v < width; v++) {
+        const index = base + k * width + v
+        carried[index] *= Math.exp(-0.2)
+        prediction[v] += carried[index] * key[k]
+      }
+      for (let k = 0; k < width; k++) for (let v = 0; v < width; v++) {
+        const index = base + k * width + v
+        carried[index] += key[k] * (arrays[2][offset + v] - prediction[v]) * 0.5
+        expected[offset + v] += carried[index] * query[k]
+      }
+    }
+    const started = performance.now()
+    assertClose(await out.toArray(), Array.from(expected), 1e-4)
+    assertClose(await state.toArray(), Array.from(carried), 1e-4)
+    console.log(`  gated delta 64x16x128 cold execution/readback: ${(performance.now() - started).toFixed(1)} ms`)
+    for (const t of [...inputs, out, state]) t.dispose()
+  })
+
   await test('nn convolution factories InstanceNorm and LSTMCell', async () => {
     const conv = new pg.nn.Conv1d(1, 1, 2, {bias: false})
     conv.weight = Tensor.ones(1, 1, 2)

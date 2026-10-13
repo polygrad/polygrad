@@ -57,6 +57,8 @@ model_transformer_build(PolyCtx *, const ModelTransformerConfig *, const ModelTr
 MODEL_IMPORT_INTERNAL int model_decoder_sampler(PolyModel *, int, PolyTensor *, PolyUOp *);
 MODEL_IMPORT_INTERNAL PolyModel *
 model_whisper_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
+MODEL_IMPORT_INTERNAL PolyModel *
+model_qwen35_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);
 
 MODEL_IMPORT_INTERNAL PolyModel *
 model_gpt2_from_hf_decoded(const PolyHfDecoded *, const PolyGenericImportOpts *);

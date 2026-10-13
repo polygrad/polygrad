@@ -217,6 +217,28 @@ class InstanceNorm:
         return x._make_result_from_core(core, x.shape)
 
 
+def gated_delta_rule(q, k, v, log_decay, beta, state=None, *, chunk_size=64, normalize_qk=True):
+    """Causal delta attention; return (output, final_state), without mutating state.
+
+    q/k: [batch, time, heads, key_width]; v: [batch, time, heads, value_width].
+    log_decay/beta: [batch, time, heads], with log_decay <= 0 and beta in [0,1].
+    Optional state: [batch, heads, key_width, value_width], initially zero.
+    Shapes must be concrete. chunk_size is a power of two in [1,64]. Computation
+    and final_state use float32; output uses q's dtype. normalize_qk divides by
+    sqrt(sum(x*x)+1e-6). All graph construction is shared C logic.
+    """
+    inputs = (q,k,v,log_decay,beta,state)
+    q._check_runtime(*inputs)
+    if not isinstance(chunk_size, int) or not 1 <= chunk_size <= 64:
+        raise ValueError('chunk_size must be an integer in [1,64]')
+    out, final = _ffi._ptr(), _ffi._ptr()
+    if _ffi._lib.poly_tensor_gated_delta_rule(q._ctx, *(t._tensor if t is not None else None for t in inputs),
+            chunk_size, normalize_qk, ctypes.byref(out), ctypes.byref(final)):
+        raise ValueError('gated_delta_rule requires compatible concrete floating shapes and a power-of-two chunk_size in [1,64]')
+    return (q._make_result_from_core(out, v.shape),
+            q._make_result_from_core(final, (q.shape[0],q.shape[2],q.shape[3],v.shape[3])))
+
+
 class LSTMCell:
     _Tensor = Tensor
     def __init__(self, input_size, hidden_size, bias=True):

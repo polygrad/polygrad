@@ -115,6 +115,52 @@ int poly_bind_index_dst_shape(
   return poly_model_buf_shape(idx->inst, bi, shape_out, max_dims);
 }
 
+static bool weight_dtype(int decoded, PolyDType *dtype) {
+  switch (decoded) {
+  case POLY_DECODED_F32:
+    *dtype = POLY_FLOAT32;
+    return true;
+  case POLY_DECODED_F16:
+    *dtype = POLY_FLOAT16;
+    return true;
+  case POLY_DECODED_BF16:
+    *dtype = POLY_BFLOAT16;
+    return true;
+  default:
+    return false;
+  }
+}
+
+PolyTensor *poly_import_parameter(
+    PolyModel *model,
+    const PolyDecodedTensor *source,
+    int count,
+    const char *name,
+    const int64_t *shape,
+    int ndim
+) {
+  if (!model || !name || !shape || ndim < 1 || ndim > 8 || count < 0) return NULL;
+  PolyDType dtype = POLY_FLOAT32;
+  if (source) {
+    const PolyDecodedTensor *found = NULL;
+    for (int i = 0; i < count; i++)
+      if (source[i].name && !strcmp(source[i].name, name)) {
+        if (found) goto invalid;
+        found = &source[i];
+      }
+    if (!found || found->ndim != ndim || memcmp(shape, found->shape, ndim * sizeof(*shape)) ||
+        !weight_dtype(found->dtype, &dtype))
+      goto invalid;
+  }
+  return poly_model_param(model, name, dtype, shape, ndim);
+invalid:
+  poly_import_error_set(
+      POLY_IMPORT_ERR_WEIGHT_MISMATCH,
+      "missing, duplicate, unsupported dtype or wrong shape for weight '%s'", name
+  );
+  return NULL;
+}
+
 int poly_import_bind_tensor(
     PolyBindIndex *idx,
     const char *name,
@@ -129,6 +175,34 @@ int poly_import_bind_tensor(
   if (entry->bound) {
     poly_import_error_set(POLY_IMPORT_ERR_WEIGHT_MISMATCH, "duplicate weight binding '%s'", name);
     return -1;
+  }
+  if (!tensor) return -1;
+  PolyDType dtype;
+  if (!transpose_2d && crop_axis == -1 && weight_dtype(tensor->dtype, &dtype) &&
+      poly_model_buf_dtype_id(idx->inst, entry->buf_idx) ==
+          poly_dtype_id_by_name(poly_dtype_name(dtype))) {
+    int64_t shape[POLY_MAX_DIMS];
+    int ndim = poly_model_buf_shape(idx->inst, entry->buf_idx, shape, POLY_MAX_DIMS);
+    size_t bytes = poly_model_buf_nbytes(idx->inst, entry->buf_idx);
+    size_t width = (size_t)poly_dtype_itemsize(dtype);
+    if (tensor->ndim < 0 || tensor->ndim > 8 || ndim != tensor->ndim ||
+        memcmp(shape, tensor->shape, ndim * sizeof(*shape))) {
+      poly_import_error_set(POLY_IMPORT_ERR_SHAPE_MISMATCH, "shape mismatch for '%s'", name);
+      return -1;
+    }
+    if (tensor->numel < 0 || (uint64_t)tensor->numel > SIZE_MAX / width ||
+        bytes != (size_t)tensor->numel * width || (bytes && !tensor->data)) {
+      poly_import_error_set(POLY_IMPORT_ERR_SHAPE_MISMATCH, "invalid raw weight '%s'", name);
+      return -1;
+    }
+    /* BF16 range is preserved; unsupported arithmetic is decomposed by the
+     * backend, never by silently narrowing stored weights to F16. */
+    if (bytes && poly_model_write_buf(idx->inst, entry->buf_idx, tensor->data, bytes)) {
+      poly_import_error_set(POLY_IMPORT_ERR_INTERNAL, "buffer write failed for '%s'", name);
+      return -1;
+    }
+    entry->bound = true;
+    return 1;
   }
   float *data = poly_decoded_tensor_to_f32(tensor);
   if (!data) {

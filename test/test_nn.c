@@ -30,6 +30,42 @@ static int nn_param_index(PolyModel *inst, const char *name) {
 
 /* Convenience builder tests */
 
+TEST(nn, gated_delta_state_ownership_and_validation) {
+  PolyCtx *ctx = poly_ctx_new(), *foreign = poly_ctx_new();
+  float ones[2] = {1, 1}, values[2] = {2, 4}, decay[2] = {0, 0}, beta[2] = {.5f, .5f};
+  PolyTensor *q =
+      poly_tensor_from_host(ctx, ones, sizeof(ones), POLY_FLOAT32, (int64_t[]){1, 2, 1, 1}, 4);
+  PolyTensor *v =
+      poly_tensor_from_host(ctx, values, sizeof(values), POLY_FLOAT32, (int64_t[]){1, 2, 1, 1}, 4);
+  PolyTensor *g =
+      poly_tensor_from_host(ctx, decay, sizeof(decay), POLY_FLOAT32, (int64_t[]){1, 2, 1}, 3);
+  PolyTensor *b =
+      poly_tensor_from_host(ctx, beta, sizeof(beta), POLY_FLOAT32, (int64_t[]){1, 2, 1}, 3);
+  PolyTensor *o = NULL, *s = NULL;
+  ASSERT_INT_EQ(poly_tensor_gated_delta_rule(foreign, q, q, v, g, b, NULL, 2, false, &o, &s), -1);
+  ASSERT_TRUE(!o && !s);
+  ASSERT_INT_EQ(poly_tensor_gated_delta_rule(ctx, q, q, v, g, b, NULL, 3, false, &o, &s), -1);
+  ASSERT_INT_EQ(poly_tensor_gated_delta_rule(ctx, q, q, v, g, b, NULL, 2, false, &o, &o), -1);
+  ASSERT_INT_EQ(poly_tensor_gated_delta_rule(ctx, q, q, v, g, b, NULL, 2, false, &o, &s), 0);
+  poly_tensor_release(q);
+  poly_tensor_release(v);
+  poly_tensor_release(g);
+  poly_tensor_release(b);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyTensor *outputs[] = {o, s};
+  PolyTensor *realized[2] = {0};
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, outputs, 2, realized), 0);
+  poly_tensor_release(o);
+  poly_tensor_release(s);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.tensor_records, 0);
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(nn, sample_logits_ownership_and_validation) {
   PolyCtx *ctx = poly_ctx_new(), *foreign = poly_ctx_new();
   float data[8] = {1, 2, 3, 4, 4, 3, 2, 1};

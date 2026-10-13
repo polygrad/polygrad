@@ -23,6 +23,94 @@
 #include <stdlib.h>
 #include <math.h>
 
+TEST(hf, qwen35_config_ownership_and_required_weights) {
+  const char *config =
+      "{\"hidden_size\":16,\"intermediate_size\":32,\"vocab_size\":32,"
+      "\"num_hidden_layers\":2,\"num_attention_heads\":2,\"num_key_value_heads\":1,"
+      "\"head_dim\":8,\"linear_num_key_heads\":1,\"linear_num_value_heads\":2,"
+      "\"linear_key_head_dim\":4,\"linear_value_head_dim\":4,\"linear_conv_kernel_dim\":3,"
+      "\"layer_types\":[\"linear_attention\",\"full_attention\"],\"max_seq_len\":2,"
+      "\"rope_parameters\":{\"rope_type\":\"default\",\"partial_rotary_factor\":0.5}}";
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModelError err = {0};
+  PolyModel *m = poly_model_from_config(
+      ctx, "Qwen35Text", config, (int)strlen(config), POLY_DEVICE_INTERP, &err
+  );
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "forward"), 3);
+  ASSERT_INT_EQ(poly_model_entrypoint_output_count(m, "forward"), 1);
+  int size = 0;
+  ASSERT_TRUE(poly_model_save_bundle(m, &size) == NULL);
+  ASSERT_TRUE(strstr(poly_model_last_error(m)->message, "not initialized") != NULL);
+  int parameters = 0;
+  for (int i = 0; i < poly_model_buf_count(m); i++)
+    parameters += poly_model_buf_role(m, i) == POLY_ROLE_PARAM;
+  poly_model_free(m);
+  char cached[1024];
+  snprintf(cached, sizeof(cached), "%.*s,\"cache_capacity\":8}", (int)strlen(config) - 1, config);
+  m = poly_model_from_config(
+      ctx, "Qwen35Text", cached, (int)strlen(cached), POLY_DEVICE_INTERP, &err
+  );
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(ctx->n_tensors, 0);
+  int cached_parameters = 0;
+  for (int i = 0; i < poly_model_buf_count(m); i++)
+    cached_parameters += poly_model_buf_role(m, i) == POLY_ROLE_PARAM;
+  ASSERT_INT_EQ(cached_parameters, parameters);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "prefill"), 1);
+  ASSERT_INT_EQ(poly_model_entrypoint_input_count(m, "decode"), 1);
+  ASSERT_INT_EQ(poly_model_control_count(m, "prefill"), 1);
+  ASSERT_INT_EQ(poly_model_control_count(m, "decode"), 1);
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(hf, typed_weight_binding_preserves_bfloat_range_and_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+  PolyModel *m = poly_model_new(ctx, NULL);
+  uint16_t values[] = {0x4c00, 0xbf80}; /* 2^25 (outside F16 range), -1 */
+  PolyDecodedTensor source = {
+      .name = "weight",
+      .data = values,
+      .shape = {2},
+      .ndim = 1,
+      .numel = 2,
+      .dtype = POLY_DECODED_BF16};
+  PolyTensor *w = poly_import_parameter(m, &source, 1, "weight", (int64_t[]){2}, 1);
+  ASSERT_NOT_NULL(w);
+  ASSERT_TRUE(poly_dtype_eq(w->uop_physical->dtype, POLY_BFLOAT16));
+  PolyTensor *out = poly_tensor_cast(ctx, w, POLY_FLOAT32);
+  ASSERT_INT_EQ(poly_model_output(m, "out", out), POLY_STATUS_OK);
+  ASSERT_INT_EQ(
+      poly_model_entrypoint(m, "forward", NULL, 0, (const char *[]){"out"}, 1, NULL), POLY_STATUS_OK
+  );
+  PolyModelError err = {0};
+  ASSERT_INT_EQ(poly_model_build(m, &err), POLY_STATUS_OK);
+  PolyBindIndex *index = poly_bind_index_create(m);
+  ASSERT_NOT_NULL(index);
+  source.ndim = 2;
+  source.shape[0] = 1;
+  source.shape[1] = 2;
+  ASSERT_INT_EQ(poly_import_bind_tensor(index, "weight", &source, 0, -1), -1);
+  source.ndim = 1;
+  source.shape[0] = 2;
+  ASSERT_INT_EQ(poly_import_bind_tensor(index, "weight", &source, 0, -1), 1);
+  ASSERT_INT_EQ(poly_import_bind_tensor(index, "weight", &source, 0, -1), -1);
+  int bi = poly_bind_index_find(index, "weight");
+  ASSERT_INT_EQ(poly_model_buf_nbytes(m, bi), sizeof(values));
+  uint16_t actual[2] = {0};
+  ASSERT_INT_EQ(poly_model_read_buf(m, bi, actual, sizeof(actual)), 0);
+  ASSERT_TRUE(!memcmp(actual, values, sizeof(values)));
+  poly_bind_index_destroy(index);
+  poly_tensor_release(w);
+  poly_tensor_release(out);
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 /* Safetensors multi-dtype */
 
 TEST(hf, whisper_config_ownership) {

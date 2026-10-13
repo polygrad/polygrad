@@ -120,6 +120,27 @@ PolyTensor *poly_tensor_embedding_apply(PolyCtx *ctx, PolyTensor *tokens, PolyTe
 
 /* Transformer building blocks */
 
+/* Causal gated delta rule (Qwen3.5/DeltaNet), with explicit non-mutated state.
+ * q,k: [B,T,H,K], v: [B,T,H,V], log_decay,beta: [B,T,H], state: [B,H,K,V].
+ * Concrete positive shapes, floating inputs; log_decay <= 0, beta in [0,1].
+ * A NULL state starts at zero. chunk_size is a power of two in [1,64].
+ * normalize_qk uses rsqrt(sum(x*x)+1e-6), not Tensor.normalize's clamp.
+ * Accumulation/state are F32; output uses q's dtype. Both outputs are owned.
+ * This layer stays causal independently of a model's full-attention mask. */
+int poly_tensor_gated_delta_rule(
+    PolyCtx *ctx,
+    PolyTensor *q,
+    PolyTensor *k,
+    PolyTensor *v,
+    PolyTensor *log_decay,
+    PolyTensor *beta,
+    PolyTensor *state,
+    int chunk_size,
+    bool normalize_qk,
+    PolyTensor **output,
+    PolyTensor **final_state
+);
+
 /* nn.LSTMCell: explicit caller-owned weights/state; both state inputs may be
  * NULL for a zero initial state. Successful outputs are caller-owned handles. */
 int poly_uop_lstm_cell(

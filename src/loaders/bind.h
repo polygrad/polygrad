@@ -23,6 +23,18 @@ void poly_bind_index_destroy(PolyBindIndex *idx);
 /* Buffer index, or -1 if absent. Used for duplicate/role validation at import. */
 int poly_bind_index_find(const PolyBindIndex *idx, const char *name);
 
+/* Declare checkpoint-typed storage without retaining source bytes. NULL source
+ * declares F32 for config-only construction; otherwise name and shape must match.
+ * Caller owns the returned Tensor. */
+PolyTensor *poly_import_parameter(
+    PolyModel *model,
+    const PolyDecodedTensor *source,
+    int count,
+    const char *name,
+    const int64_t *shape,
+    int ndim
+);
+
 /*
  * Copy F32 tensor data into the named buffer of the bound PolyModel.
  * Shapes must match after optional transpose. crop_axis=-1 forbids cropping;

@@ -1369,6 +1369,33 @@ static napi_value napi_poly_tensor_floor(napi_env env, napi_callback_info info) 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_floor(a0, a1));
 }
+static napi_value napi_poly_tensor_gated_delta_rule(napi_env env, napi_callback_info info) {
+  napi_value argv[9];
+  size_t argc = 9;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 9) {
+    napi_throw_type_error(env, NULL, "poly_tensor_gated_delta_rule: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  PolyTensor *a2 = get_external_nullable(env, argv[2]);
+  PolyTensor *a3 = get_external_nullable(env, argv[3]);
+  PolyTensor *a4 = get_external_nullable(env, argv[4]);
+  PolyTensor *a5 = get_external_nullable(env, argv[5]);
+  PolyTensor *a6 = get_external_nullable(env, argv[6]);
+  int32_t a7;
+  napi_value v7;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[7], &v7));
+  NAPI_CALL(env, napi_get_value_int32(env, v7, &a7));
+  bool a8;
+  napi_value b8;
+  NAPI_CALL(env, napi_coerce_to_bool(env, argv[8], &b8));
+  NAPI_CALL(env, napi_get_value_bool(env, b8, &a8));
+  PolyTensor *first = NULL, *second = NULL;
+  int rc = poly_tensor_gated_delta_rule(a0, a1, a2, a3, a4, a5, a6, a7, a8, &first, &second);
+  return generated_tensor_pair(env, rc, first, second, "poly_tensor_gated_delta_rule");
+}
 static napi_value napi_poly_tensor_gather_dim(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;

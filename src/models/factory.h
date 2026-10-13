@@ -65,6 +65,7 @@ PolyModel *model_gpt2_configure(PolyCtx *, const cJSON *, GPT2Config, PolyModelE
 PolyModel *model_distilgpt2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_llama_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_whisper_from_config(PolyCtx *, const cJSON *, PolyModelError *);
+PolyModel *model_qwen35_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_embeddinggemma2_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_clip_from_config(PolyCtx *, const cJSON *, PolyModelError *);
 PolyModel *model_vit_from_config(PolyCtx *, const cJSON *, PolyModelError *);

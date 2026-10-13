@@ -77,6 +77,7 @@ DECLARE_NAPI_METHOD("poly_model_set_optimizer_groups", napi_poly_model_set_optim
     DECLARE_NAPI_METHOD("poly_tensor_eye_by_id", napi_poly_tensor_eye_by_id),
     DECLARE_NAPI_METHOD("poly_tensor_flip", napi_poly_tensor_flip),
     DECLARE_NAPI_METHOD("poly_tensor_floor", napi_poly_tensor_floor),
+    DECLARE_NAPI_METHOD("poly_tensor_gated_delta_rule", napi_poly_tensor_gated_delta_rule),
     DECLARE_NAPI_METHOD("poly_tensor_gather_dim", napi_poly_tensor_gather_dim),
     DECLARE_NAPI_METHOD("poly_tensor_ge", napi_poly_tensor_ge),
     DECLARE_NAPI_METHOD("poly_tensor_gelu", napi_poly_tensor_gelu),

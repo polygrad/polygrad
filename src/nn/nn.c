@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Polygrad retains a portable logical twin, but default execution follows the
@@ -136,6 +137,245 @@ int poly_tensor_lstm_cell(
 }
 
 /* Linear */
+
+/* Gated delta rule: HF's chunked equations, using block triangular inversion.
+ * The finite geometric series is algebraically exact but unstable in F32:
+ * normalized, correlated keys can make powers of the lower triangle enormous.
+ * [[A,0],[C,D]]^-1 = [[A^-1,0],[-D^-1 C A^-1,D^-1]] avoids those powers.
+ * Independent diagonal blocks are batched at each level, not solved rowwise. */
+static PolyUOp *delta_slice(PolyCtx *ctx, PolyUOp *x, int axis, int64_t lo, int64_t hi) {
+  if (!x) return NULL;
+  int n = poly_uop_ndim(ctx, x);
+  const int64_t *shape = poly_uop_max_shape_dims(ctx, x);
+  int64_t bounds[POLY_MAX_DIMS][2];
+  if (!shape || axis < 0 || axis >= n) return NULL;
+  for (int i = 0; i < n; i++) {
+    bounds[i][0] = 0;
+    bounds[i][1] = shape[i];
+  }
+  bounds[axis][0] = lo;
+  bounds[axis][1] = hi;
+  return poly_uop_shrink(ctx, x, bounds, n);
+}
+
+static PolyUOp *delta_transpose(PolyCtx *ctx, PolyUOp *x) {
+  if (!x) return NULL;
+  int n = poly_uop_ndim(ctx, x);
+  int64_t order[POLY_MAX_DIMS];
+  if (n < 2) return NULL;
+  for (int i = 0; i < n; i++)
+    order[i] = i;
+  order[n - 1] = n - 2;
+  order[n - 2] = n - 1;
+  return poly_uop_permute(ctx, x, order, n);
+}
+
+static PolyUOp *delta_inverse(PolyCtx *ctx, PolyUOp *lower, int64_t batches, int n) {
+  PolyUOp *inv = poly_uop_full(ctx, (int64_t[]){batches, n, 1, 1}, 4, 1);
+  for (int w = 1; w < n; w *= 2) {
+    int count = n / (2 * w);
+    PolyUOp *as[32], *ds[32], *cs[32];
+    for (int j = 0; j < count; j++) {
+      as[j] = poly_uop_reshape(
+          ctx, delta_slice(ctx, inv, 1, 2 * j, 2 * j + 1), (int64_t[]){batches, w, w}, 3
+      );
+      ds[j] = poly_uop_reshape(
+          ctx, delta_slice(ctx, inv, 1, 2 * j + 1, 2 * j + 2), (int64_t[]){batches, w, w}, 3
+      );
+      cs[j] = delta_slice(
+          ctx, delta_slice(ctx, lower, 1, (2 * j + 1) * w, (2 * j + 2) * w), 2, 2 * j * w,
+          (2 * j + 1) * w
+      );
+    }
+    PolyUOp *a = poly_uop_stack_axis(ctx, as, count, 1);
+    PolyUOp *d = poly_uop_stack_axis(ctx, ds, count, 1);
+    PolyUOp *c = poly_uop_stack_axis(ctx, cs, count, 1);
+    if (w > 1) c = poly_uop_dot(ctx, poly_uop_dot(ctx, d, c), a);
+    c = poly_uop_mul(ctx, c, poly_uop_const_typed(ctx, POLY_FLOAT32, -1));
+    PolyUOp *zero = poly_uop_full(ctx, (int64_t[]){batches, count, w, w}, 4, 0);
+    PolyUOp *top = poly_uop_cat(ctx, (PolyUOp *[]){a, zero}, 2, 3);
+    PolyUOp *bottom = poly_uop_cat(ctx, (PolyUOp *[]){c, d}, 2, 3);
+    /* Store each level once: reusing its slices must not duplicate its solves. */
+    inv = poly_uop_contiguous(ctx, poly_uop_cat(ctx, (PolyUOp *[]){top, bottom}, 2, 2));
+    if (!inv) return NULL;
+  }
+  return poly_uop_reshape(ctx, inv, (int64_t[]){batches, n, n}, 3);
+}
+
+static PolyUOp *delta_normalize(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *sq = poly_uop_sum_reduce(ctx, poly_uop_mul(ctx, x, x), 3, true);
+  return poly_uop_mul(
+      ctx, x,
+      poly_uop_rsqrt(ctx, poly_uop_add(ctx, sq, poly_uop_const_typed(ctx, POLY_FLOAT32, 1e-6)))
+  );
+}
+
+static int delta_roots(
+    PolyCtx *ctx,
+    PolyUOp **x,
+    int chunk,
+    bool normalize,
+    const int64_t *dims,
+    int64_t width,
+    PolyUOp **out,
+    PolyUOp **final
+) {
+  int64_t b = dims[0], t = dims[1], h = dims[2], kdim = dims[3];
+  int64_t chunks = (t + chunk - 1) / chunk, length = chunks * chunk, groups;
+  if (__builtin_mul_overflow(b, h, &groups) || __builtin_mul_overflow(groups, chunks, &groups))
+    return -1;
+  PolyUOp *q = poly_uop_cast(ctx, x[0], POLY_FLOAT32), *k = poly_uop_cast(ctx, x[1], POLY_FLOAT32);
+  if (normalize) {
+    q = delta_normalize(ctx, q);
+    k = delta_normalize(ctx, k);
+  }
+  q = poly_uop_mul(ctx, q, poly_uop_const_typed(ctx, POLY_FLOAT32, 1.0 / sqrt((double)kdim)));
+  PolyUOp *src[] = {
+      q, k, poly_uop_cast(ctx, x[2], POLY_FLOAT32), poly_uop_cast(ctx, x[3], POLY_FLOAT32),
+      poly_uop_cast(ctx, x[4], POLY_FLOAT32)};
+  for (int i = 0; i < 5; i++) {
+    int rank = i < 3 ? 4 : 3;
+    int64_t order[] = {0, 2, 1, 3}, pads[][2] = {{0, 0}, {0, 0}, {0, length - t}, {0, 0}};
+    src[i] = poly_uop_pad(ctx, poly_uop_permute(ctx, src[i], order, rank), pads, rank);
+    if (i < 3)
+      src[i] = poly_uop_reshape(ctx, src[i], (int64_t[]){groups, chunk, i == 2 ? width : kdim}, 3);
+    else
+      src[i] = poly_uop_reshape(ctx, src[i], (int64_t[]){groups, chunk}, 2);
+  }
+  q = src[0];
+  k = src[1];
+  PolyUOp *g = poly_uop_cumalu(ctx, src[3], 1, POLY_OP_ADD);
+  PolyUOp *beta = poly_uop_reshape(ctx, src[4], (int64_t[]){groups, chunk, 1}, 3);
+  PolyUOp *kb = poly_uop_mul(ctx, k, beta), *vb = poly_uop_mul(ctx, src[2], beta);
+  PolyUOp *gx = poly_uop_reshape(ctx, g, (int64_t[]){groups, chunk, 1}, 3);
+  PolyUOp *gy = poly_uop_reshape(ctx, g, (int64_t[]){groups, 1, chunk}, 3);
+  /* Mask before exp: upper-triangle decay differences can overflow. */
+  PolyUOp *mask = poly_uop_tril(ctx, poly_uop_full(ctx, (int64_t[]){chunk, chunk}, 2, 1), 0);
+  mask = poly_uop_cast(ctx, mask, POLY_BOOL);
+  PolyUOp *decay = poly_uop_exp(
+      ctx,
+      poly_uop_where(
+          ctx, mask, poly_uop_sub(ctx, gx, gy), poly_uop_const_typed(ctx, POLY_FLOAT32, -INFINITY)
+      )
+  );
+  PolyUOp *lower = poly_uop_tril(
+      ctx, poly_uop_mul(ctx, poly_uop_dot(ctx, kb, delta_transpose(ctx, k)), decay), -1
+  );
+  PolyUOp *inverse = delta_inverse(ctx, lower, groups, chunk);
+  PolyUOp *values = poly_uop_contiguous(ctx, poly_uop_dot(ctx, inverse, vb));
+  PolyUOp *keys = poly_uop_contiguous(
+      ctx, poly_uop_dot(ctx, inverse, poly_uop_mul(ctx, kb, poly_uop_exp(ctx, gx)))
+  );
+  PolyUOp *attn = poly_uop_contiguous(
+      ctx, poly_uop_mul(ctx, poly_uop_dot(ctx, q, delta_transpose(ctx, k)), decay)
+  );
+  q = poly_uop_mul(ctx, q, poly_uop_exp(ctx, gx));
+  PolyUOp *last = delta_slice(ctx, g, 1, chunk - 1, chunk);
+  k = poly_uop_mul(
+      ctx, k,
+      poly_uop_reshape(
+          ctx, poly_uop_exp(ctx, poly_uop_sub(ctx, last, g)), (int64_t[]){groups, chunk, 1}, 3
+      )
+  );
+  PolyUOp *state = x[5] ? poly_uop_cast(ctx, x[5], POLY_FLOAT32)
+                        : poly_uop_full(ctx, (int64_t[]){b, h, kdim, width}, 4, 0);
+  PolyUOp *parts[5] = {q, k, values, keys, attn};
+  for (int i = 0; i < 5; i++)
+    parts[i] = poly_uop_reshape(
+        ctx, parts[i], (int64_t[]){b, h, chunks, chunk, i == 4 ? chunk : (i == 2 ? width : kdim)}, 5
+    );
+  last = poly_uop_reshape(ctx, poly_uop_exp(ctx, last), (int64_t[]){b, h, chunks, 1, 1}, 5);
+  PolyUOp **outputs = calloc((size_t)chunks, sizeof(*outputs));
+  if (!outputs) return -1;
+  for (int64_t j = 0; j < chunks; j++) {
+    PolyUOp *p[5];
+    for (int i = 0; i < 5; i++)
+      p[i] = poly_uop_reshape(
+          ctx, delta_slice(ctx, parts[i], 2, j, j + 1),
+          (int64_t[]){b, h, chunk, i == 4 ? chunk : (i == 2 ? width : kdim)}, 4
+      );
+    PolyUOp *v = poly_uop_contiguous(ctx, poly_uop_sub(ctx, p[2], poly_uop_dot(ctx, p[3], state)));
+    outputs[j] = poly_uop_contiguous(
+        ctx, poly_uop_add(ctx, poly_uop_dot(ctx, p[0], state), poly_uop_dot(ctx, p[4], v))
+    );
+    PolyUOp *d =
+        poly_uop_reshape(ctx, delta_slice(ctx, last, 2, j, j + 1), (int64_t[]){b, h, 1, 1}, 4);
+    state = poly_uop_contiguous(
+        ctx, poly_uop_add(
+                 ctx, poly_uop_mul(ctx, state, d), poly_uop_dot(ctx, delta_transpose(ctx, p[1]), v)
+             )
+    );
+    if (!outputs[j] || !state) {
+      free(outputs);
+      return -1;
+    }
+  }
+  PolyUOp *result = poly_uop_cat(ctx, outputs, (int)chunks, 2);
+  free(outputs);
+  result = delta_slice(ctx, result, 2, 0, t);
+  result = poly_uop_permute(ctx, result, (int64_t[]){0, 2, 1, 3}, 4);
+  *out = poly_uop_cast(ctx, result, x[0]->dtype);
+  *final = state;
+  return *out && *final ? 0 : -1;
+}
+
+int poly_tensor_gated_delta_rule(
+    PolyCtx *ctx,
+    PolyTensor *q,
+    PolyTensor *k,
+    PolyTensor *v,
+    PolyTensor *g,
+    PolyTensor *beta,
+    PolyTensor *state,
+    int chunk,
+    bool normalize,
+    PolyTensor **output,
+    PolyTensor **final_state
+) {
+  if (!output || !final_state || output == final_state) return -1;
+  *output = *final_state = NULL;
+  if (!ctx || !q || !k || !v || !g || !beta || chunk < 1 || chunk > 64 || (chunk & (chunk - 1)))
+    return -1;
+  PolyTensor *inputs[] = {q, k, v, g, beta, state};
+  int logical = poly_tensor_result_builds_logical(ctx, inputs, 6);
+  if (logical < 0) return -1;
+  int64_t shapes[6][4] = {{0}};
+  for (int i = 0; i < 6; i++) {
+    if (!inputs[i]) continue;
+    PolyUOp *u = inputs[i]->uop_physical;
+    int rank = i == 3 || i == 4 ? 3 : 4;
+    if (!u || !poly_dtype_is_float(u->dtype) || poly_uop_ndim(ctx, u) != rank) return -1;
+    for (int j = 0; j < rank; j++) {
+      PolyUOp *d = poly_uop_shape_dim(ctx, u, j);
+      if (!d || d->op != POLY_OP_CONST || d->arg.i <= 0) return -1;
+      shapes[i][j] = d->arg.i;
+    }
+  }
+  for (int i = 1; i < 5; i++)
+    for (int j = 0; j < 3; j++)
+      if (shapes[i][j] != shapes[0][j]) return -1;
+  if (shapes[0][3] != shapes[1][3] || shapes[0][1] > INT_MAX - 64) return -1;
+  int64_t ss[] = {shapes[0][0], shapes[0][2], shapes[0][3], shapes[2][3]};
+  if (state && memcmp(ss, shapes[5], sizeof(ss))) return -1;
+  PolyUOp *roots[6], *op = NULL, *sp = NULL, *ol = NULL, *sl = NULL;
+  for (int i = 0; i < 6; i++)
+    roots[i] = inputs[i] ? inputs[i]->uop_physical : NULL;
+  if (delta_roots(ctx, roots, chunk, normalize, shapes[0], shapes[2][3], &op, &sp)) return -1;
+  if (logical) {
+    for (int i = 0; i < 6; i++)
+      roots[i] = inputs[i] ? inputs[i]->uop_logical : NULL;
+    if (delta_roots(ctx, roots, chunk, normalize, shapes[0], shapes[2][3], &ol, &sl)) return -1;
+  }
+  PolyTensor *o = nn_tensor_result(ctx, ol, op, inputs, 6),
+             *s = o ? nn_tensor_result(ctx, sl, sp, inputs, 6) : NULL;
+  if (!s) {
+    poly_tensor_release(o);
+    return -1;
+  }
+  *output = o;
+  *final_state = s;
+  return 0;
+}
 
 PolyUOp *poly_uop_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
   if (!ctx || !x || !w) return NULL;

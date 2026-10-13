@@ -15,6 +15,7 @@ from .modules import (
     ConvTranspose2d,
     InstanceNorm,
     LSTMCell,
+    gated_delta_rule,
     BatchNorm,
 )
 from .state import get_state_dict, load_state_dict, get_parameters, safe_load, safe_load_metadata
@@ -37,6 +38,7 @@ __all__ = [
     "ConvTranspose2d",
     "InstanceNorm",
     "LSTMCell",
+    "gated_delta_rule",
     "BatchNorm",
     "BatchNorm2d",
     "BatchNorm3d",
@@ -83,6 +85,12 @@ def _bind_runtime(runtime):
     entries['Conv1d'] = functools.partial(modules.Conv1d, _factory=entries['Conv2d'])
     entries['ConvTranspose1d'] = functools.partial(modules.ConvTranspose1d, _factory=entries['ConvTranspose2d'])
     entries['BatchNorm2d'] = entries['BatchNorm3d'] = entries['BatchNorm']
+    def bound_delta(q, *args, **kwargs):
+        runtime._check_live()
+        if q._ctx != runtime._ctx:
+            raise ValueError('NN input belongs to another Runtime')
+        return modules.gated_delta_rule(q, *args, **kwargs)
+    entries['gated_delta_rule'] = bound_delta
     entries['state'] = state._bind_runtime(runtime)
     for name in ('get_state_dict', 'get_parameters', 'load_state_dict', 'safe_load', 'safe_load_metadata'):
         entries[name] = getattr(entries['state'], name)

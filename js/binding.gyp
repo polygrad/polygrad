@@ -78,6 +78,7 @@
         "csrc/src/models/gemma4_audio.c",
         "csrc/src/models/transformer.c",
         "csrc/src/models/whisper.c",
+        "csrc/src/models/qwen35.c",
         "csrc/src/models/vision.c",
         "csrc/src/models/clip.c",
         "csrc/src/models/vit.c",

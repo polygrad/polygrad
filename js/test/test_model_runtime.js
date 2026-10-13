@@ -5,6 +5,79 @@ const embeddingGemma2Fixture = require('../../test/fixtures/embeddinggemma2.json
 const embeddingGemma2ImageFixture = require('../../test/fixtures/embeddinggemma2_image.json')
 const embeddingGemma2AudioFixture = require('../../test/fixtures/embeddinggemma2_audio.json')
 const torchFixture = require('../../test/fixtures/torch.json')
+const qwen35Fixture = require('../../test/fixtures/qwen35.json')
+
+async function checkQwen35Text(pg) {
+  const f = qwen35Fixture
+  const inputs = Object.fromEntries(Object.entries(f.inputs).map(([k,v]) => [k, Int32Array.from(v)]))
+  for (const row of f.models) for (const c of row.cases) {
+    const config = new TextEncoder().encode(JSON.stringify({...f.config, is_causal:c.causal}))
+    const weights = Uint8Array.from(atob(row.weights), v => v.charCodeAt(0))
+    const model = pg.Model.fromHF(config, [weights], {maxBatch:2, maxSeqLen:5})
+    let restored
+    try {
+      const params = model.bindings().filter(b => b.role === pg.Model.ROLE_PARAM)
+      assert(params.length > 0 && params.every(b => b.dtype === row.dtype), 'checkpoint weight dtype preserved')
+      const result = (await model.forwardAsync(inputs)).last_hidden_state
+      assertClose(result, c.expected, row.dtype === 'bfloat16' ? 0.04 : 5e-5)
+      restored = pg.Model.load(await model.saveAsync())
+      assertClose((await restored.forwardAsync(inputs)).last_hidden_state, result, 0)
+    } finally {
+      if (restored) await restored.dispose()
+      await model.dispose()
+    }
+  }
+}
+
+async function checkQwen35Cache(pg, dtype) {
+  const f = qwen35Fixture
+  const row = f.models.find(m => m.dtype === dtype)
+  const config = new TextEncoder().encode(JSON.stringify({...f.config, is_causal:true, cache_capacity:8}))
+  const weights = Uint8Array.from(atob(row.weights), v => v.charCodeAt(0))
+  const model = pg.Model.fromHF(config, [weights], {maxBatch:1, maxSeqLen:2})
+  let restored
+  const tol = dtype === 'bfloat16' ? 0.04 : 7e-5
+  try {
+    const outputs = []
+    for (const pos of [0,2,4,5]) {
+      const entry = pos < 4 ? 'prefill' : 'decode'
+      const tokens = Int32Array.from(f.cached_inputs.slice(pos, pos + (pos < 4 ? 2 : 1)))
+      const got = await model.callAsync(entry, {[`tokens_${entry}`]:tokens}, {controls:{start_pos:pos}})
+      outputs.push(...got[`hidden_${entry}`])
+    }
+    assertClose(outputs, row.cached.expected, tol)
+    const states = new Map()
+    for (const b of model.bindings().filter(b => b.name.includes('.cache.'))) {
+      const raw = await model.readBufferAsync(b.name)
+      states.set(b.name, raw.slice())
+      const values = b.dtype === 'bfloat16'
+        ? new Float32Array(Uint32Array.from(raw, v => v * 65536).buffer) : raw
+      // KV capacity is eight; the reference has only the six populated tokens.
+      const active = b.name.endsWith('.kv')
+        ? [...values.slice(0,48), ...values.slice(64,112)] : values
+      assertClose(active, row.cached.states[b.name], tol)
+    }
+    assert(states.size === 3, 'conv, delta and KV caches are model state')
+    let error
+    try {
+      await model.callAsync('prefill', {tokens_prefill:new Int32Array([1,2])}, {controls:{start_pos:7}})
+    } catch (e) { error = e }
+    assert(error, 'cache overflow must reject before writing state')
+    for (const [name, raw] of states) assertClose(await model.readBufferAsync(name), raw, 0)
+    restored = pg.Model.load(await model.saveAsync())
+    await model.resetTransientAsync()
+    for (const candidate of [model, restored]) {
+      for (const [name, raw] of states)
+        assertClose(await candidate.readBufferAsync(name), new raw.constructor(raw.length), 0)
+      const got = await candidate.callAsync('prefill',
+        {tokens_prefill:Int32Array.from(f.cached_inputs.slice(0,2))}, {controls:{start_pos:0}})
+      assertClose(got.hidden_prefill, outputs.slice(0,32), 0)
+    }
+  } finally {
+    if (restored) await restored.dispose()
+    await model.dispose()
+  }
+}
 
 async function checkWhisperCaches(pg) {
   const model = await pg.models.WhisperAsync({d_model:8, num_mel_bins:4,
@@ -2704,6 +2777,9 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
+  await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
+  for (const dtype of ['float32', 'bfloat16'])
+    await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
@@ -3494,6 +3570,9 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))
   await test('EmbeddingGemma2 text/image/audio reference and portable state', () => checkEmbeddingGemma2(pg))
+  await test('Qwen3.5 text prefill dtype masks and portable state', () => checkQwen35Text(pg))
+  for (const dtype of ['float32', 'bfloat16'])
+    await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))

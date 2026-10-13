@@ -152,6 +152,8 @@ def bind(lib):
     lib.poly_tensor_flip.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
     lib.poly_tensor_floor.restype = ctypes.c_void_p
     lib.poly_tensor_floor.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_gated_delta_rule.restype = ctypes.c_int
+    lib.poly_tensor_gated_delta_rule.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_bool, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
     lib.poly_tensor_gather_dim.restype = ctypes.c_void_p
     lib.poly_tensor_gather_dim.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     lib.poly_tensor_ge.restype = ctypes.c_void_p

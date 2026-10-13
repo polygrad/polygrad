@@ -227,6 +227,10 @@ Layers include `Linear`, `LayerNorm`, `LayerNorm2d`, `RMSNorm`, `Embedding`,
 `InstanceNorm`, `LSTMCell`, and `BatchNorm`. Optimizers include `SGD`, `Adam`, and
 `AdamW`; each provides `step()` and `zero_grad()`.
 
+`nn.gated_delta_rule(q, k, v, log_decay, beta, state=None)` returns the causal
+attention output and final state without mutating the supplied state. It supports
+concrete shapes and chunked prefill; accumulation and state use float32.
+
 ## Models
 
 Start with [Quickstart: Models](#quickstart-models) for capture, fitting and export.
@@ -428,6 +432,18 @@ Call `reset_transient()` and encode again for a new recording. Saved models load
 with empty caches. Audio preprocessing, tokenization and transcription policy
 (language/task tokens, suppression and timestamp rules) remain the caller's job;
 this is not a replacement for Whisper's full `transcribe` pipeline.
+
+`Qwen35Text` imports a `qwen3_5_text` configuration and text-backbone weights
+through `Model.from_hf`. Its `forward` takes int32 `input_ids`, `attention_mask`
+and `position_ids`, all shaped `[max_batch, max_seq_len]`, and returns float32
+`last_hidden_state`. F32/F16/BF16 weight storage is preserved. Only full attention
+obeys `is_causal`; linear attention stays causal. With `cache_capacity` in a causal
+configuration, use `model.call('prefill', {'tokens_prefill': ids},
+controls={'start_pos': offset})` or `decode` with `tokens_decode` for one token.
+These return `hidden_prefill` or `hidden_decode`; prefill takes `max_seq_len`
+tokens. Supply consecutive offsets; `reset_transient()` clears the caches, and
+saved models load with empty caches. This is a text backbone, not a token
+generator, vision model or complete sentence-embedding pipeline.
 
 For cached Qwen3 generation, use `models.Transformer.from_gguf(data,
 cache_capacity=4096, prefill_chunk_size=64)`, or the runtime-bound

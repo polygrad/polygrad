@@ -570,6 +570,7 @@
   "poly_tensor_full_invalid_by_id": {"manual":["python","native","wasm"]},
   "poly_tensor_full_uint_by_id": {"manual":["python","native","wasm"]},
   "poly_tensor_function": {"manual":["python","native","wasm"]},
+  "poly_tensor_gated_delta_rule": {"frontend":"pair"},
   "poly_tensor_gather_dim": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},
   "poly_tensor_ge": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},
   "poly_tensor_gelu": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},

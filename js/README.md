@@ -453,6 +453,20 @@ Saved models load with empty caches. Audio preprocessing, tokenization and
 transcription policy (language/task tokens, suppression and timestamp rules)
 remain the caller's job; this is not Whisper's full `transcribe` pipeline.
 
+`Qwen35Text` imports a `qwen3_5_text` configuration and text-backbone weights
+through `pg.Model.fromHF`. Call `forwardAsync` with `Int32Array` inputs
+`input_ids`, `attention_mask` and `position_ids`, each containing
+`maxBatch * maxSeqLen` values; it returns float32 `last_hidden_state`.
+F32/F16/BF16 weight storage is preserved, including BF16 emulation on WebGPU.
+Only full attention obeys `is_causal`; linear attention stays causal. With
+`cache_capacity` in a causal configuration, use
+`await model.callAsync('prefill', {tokens_prefill: ids}, {controls: {start_pos: offset}})`
+or `decode` with `tokens_decode` for one token. These return `hidden_prefill` or
+`hidden_decode`; prefill takes `maxSeqLen` tokens. Supply consecutive offsets;
+`resetTransientAsync()` clears the caches, and saved models load with empty
+caches. This is a text backbone, not a token generator, vision model or complete
+embedding pipeline.
+
 For cached Qwen3 generation, use `pg.models.Transformer.fromGGUF(bytes,
 {cacheCapacity:4096, prefillChunkSize:64})`. The loader validates the generation
 contract; `pg.Model.fromGGUF` accepts the same cache options but stays generic.
@@ -909,6 +923,7 @@ function create({ polygrad: pg }) {
 | Data/readback | `realize`, `realizeAsync`, `toArray`, `toArrayAsync`, `toTypedArray`, `toTypedArrayAsync`, `toTypedArrays`, `toTypedArraysAsync`, `copyFrom`, `updateFrom` |
 | Compilation | `jit`, `jitAsync`, `compile`, `compileAsync`, `Tensor.customKernel` |
 | Neural nets | `nn.Linear`, `nn.SGD`, `nn.Adam`, `nn.AdamW`, `nn.getParameters`, `nn.getStateDict` |
+| Delta attention | `nn.gatedDeltaRule(q, k, v, logDecay, beta, state)` returns `[output, finalState]`; causal chunked prefill, concrete shapes, float32 accumulation/state, no input-state mutation. |
 
 ## C-authored graphs
 

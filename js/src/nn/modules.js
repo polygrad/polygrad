@@ -5,6 +5,21 @@ const { isIntegerDtype } = require('../tensor')
 function createBoundModules(runtime) {
   const Tensor = runtime.Tensor
 
+  function gatedDeltaRule(q, k, v, logDecay, beta, state = null, opts = {}) {
+    const inputs = [q, k, v, logDecay, beta, state]
+    if (!runtime._lifetime.alive || !runtime._core) throw new Error('polygrad runtime has been disposed')
+    // Separate Wasm runtimes can reuse pointer values; compare wrapper ownership
+    // before passing any handle to the bound FFI instance.
+    if (inputs.some(t => t !== null && !(t instanceof Tensor))) throw new Error('gatedDeltaRule input belongs to another Runtime')
+    for (const t of inputs) if (t !== null) t._requireLive()
+    const chunk = opts.chunkSize === undefined ? 64 : opts.chunkSize
+    if (!Number.isInteger(chunk) || chunk < 1 || chunk > 64) throw new RangeError('chunkSize must be an integer in [1,64]')
+    const pair = runtime._core.ffi.poly_tensor_gated_delta_rule(q._ctx,
+      ...inputs.map(t => t === null ? null : t._tensor), chunk, opts.normalizeQk !== false)
+    if (!pair) throw new Error('gatedDeltaRule requires compatible concrete floating shapes and a power-of-two chunkSize in [1,64]')
+    return pair.map(handle => q._makeResultFromCore(handle))
+  }
+
   class Linear {
     constructor(inFeatures, outFeatures, opts = {}) {
       this.inFeatures = Number(inFeatures)
@@ -249,7 +264,7 @@ function createBoundModules(runtime) {
   }
 
   return { Linear, LayerNorm, LayerNorm2d, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d,
-    InstanceNorm, LSTMCell, GroupNorm, RMSNorm, Embedding, Dropout,
+    InstanceNorm, LSTMCell, gatedDeltaRule, GroupNorm, RMSNorm, Embedding, Dropout,
     BatchNorm, BatchNorm2d: BatchNorm, BatchNorm3d: BatchNorm }
 }
 
