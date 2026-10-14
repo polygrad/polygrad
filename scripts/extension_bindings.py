@@ -32,10 +32,16 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
+import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK = Path(__file__).resolve().parent
 INSTALLED = (SDK / 'include/polygrad.h').is_file()
+EXPORT_DEFINITIONS = [
+    '#ifdef _WIN32', '#define EXT __declspec(dllexport)', '#define POLY_EXTENSION_LOCAL',
+    '#else', '#define EXT __attribute__((visibility("default")))',
+    '#define POLY_EXTENSION_LOCAL __attribute__((visibility("hidden")))', '#endif',
+]
 
 
 def include_dir():
@@ -58,8 +64,12 @@ def sdk(output):
              for p in (ROOT / 'src').rglob('*.h')}
     files.update({p.relative_to(ROOT): p for p in (ROOT / 'vendor/cjson').glob('*.h')})
     files.update({Path('extension_bindings.py'): Path(__file__),
+                  Path('extension_methods.py'): SDK / 'extension_methods.py',
                   Path('extension_api.json'): ROOT / 'js/src/extension_api.json',
-                  Path('include/extension_native.h'): ROOT / 'js/extension_native.h'})
+                  Path('examples/author.c'): ROOT / 'test/extension_methods_fixture.c',
+                  Path('examples/methods.json'): ROOT / 'test/extension_methods_fixture.json',
+                  Path('include/extension_native.h'): ROOT / 'js/extension_native.h',
+                  Path('include/extension_method_native.h'): ROOT / 'js/extension_method_native.h'})
     for relative, source in files.items():
         target = output / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -182,7 +192,12 @@ def frontend_bindings(decls, rules):
                        f"  if (status{i} != napi_ok || !a{i}) {{"]
             native += [f"    free(a{j});" for j in strings if j <= i]
             native += ['    napi_throw_type_error(env, NULL, "expected a UTF-8 string"); return NULL;', "  }"]
-        if rule['frontend'] == 'status':
+        if rule['frontend'] == 'owned_string':
+            native += [f"  char *text = {name}({', '.join(c_args)});"]
+            native += [f"  free(a{i});" for i in strings]
+            native += ["  napi_value result;", "  napi_status status = text ? napi_create_string_utf8(env, text, NAPI_AUTO_LENGTH, &result) : napi_get_null(env, &result);",
+                       "  free(text);", "  NAPI_CALL(env, status);", "  return result;", "}"]
+        elif rule['frontend'] == 'status':
             native += [f"  int rc = {name}({', '.join(c_args)});"]
             native += [f"  free(a{i});" for i in strings]
             native += ["  napi_value result;", "  NAPI_CALL(env, napi_create_int32(env, rc, &result));",
@@ -204,7 +219,11 @@ def frontend_bindings(decls, rules):
         exports.append(f'DECLARE_NAPI_METHOD("{name}", napi_{name}),')
         if strings:
             types = ['string' if i in strings else 'number' for i in range(len(args))]
-            wasm.append(f"  {name}: ({', '.join(names)}) => Module.ccall('{name}', 'number', {json.dumps(types)}, [{', '.join(js_args)}]),")
+            call = f"Module.ccall('{name}', 'number', {json.dumps(types)}, [{', '.join(js_args)}])"
+            if rule['frontend'] == 'owned_string':
+                wasm.append(f"  {name}: ({', '.join(names)}) => {{ const p = {call} >>> 0; try {{ return p ? Module.UTF8ToString(p) : null }} finally {{ if (p) Module._free(p) }} }},")
+            else:
+                wasm.append(f"  {name}: ({', '.join(names)}) => {call},")
         elif arrays:
             wasm += [f"  {name}: ({', '.join(input_names)}) => {{"]
             for index, count, elements, limit in arrays:
@@ -462,20 +481,20 @@ def validate_rules(decls, rules):
         if 'frontend' in rule:
             kind = rule['frontend']
             pair, optional = kind == 'pair', kind == 'optional'
-            if kind not in {'direct', 'pair', 'optional', 'status'}:
+            if kind not in {'direct', 'pair', 'optional', 'status', 'owned_string'}:
                 raise ValueError(f'{name}: unknown frontend adapter {kind}')
             outputs = 2 if pair else 1 if optional else 0
             inputs = args[:-outputs] if outputs else args
             if (outputs and (len(args) < outputs or any(a['type']['qualType'] != 'PolyTensor **'
                                                        for a in args[-outputs:]))):
                 raise ValueError(f'{name}: unsupported owned-output signature')
-            expected_ret = {'int'} if pair or kind == 'status' else {'PolyTensor *'} if optional else {'PolyTensor *', 'PolyUOp *'}
+            expected_ret = {'char *'} if kind == 'owned_string' else {'int'} if pair or kind == 'status' else {'PolyTensor *'} if optional else {'PolyTensor *', 'PolyUOp *'}
             if ret not in expected_ret:
                 raise ValueError(f'{name}: unsupported frontend return {ret}')
             for arg in inputs:
                 t, n = arg['type']['qualType'], arg['name']
                 if (t.removeprefix('const ') in OPAQUE | SCALARS
-                        or (kind == 'status' and t == 'const char *')):
+                        or (kind in {'status', 'owned_string'} and t == 'const char *')):
                     continue
                 if (t in {'int64_t *', 'const int64_t *', 'int64_t (*)[2]'}
                         and n in arrays and isinstance(arrays[n]['length'], str)
@@ -585,6 +604,12 @@ def consumer(a):
     api = json.loads((SDK / 'extension_api.json' if INSTALLED else ROOT / 'js/src/extension_api.json').read_text())
     source = a.source.resolve()
     decls = declarations(f'#include "{source}"\n')
+    methods, method_roots = [], []
+    if getattr(a, 'methods', None):
+        spec = importlib.util.spec_from_file_location('polygrad_extension_methods', SDK / 'extension_methods.py')
+        extension_methods = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extension_methods)
+        methods, method_roots = extension_methods.describe(json.loads(a.methods.read_text()), decls, signature)
     ret, params = signature(decls[a.entry])
     types = [p["type"]["qualType"] for p in params]
     if (
@@ -621,30 +646,34 @@ def consumer(a):
             walk(body)
 
     visit(a.entry)
+    for root in method_roots:
+        visit(root)
+    if methods:
+        imports.add('poly_extension_supports_abi')
     names = sorted(imports)
     if set(names) - api.keys():
         raise ValueError(f"unsupported imports: {set(names) - api.keys()}")
     manifest = {
-        "construction_abi": construction_abi(),
+        "construction_abi": 2 if methods else construction_abi(),
         "entry": a.entry,
         "inputs": a.inputs,
         "outputs": a.outputs,
         "scalars": types[2:-1],
         "imports": names,
     }
+    if methods:
+        manifest['methods'] = methods
+    manifest_text = json.dumps(manifest)
+    # Includes the terminating NUL; match the bounded Wasm loader read.
+    if len(manifest_text.encode('utf-8')) >= 65536:
+        raise ValueError('extension manifest must fit in 65536 bytes including NUL')
     c = [
         "/* Generated from Polygrad public declarations. */",
         '#include "polygrad.h"',
         '#include "frontend.h"',
         "#include <stddef.h>",
         "#include <math.h>",
-        "#ifdef _WIN32",
-        "#define EXT __declspec(dllexport)",
-        "#define POLY_EXTENSION_LOCAL",
-        "#else",
-        '#define EXT __attribute__((visibility("default")))',
-        '#define POLY_EXTENSION_LOCAL __attribute__((visibility("hidden")))',
-        "#endif",
+        *EXPORT_DEFINITIONS,
     ]
     for name in names:
         d = api[name]
@@ -670,6 +699,9 @@ def consumer(a):
         'int (*abi)(void) = (int (*)(void))resolve("poly_extension_abi_version");',
         "if (!abi || abi() != POLYGRAD_EXTENSION_ABI_VERSION) return 0;",
     ]
+    if methods:
+        c += ['int (*supports)(int) = (int (*)(int))resolve("poly_extension_supports_abi");',
+              'if (!supports || !supports(2)) return 0;']
     # Validate all addresses before publishing any: a failed bind is atomic.
     for name in names:
         c += [
@@ -683,7 +715,7 @@ def consumer(a):
     c += [
         "extension_bound=1; return 1;}",
         "#endif",
-        f"EXT const char *poly_extension_manifest(void) {{ return {json.dumps(json.dumps(manifest))}; }}",
+        f"EXT const char *poly_extension_manifest(void) {{ return {json.dumps(manifest_text)}; }}",
         "EXT int poly_extension_abi(void) { return POLYGRAD_ABI_VERSION; }",
         f"extern int {a.entry}("
         + ", ".join(t + " " + p["name"] for t, p in zip(types, params))
@@ -707,6 +739,10 @@ def consumer(a):
     c += [
         f"return {a.entry}(" + ", ".join(args) + ");",
         "}",
+    ]
+    if methods:
+        c += [extension_methods.PROTOTYPES, '#define POLY_EXTENSION_METHODS 1']
+    c += [
         "#ifdef POLY_EXTENSION_NAPI",
         f"#define POLY_EXTENSION_NINPUTS {a.inputs}",
         f"#define POLY_EXTENSION_NOUTPUTS {a.outputs}",
@@ -717,6 +753,8 @@ def consumer(a):
     a.output.mkdir(parents=True, exist_ok=True)
     (a.output / "extension.c").write_text("\n".join(c) + "\n")
     (a.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    if methods:
+        (a.output / 'methods.c').write_text(extension_methods.generate(source, methods, EXPORT_DEFINITIONS))
 
 
 if __name__ == "__main__":
@@ -725,6 +763,7 @@ if __name__ == "__main__":
     p.add_argument("--check", action="store_true")
     p.add_argument("--source", type=Path)
     p.add_argument("--entry")
+    p.add_argument("--methods", type=Path, help="consumer method ownership rules; declarations own signatures")
     p.add_argument("--inputs", type=int)
     p.add_argument("--outputs", type=int)
     p.add_argument("--output", type=Path)

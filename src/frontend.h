@@ -15,6 +15,9 @@ extern "C" {
  * private struct access and execution are outside this contract. */
 #define POLYGRAD_EXTENSION_ABI_VERSION 1
 int poly_extension_abi_version(void);
+/* The legacy query stays at 1 for already compiled authors. Method-bearing
+ * manifests require contract 2; use this capability query for newer contracts. */
+int poly_extension_supports_abi(int version);
 
 /* Address lookup in this loaded core, not a second mathematical API. Call only
  * through the exact declared function type after verifying the construction

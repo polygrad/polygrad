@@ -527,6 +527,9 @@ async function main() {
     const response = await fetch('/extension/author.wasm')
     if (!response.ok) throw new Error('extension fixture missing')
     await window.__checkExtension(extensionRuntime, await response.arrayBuffer(), polygrad.create)
+    const methodsResponse = await fetch('/extension-methods/author.wasm')
+    if (!methodsResponse.ok) throw new Error('extension methods fixture missing')
+    await window.__checkExtensionMethods(extensionRuntime, await methodsResponse.arrayBuffer(), polygrad.create)
     console.log('  [PASS] C extension gradient, checkpoint and rollback')
     extensionPassed++
   } catch (e) {

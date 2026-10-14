@@ -15,6 +15,19 @@
     "ownership": "value",
     "cleanup": false
   },
+  "poly_extension_supports_abi": {
+    "return": "int",
+    "args": [
+      [
+        "int",
+        "version"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "value",
+    "cleanup": false
+  },
   "poly_tensor_abs": {
     "return": "PolyTensor *",
     "args": [

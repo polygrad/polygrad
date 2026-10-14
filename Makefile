@@ -114,13 +114,24 @@ build/extension/author.wasm: build/extension/extension.c test/extension_fixture.
 	$(EMCC) -O2 -Isrc $^ -sSTANDALONE_WASM=1 -sALLOW_MEMORY_GROWTH=1 --no-entry -Wl,--allow-undefined \
 	  -Wl,--export=poly_extension_build -Wl,--export=poly_extension_manifest -Wl,--export=poly_extension_abi \
 	  -Wl,--export=malloc -Wl,--export=free -o $@
-extension-fixture: build/extension/author.so build/extension/native.node build/extension/author.wasm
+build/extension-methods/extension.c build/extension-methods/methods.c &: test/extension_methods_fixture.c test/extension_methods_fixture.json scripts/extension_bindings.py scripts/extension_methods.py js/src/extension_api.json $(PROJECT_HEADERS)
+	$(PYTHON) scripts/extension_bindings.py --source $< --entry example_build --inputs 1 --outputs 1 --methods test/extension_methods_fixture.json --output build/extension-methods
+build/extension-methods/author.so: build/extension-methods/extension.c build/extension-methods/methods.c
+	$(CC) -std=c11 -fPIC -shared -Isrc $^ -o $@ -lm
+build/extension-methods/native.node: build/extension-methods/extension.c build/extension-methods/methods.c js/extension_native.h js/extension_method_native.h
+	$(CC) -std=c11 -fPIC -shared -DPOLY_EXTENSION_NAPI -Isrc -Ijs -I$(NODE_INCLUDE) $(filter %.c,$^) -o $@ -lm
+build/extension-methods/author.wasm: build/extension-methods/extension.c build/extension-methods/methods.c
+	$(EMCC) -O2 -Isrc $^ -sSTANDALONE_WASM=1 -sALLOW_MEMORY_GROWTH=1 --no-entry -Wl,--allow-undefined \
+	  -Wl,--export=poly_extension_build -Wl,--export=poly_extension_manifest -Wl,--export=poly_extension_abi \
+	  -Wl,--export=poly_extension_invoke -Wl,--export=poly_extension_release \
+	  -Wl,--export=malloc -Wl,--export=free -o $@
+extension-fixture: build/extension/author.so build/extension/native.node build/extension/author.wasm build/extension-methods/author.so build/extension-methods/native.node build/extension-methods/author.wasm
 test-extension: test-extension-python test-extension-native test-extension-wasm
-test-extension-python: check-extension-bindings build/extension/author.so build/libpolygrad.so
+test-extension-python: check-extension-bindings build/extension/author.so build/extension-methods/author.so build/libpolygrad.so
 	PYTHONPATH=py POLY_LIB=$(CURDIR)/build/libpolygrad.so $(PYTHON) -m pytest -q py/tests/test_extension.py py/tests/test_extension_bindings.py
-test-extension-native: check-extension-bindings build/extension/native.node js/build/Release/polygrad_napi.node
+test-extension-native: check-extension-bindings build/extension/native.node build/extension-methods/native.node js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_extension.js
-test-extension-wasm: check-extension-bindings build/extension/author.wasm wasm-pkg
+test-extension-wasm: check-extension-bindings build/extension/author.wasm build/extension-methods/author.wasm wasm-pkg
 	POLY_CORE=wasm $(NODE) js/test/test_extension.js
 
 WASM_ASYNCIFY_IMPORTS = ['poly_webgpu_batch_end','js_webgpu_dispatch','js_webgpu_get_or_create_pipeline','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
@@ -971,7 +982,7 @@ test-onnx-encoder: test-onnx-encoder-python js/build/Release/polygrad_napi.node 
 	$(NODE) js/test/test_onnx_encoder.js wasm '$(ONNX_ENCODER_DIR)'
 	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-browser
 
-test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension/native.node js/build/Release/polygrad_napi.node wasm-pkg
+test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension-methods/author.so build/extension/native.node js/build/Release/polygrad_napi.node wasm-pkg
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v
 
 .PHONY: test-readme
@@ -1069,7 +1080,7 @@ test-browser-runner:
 
 # Chromium profile/socket paths must stay short in deeply nested worktrees.
 BROWSER_TMPDIR ?= /tmp
-test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg build/extension/author.wasm
+test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg build/extension/author.wasm build/extension-methods/author.wasm
 	cd js && bash scripts/build-browser.sh && TMPDIR=$(BROWSER_TMPDIR) $(NODE) test/browser/run.js
 
 test-browser-matrix: test-js-browser-matrix

@@ -3,7 +3,7 @@ include CHANGELOG.md
 recursive-include csrc *.c *.h
 include polygrad/_native.c
 include polygrad/extension_api.json
-recursive-include polygrad/_sdk *.h *.py *.json
+recursive-include polygrad/_sdk *.h *.c *.py *.json
 prune tests
 prune build
 prune dist

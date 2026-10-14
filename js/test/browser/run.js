@@ -36,8 +36,8 @@ const server = http.createServer((req, res) => {
     res.end()
     return
   }
-  const extension = url === '/extension/author.wasm'
-  const filePath = extension ? path.join(jsDir, '../build/extension/author.wasm') :
+  const extension = ['/extension/author.wasm', '/extension-methods/author.wasm'].includes(url)
+  const filePath = extension ? path.join(jsDir, '../build', url.slice(1)) :
     path.join(jsDir, url === '/' ? '/test/browser/index.html' : url)
 
   if (!extension && !filePath.startsWith(jsDir)) {

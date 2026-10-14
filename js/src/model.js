@@ -1058,6 +1058,30 @@ function createBoundModelClass(runtime) {
       return this._rt._core.model.entrypoints(this._handle)
     }
 
+    setMetadata(key, value) {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      if (typeof key !== 'string' || !key || key.includes('\0')) throw new TypeError('invalid metadata key')
+      const ffi = this._rt._core.ffi
+      // JSON.stringify normally hides nonfinite numbers as null. Reject them.
+      const json = value === null ? null : JSON.stringify(value, (_k, v) => {
+        if (typeof v === 'number' && !Number.isFinite(v)) throw new TypeError('metadata numbers must be finite')
+        return v
+      })
+      if (json === undefined) throw new TypeError('metadata must be JSON')
+      const rc = json === null ? ffi.poly_model_delete_metadata_key(this._handle, key)
+        : ffi.poly_model_set_metadata_key(this._handle, key, json)
+      if (rc !== 0) throw new Error('metadata update rejected: reserved key, invalid JSON/NUL, or busy Model')
+    }
+
+    getMetadata(key) {
+      this._requireOpen()
+      if (this._rt._activeAsync) throw new Error('Model metadata unavailable during active async work')
+      if (typeof key !== 'string' || !key || key.includes('\0')) throw new TypeError('invalid metadata key')
+      const json = this._rt._core.ffi.poly_model_get_metadata_key(this._handle, key)
+      return json === null ? null : JSON.parse(json)
+    }
+
     summary() {
       const roles = ['PARAM', 'INPUT', 'TARGET', 'OUTPUT', 'AUX']
       const bindings = this.bindings().map(b =>

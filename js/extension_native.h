@@ -66,13 +66,21 @@ invalid:
   napi_throw_type_error(env, NULL, "invalid extension arguments");
   return NULL;
 }
+#ifdef POLY_EXTENSION_METHODS
+#include "extension_method_native.h"
+#endif
 static napi_value extension_init(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
       {"bind", 0, extension_bind, 0, 0, 0, napi_default, 0},
       {"manifest", 0, extension_manifest, 0, 0, 0, napi_default, 0},
       {"abi", 0, extension_abi, 0, 0, 0, napi_default, 0},
-      {"build", 0, extension_build, 0, 0, 0, napi_default, 0}};
-  napi_define_properties(env, exports, 4, methods);
+      {"build", 0, extension_build, 0, 0, 0, napi_default, 0},
+#ifdef POLY_EXTENSION_METHODS
+      {"invoke", 0, extension_invoke, 0, 0, 0, napi_default, 0},
+      {"release", 0, extension_release, 0, 0, 0, napi_default, 0},
+#endif
+  };
+  napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
   return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, extension_init)

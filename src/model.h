@@ -668,6 +668,16 @@ int poly_model_control_bounds(
  * executable metadata. NULL clears it. Raw IR export does not include it. */
 int poly_model_set_metadata(PolyModel *model, const char *json);
 const char *poly_model_metadata(const PolyModel *model);
+/* Application namespaces: callers own their top-level key. "transformer",
+ * "polygrad" and "polygrad.*" are reserved. Values are JSON; embedded NULs
+ * are rejected. Finite binary64 numbers round-trip exactly; encode integers
+ * outside binary64's exact range as strings.
+ * These edits do not mutate executable state or invalidate prefix caches.
+ * get returns an owned JSON string (free it), or NULL for a missing key/error.
+ * The whole-object C API above is for trusted builders/bundle restoration. */
+int poly_model_set_metadata_key(PolyModel *model, const char *key, const char *json);
+int poly_model_delete_metadata_key(PolyModel *model, const char *key);
+char *poly_model_get_metadata_key(PolyModel *model, const char *key);
 
 #ifdef __cplusplus
 }

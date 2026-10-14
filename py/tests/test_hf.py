@@ -441,6 +441,9 @@ def test_transformer_specialization_owns_one_model():
         cleanup.callback(cached.dispose)
         assert isinstance(cached, Transformer) and isinstance(cached, pg.Model)
         for name, data in llama_weights(case).items(): cached.write_buffer(name, data)
+        cached.set_metadata('polyprob', {'schema': 1})
+        with pytest.raises(ValueError, match='reserved'):
+            cached.set_metadata('transformer', {})
         bundle = cached.save()
         generic = rt.Model.load(bundle)
         cleanup.callback(generic.dispose)
@@ -452,6 +455,10 @@ def test_transformer_specialization_owns_one_model():
         assert specialized.decode_position == 0
         specialized.append_tokens(np.array([1, 4], np.int32))
         assert specialized.decode_position == 2
+        specialized.set_metadata('polyprob', {'schema': 2})
+        assert specialized.decode_position == 2
+        specialized.append_tokens(np.array([2], np.int32))
+        assert specialized.decode_position == 3
         specialized.dispose()
         specialized.dispose()
         with pytest.raises(RuntimeError, match='disposed'):

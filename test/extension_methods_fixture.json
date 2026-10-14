@@ -1,0 +1,11 @@
+{
+  "example_new": {"args": {"term": {"tensor": "borrowed"}, "name": {"string": "borrowed"}}, "return": {"object": "builder", "release": "example_close"}},
+  "example_add": {"args": {"b": {"object": "builder"}, "term": {"tensor": "borrowed"}, "name": {"string": "borrowed"}}, "return": "status"},
+  "example_finish": {"args": {"b": {"object": "builder"}}, "return": {"tensor": "owned"}},
+  "example_input": {"args": {"b": {"object": "builder"}}, "return": {"tensor": "owned"}},
+  "example_name": {"args": {"b": {"object": "builder"}}, "return": {"string": "borrowed"}},
+  "example_name_copy": {"args": {"b": {"object": "builder"}}, "return": {"string": "owned", "release": "example_free_string"}},
+  "example_live": {"return": "value"},
+  "example_order": {"return": "value"},
+  "example_reset": {"return": "status"}
+}

@@ -5,10 +5,65 @@ import sys
 from pathlib import Path
 import subprocess
 import importlib.util
+import ctypes
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_consumer_methods_are_import_roots(tmp_path):
+    source = tmp_path / 'author.c'
+    source.write_text('#include "polygrad.h"\n'
+        'int build(PolyCtx*c,PolyTensor**x,PolyTensor**y){y[0]=poly_tensor_retain(x[0]);return 1;}\n'
+        'PolyTensor *extra(PolyCtx*c,PolyTensor*x){return poly_tensor_exp(c,x);}\n')
+    rules = tmp_path / 'methods.json'
+    rules.write_text(json.dumps({'extra': {'args': {'x': {'tensor': 'borrowed'}},
+                                         'return': {'tensor': 'owned'}}}))
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/extension_bindings.py'),
+        '--source', str(source), '--entry', 'build', '--inputs', '1', '--outputs', '1',
+        '--methods', str(rules), '--output', str(tmp_path / 'out')], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((tmp_path / 'out/manifest.json').read_text())
+    assert manifest['construction_abi'] == 2
+    assert 'poly_tensor_exp' in manifest['imports']
+    assert manifest['methods'][0]['name'] == 'extra'
+    lib = tmp_path / 'author.so'
+    subprocess.run(['cc', '-std=c11', '-fPIC', '-fvisibility=hidden', '-shared',
+                    '-I'+str(ROOT/'src'), str(tmp_path/'out/extension.c'),
+                    str(tmp_path/'out/methods.c'), '-o', str(lib), '-lm'], check=True)
+    loaded = ctypes.CDLL(str(lib))
+    for name in ('poly_extension_invoke', 'poly_extension_release', 'poly_extension_free'):
+        assert getattr(loaded, name)
+
+
+def test_consumer_manifest_size_limit(tmp_path):
+    source = tmp_path / 'author.c'
+    source.write_text('#include "polygrad.h"\n'
+        'int build(PolyCtx*c,PolyTensor**x,PolyTensor**y){y[0]=poly_tensor_retain(x[0]);return 1;}\n' +
+        '\n'.join(f'int method{i}('+','.join(f'int arg{j}' for j in range(64))+'){return 0;}' for i in range(32)))
+    rules = tmp_path/'methods.json'
+    rules.write_text(json.dumps({f'method{i}': {'return':'value'} for i in range(32)}))
+    result = subprocess.run([sys.executable, str(ROOT/'scripts/extension_bindings.py'),
+        '--source',str(source),'--entry','build','--inputs','1','--outputs','1',
+        '--methods',str(rules),'--output',str(tmp_path/'out')], capture_output=True,text=True)
+    assert result.returncode != 0
+    assert '65536' in result.stderr
+
+
+@pytest.mark.parametrize('rules', [
+    {'missing': {'return': 'void'}},
+    {'extra': {'return': {'tensor': 'owned'}}},
+    {'extra': {'args': {'x': {'tensor': 'owned'}}, 'return': {'tensor': 'owned'}}},
+    {'extra': {'args': {'x': {'tensor': 'borrowed'}}, 'return': {'tensor': 'borrowed'}}},
+    {'extra': {'args': {'absent': {'tensor': 'borrowed'}}, 'return': {'tensor': 'owned'}}},
+])
+def test_consumer_method_rules_reject_missing_ownership(generator, rules):
+    spec = importlib.util.spec_from_file_location('extension_methods', ROOT / 'scripts/extension_methods.py')
+    methods = importlib.util.module_from_spec(spec); spec.loader.exec_module(methods)
+    decls = generator.declarations('#include "polygrad.h"\nPolyTensor *extra(PolyCtx *ctx, PolyTensor *x);')
+    with pytest.raises(ValueError):
+        methods.describe(rules, decls, generator.signature)
 
 
 @pytest.fixture(scope='module')
@@ -388,8 +443,11 @@ def test_clean_sdist_regenerates_missing_bindings(tmp_path):
     shutil.copyfile(ROOT / 'Makefile', tmp_path / 'Makefile')
     (tmp_path / 'js').mkdir()
     shutil.copyfile(ROOT / 'js/extension_native.h', tmp_path / 'js/extension_native.h')
+    shutil.copyfile(ROOT / 'js/extension_method_native.h', tmp_path / 'js/extension_method_native.h')
     for directory in ('test', 'bench'):
         (tmp_path / directory).mkdir()
+    for name in ('extension_methods_fixture.c', 'extension_methods_fixture.json'):
+        shutil.copyfile(ROOT / 'test' / name, tmp_path / 'test' / name)
     subprocess.run([sys.executable, 'setup.py', 'sdist'], cwd=tmp_path / 'py',
                    capture_output=True, text=True, encoding='utf-8', check=True)
     artifact, = (tmp_path / 'py/dist').glob('*.tar.gz')
@@ -398,6 +456,8 @@ def test_clean_sdist_regenerates_missing_bindings(tmp_path):
         assert {'polygrad/_generated_ffi.py', 'polygrad/_generated_special_ffi.py',
                 'polygrad/extension_api.json', 'csrc/src/frontend_exports.h',
                 'polygrad/sdk.py', 'polygrad/_sdk/extension_bindings.py',
+                'polygrad/_sdk/extension_methods.py', 'polygrad/_sdk/include/extension_method_native.h',
+                'polygrad/_sdk/examples/author.c', 'polygrad/_sdk/examples/methods.json',
                 'polygrad/_sdk/include/polygrad.h',
                 'polygrad/_sdk/vendor/cjson/cJSON.h'} <= paths
         assert 'scripts/extension_bindings.py' not in paths

@@ -92,7 +92,7 @@ setup(
     name='polygrad',
     version=_read_version(),
     packages=find_packages(include=['polygrad', 'polygrad.*', 'extra', 'extra.*']),
-    package_data={'polygrad': ['_native.c', 'extension_api.json', '_sdk/*.py', '_sdk/*.json',
+    package_data={'polygrad': ['_native.c', 'extension_api.json', '_sdk/*.py', '_sdk/*.json', '_sdk/examples/*',
                                '_sdk/include/*.h', '_sdk/include/**/*.h', '_sdk/vendor/**/*.h']},
     ext_modules=[
         Extension(

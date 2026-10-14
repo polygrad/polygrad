@@ -303,25 +303,29 @@ class PolyRuntime {
     const core = this._core
     const asyncHost = this._usesAsyncHostBridge()
     this._closing = true
+    // A failed extension close must not strand the remaining owners/context.
+    const releases = [
+      ...[...(this._extensions || [])].reverse().map(extension=>()=>extension.dispose()),
+      ()=>this.Model && this.Model._disposeAll && this.Model._disposeAll(),
+      ()=>this.jit && this.jit.disposeAll && this.jit.disposeAll(true),
+      ()=>this.Tensor && this.Tensor._disposeAll && this.Tensor._disposeAll(),
+      ()=>this.uop && this.uop._disposeAll && this.uop._disposeAll(),
+      ()=>{ if (this._lifetime) this._lifetime.alive = false },
+      ()=>core.destroy && core.destroy()
+    ]
 
     if (!asyncHost) {
-      if (this.Model && this.Model._disposeAll) this.Model._disposeAll()
-      if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
-      if (this.Tensor && this.Tensor._disposeAll) this.Tensor._disposeAll()
-      if (this.uop && this.uop._disposeAll) this.uop._disposeAll()
-      if (this._lifetime) this._lifetime.alive = false
-      if (core.destroy) core.destroy()
+      let error
+      for (const release of releases) { try { release() } catch(e) { error ||= e } }
       this._core = null
+      if (error) throw error
       return undefined
     }
 
     this._disposePromise = this._waitForAsync().then(async () => {
-      if (this.Model && this.Model._disposeAll) await this.Model._disposeAll()
-      if (this.jit && this.jit.disposeAll) this.jit.disposeAll(true)
-      if (this.Tensor && this.Tensor._disposeAll) await this.Tensor._disposeAll()
-      if (this.uop && this.uop._disposeAll) this.uop._disposeAll()
-      if (this._lifetime) this._lifetime.alive = false
-      return core.destroy ? core.destroy() : undefined
+      let error
+      for (const release of releases) { try { await release() } catch(e) { error ||= e } }
+      if (error) throw error
     }).finally(() => {
       this._core = null
     })

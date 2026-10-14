@@ -119,11 +119,15 @@ async function main() {
 
     const custom = pg.Model.fromBundle(readBytes(path.join(dir, 'python-custom.bundle')))
     try {
+      const metadata = custom.getMetadata('example')
+      if (metadata.schema !== 1 || metadata.name !== 'μ' || metadata.writer !== 'python') throw new Error('Python metadata lost')
+      custom.setMetadata('transport', {core})
       const output = custom.call('double', { x: new Float32Array([3]) })
       if (output.twice[0] !== 14) throw new Error('Python custom model lost graph/state')
       custom.writeBuffer('weight', new Float32Array([4]))
       if (custom.readBuffer('tied')[0] !== 4 || custom.forward({ x: new Float32Array([3]) }).prediction[0] !== 13)
         throw new Error('Python custom model lost alias or AUX state')
+      writeBytes(path.join(dir, `javascript-${core}-resaved.bundle`), custom.save())
     } finally { custom.dispose() }
 
     const w = new pg.Tensor([2], { dtype: 'float32' })
@@ -136,6 +140,7 @@ async function main() {
       { name: 'double', inputs: ['x'], outputs: ['twice'] }
     ] })
     try {
+      authored.setMetadata('example', {schema:1, name:'μ', writer:'javascript'})
       writeBytes(path.join(dir, `javascript-${core}-custom.bundle`), authored.saveBundle({ includeOptimizer: false }))
     } finally { authored.dispose() }
 

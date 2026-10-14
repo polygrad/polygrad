@@ -314,8 +314,16 @@ def run_core(work: Path, core: str, source_after: Model, expected_loss: float) -
     finally:
         inference.free()
 
+    resaved = Model.load((work / f'javascript-{core}-resaved.bundle').read_bytes())
+    try:
+        assert resaved.get_metadata('example') == {'schema': 1, 'name': 'μ', 'writer': 'python'}
+        assert resaved.get_metadata('transport') == {'core': core}
+        np.testing.assert_array_equal(resaved.forward(x=np.array([3], np.float32))['prediction'], [13])
+    finally:
+        resaved.dispose()
     custom = Model.from_bundle((work / f'javascript-{core}-custom.bundle').read_bytes())
     try:
+        assert custom.get_metadata('example') == {'schema': 1, 'name': 'μ', 'writer': 'javascript'}
         np.testing.assert_array_equal(custom.forward(x=np.array([3], np.float32))['prediction'], [7])
         np.testing.assert_array_equal(custom.call('double', x=np.array([3], np.float32))['twice'], [14])
         custom.write_buffer('weight', np.array([4], np.float32))
@@ -337,6 +345,7 @@ def export_custom(work: Path) -> None:
                             {'name': 'forward', 'inputs': ['x'], 'outputs': ['prediction']},
                             {'name': 'double', 'inputs': ['x'], 'outputs': ['twice']}])
     try:
+        model.set_metadata('example', {'schema': 1, 'name': 'μ', 'writer': 'python'})
         (work / 'python-custom.bundle').write_bytes(model.save_bundle(include_optimizer=False))
     finally:
         model.free()

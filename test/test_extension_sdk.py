@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -125,6 +126,50 @@ const pg = require(path.resolve('node_modules/polygrad'))
 })().catch(e=>{console.error(e);process.exitCode=1})
 ''', args.kind, json.dumps(list(variants))])
     print(f'PASS: installed {args.kind} SDK, {len(variants)} compatibility cases', flush=True)
+    shutil.copyfile(sdk / 'examples/author.c', 'extension_methods_fixture.c')
+    shutil.copyfile(sdk / 'examples/methods.json', 'extension_methods_fixture.json')
+    run([*generator, '--source', 'extension_methods_fixture.c', '--entry', 'example_build',
+         '--inputs', '1', '--outputs', '1', '--methods', 'extension_methods_fixture.json',
+         '--output', 'methods-generated'])
+    sources = ['methods-generated/extension.c', 'methods-generated/methods.c']
+    if args.kind == 'wasm':
+        command = [*shlex.split(os.environ.get('EMCC', 'emcc')), '-O2', '-I' + str(include),
+                   *sources, '-sSTANDALONE_WASM=1', '-sALLOW_MEMORY_GROWTH=1', '--no-entry', '-Wl,--allow-undefined']
+        command += ['-Wl,--export=' + name for name in ('poly_extension_build', 'poly_extension_manifest',
+            'poly_extension_abi', 'poly_extension_invoke', 'poly_extension_release', 'malloc', 'free')]
+        command += ['-o', 'methods.wasm']
+    else:
+        command = [*shlex.split(os.environ.get('CC', 'cc')), '-std=c11', '-O2', '-shared', '-fPIC',
+                   '-I' + str(include), *sources, '-lm', '-o', 'methods.so' if args.kind == 'python' else 'methods.node']
+        if args.kind == 'native': command += ['-DPOLY_EXTENSION_NAPI', '-I' + args.node_include]
+    run(command)
+    if args.kind == 'python':
+        with polygrad.create(device='CPU', logical='always') as rt:
+            author = rt.load_extension(str(Path('methods.so').resolve()))
+            x = rt.Tensor([1.])
+            obj = author.methods.example_new(x, 'μ')
+            x.dispose(); rt.collect()
+            assert author.methods.example_name(obj) == 'μ'
+            y = author.methods.example_finish(obj)
+            parameter = author.methods.example_input(obj)
+            model = rt.Model.from_tensors(params={'x': parameter}, outputs={'y': y})
+            parameter.dispose()
+            model.set_metadata('example', {'schema': 1})
+            y.dispose(); author.dispose()
+            np.testing.assert_allclose(model.call('forward', {})['y'], [np.e], rtol=1e-6)
+            restored = rt.Model.load(model.save())
+            assert restored.get_metadata('example') == {'schema': 1}
+            restored.dispose(); model.dispose()
+    else:
+        run([args.node, '-e', '''
+const pg=require(require('path').resolve('node_modules/polygrad')),fs=require('fs'),path=require('path')
+;(async()=>{
+ const core=process.argv[1],rt=await pg.create({core,device:'cpu',logical:'always'})
+ try { await require('./check_extension_methods')(rt,core==='native'?require(path.resolve('methods.node')):fs.readFileSync('methods.wasm'),pg.create) }
+ finally { await rt.dispose() }
+})().catch(e=>{console.error(e);process.exitCode=1})
+''', args.kind])
+    print(f'PASS: installed {args.kind} stateful methods, ownership and metadata', flush=True)
 
 
 if __name__ == '__main__':

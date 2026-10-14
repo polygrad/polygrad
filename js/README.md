@@ -1031,6 +1031,26 @@ arbitrary C code safe, and not every public C signature is supported. Native
 integration is tested on Linux; Chrome Wasm/WebGPU are tested. Build ordinary
 Models with `pg.Model.fromTensors` for execution, training and save/load.
 
+Stateful authors add `--methods methods.json`; the method declarations determine
+imports and signatures, while JSON specifies pointer ownership. The example
+in the installed `sdk/examples/` directory covers objects, strings and Tensors.
+Compile generated `methods.c` instead of the original source, with `extension.c`.
+Wasm also exports `poly_extension_invoke` and `poly_extension_release`.
+Call `author.methods.<name>(...)`; context arguments are supplied automatically.
+Consumer objects expose `dispose()`, never raw handles. Borrowed strings last
+for the call and returned strings are copied. Authors retain saved Tensor roots
+and clean up partial failures. Methods only build graphs, not execute them.
+Method manifests require construction contract 2; stateless authors retain 1.
+Await disposal on WebGPU: objects close in reverse creation order, and runtime
+disposal closes extensions before Models/Tensors. GC cleanup uses the same
+deferred queue but is not a substitute for explicit disposal.
+
+`model.setMetadata('owner', value)` and `model.getMetadata('owner')` write/read
+detached application JSON; `null` removes the key. `transformer`, `polygrad` and
+`polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
+round-trip exactly; encode integers outside its exact range as strings. Bundles preserve metadata, raw IR does
+not, and application edits do not invalidate execution caches.
+
 ## Troubleshooting
 
 - **`unknown type name '__fp16'`:** float16 CPU kernels require Clang.

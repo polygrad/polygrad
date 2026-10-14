@@ -375,12 +375,24 @@ uint8_t *poly_model_save_bundle(PolyModel *inst, int *out_len) {
   return poly_model_save_bundle_ex(inst, out_len, POLY_EXPORT_WEIGHTS_DEFAULT);
 }
 
+/* cJSON selects the first duplicate key; JS/Python select the last. Do not
+ * admit an artifact whose meaning depends on the reader. Compare decoded keys. */
+static bool bundle_metadata_unique(const cJSON *value) {
+  for (const cJSON *child = value->child; child; child = child->next) {
+    if (cJSON_IsObject(value))
+      for (const cJSON *other = child->next; other; other = other->next)
+        if (!strcmp(child->string, other->string)) return false;
+    if (!bundle_metadata_unique(child)) return false;
+  }
+  return true;
+}
+
 static PolyModel *bundle_restore_metadata(PolyModel *model, const PolyBundleSections *sections) {
   if (!model || !sections->metadata_json) return model;
   cJSON *meta = cJSON_ParseWithLength(sections->metadata_json, (size_t)sections->metadata_len);
   cJSON *application = cJSON_GetObjectItemCaseSensitive(meta, "application");
   char *json = application ? cJSON_PrintUnformatted(application) : NULL;
-  bool valid = cJSON_IsObject(meta) &&
+  bool valid = cJSON_IsObject(meta) && bundle_metadata_unique(meta) &&
                (!application ||
                 (cJSON_IsObject(application) && json && poly_model_set_metadata(model, json) == 0));
   free(json);

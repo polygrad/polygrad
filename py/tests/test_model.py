@@ -2202,6 +2202,67 @@ def sequential_definition():
 
 
 class TestModelDefinition:
+    @pytest.mark.parametrize('metadata', [
+        b'{"application":{"a":1},"application":{"a":2}}',
+        b'{"application":{"a":1,"a":2}}',
+        b'{"application":{"a":[{"b":1,"\\u0062":2}]}}',
+    ])
+    def test_bundle_rejects_duplicate_metadata(self, metadata):
+        import struct
+        weight = Tensor([2.0])
+        model = Model.from_tensors(params={'weight':weight}, outputs={'y':weight+1})
+        try:
+            blob = model.save()
+            result = bytearray(blob[:20])
+            pos = 20
+            for _ in range(struct.unpack_from('<I',blob,16)[0]):
+                kind, length = struct.unpack_from('<II',blob,pos)
+                payload = metadata if kind == 3 else blob[pos+8:pos+8+length]
+                result.extend(struct.pack('<II',kind,len(payload))+payload)
+                pos += 8+length
+            with pytest.raises((ValueError, RuntimeError)):
+                loaded = Model.load(bytes(result))
+                loaded.dispose()
+        finally:
+            model.dispose(); weight.dispose()
+
+    def test_application_metadata_namespaces(self):
+        weight = Tensor([2.0])
+        model = Model.from_tensors(params={'weight': weight}, outputs={'y': weight + 1})
+        restored = None
+        try:
+            value = {'sites': ['μ', 'scale'], 'schema': 1}
+            model.set_metadata('polyprob', value)
+            value['sites'].append('not stored')
+            assert model.get_metadata('polyprob') == {'sites': ['μ', 'scale'], 'schema': 1}
+            assert model.get_metadata('absent') is None
+            for key in ('transformer', 'polygrad', 'polygrad.future', '', 'bad\0key'):
+                with pytest.raises((ValueError, RuntimeError)):
+                    model.set_metadata(key, {})
+            for value in ({'bad': '\0tail'}, {'bad\0key': 1}, {'x': float('nan')}):
+                with pytest.raises((ValueError, RuntimeError)):
+                    model.set_metadata('polyprob', value)
+            assert model.get_metadata('polyprob')['schema'] == 1
+            # A literal backslash-u sequence is not a NUL character.
+            model.set_metadata('other', {'text': r'\u0000'})
+            numbers = [0.1 + 0.2, 1.0000000000000002, 2**53, -2**53,
+                       float.fromhex('0x1.fffffffffffffp+1023'), float.fromhex('0x0.0000000000001p-1022')]
+            model.set_metadata('numbers', {'values': numbers, 'exact': str(2**53 + 1)})
+            assert model.get_metadata('numbers') == {'values': numbers, 'exact': str(2**53 + 1)}
+            restored = Model.load(model.save())
+            assert restored.get_metadata('polyprob') == model.get_metadata('polyprob')
+            assert restored.get_metadata('other') == {'text': r'\u0000'}
+            assert restored.get_metadata('numbers') == model.get_metadata('numbers')
+            model.set_metadata('polyprob', None)
+            assert model.get_metadata('polyprob') is None
+            model.dispose()
+            with pytest.raises(RuntimeError, match='disposed'):
+                model.get_metadata('other')
+        finally:
+            if restored: restored.dispose()
+            model.dispose()
+            weight.dispose()
+
     def test_usability_summary_and_path_roundtrip(self, tmp_path, monkeypatch):
         weight = Tensor([2.0])
         model = Model.from_tensors(params={'weight': weight}, outputs={'prediction': weight + 1})

@@ -1034,6 +1034,35 @@ class Model:
                  'shape_bounds': self.buf_shape_bounds(i),
                  'trainable': self.buf_trainable(i)} for i in range(self.buf_count)]
 
+    def set_metadata(self, key, value):
+        """Set application JSON under an owner key; None removes that key.
+
+        Polygrad keys are reserved. Finite binary64 numbers round-trip exactly;
+        encode integers outside its exact range as strings. NULs are rejected.
+        """
+        if not self._ptr:
+            raise RuntimeError('Model has been disposed')
+        if not isinstance(key, str) or not key or '\0' in key:
+            raise ValueError('metadata key must be a nonempty string without NUL')
+        lib = _get_lib()
+        rc = (lib.poly_model_delete_metadata_key(self._ptr, key.encode()) if value is None else
+              lib.poly_model_set_metadata_key(self._ptr, key.encode(),
+                  json.dumps(value, allow_nan=False).encode()))
+        if rc != 0:
+            raise ValueError('metadata update rejected: reserved key, invalid JSON/NUL, or busy Model')
+
+    def get_metadata(self, key):
+        """Return a detached JSON value, or None when absent."""
+        if not self._ptr:
+            raise RuntimeError('Model has been disposed')
+        if not isinstance(key, str) or not key or '\0' in key:
+            raise ValueError('metadata key must be a nonempty string without NUL')
+        ptr = _get_lib().poly_model_get_metadata_key(self._ptr, key.encode())
+        try:
+            return json.loads(ctypes.string_at(ptr)) if ptr else None
+        finally:
+            if ptr: _libc.free(ptr)
+
     def entrypoints(self):
         """Return the sealed callable signatures and their declared objectives."""
         if not self._ptr:

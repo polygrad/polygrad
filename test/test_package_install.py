@@ -41,6 +41,11 @@ def only_artifact(directory, pattern):
     return matches[0].resolve()
 
 
+def copy_sdk_fixtures(work):
+    shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', work / 'author.c')
+    shutil.copyfile(ROOT / 'js/test/check_extension_methods.js', work / 'check_extension_methods.js')
+
+
 def python_install(work, env, wheel=False, sdk=False):
     artifact = only_artifact(ROOT / 'py/dist', 'polygrad-*.whl' if wheel else 'polygrad-*.tar.gz')
     venv = work / 'venv'
@@ -51,7 +56,7 @@ def python_install(work, env, wheel=False, sdk=False):
     run([str(interpreter), '-I', str(ROOT / 'test/package_install_python.py')],
         work, env, work / 'runtime.log')
     if sdk:
-        shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', work / 'author.c')
+        copy_sdk_fixtures(work)
         run([str(interpreter), '-I', str(ROOT / 'test/test_extension_sdk.py'), 'python'],
             work, env, work / 'sdk.log')
 
@@ -91,7 +96,7 @@ def node_install(work, env, npm, node, sdk=False):
         run([node, str(ROOT / 'test/package_install_node.cjs'), expected],
             prefix, env, work / f'{lane}-runtime.log')
         if sdk:
-            shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', prefix / 'author.c')
+            copy_sdk_fixtures(prefix)
             run([sys.executable, str(ROOT / 'test/test_extension_sdk.py'), expected, '--node', node],
                 prefix, env, work / f'{lane}-sdk.log')
         # Resolve from the installed consumer directory. Browser conditions in

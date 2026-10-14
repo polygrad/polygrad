@@ -5665,6 +5665,67 @@ const char *poly_model_metadata(const PolyModel *inst) {
   return inst ? inst->metadata : NULL;
 }
 
+/* cJSON stores strings as C strings: reject escaped NUL before decoding, but
+ * allow a literal escaped backslash followed by u0000. */
+static bool metadata_json_valid(const char *json) {
+  for (const char *p = json; *p; p++) {
+    if (*p != '\\') continue;
+    p++;
+    if (!*p) return false;
+    if (*p == 'u' && strncmp(p + 1, "0000", 4) == 0) return false;
+  }
+  return true;
+}
+
+static bool metadata_finite(const cJSON *value) {
+  if (cJSON_IsNumber(value) && !isfinite(value->valuedouble)) return false;
+  for (const cJSON *child = value->child; child; child = child->next)
+    if (!metadata_finite(child)) return false;
+  return true;
+}
+
+int poly_model_set_metadata_key(PolyModel *inst, const char *key, const char *json) {
+  if (!inst || !key || !*key || (inst->stage != POLY_MODEL_BUILDING && poly_model_is_busy(inst)) ||
+      !strcmp(key, "transformer") || !strcmp(key, "polygrad") || !strncmp(key, "polygrad.", 9))
+    return -1;
+  if (json && !metadata_json_valid(json)) return -1;
+  cJSON *value = json ? cJSON_ParseWithOpts(json, NULL, true) : NULL;
+  if (json && (!value || !metadata_finite(value))) {
+    cJSON_Delete(value);
+    return -1;
+  }
+  cJSON *object = inst->metadata ? cJSON_Parse(inst->metadata) : cJSON_CreateObject();
+  if (!object) {
+    cJSON_Delete(value);
+    return -1;
+  }
+  cJSON_DeleteItemFromObjectCaseSensitive(object, key);
+  if (value && !cJSON_AddItemToObject(object, key, value)) {
+    cJSON_Delete(value);
+    cJSON_Delete(object);
+    return -1;
+  }
+  char *copy = cJSON_PrintUnformatted(object);
+  cJSON_Delete(object);
+  if (!copy) return -1;
+  free(inst->metadata);
+  inst->metadata = copy;
+  return 0;
+}
+
+int poly_model_delete_metadata_key(PolyModel *inst, const char *key) {
+  return poly_model_set_metadata_key(inst, key, NULL);
+}
+
+char *poly_model_get_metadata_key(PolyModel *inst, const char *key) {
+  if (!inst || !key || !inst->metadata) return NULL;
+  cJSON *object = cJSON_Parse(inst->metadata);
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
+  char *copy = value ? cJSON_PrintUnformatted(value) : NULL;
+  cJSON_Delete(object);
+  return copy;
+}
+
 int poly_model_reset_transient(PolyModel *inst) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || inst->ctx->execution_depth ||
       inst->ctx->collecting || inst->ctx->active_jit_capture)

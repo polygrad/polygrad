@@ -81,6 +81,36 @@ async function checkIncrementalHF(pg) {
   await checkTorchCheckpoint(pg)
 }
 
+async function checkApplicationMetadata(pg) {
+  const x = new pg.Tensor([2]), y = x.add(1)
+  const model = await pg.Model.fromTensors({params:{x}, outputs:{y}})
+  let restored
+  try {
+    model.setMetadata('polyprob', {schema:1, sites:['μ', 'scale']})
+    const value = model.getMetadata('polyprob'); value.sites.push('not stored')
+    assert(model.getMetadata('polyprob').sites.length === 2, 'metadata was not copied')
+    for (const key of ['transformer', 'polygrad', 'polygrad.future', '', 'a\0b']) {
+      let error; try { model.setMetadata(key, {}) } catch (e) { error = e }
+      assert(error, 'reserved/invalid metadata accepted')
+    }
+    for (const value of [{x:'a\0b'}, {'a\0b':1}, {x:Infinity}]) {
+      let error; try { model.setMetadata('polyprob', value) } catch (e) { error = e }
+      assert(error, 'invalid metadata accepted')
+    }
+    model.setMetadata('other', {text:'\\u0000'})
+    const numbers = [0.1+0.2, 1.0000000000000002, 2**53, -(2**53), Number.MAX_VALUE, Number.MIN_VALUE]
+    model.setMetadata('numbers', numbers)
+    assert(model.getMetadata('numbers').every((v,i)=>v===numbers[i]), 'metadata numbers changed')
+    restored = await pg.Model.load(await model.saveAsync())
+    assert(restored.getMetadata('numbers').every((v,i)=>v===numbers[i]), 'saved metadata numbers changed')
+    assert(JSON.stringify(restored.getMetadata('polyprob')) === JSON.stringify(model.getMetadata('polyprob')), 'metadata roundtrip')
+    assert(restored.getMetadata('other').text === '\\u0000', 'literal escape changed')
+    model.setMetadata('polyprob', null)
+    assert(model.getMetadata('polyprob') === null, 'metadata not cleared')
+    assert(model.getMetadata('other').text === '\\u0000', 'another owner changed')
+  } finally { if (restored) await restored.dispose(); await model.dispose(); y.dispose(); x.dispose() }
+}
+
 async function checkQwen35Image(pg) {
   const f = qwen35ImageFixture
   const inputs = Object.fromEntries(Object.entries(f.inputs).filter(([k]) => k !== 'attention_mask')
@@ -2983,6 +3013,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Qwen3.5 composite checkpoints logits and fused sampling', () => checkQwen35Generation(pg))
   await test('Qwen3.5 packed images cached generation and admission', () => checkQwen35Image(pg))
   await test('Incremental HF range loading and failure ownership', () => checkIncrementalHF(pg))
+  await test('Model application metadata namespaces', () => checkApplicationMetadata(pg))
   await test('Late embeddings public composition and document masking', () => checkLateEmbeddings(pg))
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))

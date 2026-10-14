@@ -18,6 +18,9 @@
 int poly_extension_abi_version(void) {
   return POLYGRAD_EXTENSION_ABI_VERSION;
 }
+int poly_extension_supports_abi(int version) {
+  return version == 1 || version == 2;
+}
 
 PolyProc poly_get_proc_address(const char *name) {
   if (!name) return NULL;

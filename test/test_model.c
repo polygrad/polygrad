@@ -30,6 +30,39 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, application_metadata_preserves_reserved_keys_and_state) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *m = poly_model_new(ctx, NULL);
+  ASSERT_NOT_NULL(m);
+  ASSERT_INT_EQ(poly_model_set_metadata(m, "{\"transformer\":{\"version\":1}}"), 0);
+  PolyModelStateVersion before = poly_model_state_version(m);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polyprob", "{\"site\":\"μ\"}"), 0);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "transformer", "{}"), -1);
+  ASSERT_INT_EQ(poly_model_delete_metadata_key(m, "transformer"), -1);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polygrad.future", "{}"), -1);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polyprob", "{\"x\":\"a\\u0000b\"}"), -1);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polyprob", "{\"a\\u0000b\":1}"), -1);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polyprob", "{} trailing"), -1);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "polyprob", "1e999"), -1);
+  char *text = poly_model_get_metadata_key(m, "transformer");
+  ASSERT_STR_EQ(text, "{\"version\":1}");
+  free(text);
+  text = poly_model_get_metadata_key(m, "polyprob");
+  ASSERT_STR_EQ(text, "{\"site\":\"μ\"}");
+  free(text);
+  ASSERT_INT_EQ(poly_model_set_metadata_key(m, "other", "\"\\\\u0000\""), 0);
+  ASSERT_INT_EQ(poly_model_delete_metadata_key(m, "polyprob"), 0);
+  ASSERT_TRUE(poly_model_get_metadata_key(m, "polyprob") == NULL);
+  PolyModelStateVersion after = poly_model_state_version(m);
+  ASSERT_TRUE(
+      before.mutation == after.mutation && before.transient == after.transient &&
+      before.reset == after.reset
+  );
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, factory_error_is_always_failure_and_preserves_first_error) {
   ASSERT_FALSE(model_factory_error(NULL, "layers", "invalid dimension %d", 0));
   PolyModelError err = {0};

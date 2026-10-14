@@ -6,6 +6,70 @@ import pytest
 from polygrad import create
 
 LIB = Path(__file__).resolve().parents[2] / "build/extension/author.so"
+METHOD_LIB = LIB.parent.parent / 'extension-methods/author.so'
+
+
+def test_extension_methods_ownership_and_runtime_teardown():
+    import gc
+    rt = create(device='CPU', logical='always')
+    other = create(device='CPU', logical='always')
+    author = rt.load_extension(METHOD_LIB)
+    observer = other.load_extension(METHOD_LIB)
+    methods = author.methods
+    methods.example_reset()
+    x = rt.Tensor([1.0])
+    stale = methods.example_new(x, 'old generation')
+    stale.dispose()
+    next_object = methods.example_new(x, 'new generation')
+    with pytest.raises(ValueError, match='live object'):
+        methods.example_name(stale)
+    next_object.dispose(); methods.example_reset()
+    a = methods.example_new(x, 'μ')
+    b = methods.example_new(x, 'second')
+    assert methods.example_name(a) == methods.example_name_copy(a) == 'μ'
+    with pytest.raises(ValueError, match='extension instance'):
+        observer.methods.example_finish(a)
+    with pytest.raises(ValueError, match='extension instance'):
+        methods.example_finish(1)
+    with pytest.raises(ValueError, match='NUL'):
+        methods.example_new(x, 'bad\0name')
+    foreign = other.Tensor([1.])
+    with pytest.raises(ValueError, match='runtime'):
+        methods.example_add(a, foreign, 'foreign')
+    with pytest.raises(RuntimeError, match='failed'):
+        methods.example_add(a, x, 'fail')
+    methods.example_add(a, x, 'ok')
+    x.dispose(); rt.collect()
+    y = methods.example_finish(a)
+    parameter = methods.example_input(a)
+    model = rt.Model.from_tensors(params={'x': parameter}, outputs={'y': y})
+    y.dispose(); parameter.dispose()
+    model.set_metadata('example', {'name': 'μ', 'schema': 1})
+    author.dispose()
+    assert observer.methods.example_order() == 21
+    assert observer.methods.example_live() == 0
+    a.dispose(); b.dispose()
+    np.testing.assert_allclose(model.call('forward', {})['y'], [np.exp(2)], rtol=1e-6)
+    model.dispose()
+    with pytest.raises(RuntimeError, match='disposed'):
+        methods.example_finish(a)
+    # Runtime owns consumers and closes them before their retained Tensor roots.
+    author2 = rt.load_extension(METHOD_LIB)
+    observer.methods.example_reset()
+    x = rt.Tensor([0.])
+    c = author2.methods.example_new(x, 'gc')
+    del c; gc.collect()
+    assert observer.methods.example_live() == 0
+    observer.methods.example_reset()
+    a = author2.methods.example_new(x, 'first')
+    b = author2.methods.example_new(x, 'second')
+    rt.dispose()
+    assert observer.methods.example_live() == 0
+    assert observer.methods.example_order() == 21
+    with pytest.raises(RuntimeError, match='disposed'):
+        author2.methods.example_finish(a)
+    a.dispose(); b.dispose()
+    foreign.dispose(); other.dispose()
 
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])

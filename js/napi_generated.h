@@ -12,6 +12,113 @@ static napi_value napi_poly_extension_abi_version(napi_env env, napi_callback_in
   NAPI_CALL(env, napi_create_int32(env, rc, &result));
   return result;
 }
+static napi_value napi_poly_extension_supports_abi(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 1) {
+    napi_throw_type_error(env, NULL, "poly_extension_supports_abi: wrong argument count");
+    return NULL;
+  }
+  int32_t a0;
+  napi_value v0;
+  NAPI_CALL(env, napi_coerce_to_number(env, argv[0], &v0));
+  NAPI_CALL(env, napi_get_value_int32(env, v0, &a0));
+  int rc = poly_extension_supports_abi(a0);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+static napi_value napi_poly_model_delete_metadata_key(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_model_delete_metadata_key: wrong argument count");
+    return NULL;
+  }
+  PolyModel *a0 = get_external_nullable(env, argv[0]);
+  char *a1 = NULL;
+  size_t bytes1;
+  napi_status status1 = napi_get_value_string_utf8(env, argv[1], NULL, 0, &bytes1);
+  if (status1 == napi_ok && (a1 = malloc(bytes1 + 1)))
+    status1 = napi_get_value_string_utf8(env, argv[1], a1, bytes1 + 1, NULL);
+  if (status1 != napi_ok || !a1) {
+    free(a1);
+    napi_throw_type_error(env, NULL, "expected a UTF-8 string");
+    return NULL;
+  }
+  int rc = poly_model_delete_metadata_key(a0, a1);
+  free(a1);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+static napi_value napi_poly_model_get_metadata_key(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_model_get_metadata_key: wrong argument count");
+    return NULL;
+  }
+  PolyModel *a0 = get_external_nullable(env, argv[0]);
+  char *a1 = NULL;
+  size_t bytes1;
+  napi_status status1 = napi_get_value_string_utf8(env, argv[1], NULL, 0, &bytes1);
+  if (status1 == napi_ok && (a1 = malloc(bytes1 + 1)))
+    status1 = napi_get_value_string_utf8(env, argv[1], a1, bytes1 + 1, NULL);
+  if (status1 != napi_ok || !a1) {
+    free(a1);
+    napi_throw_type_error(env, NULL, "expected a UTF-8 string");
+    return NULL;
+  }
+  char *text = poly_model_get_metadata_key(a0, a1);
+  free(a1);
+  napi_value result;
+  napi_status status = text ? napi_create_string_utf8(env, text, NAPI_AUTO_LENGTH, &result)
+                            : napi_get_null(env, &result);
+  free(text);
+  NAPI_CALL(env, status);
+  return result;
+}
+static napi_value napi_poly_model_set_metadata_key(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 3) {
+    napi_throw_type_error(env, NULL, "poly_model_set_metadata_key: wrong argument count");
+    return NULL;
+  }
+  PolyModel *a0 = get_external_nullable(env, argv[0]);
+  char *a1 = NULL;
+  size_t bytes1;
+  napi_status status1 = napi_get_value_string_utf8(env, argv[1], NULL, 0, &bytes1);
+  if (status1 == napi_ok && (a1 = malloc(bytes1 + 1)))
+    status1 = napi_get_value_string_utf8(env, argv[1], a1, bytes1 + 1, NULL);
+  if (status1 != napi_ok || !a1) {
+    free(a1);
+    napi_throw_type_error(env, NULL, "expected a UTF-8 string");
+    return NULL;
+  }
+  char *a2 = NULL;
+  size_t bytes2;
+  napi_status status2 = napi_get_value_string_utf8(env, argv[2], NULL, 0, &bytes2);
+  if (status2 == napi_ok && (a2 = malloc(bytes2 + 1)))
+    status2 = napi_get_value_string_utf8(env, argv[2], a2, bytes2 + 1, NULL);
+  if (status2 != napi_ok || !a2) {
+    free(a1);
+    free(a2);
+    napi_throw_type_error(env, NULL, "expected a UTF-8 string");
+    return NULL;
+  }
+  int rc = poly_model_set_metadata_key(a0, a1, a2);
+  free(a1);
+  free(a2);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
 static napi_value napi_poly_model_set_optimizer_groups(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;

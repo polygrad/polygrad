@@ -4,6 +4,10 @@ const { integer64 } = require('./integer')
 
 module.exports = (Module, callWithInt64, callWithArrays, callTensorPair) => ({
   poly_extension_abi_version: () => Module._poly_extension_abi_version(),
+  poly_extension_supports_abi: (a0) => Module._poly_extension_supports_abi(Number(a0)),
+  poly_model_delete_metadata_key: (a0, a1) => Module.ccall('poly_model_delete_metadata_key', 'number', ["number", "string"], [(a0 || 0), a1]),
+  poly_model_get_metadata_key: (a0, a1) => { const p = Module.ccall('poly_model_get_metadata_key', 'number', ["number", "string"], [(a0 || 0), a1]) >>> 0; try { return p ? Module.UTF8ToString(p) : null } finally { if (p) Module._free(p) } },
+  poly_model_set_metadata_key: (a0, a1, a2) => Module.ccall('poly_model_set_metadata_key', 'number', ["number", "string", "string"], [(a0 || 0), a1, a2]),
   poly_model_set_optimizer_groups: (a0, a1) => Module.ccall('poly_model_set_optimizer_groups', 'number', ["number", "string"], [(a0 || 0), a1]),
   poly_tensor_abs: (a0, a1) => Module._poly_tensor_abs((a0 || 0), (a1 || 0)),
   poly_tensor_acos: (a0, a1) => Module._poly_tensor_acos((a0 || 0), (a1 || 0)),

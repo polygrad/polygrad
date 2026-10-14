@@ -426,6 +426,8 @@ class Runtime:
       if _model_capture_active(self._ctx):
           raise RuntimeError('Runtime disposal is not allowed during Model capture')
       if not self._disposed:
+          for extension in reversed(list(getattr(self, '_extensions', ()))):
+              extension.dispose()
           _dispose_models_for_ctx(self._ctx)
           _dispose_jits_for_ctx(self._ctx)
           _dispose_tensors_for_ctx(self._ctx)

@@ -822,6 +822,24 @@ additive core changes do not invalidate them. Legacy authors still use the
 original exact core-ABI check. An incompatible contract or missing import fails
 at load time. Ordinary package installation does not require SDK build tools.
 
+Stateful authors can add `--methods methods.json`. Method names select C
+declarations and import roots; the JSON supplies ownership, not signatures.
+The installed `_sdk/examples/` directory contains a complete example. Compile generated
+`methods.c` **instead of** the original author source, alongside `extension.c`.
+Call `author.methods.<name>(...)`; context arguments are supplied automatically.
+Returned consumer objects expose `dispose()`, not pointer integers. Borrowed
+strings last only for the call; returned strings are copied. Authors retain any
+Tensor they keep and roll back partial changes on failure. Methods build graphs,
+never execute them. Method authors require construction contract 2; stateless
+authors retain contract 1. Extension disposal closes objects in reverse creation
+order, and runtime disposal closes extensions before Models and Tensors.
+
+`model.set_metadata('owner', value)` and `model.get_metadata('owner')` store and
+read detached application JSON; `None` removes the key. `transformer`, `polygrad`
+and `polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
+round-trip exactly; encode integers outside its exact range as strings. Metadata survives bundles,
+not raw IR, and application edits do not invalidate execution caches.
+
 For a runnable example from the checkout root, first run
 `make build/extension/author.so`. The supplied `test/extension_fixture.c`
 constructs a Gaussian log density and its gradient (mode `0`):
