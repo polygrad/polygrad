@@ -16,6 +16,20 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
+def test_interp_floating_rounding_at_cast_alu_and_storage():
+    with Runtime(device='INTERP') as rt:
+        x = rt.Tensor([1.005859375, 1.00390625, 1.01171875, -1.005859375]).realize()
+        expected = [1.0078125, 1., 1.015625, -1.0078125]
+        np.testing.assert_array_equal(x.cast(dtypes.bfloat16).cast(dtypes.float32).numpy(), expected)
+        stored = x.cast(dtypes.bfloat16).contiguous().realize()
+        np.testing.assert_array_equal(stored.cast(dtypes.float32).numpy(), expected)
+        a = rt.Tensor([1., 1.], dtype=dtypes.bfloat16).realize()
+        b = rt.Tensor([.005859375, .01171875], dtype=dtypes.bfloat16).realize()
+        np.testing.assert_array_equal((a + b).cast(dtypes.float32).numpy(), [1.0078125, 1.015625])
+        wide = rt.Tensor([16777217.], dtype=dtypes.float64).realize()
+        np.testing.assert_array_equal(wide.cast(dtypes.float32).cast(dtypes.float64).numpy(), [16777216.])
+
+
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])
 def test_log_ndtr_tails_and_derivatives(dtype):
     with Runtime(device='CPU') as rt:

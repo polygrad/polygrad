@@ -4499,6 +4499,53 @@ TEST(codegen, interp_float_to_narrow_integer_wraps) {
   PASS();
 }
 
+TEST(codegen, interp_floating_cast_rounds_before_widening) {
+  /* PythonProgram CAST uses dtype.truncate even when no narrow STORE follows. */
+  PolyDType types[] = {POLY_BFLOAT16, POLY_BFLOAT16, POLY_BFLOAT16, POLY_FLOAT32};
+  double input[] = {1.005859375, 1.00390625, -1.01171875, 16777217.0};
+  double expected[] = {1.0078125, 1.0, -1.015625, 16777216.0};
+  for (int i = 0; i < 4; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT64, 1, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, out, zero, poly_arg_none());
+    PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(input[i]));
+    PolyUOp *narrow = poly_uop1(ctx, POLY_OP_CAST, types[i], value, poly_arg_none());
+    PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, narrow, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, wide, poly_arg_none());
+    PolyUOp *linear[] = {out, zero, index, value, narrow, wide, store};
+    double result = 0;
+    void *args[] = {&result};
+    int rc = poly_interp_eval(ctx, linear, 7, args, 1);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(rc, 0);
+    ASSERT_FLOAT_EQ(result, expected[i], 0.0);
+  }
+  PASS();
+}
+
+TEST(codegen, interp_bfloat16_alu_rounds_nearest_even) {
+  for (int sign = -1; sign <= 1; sign += 2) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_uop_param(ctx, POLY_FLOAT64, 1, 0, POLY_ADDR_GLOBAL);
+    PolyUOp *zero = poly_uop_const_int(ctx, 0);
+    PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, out, zero, poly_arg_none());
+    PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(sign));
+    PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(sign * .005859375));
+    PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_BFLOAT16, a, b, poly_arg_none());
+    PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, sum, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, wide, poly_arg_none());
+    PolyUOp *linear[] = {out, zero, index, a, b, sum, wide, store};
+    double result = 0;
+    void *args[] = {&result};
+    int rc = poly_interp_eval(ctx, linear, 8, args, 1);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(rc, 0);
+    ASSERT_FLOAT_EQ(result, sign * 1.0078125, 0.0);
+  }
+  PASS();
+}
+
 TEST(codegen, interp_bitcast_uint8_to_int8_reinterprets_sign_bit) {
   /* Pinned PythonProgram delegates BITCAST to uop/ops.py:1199-1207, which
    * packs with the uint8 format and unpacks the same byte as int8. */

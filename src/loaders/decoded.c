@@ -8,6 +8,7 @@
  */
 
 #include "decoded.h"
+#include "../core.h"
 #include "import_error.h"
 #include <stdlib.h>
 #include <string.h>
@@ -48,48 +49,12 @@ static uint16_t read_u16(const uint8_t *bytes) {
   return value;
 }
 
-/* F16/BF16 conversion (shared with safetensors) */
-
-static float f16_to_f32(uint16_t h) {
-  uint32_t sign = ((uint32_t)h & 0x8000) << 16;
-  uint32_t exponent = (h >> 10) & 0x1F;
-  uint32_t mantissa = h & 0x03FF;
-  uint32_t result;
-  if (exponent == 0) {
-    if (mantissa == 0) {
-      result = sign;
-    } else {
-      exponent = 1;
-      while (!(mantissa & 0x0400)) {
-        mantissa <<= 1;
-        exponent--;
-      }
-      mantissa &= 0x03FF;
-      result = sign | ((127 - 15 + exponent) << 23) | (mantissa << 13);
-    }
-  } else if (exponent == 31) {
-    result = sign | 0x7F800000 | (mantissa << 13);
-  } else {
-    result = sign | ((exponent + 112) << 23) | (mantissa << 13);
-  }
-  float f;
-  memcpy(&f, &result, sizeof(f));
-  return f;
-}
-
-static float bf16_to_f32(uint16_t h) {
-  uint32_t bits = (uint32_t)h << 16;
-  float f;
-  memcpy(&f, &bits, sizeof(f));
-  return f;
-}
-
 /* GGML Q4_0 dequantization */
 /* Block: 2 bytes f16 scale + 16 bytes (32 x 4-bit unsigned) = 18 bytes */
 
 static void dequant_q4_0(const uint8_t *block, float *out, int64_t n_blocks) {
   for (int64_t b = 0; b < n_blocks; b++) {
-    float scale = f16_to_f32(read_u16(block + b * 18));
+    float scale = poly_f16_to_float(read_u16(block + b * 18));
     const uint8_t *qs = block + b * 18 + 2;
     /* q_to_uint8 transposes the bit planes before flattening. */
     for (int j = 0; j < 16; j++) {
@@ -104,8 +69,8 @@ static void dequant_q4_0(const uint8_t *block, float *out, int64_t n_blocks) {
 
 static void dequant_q4_1(const uint8_t *block, float *out, int64_t n_blocks) {
   for (int64_t b = 0; b < n_blocks; b++) {
-    float d = f16_to_f32(read_u16(block + b * 20));
-    float m = f16_to_f32(read_u16(block + b * 20 + 2));
+    float d = poly_f16_to_float(read_u16(block + b * 20));
+    float m = poly_f16_to_float(read_u16(block + b * 20 + 2));
     const uint8_t *qs = block + b * 20 + 4;
     for (int j = 0; j < 16; j++) {
       out[b * 32 + j] = (qs[j] & 0x0F) * d + m;
@@ -119,7 +84,7 @@ static void dequant_q4_1(const uint8_t *block, float *out, int64_t n_blocks) {
 
 static void dequant_q8_0(const uint8_t *block, float *out, int64_t n_blocks) {
   for (int64_t b = 0; b < n_blocks; b++) {
-    float scale = f16_to_f32(read_u16(block + b * 34));
+    float scale = poly_f16_to_float(read_u16(block + b * 34));
     const int8_t *qs = (const int8_t *)(block + b * 34 + 2);
     for (int j = 0; j < 32; j++)
       out[b * 32 + j] = qs[j] * scale;
@@ -140,7 +105,7 @@ static void dequant_q6_k(const uint8_t *block, float *out, int64_t n_blocks) {
     const uint8_t *ql = block + b * 210; /* 128 bytes */
     const uint8_t *qh = block + b * 210 + 128; /* 64 bytes */
     const int8_t *sc = (const int8_t *)(block + b * 210 + 192); /* 16 bytes */
-    float d = f16_to_f32(read_u16(block + b * 210 + 208));
+    float d = poly_f16_to_float(read_u16(block + b * 210 + 208));
 
     for (int g = 0; g < 16; g++) {
       float group_scale = d * sc[g];
@@ -197,13 +162,13 @@ float *poly_decoded_tensor_to_f32(const PolyDecodedTensor *t) {
   case POLY_DECODED_F16: {
     const uint8_t *src = t->data;
     for (int64_t i = 0; i < t->numel; i++)
-      out[i] = f16_to_f32(read_u16(src + 2 * i));
+      out[i] = poly_f16_to_float(read_u16(src + 2 * i));
     return out;
   }
   case POLY_DECODED_BF16: {
     const uint8_t *src = t->data;
     for (int64_t i = 0; i < t->numel; i++)
-      out[i] = bf16_to_f32(read_u16(src + 2 * i));
+      out[i] = poly_bf16_to_float(read_u16(src + 2 * i));
     return out;
   }
   case POLY_DECODED_I32: {

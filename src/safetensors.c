@@ -17,6 +17,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "safetensors.h"
+#include "core.h"
 #include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -699,54 +700,6 @@ PolySafetensorViewEx *poly_safetensors_index(
   return safetensors_decode_index(header, header_len, file_len, n_out, NULL, offsets_out);
 }
 
-/* F16/BF16 to F32 conversion */
-
-static float f16_to_f32(uint16_t h) {
-  uint32_t sign = ((uint32_t)h & 0x8000) << 16;
-  uint32_t exponent = (h >> 10) & 0x1F;
-  uint32_t mantissa = h & 0x03FF;
-
-  if (exponent == 0) {
-    if (mantissa == 0) {
-      /* Signed zero */
-      float f;
-      uint32_t bits = sign;
-      memcpy(&f, &bits, sizeof(f));
-      return f;
-    }
-    /* Denormalized: convert to normalized f32 */
-    exponent = 1;
-    while (!(mantissa & 0x0400)) {
-      mantissa <<= 1;
-      exponent--;
-    }
-    mantissa &= 0x03FF;
-    uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23) | ((uint32_t)mantissa << 13);
-    float f;
-    memcpy(&f, &bits, sizeof(f));
-    return f;
-  } else if (exponent == 31) {
-    /* Inf or NaN */
-    uint32_t bits = sign | 0x7F800000 | ((uint32_t)mantissa << 13);
-    float f;
-    memcpy(&f, &bits, sizeof(f));
-    return f;
-  }
-
-  /* Normalized */
-  uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23) | ((uint32_t)mantissa << 13);
-  float f;
-  memcpy(&f, &bits, sizeof(f));
-  return f;
-}
-
-static float bf16_to_f32(uint16_t h) {
-  uint32_t bits = (uint32_t)h << 16;
-  float f;
-  memcpy(&f, &bits, sizeof(f));
-  return f;
-}
-
 float *poly_safetensors_to_f32(const PolySafetensorViewEx *view) {
   if (!view || view->numel <= 0) return NULL;
 
@@ -764,7 +717,7 @@ float *poly_safetensors_to_f32(const PolySafetensorViewEx *view) {
     for (int64_t i = 0; i < view->numel; i++) {
       uint16_t h;
       memcpy(&h, raw + i * 2, 2);
-      out[i] = f16_to_f32(h);
+      out[i] = poly_f16_to_float(h);
     }
     break;
 
@@ -772,7 +725,7 @@ float *poly_safetensors_to_f32(const PolySafetensorViewEx *view) {
     for (int64_t i = 0; i < view->numel; i++) {
       uint16_t h;
       memcpy(&h, raw + i * 2, 2);
-      out[i] = bf16_to_f32(h);
+      out[i] = poly_bf16_to_float(h);
     }
     break;
 

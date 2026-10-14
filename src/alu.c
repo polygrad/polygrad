@@ -187,82 +187,21 @@ static bool is_cmp_op(PolyOps op) {
   return op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ;
 }
 
-static float f16_bits_to_f32(uint16_t h) {
-  uint32_t sign = ((uint32_t)h & 0x8000u) << 16;
-  uint32_t exp = ((uint32_t)h >> 10) & 0x1fu;
-  uint32_t frac = (uint32_t)h & 0x03ffu;
-  uint32_t u;
-  if (exp == 0) {
-    if (frac == 0) {
-      u = sign;
-    } else {
-      int e = -14;
-      while ((frac & 0x0400u) == 0) {
-        frac <<= 1;
-        e--;
-      }
-      frac &= 0x03ffu;
-      u = sign | (uint32_t)(e + 127) << 23 | (frac << 13);
-    }
-  } else if (exp == 31) {
-    u = sign | 0x7f800000u | (frac << 13);
-  } else {
-    u = sign | ((exp + 127 - 15) << 23) | (frac << 13);
-  }
-  float out;
-  memcpy(&out, &u, sizeof(out));
-  return out;
-}
-
-static uint16_t f32_to_f16_bits_rne(float f) {
-  uint32_t u;
-  memcpy(&u, &f, sizeof(u));
-  uint32_t sign = (u >> 16) & 0x8000u;
-  uint32_t exp = (u >> 23) & 0xffu;
-  uint32_t mant = u & 0x007fffffu;
-
-  if (exp == 0xffu) return (uint16_t)(sign | 0x7c00u | (mant ? 0x0200u : 0));
-
-  int32_t half_exp = (int32_t)exp - 127 + 15;
-  if (half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
-  if (half_exp <= 0) {
-    if (half_exp < -10) return (uint16_t)sign;
-    mant |= 0x00800000u;
-    uint32_t shift = (uint32_t)(14 - half_exp);
-    uint32_t half_mant = mant >> shift;
-    uint32_t round_bit = UINT32_C(1) << (shift - 1);
-    uint32_t remainder = mant & (round_bit - 1);
-    if ((mant & round_bit) && (remainder || (half_mant & 1u))) half_mant++;
-    return (uint16_t)(sign | half_mant);
-  }
-
-  uint32_t half_mant = mant >> 13;
-  uint32_t round_bit = 0x00001000u;
-  uint32_t remainder = mant & (round_bit - 1);
-  if ((mant & round_bit) && (remainder || (half_mant & 1u))) {
-    half_mant++;
-    if (half_mant == 0x0400u) {
-      half_mant = 0;
-      half_exp++;
-      if (half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
-    }
-  }
-  return (uint16_t)(sign | ((uint32_t)half_exp << 10) | half_mant);
+static uint16_t f32_to_f16_bits_rne(float x) {
+  /* Constant folding canonically packs half NaNs, unlike raw interpreter BITCAST. */
+  if (isnan(x)) return (uint16_t)((signbit(x) ? 0x8000u : 0) | 0x7e00u);
+  return poly_float_to_f16(x);
 }
 
 static double round_to_f16(double x) {
   float f = (float)x;
-  return (double)f16_bits_to_f32(f32_to_f16_bits_rne(f));
+  return (double)poly_f16_to_float(f32_to_f16_bits_rne(f));
 }
 
 static double round_to_bf16(double x) {
   float f = (float)x;
   if (!isfinite(f)) return (double)f;
-  uint32_t u;
-  memcpy(&u, &f, sizeof(u));
-  u = (u + 0x7fffu + ((u >> 16) & 1u)) & 0xffff0000u;
-  memcpy(&f, &u, sizeof(f));
-  return (double)f;
+  return (double)poly_bf16_to_float(poly_float_to_bf16(f));
 }
 
 /* Pinned tinygrad/uop/symbolic.py:19-24 fold_bitcast uses struct pack/unpack
@@ -306,7 +245,7 @@ bool poly_exec_bitcast_const(PolyDType from, PolyDType to, PolyArg value, PolyAr
     if (poly_dtype_is_fp8(to)) {
       *out = poly_arg_float(poly_fp8_to_float((uint8_t)bits, to));
     } else if (to.bitsize == 16) {
-      *out = poly_arg_float((double)f16_bits_to_f32((uint16_t)bits));
+      *out = poly_arg_float((double)poly_f16_to_float((uint16_t)bits));
     } else if (to.bitsize == 32) {
       uint32_t raw = (uint32_t)bits;
       float v32 = 0.0f;

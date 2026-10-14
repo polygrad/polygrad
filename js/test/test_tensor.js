@@ -190,6 +190,24 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await new Tensor([[[1, 2, 3]]]).interpolate([1], {mode: 'linear', alignCorners: true}).toArray(), [1])
   }))
 
+  await test('INTERP floating rounding at cast ALU and storage', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const x = await new Tensor([1.005859375, 1.00390625, 1.01171875, -1.005859375], {device: 'INTERP'}).realize()
+    const expected = [1.0078125, 1, 1.015625, -1.0078125]
+    assertClose(await x.cast('bfloat16').cast('float32').toArray(), expected, 0)
+    const stored = await x.cast('bfloat16').contiguous().realize()
+    assertClose(await stored.cast('float32').toArray(), expected, 0)
+    const a = await new Tensor([1, 1], {device: 'INTERP', dtype: 'bfloat16'}).realize()
+    const b = await new Tensor([.005859375, .01171875], {device: 'INTERP', dtype: 'bfloat16'}).realize()
+    assertClose(await a.add(b).cast('float32').toArray(), [1.0078125, 1.015625], 0)
+  }))
+
+  if (supportsF64) await test('INTERP floating rounding FP64 to FP32', isolatedRuntime(async runtime => {
+    const Tensor = runtime.Tensor
+    const wide = await new Tensor(new Float64Array([16777217]), {device: 'INTERP', dtype: 'float64'}).realize()
+    assertClose(await wide.cast('float32').cast('float64').toArray(), [16777216], 0)
+  }))
+
   if (supportsF16) await test('upstream backports: half rounding and max gradient', isolatedRuntime(async runtime => {
     const Tensor = runtime.Tensor
     const rounded = Array.from(await new Tensor([70000, 1.0001, -70000]).cast('float16').cast('float32').toArray())

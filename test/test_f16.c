@@ -460,6 +460,24 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   PASS();
 }
 
+TEST(f16, cast_f32_to_bf16_rounds_nearest_even_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_uop_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_test_buffer(ctx, POLY_BFLOAT16, 4);
+  PolyUOp *casted = poly_uop_cast(ctx, in, POLY_BFLOAT16);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, casted));
+  float values[] = {1.005859375f, 1.00390625f, 1.01171875f, -1.005859375f};
+  uint16_t result[4] = {0}, expected[] = {0x3f81, 0x3f80, 0x3f82, 0xbf81};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(in, values), POLY_TEST_HOST_VIEW(out, result)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(result[i], expected[i]);
+  PASS();
+}
+
 /* Pinned tinygrad f2f_store decomposes vector results lane-by-lane before
  * BF16 storage (uop/decompositions.py:423-429, 533-562). Four elements force
  * the CPU codegen upcast/STACK path that scalar and three-lane cases miss. */

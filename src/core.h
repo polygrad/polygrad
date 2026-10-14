@@ -256,6 +256,12 @@ bool poly_dtype_by_id(int id, PolyDType *out);
 int poly_dtype_id_by_name(const char *name);
 uint8_t poly_float_to_fp8(double x, PolyDType dtype);
 double poly_fp8_to_float(uint8_t x, PolyDType dtype);
+/* IEEE storage conversions: encode uses nearest-even; decode preserves NaN
+ * sign/payload bits. Callers needing a canonical NaN apply that policy separately. */
+uint16_t poly_float_to_f16(float x);
+float poly_f16_to_float(uint16_t x);
+uint16_t poly_float_to_bf16(float x);
+float poly_bf16_to_float(uint16_t x);
 
 /* Axis metadata for RANGE args (tinygrad AxisType parity) */
 

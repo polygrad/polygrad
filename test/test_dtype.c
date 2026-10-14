@@ -112,6 +112,49 @@ TEST(dtype, fp8_identities_append_without_renumbering_existing_types) {
   PASS();
 }
 
+TEST(dtype, half_storage_conversions_cover_all_encodings) {
+  for (uint32_t bits = 0; bits <= UINT16_MAX; bits++) {
+    unsigned exp = (bits >> 10) & 31u, frac = bits & 1023u;
+    uint32_t expected;
+    if (exp == 31) {
+      expected = 0x7f800000u | (frac << 13);
+    } else {
+      float exact = exp ? (float)ldexp(1024 + frac, (int)exp - 25) : (float)ldexp(frac, -24);
+      memcpy(&expected, &exact, sizeof(expected));
+    }
+    expected |= (bits & 0x8000u) << 16;
+    float decoded = poly_f16_to_float((uint16_t)bits);
+    uint32_t actual;
+    memcpy(&actual, &decoded, sizeof(actual));
+    ASSERT_INT_EQ(actual, expected);
+    ASSERT_INT_EQ(poly_float_to_f16(decoded), bits);
+    decoded = poly_bf16_to_float((uint16_t)bits);
+    memcpy(&actual, &decoded, sizeof(actual));
+    ASSERT_INT_EQ(actual, bits << 16);
+    ASSERT_INT_EQ(poly_float_to_bf16(decoded), bits);
+  }
+  PASS();
+}
+
+TEST(dtype, half_storage_encodes_nearest_even_and_preserves_special_values) {
+  const float input[] = {0.0f,           -0.0f,          0x1p-24f, -0x1p-24f, 0x1p-25f, 0x3p-25f,
+                         1.00048828125f, 1.00146484375f, 65520.0f, INFINITY,  -INFINITY};
+  const uint16_t expected[] = {0, 0x8000, 1, 0x8001, 0, 2, 0x3c00, 0x3c02, 0x7c00, 0x7c00, 0xfc00};
+  for (size_t i = 0; i < sizeof(input) / sizeof(input[0]); i++)
+    ASSERT_INT_EQ(poly_float_to_f16(input[i]), expected[i]);
+  const uint32_t raw[] = {0,           0x80000000u, 0x00008000u, 0x00018000u,
+                          0x3f808000u, 0x3f818000u, 0xbf818000u, 0x7f7fffffu,
+                          0x7f800000u, 0xff800000u, 0x7f800001u, 0xff800001u};
+  const uint16_t bf16[] = {0,      0x8000, 0,      2,      0x3f80, 0x3f82,
+                           0xbf82, 0x7f80, 0x7f80, 0xff80, 0x7fc0, 0xffc0};
+  for (size_t i = 0; i < sizeof(raw) / sizeof(raw[0]); i++) {
+    float value;
+    memcpy(&value, &raw[i], sizeof(value));
+    ASSERT_INT_EQ(poly_float_to_bf16(value), bf16[i]);
+  }
+  PASS();
+}
+
 TEST(dtype, fp8_storage_conversion_matches_current_tinygrad) {
   const double values[] = {-INFINITY, -1.5, -0.0, 0.0, 0.1, 1.0, 1.5, 448.0, INFINITY, NAN};
   const PolyDType dtypes[] = {

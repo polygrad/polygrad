@@ -12,6 +12,80 @@
 #include <ctype.h>
 #include <stdatomic.h>
 
+float poly_f16_to_float(uint16_t h) {
+  uint32_t sign = ((uint32_t)h & 0x8000u) << 16;
+  uint32_t exp = (h >> 10) & 0x1fu, frac = h & 0x03ffu, bits;
+  if (exp == 0) {
+    if (frac == 0) {
+      bits = sign;
+    } else {
+      int e = -14;
+      while ((frac & 0x0400u) == 0) {
+        frac <<= 1;
+        e--;
+      }
+      bits = sign | ((uint32_t)(e + 127) << 23) | ((frac & 0x03ffu) << 13);
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7f800000u | (frac << 13);
+  } else {
+    bits = sign | ((exp + 112) << 23) | (frac << 13);
+  }
+  float out;
+  memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+uint16_t poly_float_to_f16(float x) {
+  uint32_t bits;
+  memcpy(&bits, &x, sizeof(bits));
+  uint32_t sign = (bits >> 16) & 0x8000u;
+  uint32_t exp = (bits >> 23) & 0xffu, mant = bits & 0x007fffffu;
+  if (exp == 0xffu) {
+    uint16_t payload = (uint16_t)(mant >> 13);
+    if (mant && !payload) payload = 1;
+    return (uint16_t)(sign | 0x7c00u | payload);
+  }
+  int half_exp = (int)exp - 112;
+  if (half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
+  if (half_exp <= 0) {
+    if (half_exp < -10) return (uint16_t)sign;
+    mant |= 0x00800000u;
+    unsigned shift = (unsigned)(14 - half_exp);
+    uint32_t half_mant = mant >> shift, midpoint = UINT32_C(1) << (shift - 1);
+    if ((mant & midpoint) && ((mant & (midpoint - 1)) || (half_mant & 1u))) half_mant++;
+    return (uint16_t)(sign | half_mant);
+  }
+  uint32_t half_mant = mant >> 13;
+  if ((mant & 0x1000u) && ((mant & 0xfffu) || (half_mant & 1u))) {
+    half_mant++;
+    if (half_mant == 0x400u) {
+      half_mant = 0;
+      if (++half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
+    }
+  }
+  return (uint16_t)(sign | ((uint32_t)half_exp << 10) | half_mant);
+}
+
+float poly_bf16_to_float(uint16_t x) {
+  uint32_t bits = (uint32_t)x << 16;
+  float out;
+  memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+uint16_t poly_float_to_bf16(float x) {
+  uint32_t bits;
+  memcpy(&bits, &x, sizeof(bits));
+  /* Never round a NaN payload into infinity (or overflow its sign). */
+  if ((bits & 0x7f800000u) == 0x7f800000u) {
+    uint16_t out = (uint16_t)(bits >> 16);
+    if ((bits & 0x007fffffu) && !(out & 0x7fu)) out |= 0x40u;
+    return out;
+  }
+  return (uint16_t)((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
 /* Predefined scalar dtypes */
 /* priority, bitsize, name, fmt */
 
