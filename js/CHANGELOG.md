@@ -2,6 +2,9 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Add Tensor `erfc`, `erfinv`, `ndtri`, `digamma` and `lgamma` methods backed by
+  the shared C implementation, plus stable normal log-CDF `logNdtr` (`log_ndtr`).
+
 - Improve error-function and inverse-normal accuracy, including small tail
   probabilities and center gradients. Fix log-gamma higher derivatives and
   negative arguments, and improve digamma precision in the shared C core.

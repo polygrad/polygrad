@@ -2,6 +2,9 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Expose shared probability functions to Python, JavaScript and C graph authors.
+  Add a stable normal log-CDF with gradients that remain usable in extreme tails.
+
 - Improve error-function and inverse-normal accuracy, including small tail
   probabilities and center gradients. Fix log-gamma higher derivatives and
   negative arguments, and improve digamma precision in the shared C core.
