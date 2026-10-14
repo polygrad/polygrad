@@ -37,11 +37,17 @@ TEST(tensor, gradient_target_admission_is_context_and_graph_scoped) {
   poly_ctx_set_preferred_device(other, POLY_DEVICE_INTERP);
   float value = 3;
   int32_t integer = 3;
-  PolyTensor *x = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
-  PolyTensor *unused = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
-  PolyTensor *foreign = poly_tensor_from_host(other, &value, sizeof(value), POLY_FLOAT32, NULL, 0);
-  PolyTensor *i = poly_tensor_from_host(ctx, &integer, sizeof(integer), POLY_INT32, NULL, 0);
+  int64_t shape[] = {1};
+  PolyTensor *x = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, shape, 1);
+  PolyTensor *unused = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, shape, 1);
+  PolyTensor *foreign = poly_tensor_from_host(other, &value, sizeof(value), POLY_FLOAT32, shape, 1);
+  PolyTensor *i = poly_tensor_from_host(ctx, &integer, sizeof(integer), POLY_INT32, shape, 1);
   PolyTensor *loss = poly_tensor_alu2(ctx, POLY_OP_MUL, x, x);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(unused);
+  ASSERT_NOT_NULL(foreign);
+  ASSERT_NOT_NULL(i);
+  ASSERT_NOT_NULL(loss);
   ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, x) == poly_tensor_uop_physical(x));
   ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, unused) == NULL);
   ASSERT_TRUE(poly_tensor_gradient_target(ctx, loss, foreign) == NULL);
@@ -54,6 +60,41 @@ TEST(tensor, gradient_target_admission_is_context_and_graph_scoped) {
   poly_tensor_release(x);
   poly_ctx_destroy(other);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, gradient_traversal_does_not_retain_arena_storage) {
+  const PolyLogicalPolicy policies[] = {
+      POLY_LOGICAL_NEVER, POLY_LOGICAL_ALWAYS, POLY_LOGICAL_UNTIL_REALIZE};
+  for (size_t p = 0; p < sizeof(policies) / sizeof(policies[0]); p++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_INT_EQ(poly_ctx_set_logical_policy(ctx, policies[p]), 0);
+    poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+    float value = 3;
+    int64_t shape[] = {1}, axis = 0;
+    PolyTensor *x = poly_tensor_from_host(ctx, &value, sizeof(value), POLY_FLOAT32, shape, 1);
+    PolyTensor *square = poly_tensor_alu2(ctx, POLY_OP_MUL, x, x);
+    PolyTensor *loss = poly_tensor_sum(ctx, square, &axis, 1, false);
+    /* Keep the warm gradient live so traversal storage is measured separately
+     * from new graph construction or collection. */
+    PolyTensor *warm = poly_tensor_gradient(ctx, loss, x);
+    ASSERT_NOT_NULL(warm);
+    size_t before = poly_arena_used(poly_ctx_arena(ctx));
+    for (int i = 0; i < 64; i++) {
+      PolyTensor *gradient = poly_tensor_gradient(ctx, loss, x);
+      ASSERT_NOT_NULL(gradient);
+      ASSERT_PTR_EQ(gradient->uop_physical, warm->uop_physical);
+      ASSERT_PTR_EQ(gradient->uop_logical, warm->uop_logical);
+      poly_tensor_release(gradient);
+    }
+    size_t after = poly_arena_used(poly_ctx_arena(ctx));
+    poly_tensor_release(warm);
+    poly_tensor_release(loss);
+    poly_tensor_release(square);
+    poly_tensor_release(x);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(after, before);
+  }
   PASS();
 }
 
@@ -4078,6 +4119,15 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   ASSERT_TRUE(physical_call->arg.call_info->has_grad_fxn);
   ASSERT_INT_EQ(logical_call->arg.call_info->grad_fxn_key, 17);
   ASSERT_INT_EQ(physical_call->arg.call_info->grad_fxn_key, 17);
+  int64_t axis = 0;
+  PolyTensor *loss = poly_tensor_sum(ctx, outputs[0], &axis, 1, false);
+  ASSERT_NOT_NULL(loss);
+  ASSERT_TRUE(poly_tensor_gradient(ctx, loss, a) == NULL);
+  size_t before_rejection = poly_arena_used(poly_ctx_arena(ctx));
+  for (int i = 0; i < 64; i++)
+    ASSERT_TRUE(poly_tensor_gradient(ctx, loss, a) == NULL);
+  size_t after_rejection = poly_arena_used(poly_ctx_arena(ctx));
+  poly_tensor_release(loss);
   ASSERT_INT_EQ(logical_call->n_src, 4);
   ASSERT_INT_EQ(physical_call->n_src, 4);
   ASSERT_PTR_EQ(logical_call->src[0], body);
@@ -4126,6 +4176,7 @@ TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
   ASSERT_FLOAT_EQ(c_data[3], 44.0f, 0.0);
 
   poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(after_rejection, before_rejection);
   PASS();
 }
 

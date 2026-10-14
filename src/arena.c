@@ -1,8 +1,9 @@
 /*
  * arena.c — Arena allocator: bulk allocation, bulk free
  *
- * All UOp nodes, src arrays, and arg data are allocated from the arena.
- * The entire arena is freed at once when the context is destroyed.
+ * Context-lifetime data uses the permanent arena; temporary data may use a
+ * scratch arena with mark/rewind. UOps use separate, individually reclaimable
+ * storage owned by the context (see uop/ops.c).
  */
 
 #include "polygrad.h"

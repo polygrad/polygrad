@@ -117,6 +117,7 @@ PolyTensor *poly_tensor_empty_uop_name(
     const char *device
 );
 
+/* Requires ndim >= 1 and non-NULL dims; for a scalar, import shape [1] then reshape to []. */
 PolyTensor *poly_tensor_from_host(
     PolyCtx *ctx,
     void *ptr,

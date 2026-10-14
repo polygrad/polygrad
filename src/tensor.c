@@ -895,11 +895,15 @@ PolyTensor *poly_tensor_gradient(PolyCtx *ctx, PolyTensor *loss, PolyTensor *tar
   /* This native helper cannot invoke a host custom-gradient callback. Do not
    * silently differentiate only AFTER's direct data edge. */
   int n = 0;
-  PolyUOp **topo = poly_uop_toposort(ctx, loss->uop_physical, &n);
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, loss->uop_physical, &n);
+  if (!topo) return NULL;
   for (int i = 0; i < n; i++)
     if (topo[i]->op == POLY_OP_CALL && topo[i]->arg.kind == POLY_ARG_CALL_INFO &&
-        topo[i]->arg.call_info && topo[i]->arg.call_info->grad_fxn_key)
+        topo[i]->arg.call_info && topo[i]->arg.call_info->grad_fxn_key) {
+      free(topo);
       return NULL;
+    }
+  free(topo);
   PolyUOp *physical = poly_uop_grad(ctx, loss->uop_physical, target->uop_physical);
   PolyUOp *logical = portable ? poly_uop_grad(ctx, loss->uop_logical, target->uop_logical) : NULL;
   if (!physical || (portable && !logical)) return NULL;
