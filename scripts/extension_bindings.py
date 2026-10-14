@@ -31,8 +31,43 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
+SDK = Path(__file__).resolve().parent
+INSTALLED = (SDK / 'include/polygrad.h').is_file()
+
+
+def include_dir():
+    return SDK / 'include' if INSTALLED else ROOT / 'src'
+
+
+def construction_abi():
+    macros = subprocess.check_output(
+        ['clang', '-x', 'c', f'-I{include_dir()}', '-dM', '-E', '-'],
+        input=b'#include "frontend.h"\n').decode().splitlines()
+    return int(next(line.split()[2] for line in macros
+                    if line.startswith('#define POLYGRAD_EXTENSION_ABI_VERSION ')))
+
+
+def sdk(output):
+    """Package source-owned headers and this generator, not another API list."""
+    if INSTALLED:
+        raise ValueError('SDK preparation requires the repository')
+    files = {Path('include') / p.relative_to(ROOT / 'src'): p
+             for p in (ROOT / 'src').rglob('*.h')}
+    files.update({p.relative_to(ROOT): p for p in (ROOT / 'vendor/cjson').glob('*.h')})
+    files.update({Path('extension_bindings.py'): Path(__file__),
+                  Path('extension_api.json'): ROOT / 'js/src/extension_api.json',
+                  Path('include/extension_native.h'): ROOT / 'js/extension_native.h'})
+    for relative, source in files.items():
+        target = output / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != source.read_bytes():
+            shutil.copyfile(source, target)
+    print(f'prepared author SDK: {output}')
+
+
 # Declaration roots used by the frontends, including their handwritten adapters.
 # Adding a header audits its transitive C API without granting it exposure.
 CORE_HEADERS = (
@@ -205,7 +240,7 @@ def declaration_ast(source):
                 "-x",
                 "c",
                 "-std=c11",
-                f"-I{ROOT}/src",
+                f"-I{include_dir()}",
                 "-Xclang",
                 "-ast-dump=json",
                 "-fsyntax-only",
@@ -483,6 +518,8 @@ def native_special_exports(rules):
 
 
 def core(check=False, output=None):
+    if INSTALLED:
+        raise ValueError('core binding generation requires the repository')
     decls = core_declarations()
     rules = load_rules(decls)
     result = {}
@@ -545,7 +582,7 @@ def core(check=False, output=None):
 def consumer(a):
     if not 0 <= a.inputs <= 4096 or not 1 <= a.outputs <= 4096:
         raise ValueError("invalid input/output counts")
-    api = json.loads((ROOT / "js/src/extension_api.json").read_text())
+    api = json.loads((SDK / 'extension_api.json' if INSTALLED else ROOT / 'js/src/extension_api.json').read_text())
     source = a.source.resolve()
     decls = declarations(f'#include "{source}"\n')
     ret, params = signature(decls[a.entry])
@@ -562,7 +599,7 @@ def consumer(a):
     # Clang has expanded macros and helper headers. Follow reachable function
     # bodies instead of scanning spelling, which misses macro calls and includes
     # dead helpers. The public declarations remain the sole signature source.
-    imports, visited = {"poly_abi_version", "poly_tensor_release"}, set()
+    imports, visited = {"poly_extension_abi_version", "poly_tensor_release"}, set()
 
     def visit(name):
         if name in visited:
@@ -588,6 +625,7 @@ def consumer(a):
     if set(names) - api.keys():
         raise ValueError(f"unsupported imports: {set(names) - api.keys()}")
     manifest = {
+        "construction_abi": construction_abi(),
         "entry": a.entry,
         "inputs": a.inputs,
         "outputs": a.outputs,
@@ -629,8 +667,8 @@ def consumer(a):
         "static int extension_bound;",
         "EXT int poly_extension_bind(PolyProcResolver resolve) {",
         "if (!resolve) return 0;",
-        'int (*abi)(void) = (int (*)(void))resolve("poly_abi_version");',
-        "if (!abi || abi() != POLYGRAD_ABI_VERSION) return 0;",
+        'int (*abi)(void) = (int (*)(void))resolve("poly_extension_abi_version");',
+        "if (!abi || abi() != POLYGRAD_EXTENSION_ABI_VERSION) return 0;",
     ]
     # Validate all addresses before publishing any: a failed bind is atomic.
     for name in names:
@@ -690,8 +728,14 @@ if __name__ == "__main__":
     p.add_argument("--inputs", type=int)
     p.add_argument("--outputs", type=int)
     p.add_argument("--output", type=Path)
+    p.add_argument("--sdk", type=Path, help="prepare an installed author SDK")
+    p.add_argument("--include", action="store_true", help="print the author include directory")
     a = p.parse_args()
-    if a.core:
+    if a.include:
+        print(include_dir())
+    elif a.sdk:
+        sdk(a.sdk)
+    elif a.core:
         core(a.check, a.output)
     else:
         if not all(

@@ -1003,9 +1003,23 @@ const path = require('node:path')
 })().catch(error => { console.error(error); process.exitCode = 1 })
 ```
 
-Generate the adapter using `scripts/extension_bindings.py` in the matching
-Polygrad source checkout (see the Python README's C author contract). Native
-builds include the packaged `extension_native.h`. Signatures and Wasm copying
+The npm package includes `sdk/`, with public headers, generator and native
+adapter. Authoring requires Python, Clang and a C compiler (Emscripten for Wasm);
+ordinary package installation does not require these SDK tools. No checkout is
+needed. For example, generate a one-input, one-output author adapter with:
+
+```bash
+SDK="$(node -p "require('path').join(require('path').dirname(require.resolve('polygrad/package.json')), 'sdk')")"
+python "$SDK/extension_bindings.py" --source author.c --entry build_graph --inputs 1 --outputs 1 --output build/author
+```
+
+Compile `author.c` and `build/author/extension.c` with `-O2 -I"$SDK/include"`.
+Native Node builds also need Node headers and `-DPOLY_EXTENSION_NAPI`.
+For Wasm, export `poly_extension_build`, `poly_extension_manifest`,
+`poly_extension_abi`, `malloc` and `free`; leave the `poly_*` imports unresolved
+for the runtime to bind. New authors use an independent construction ABI plus
+required-import checks; legacy authors retain exact core-ABI matching.
+Signatures and Wasm copying
 metadata are generated from the public headers plus reviewed pointer annotations;
 unsupported imports and ABI mismatches reject. Construction requires an idle
 runtime. The author borrows inputs, returns owned references and cleans up its

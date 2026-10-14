@@ -97,6 +97,13 @@ extension-bindings:
 	$(PYTHON) scripts/extension_bindings.py --core
 check-extension-bindings:
 	$(PYTHON) scripts/extension_bindings.py --core --check
+.PHONY: extension-sdk test-extension-sdk
+extension-sdk: extension-bindings
+	$(PYTHON) scripts/extension_bindings.py --sdk py/polygrad/_sdk
+	$(PYTHON) scripts/extension_bindings.py --sdk js/sdk
+test-extension-sdk: build-py-wheel
+	$(PYTHON) test/test_package_install.py python-wheel --sdk
+	NODE_INCLUDE=$(NODE_INCLUDE) $(PYTHON) test/test_package_install.py node --sdk --node $(NODE)
 build/extension/extension.c: test/extension_fixture.c scripts/extension_bindings.py js/src/extension_api.json $(PROJECT_HEADERS)
 	$(PYTHON) scripts/extension_bindings.py --source $< --entry extension_density --inputs 3 --outputs 2 --output build/extension
 build/extension/author.so: build/extension/extension.c test/extension_fixture.c

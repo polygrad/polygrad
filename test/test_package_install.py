@@ -5,6 +5,7 @@ import argparse
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,7 @@ def only_artifact(directory, pattern):
     return matches[0].resolve()
 
 
-def python_install(work, env, wheel=False):
+def python_install(work, env, wheel=False, sdk=False):
     artifact = only_artifact(ROOT / 'py/dist', 'polygrad-*.whl' if wheel else 'polygrad-*.tar.gz')
     venv = work / 'venv'
     run([sys.executable, '-m', 'venv', str(venv)], work, env, work / 'venv.log')
@@ -49,9 +50,13 @@ def python_install(work, env, wheel=False):
         work, env, work / 'install.log')
     run([str(interpreter), '-I', str(ROOT / 'test/package_install_python.py')],
         work, env, work / 'runtime.log')
+    if sdk:
+        shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', work / 'author.c')
+        run([str(interpreter), '-I', str(ROOT / 'test/test_extension_sdk.py'), 'python'],
+            work, env, work / 'sdk.log')
 
 
-def node_install(work, env, npm, node):
+def node_install(work, env, npm, node, sdk=False):
     run([npm, 'pack', '--ignore-scripts=false', '--pack-destination', str(work)],
         ROOT / 'js', env, work / 'pack.log')
     artifact = only_artifact(work, 'polygrad-*.tgz')
@@ -85,6 +90,10 @@ def node_install(work, env, npm, node):
             raise RuntimeError(f'{lane}: unexpected native addon presence at {addon}')
         run([node, str(ROOT / 'test/package_install_node.cjs'), expected],
             prefix, env, work / f'{lane}-runtime.log')
+        if sdk:
+            shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', prefix / 'author.c')
+            run([sys.executable, str(ROOT / 'test/test_extension_sdk.py'), expected, '--node', node],
+                prefix, env, work / f'{lane}-sdk.log')
         # Resolve from the installed consumer directory. Browser conditions in
         # Node verify exports only; the real WebGPU gate remains test-browser.
         for subpath, condition in (('', False), ('', True), ('/async', False),
@@ -108,6 +117,7 @@ def main():
     parser.add_argument('kind', choices=['python', 'python-wheel', 'node'])
     parser.add_argument('--npm', default='npm')
     parser.add_argument('--node', default='node')
+    parser.add_argument('--sdk', action='store_true', help='build authors with installed SDKs; requires Clang, C compiler and Emscripten for Wasm')
     parser.add_argument('--require-python', help='require this exact major.minor for the Python install lane')
     args = parser.parse_args()
     if args.require_python:
@@ -119,9 +129,9 @@ def main():
     print('Evidence:', work, flush=True)
     env = clean_environment()
     if args.kind in ('python', 'python-wheel'):
-        python_install(work, env, wheel=args.kind == 'python-wheel')
+        python_install(work, env, wheel=args.kind == 'python-wheel', sdk=args.sdk)
     else:
-        node_install(work, env, args.npm, args.node)
+        node_install(work, env, args.npm, args.node, sdk=args.sdk)
     print(f'PASS: isolated {args.kind} install; logs: {work}', flush=True)
 
 

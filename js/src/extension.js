@@ -11,6 +11,15 @@ function manifest(text) {
   return m
 }
 
+function checkAbi(spec, legacyAbi, core) {
+  if (Object.hasOwn(spec, 'construction_abi')) {
+    if (!Number.isInteger(spec.construction_abi) || spec.construction_abi !== core.ffi.poly_extension_abi_version())
+      throw Error('extension construction ABI mismatch')
+  } else if (legacyAbi !== core.ffi.poly_abi_version()) {
+    throw Error('extension ABI mismatch')
+  }
+}
+
 async function loadExtension(rt,source) {
   const core=rt._core
   const idle=()=>{
@@ -22,8 +31,8 @@ async function loadExtension(rt,source) {
   if(rt.core==='native') {
     if(!source||typeof source.bind!=='function'||typeof source.build!=='function'||typeof source.abi!=='function')
       throw TypeError('native loadExtension expects the generated extension addon')
-    if(source.abi()!==core.ffi.poly_abi_version())throw Error('extension ABI mismatch')
     spec=manifest(source.manifest())
+    checkAbi(spec, source.abi(), core)
     if(!source.bind(core.ffi.poly_extension_resolver()))throw Error('extension symbol/ABI mismatch')
     build=(inputs,values)=>source.build(core.ctx,inputs,values)
   } else {
@@ -68,12 +77,17 @@ async function loadExtension(rt,source) {
     const e=instance.exports
     for(const name of ['poly_extension_abi','poly_extension_manifest','poly_extension_build','malloc','free'])
       if(typeof e[name]!=='function')throw Error(`missing extension export: ${name}`)
-    if(e.poly_extension_abi()!==core.ffi.poly_abi_version())throw Error('extension ABI mismatch')
     const ptr=e.poly_extension_manifest()>>>0,heap=new Uint8Array(e.memory.buffer)
     let end=ptr
     while(end<heap.length&&end-ptr<65536&&heap[end])end++
     if(!ptr||end===heap.length||end-ptr===65536)throw Error('invalid extension manifest')
     spec=manifest(new TextDecoder().decode(heap.subarray(ptr,end)))
+    checkAbi(spec, e.poly_extension_abi(), core)
+    // The module's actual imports must be declared, not just a compatible
+    // subset in its manifest. The bridge already checked availability above.
+    for (const imp of WebAssembly.Module.imports(module))
+      if (imp.name.startsWith('poly_') && !spec.imports.includes(imp.name))
+        throw Error(`undeclared extension import: ${imp.name}`)
     build=(inputs,values)=>{
       error=null
       const blocks=[];let out=0,handles=[]

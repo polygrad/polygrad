@@ -319,8 +319,9 @@ def test_npm_prepack_generates_before_mirroring_and_building(generation_exit):
       }
       prepare()
       assert.equal(calls[0].at(-1), 'extension-bindings')
-      assert.match(calls[1].at(-1), /sync-csrc.js$/)
-      assert.equal(calls[2].at(-1), 'wasm-pkg')
+      assert.equal(calls[1].at(-1), 'extension-sdk')
+      assert.match(calls[2].at(-1), /sync-csrc.js$/)
+      assert.equal(calls[3].at(-1), 'wasm-pkg')
     ''', str(generation_exit)], cwd=ROOT, check=True)
 
 
@@ -345,7 +346,8 @@ def test_python_package_preparation_generates_only_in_checkout(tmp_path, monkeyp
     (tmp_path / 'src').mkdir()
     (tmp_path / 'src/core.h').touch()
     runpy.run_path(str(package / 'setup.py'))
-    assert calls == [[sys.executable, str(generator), '--core']]
+    assert calls == [[sys.executable, str(generator), '--core'],
+                     [sys.executable, str(generator), '--sdk', str(package / 'polygrad/_sdk')]]
 
 
 def test_python_special_struct_layouts_match_c(tmp_path):
@@ -381,9 +383,11 @@ def test_clean_sdist_regenerates_missing_bindings(tmp_path):
         shutil.copytree(ROOT / directory, tmp_path / directory,
                         ignore=shutil.ignore_patterns('csrc', 'build', 'dist', 'tests',
                                                      '__pycache__', '*.egg-info', '*.so',
-                                                     '_generated*.py', 'extension_api.json',
+                                                     '_sdk', '_generated*.py', 'extension_api.json',
                                                      'frontend_exports.h'))
     shutil.copyfile(ROOT / 'Makefile', tmp_path / 'Makefile')
+    (tmp_path / 'js').mkdir()
+    shutil.copyfile(ROOT / 'js/extension_native.h', tmp_path / 'js/extension_native.h')
     for directory in ('test', 'bench'):
         (tmp_path / directory).mkdir()
     subprocess.run([sys.executable, 'setup.py', 'sdist'], cwd=tmp_path / 'py',
@@ -392,7 +396,10 @@ def test_clean_sdist_regenerates_missing_bindings(tmp_path):
     with tarfile.open(artifact) as archive:
         paths = {n.split('/', 1)[-1] for n in archive.getnames()}
         assert {'polygrad/_generated_ffi.py', 'polygrad/_generated_special_ffi.py',
-                'polygrad/extension_api.json', 'csrc/src/frontend_exports.h'} <= paths
+                'polygrad/extension_api.json', 'csrc/src/frontend_exports.h',
+                'polygrad/sdk.py', 'polygrad/_sdk/extension_bindings.py',
+                'polygrad/_sdk/include/polygrad.h',
+                'polygrad/_sdk/vendor/cjson/cJSON.h'} <= paths
         assert 'scripts/extension_bindings.py' not in paths
 
 
@@ -416,8 +423,26 @@ def test_import_discovery_follows_macro_and_helper_calls(tmp_path):
                     '--inputs', '1', '--outputs', '1', '--output', str(tmp_path)],
                    cwd=ROOT, check=True)
     manifest = json.loads((tmp_path / 'manifest.json').read_text())
+    assert manifest['construction_abi'] == 1
+    assert 'poly_extension_abi_version' in manifest['imports']
+    assert 'poly_abi_version' not in manifest['imports']
     assert 'poly_tensor_exp' in manifest['imports']
     assert 'poly_tensor_log' not in manifest['imports']
+
+
+def test_sdk_author_uses_only_installed_files(generator, tmp_path):
+    import shutil
+    sdk, consumer = tmp_path / 'sdk', tmp_path / 'consumer'
+    generator.sdk(sdk)
+    consumer.mkdir()
+    shutil.copyfile(ROOT / 'test/extension_macro_fixture.c', consumer / 'author.c')
+    subprocess.run([sys.executable, str(sdk / 'extension_bindings.py'), '--source',
+                    'author.c', '--entry', 'macro_build', '--inputs', '1', '--outputs', '1',
+                    '--output', 'generated'], cwd=consumer, check=True)
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-O2', '-shared', '-fPIC',
+                    '-I' + str(sdk / 'include'), 'author.c', 'generated/extension.c',
+                    '-lm', '-o', 'author.so'], cwd=consumer, check=True)
+    assert (consumer / 'author.so').is_file()
 
 
 def test_native_thunks_are_hidden_without_consumer_flags(tmp_path):

@@ -2,6 +2,10 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Package headers and `python -m polygrad.sdk` for building C graph authors
+  without a checkout. Separate construction compatibility from the core ABI,
+  while preserving existing authors and rejecting missing required imports.
+
 - Add Tensor `erfc`, `erfinv`, `ndtri`, `digamma` and `lgamma` methods backed by
   the shared C implementation, plus stable normal log-CDF `log_ndtr` and gradients.
 

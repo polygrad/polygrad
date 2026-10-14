@@ -8,6 +8,33 @@ from polygrad import create
 LIB = Path(__file__).resolve().parents[2] / "build/extension/author.so"
 
 
+def test_extension_bind_checks_contract_and_every_import():
+    import ctypes as c
+    from polygrad import _ffi
+    author = c.CDLL(str(LIB))
+    author.poly_extension_bind.argtypes = [c.c_void_p]
+    author.poly_extension_bind.restype = c.c_int
+    core = _ffi.get_lib()
+    version = c.CFUNCTYPE(c.c_int)(lambda: 2)
+    resolver_type = c.CFUNCTYPE(c.c_void_p, c.c_char_p)
+    core_resolve = resolver_type(c.cast(core.poly_get_proc_address, c.c_void_p).value)
+    seen = []
+    def resolve(name):
+        seen.append(name)
+        if name == b'poly_extension_abi_version':
+            return c.cast(version, c.c_void_p).value
+        return core_resolve(name)
+    resolver = resolver_type(resolve)
+    assert author.poly_extension_bind(resolver) == 0
+    assert seen == [b'poly_extension_abi_version']
+    missing = resolver_type(lambda name: None if name == b'poly_tensor_release'
+                            else core_resolve(name))
+    assert author.poly_extension_bind(missing) == 0
+    compatible = resolver_type(lambda name: None if name == b'poly_abi_version'
+                               else core_resolve(name))
+    assert author.poly_extension_bind(compatible) == 1
+
+
 def test_extension_model_gradient_and_lifetime():
     assert LIB.is_file(), "run make extension-fixture"
     with create(device="CPU", logical="always") as rt, create(device="CPU") as other:

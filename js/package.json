@@ -71,6 +71,7 @@
     "napi_special_exports.h",
     "binding.gyp",
     "scripts/",
+    "sdk/",
     "extension_native.h",
     "LICENSE",
     "README.md",

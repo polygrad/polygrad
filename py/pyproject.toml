@@ -36,4 +36,4 @@ Issues = "https://github.com/polygrad/polygrad/issues"
 include = ["polygrad*", "extra*"]
 
 [tool.setuptools.package-data]
-polygrad = ["_native.c"]
+polygrad = ["_native.c", "extension_api.json", "_sdk/*.py", "_sdk/*.json", "_sdk/include/*.h", "_sdk/include/**/*.h", "_sdk/vendor/**/*.h"]

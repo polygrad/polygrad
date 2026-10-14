@@ -2,6 +2,10 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Package a C graph-author SDK in Python and npm installs. New authors use an
+  independent construction contract and required-import checks; existing
+  core-ABI108 authors retain their loading path.
+
 - Expose shared probability functions to Python, JavaScript and C graph authors.
   Add a stable normal log-CDF with gradients that remain usable in extreme tails.
 

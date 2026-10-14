@@ -7,6 +7,14 @@
     "ownership": "value",
     "cleanup": false
   },
+  "poly_extension_abi_version": {
+    "return": "int",
+    "args": [],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
   "poly_tensor_abs": {
     "return": "PolyTensor *",
     "args": [

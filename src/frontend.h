@@ -8,9 +8,17 @@
 extern "C" {
 #endif
 
+/* Construction-only extension contract, independent of private core layouts.
+ * Within this version, preserve existing function signatures, enum/dtype IDs,
+ * array widths, ownership, failure and lifetime rules. Additions are compatible;
+ * consumers must still resolve every required import. Handles are opaque:
+ * private struct access and execution are outside this contract. */
+#define POLYGRAD_EXTENSION_ABI_VERSION 1
+int poly_extension_abi_version(void);
+
 /* Address lookup in this loaded core, not a second mathematical API. Call only
- * through the exact declared function type, with matching POLYGRAD_ABI_VERSION.
- * Unsupported symbols return NULL. The provider must outlive its consumers. */
+ * through the exact declared function type after verifying the construction
+ * ABI. Unsupported symbols return NULL. The provider must outlive consumers. */
 typedef void (*PolyProc)(void);
 typedef PolyProc (*PolyProcResolver)(const char *name);
 PolyProc poly_get_proc_address(const char *name);

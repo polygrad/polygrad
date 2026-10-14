@@ -2,6 +2,10 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Package a C graph-author SDK for native and Wasm extensions. Separate
+  construction compatibility from the core ABI while preserving existing
+  authors and rejecting incompatible contracts or missing required imports.
+
 - Add Tensor `erfc`, `erfinv`, `ndtri`, `digamma` and `lgamma` methods backed by
   the shared C implementation, plus stable normal log-CDF `logNdtr` (`log_ndtr`).
 

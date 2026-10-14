@@ -22,6 +22,7 @@ repo_root = os.path.dirname(here)
 binding_generator = os.path.join(repo_root, 'scripts', 'extension_bindings.py')
 if os.path.isfile(binding_generator) and os.path.isfile(os.path.join(repo_root, 'src', 'core.h')):
     subprocess.check_call([sys.executable, binding_generator, '--core'])
+    subprocess.check_call([sys.executable, binding_generator, '--sdk', os.path.join(here, 'polygrad', '_sdk')])
 
 
 def _read_version():
@@ -91,7 +92,8 @@ setup(
     name='polygrad',
     version=_read_version(),
     packages=find_packages(include=['polygrad', 'polygrad.*', 'extra', 'extra.*']),
-    package_data={'polygrad': ['_native.c', 'extension_api.json']},
+    package_data={'polygrad': ['_native.c', 'extension_api.json', '_sdk/*.py', '_sdk/*.json',
+                               '_sdk/include/*.h', '_sdk/include/**/*.h', '_sdk/vendor/**/*.h']},
     ext_modules=[
         Extension(
             'polygrad._native',

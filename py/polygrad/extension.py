@@ -15,10 +15,15 @@ class Extension:
         self._lib = c.CDLL(str(path))
         lib, core = self._lib, _ffi.get_lib()
         lib.poly_extension_abi.restype = c.c_int
-        if lib.poly_extension_abi() != core.poly_abi_version():
-            raise RuntimeError("extension ABI mismatch")
         lib.poly_extension_manifest.restype = c.c_char_p
         self._spec = json.loads(lib.poly_extension_manifest())
+        if 'construction_abi' in self._spec:
+            version = self._spec['construction_abi']
+            if type(version) is not int or version != core.poly_extension_abi_version():
+                raise RuntimeError("extension construction ABI mismatch")
+        elif lib.poly_extension_abi() != core.poly_abi_version():
+            # Existing published authors use the original core-ABI handshake.
+            raise RuntimeError("extension ABI mismatch")
         api = json.loads(Path(__file__).with_name("extension_api.json").read_text())
         s = self._spec
         if not (

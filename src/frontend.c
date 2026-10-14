@@ -15,6 +15,10 @@
 #include "tensor.h"
 #include <string.h>
 
+int poly_extension_abi_version(void) {
+  return POLYGRAD_EXTENSION_ABI_VERSION;
+}
+
 PolyProc poly_get_proc_address(const char *name) {
   if (!name) return NULL;
 #define POLY_EXTENSION_SYMBOL(symbol)                                                              \

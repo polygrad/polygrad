@@ -808,10 +808,19 @@ NumPy readback. The denominator guard returns zeros for constant inputs.
 
 `rt.load_extension(path)` attaches a separately built C author to this runtime's
 existing core. The author calls existing `poly_tensor_*` functions; it does not
-link another Polygrad implementation. Build its adapter with
-`scripts/extension_bindings.py --source author.c --entry build_graph --inputs 1 --outputs 1 --output build/author`
-from a matching Polygrad checkout. Clang reads the public declarations; unknown
-pointer signatures reject rather than being forwarded incorrectly.
+link another Polygrad implementation. The installed package includes its author
+SDK; authoring requires Python, Clang and a C compiler, not a Polygrad checkout:
+
+```bash
+python -m polygrad.sdk --source author.c --entry build_graph --inputs 1 --outputs 1 --output build/author
+cc -std=c11 -O2 -shared -fPIC -I"$(python -m polygrad.sdk --include)" author.c build/author/extension.c -lm -o author.so
+```
+
+Clang reads the packaged public declarations; unsupported pointer signatures
+reject. New authors use a construction-only ABI and declare required imports:
+additive core changes do not invalidate them. Legacy authors still use the
+original exact core-ABI check. An incompatible contract or missing import fails
+at load time. Ordinary package installation does not require SDK build tools.
 
 For a runnable example from the checkout root, first run
 `make build/extension/author.so`. The supplied `test/extension_fixture.c`

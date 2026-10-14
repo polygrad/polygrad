@@ -15,10 +15,23 @@ async function checkExtension(pg,source,create) {
       finally {await pending}
     }
     if(pg.core==='native') {
+      const legacy = JSON.parse(source.manifest())
+      delete legacy.construction_abi
       let rejected=false
-      try {await pg.loadExtension({bind:source.bind,build:source.build,abi:()=>-1})}
+      try {await pg.loadExtension({bind:source.bind,build:source.build,abi:()=>-1,
+        manifest:()=>JSON.stringify(legacy)})}
       catch(e) {if(!/ABI mismatch/.test(e.message))throw e;rejected=true}
       if(!rejected)throw Error('extension ABI mismatch was accepted')
+      const compatible = await pg.loadExtension({bind:source.bind, build:source.build,
+        abi:()=>-1, manifest:source.manifest})
+      compatible.dispose() // Construction ABI is independent of the core ABI.
+      for (const change of [{construction_abi:2}, {construction_abi:true}, {imports:['poly_missing']}]) {
+        let called = false, rejected = false
+        try { await pg.loadExtension({abi:source.abi, build:source.build,
+          bind:()=>{called=true;return true}, manifest:()=>JSON.stringify({...JSON.parse(source.manifest()),...change})}) }
+        catch(e) { if(!/ABI mismatch|unsupported extension manifest/.test(e.message))throw e;rejected=true }
+        if(!rejected||called)throw Error('incompatible extension reached bind')
+      }
     }
     if(create) {
       const other=await create({core:pg.core,device:pg.device==='wasm'?'cpu':pg.device}),foreign=other.Tensor.empty(3)

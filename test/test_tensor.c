@@ -65,6 +65,9 @@ TEST(tensor, extension_resolver_uses_current_core) {
   int (*abi)(void) = (int (*)(void))poly_get_proc_address("poly_abi_version");
   ASSERT_NOT_NULL(abi);
   ASSERT_EQ(abi(), POLYGRAD_ABI_VERSION);
+  int (*extension_abi)(void) = (int (*)(void))poly_get_proc_address("poly_extension_abi_version");
+  ASSERT_NOT_NULL(extension_abi);
+  ASSERT_EQ(extension_abi(), POLYGRAD_EXTENSION_ABI_VERSION);
   PASS();
 }
 
