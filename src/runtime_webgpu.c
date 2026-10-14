@@ -74,7 +74,8 @@ EM_JS(void, poly_webgpu_batch_begin, (), {
 });
 
 EM_JS(int, poly_webgpu_batch_end, (int success), {
-  if (Asyncify.state === Asyncify.State.Rewinding)
+  // Synchronous Wasm/INTERP modules have no Asyncify runtime or GPU batch.
+  if (typeof Asyncify !== 'undefined' && Asyncify.state === Asyncify.State.Rewinding)
     return Asyncify.handleAsync(() => {});
   const st = Module.__polygradWebGpuState, batch = st && st.batch;
   if (!batch || !batch.depth) return success ? 0 : -1;
