@@ -146,6 +146,8 @@ Probability math uses shared C implementations: `x.erf()`, `x.erfc()`,
 `x.erfinv()`, `x.ndtri()` (standard Normal quantile), `x.digamma()` and
 `x.lgamma()` (log absolute Gamma). These support autograd and Model capture;
 derivatives at domain endpoints and poles are not defined.
+Use `x.log_ndtr()` for the standard Normal log-CDF and `(-x).log_ndtr()`
+for its log survival probability; taking `log()` of a CDF can lose the tails.
 
 ### NumPy And Data Updates
 

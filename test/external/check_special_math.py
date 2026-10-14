@@ -21,6 +21,9 @@ def reference(name, x, order):
     y = getattr(special, name)(x)
     if order == 0:
         return y
+    if name == 'log_ndtr':
+        first = math.sqrt(2 / math.pi) / special.erfcx(-x / math.sqrt(2))
+        return first if order == 1 else -first * (x + first)
     if name in ('erf', 'erfc'):
         first = (1 if name == 'erf' else -1) * 2 / math.sqrt(math.pi) * np.exp(-x*x)
         return first if order == 1 else -2*x*first
@@ -34,6 +37,7 @@ def reference(name, x, order):
 def main():
     rng = np.random.default_rng(20261013)
     grids = {
+        'log_ndtr': np.r_[np.linspace(-40, 10, 129), [-100, -11.313709, -1.414214, -1.414213, 0, 3.719, 3.72]],
         'erf': np.r_[np.linspace(-9, 9, 129), [-1.000001, -1, -.999999, 0, .999999, 1, 1.000001]],
         'erfc': np.r_[np.linspace(-9, 9, 129), [0, .999999, 1, 1.000001, 7.999999, 8, 8.000001, 20, 26]],
         'erfinv': np.r_[rng.uniform(-.9999, .9999, 128), [-.99, -.5, -1e-20, 0, 1e-20, .5, .99]],

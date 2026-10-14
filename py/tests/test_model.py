@@ -8,7 +8,7 @@ from polygrad.tensor import Tensor
 
 def test_probability_methods_capture_and_roundtrip():
     from polygrad import create
-    names = ('erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma')
+    names = ('erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma', 'log_ndtr')
     with create(device='CPU') as rt:
         data = np.array([0.1, 0.5, 0.9], np.float32)
         x = rt.Tensor(data)

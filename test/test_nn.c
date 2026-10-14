@@ -1411,6 +1411,17 @@ static double eval_derivative_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double v
   return result;
 }
 
+TEST(nn, special_math_log_ndtr) {
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_log_ndtr, -100) + 5005.524208694205) < 2e-11);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_log_ndtr, 10) / -7.619853024160473e-24 - 1) < 3e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_log_ndtr, 0, 1) - 0.7978845608028654) < 2e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_log_ndtr, 0, 2) + 0.6366197723675813) < 2e-13);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_log_ndtr, -INFINITY) == -INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_log_ndtr, INFINITY) == 0);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_log_ndtr, NAN)));
+  PASS();
+}
+
 TEST(nn, special_math_probability_gamma_derivatives) {
   /* SciPy polygamma, independently checked with 80-digit mpmath. */
   ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_lgamma, 3.2, 1) - 0.9988388912865998) < 2e-12);

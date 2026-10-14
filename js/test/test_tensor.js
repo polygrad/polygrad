@@ -7140,7 +7140,9 @@ async function runTensorTests(pg, createRuntime) {
       erfinv: [[0, 1e-8, -0.5, 0.99], [0, 8.86226925452758e-9, -0.4769362762044699, 1.8213863677184495]],
       ndtri: [[0.5, 1e-8, 1e-4], [0, -5.612001244174789, -3.7190164854556804]],
       digamma: [[-6.5, 1, 6], [1.9467574842460869, -0.5772156649015329, 1.7061176684318005]],
-      lgamma: [[-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]]
+      lgamma: [[-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]],
+      log_ndtr: [[-100, -40, -2, 0, 8, 10], [-5005.524208694205, -804.6084420137539,
+        -3.7831843336820317, -0.6931471805599453, -6.220960574271743e-16, -7.619853024160473e-24]]
     }
     const coreFn = (name, x) => {
       const y = x[name]()
@@ -7162,7 +7164,8 @@ async function runTensorTests(pg, createRuntime) {
       ['lgamma', 3.2, 0.9988388912865996, 0.3663211907314008],
       ['lgamma', -6.5, 1.9467574842460869, 9.726988504392654],
       ['erfinv', 0, 0.8862269254527580, 0],
-      ['ndtri', 0.5, 2.5066282746310005, 0]
+      ['ndtri', 0.5, 2.5066282746310005, 0],
+      ['log_ndtr', 0, 0.7978845608028654, -0.6366197723675813]
     ]) {
       const x = new Tensor([value], { dtype: 'float32' })
       await x.realize()
@@ -7174,7 +7177,7 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
   await test('core probability Model capture and roundtrip', async () => {
-    const names = ['erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma']
+    const names = ['erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma', 'log_ndtr']
     const data = new Float32Array([0.1, 0.5, 0.9]), x = new Tensor(data), expected = {}
     for (const name of names) {
       const y = x[name]()

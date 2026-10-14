@@ -1960,6 +1960,13 @@ function createBoundTensorClass(runtime) {
       return this._makeResultFromCore(core)
     }
 
+    logNdtr() {
+      const core = this._rt._core.ffi.poly_tensor_log_ndtr(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    log_ndtr() { return this.logNdtr() }
+
     digamma() {
       const core = this._rt._core.ffi.poly_tensor_digamma(this._ctx, this._tensor)
       return this._makeResultFromCore(core)

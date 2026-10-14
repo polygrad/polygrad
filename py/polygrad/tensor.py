@@ -2116,6 +2116,10 @@ class Tensor:
         core = _ffi._lib.poly_tensor_ndtri(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)
 
+    def log_ndtr(self):
+        core = _ffi._lib.poly_tensor_log_ndtr(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
     def digamma(self):
         core = _ffi._lib.poly_tensor_digamma(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)

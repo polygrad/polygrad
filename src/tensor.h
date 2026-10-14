@@ -273,6 +273,8 @@ PolyTensor *poly_tensor_erfinv(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_ndtri(PolyCtx *ctx, PolyTensor *x);
 
+PolyTensor *poly_tensor_log_ndtr(PolyCtx *ctx, PolyTensor *x);
+
 PolyTensor *poly_tensor_digamma(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_lgamma(PolyCtx *ctx, PolyTensor *x);

@@ -252,7 +252,7 @@ static PolyUOp *erf_center(PolyCtx *ctx, PolyUOp *x) {
   );
 }
 
-static PolyUOp *erfc_tail(PolyCtx *ctx, PolyUOp *a) {
+static PolyUOp *erfc_tail_factor(PolyCtx *ctx, PolyUOp *a, bool logarithm) {
   const double p[] = {
       2.46196981473530512524E-10, 5.64189564831068821977E-1, 7.46321056442269912687E0,
       4.86371970985681366614E1,   1.96520832956077098242E2,  5.26445194995477358631E2,
@@ -266,12 +266,38 @@ static PolyUOp *erfc_tail(PolyCtx *ctx, PolyUOp *a) {
   const double s[] = {2.26052863220117276590E0, 9.39603524938001434673E0, 1.20489539808096656605E1,
                       1.70814450747565897222E1, 9.60896809063285878198E0, 3.36907645100081516050E0};
   PolyDType dt = a->dtype;
-  /* erfc(28) is below the smallest F64 subnormal. Bound inactive branches
-   * before evaluation, including infinity, to keep their VJPs finite. */
-  PolyUOp *underflow = poly_uop_gt(ctx, a, cdt(ctx, dt, 28));
-  a = poly_uop_where(ctx, underflow, cdt(ctx, dt, 28), a);
   PolyUOp *small = poly_uop_alu2(ctx, POLY_OP_CMPLT, a, cdt(ctx, dt, 8));
-  PolyUOp *ratio = poly_uop_where(
+  if (logarithm) {
+    /* Evaluate the large-argument rational in 1/a, factoring out 1/a.
+     * Neither powers of a nor exp(-a*a) need be representable. Bound the
+     * inactive middle branch too, so its derivative cannot inject NaNs. */
+    double reverse_r[6], reverse_s[7];
+    for (int i = 0; i < 6; i++) {
+      reverse_r[i] = r[5 - i];
+      reverse_s[i] = s[5 - i];
+    }
+    reverse_s[6] = 1;
+    PolyUOp *mid = poly_uop_where(ctx, small, a, cdt(ctx, dt, 8));
+    PolyUOp *inverse = poly_uop_div(ctx, cdt(ctx, dt, 1), a);
+    PolyUOp *center = poly_uop_log(
+        ctx,
+        poly_uop_div(
+            ctx, special_polynomial(ctx, mid, p, 9, false), special_polynomial(ctx, mid, q, 8, true)
+        )
+    );
+    PolyUOp *tail = poly_uop_sub(
+        ctx,
+        poly_uop_log(
+            ctx, poly_uop_div(
+                     ctx, special_polynomial(ctx, inverse, reverse_r, 6, false),
+                     special_polynomial(ctx, inverse, reverse_s, 7, false)
+                 )
+        ),
+        poly_uop_log(ctx, a)
+    );
+    return poly_uop_where(ctx, small, center, tail);
+  }
+  return poly_uop_where(
       ctx, small,
       poly_uop_div(
           ctx, special_polynomial(ctx, a, p, 9, false), special_polynomial(ctx, a, q, 8, true)
@@ -280,6 +306,15 @@ static PolyUOp *erfc_tail(PolyCtx *ctx, PolyUOp *a) {
           ctx, special_polynomial(ctx, a, r, 6, false), special_polynomial(ctx, a, s, 6, true)
       )
   );
+}
+
+static PolyUOp *erfc_tail(PolyCtx *ctx, PolyUOp *a) {
+  PolyDType dt = a->dtype;
+  /* erfc(28) is below the smallest F64 subnormal. Bound inactive branches
+   * before evaluation, including infinity, to keep their VJPs finite. */
+  PolyUOp *underflow = poly_uop_gt(ctx, a, cdt(ctx, dt, 28));
+  a = poly_uop_where(ctx, underflow, cdt(ctx, dt, 28), a);
+  PolyUOp *ratio = erfc_tail_factor(ctx, a, false);
   PolyUOp *tail = poly_uop_mul(
       ctx, ratio, poly_uop_exp(ctx, poly_uop_elementwise_neg(ctx, poly_uop_mul(ctx, a, a)))
   );
@@ -668,6 +703,29 @@ PolyUOp *poly_uop_erfc(PolyCtx *ctx, PolyUOp *x) {
   return poly_uop_cast(
       ctx, poly_uop_where(ctx, small, poly_uop_sub(ctx, cdt(ctx, dt, 1), center), tail), result
   );
+}
+
+PolyUOp *poly_uop_log_ndtr(PolyCtx *ctx, PolyUOp *x) {
+  PolyDType result;
+  x = special_float(ctx, x, &result);
+  if (!x) return NULL;
+  PolyDType dt = x->dtype;
+  /* log Phi(x) = log(erfcx(-x/sqrt(2))) - x*x/2 - log(2).
+   * In the other tail use log1p(-erfc(x/sqrt(2))/2), not log(1-p).
+   * Select safe arguments before evaluation to preserve interior autograd. */
+  PolyUOp *negative = poly_uop_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, -1.4142135623730951));
+  PolyUOp *lower = poly_uop_where(ctx, negative, x, cdt(ctx, dt, -1.4142135623730951));
+  PolyUOp *a = poly_uop_mul(ctx, lower, cdt(ctx, dt, -0.70710678118654752440));
+  PolyUOp *square = poly_uop_mul(ctx, poly_uop_mul(ctx, lower, cdt(ctx, dt, 0.5)), lower);
+  PolyUOp *tail = poly_uop_sub(
+      ctx, poly_uop_sub(ctx, erfc_tail_factor(ctx, a, true), square),
+      cdt(ctx, dt, 0.69314718055994530942)
+  );
+  PolyUOp *upper = poly_uop_where(ctx, negative, cdt(ctx, dt, 0), x);
+  PolyUOp *probability =
+      poly_uop_erfc(ctx, poly_uop_mul(ctx, upper, cdt(ctx, dt, 0.70710678118654752440)));
+  PolyUOp *regular = poly_uop_log1p(ctx, poly_uop_mul(ctx, probability, cdt(ctx, dt, -0.5)));
+  return poly_uop_cast(ctx, poly_uop_where(ctx, negative, tail, regular), result);
 }
 
 /* Keep centered q and tail probability separate. Forming 2*p-1 loses small

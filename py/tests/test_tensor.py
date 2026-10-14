@@ -17,6 +17,26 @@ from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])
+def test_log_ndtr_tails_and_derivatives(dtype):
+    with Runtime(device='CPU') as rt:
+        values = np.array([-100, -40, -10, -2, 0, 2, 8, 10], dtype=dtype)
+        expected = [-5005.524208694205, -804.6084420137539, -53.23128515051248,
+                    -3.7831843336820317, -0.6931471805599453, -0.023012909328963486,
+                    -6.220960574271743e-16, -7.619853024160473e-24]
+        x = rt.Tensor(values).realize()
+        y = x.log_ndtr()
+        np.testing.assert_allclose(y.numpy(), expected, rtol=5e-6 if dtype == 'float32' else 2e-13, atol=0)
+        center = rt.Tensor(np.array([0], dtype=dtype)).realize()
+        d1, = center.log_ndtr().sum().gradient(center)
+        d2, = d1.sum().gradient(center)
+        tol = 5e-6 if dtype == 'float32' else 2e-13
+        np.testing.assert_allclose(d1.numpy(), [math.sqrt(2 / math.pi)], rtol=tol)
+        np.testing.assert_allclose(d2.numpy(), [-2 / math.pi], rtol=tol)
+        special = rt.Tensor(np.array([-np.inf, np.inf, np.nan], dtype=dtype)).log_ndtr().numpy()
+        assert special[0] == -np.inf and special[1] == 0 and np.isnan(special[2])
+
+
+@pytest.mark.parametrize('dtype', ['float32', 'float64'])
 def test_core_probability_special_functions(dtype):
     # Public methods must use the same composition as direct C graph callers.
     with Runtime(device='CPU') as rt:
