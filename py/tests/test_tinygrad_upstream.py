@@ -256,7 +256,8 @@ def test_reference_reuse_is_hash_locked_and_never_reuses_polygrad(tmp_path):
         upstream.reuse_reference_runs(path, sha, lock, ['test/a.py'])
 
 
-def test_reference_lock_tracks_dependency_tool_and_environment_inputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize('env_key', ['PATH', 'LD_LIBRARY_PATH'])
+def test_reference_lock_tracks_dependency_tool_and_environment_inputs(tmp_path, monkeypatch, env_key):
     from types import SimpleNamespace
     dependency = tmp_path / 'dependency.py'
     dependency.write_text('original')
@@ -279,8 +280,34 @@ def test_reference_lock_tracks_dependency_tool_and_environment_inputs(tmp_path, 
         path.write_text('changed')
         assert get_lock() != original
         path.write_text(content)
-    monkeypatch.setenv('LD_LIBRARY_PATH', '/changed')
+    monkeypatch.setenv(env_key, '/changed')
     assert get_lock() != original
+
+
+def test_worker_preserves_explicit_toolchain_path_not_ambient_cc(tmp_path, monkeypatch):
+    # Select clang through PATH, which the reference lock records. Ambient CC
+    # is intentionally excluded from the isolated worker environment.
+    selected_path = '/explicit/toolchain/bin:/usr/bin'
+    monkeypatch.setenv('PATH', selected_path)
+    monkeypatch.setenv('CC', '/unrecorded/compiler')
+    environments = []
+
+    def launch(command, **kwargs):
+        environments.append(kwargs['env'])
+        request = json.loads(Path(command[-1]).read_text())
+        Path(request['result']).write_text(json.dumps({'exit_code': 0, 'tests': {}}))
+        Path(request['events']).write_text('')
+        return SimpleNamespace(wait=lambda timeout: 0)
+
+    monkeypatch.setattr(upstream.subprocess, 'Popen', launch)
+    for engine in ('tinygrad', 'polygrad'):
+        result = upstream.run_one(tmp_path, engine, 'test/backend/test_dtype.py',
+                                  tmp_path, tmp_path / 'libpolygrad.so', 10)
+        assert result['exit_code'] == 0
+    assert len(environments) == 2
+    for env in environments:
+        assert env['PATH'] == selected_path
+        assert 'CC' not in env
 
 
 @pytest.mark.parametrize('error', ['crash', 'collection', 'missing_lock', 'transitive'])
