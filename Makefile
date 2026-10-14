@@ -190,6 +190,7 @@ test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.runtime_copy_accepts_empty_storage
 	$(SAN_RUN) $(NODE) $< --require-no-skips binding_publication
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.interp_scalar_params_use_numeric_bindings
+	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.interp_scalar_params_round_only_at_consumers
 	$(SAN_RUN) $(NODE) $< --require-no-skips schedule_runtime.jit_input_scalar_substitution_failure_is_not_capture
 	$(SAN_RUN) $(NODE) $< --require-no-skips sym.owner_uint64_derived_bounds_use_full_source_domain
 	$(SAN_RUN) $(NODE) $< --require-no-skips sym.owner_exact_interval_allocation_failure_cleans_up

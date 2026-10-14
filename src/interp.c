@@ -835,13 +835,15 @@ static int interp_region(
     case POLY_OP_PARAM: {
       int arg_index = param_arg_indices[i];
       if (arg_index >= 0 && arg_index < n_args && args[arg_index]) {
-        /* PythonProgram consumes numeric pvals. The host binding is int64,
-         * regardless of the PARAM's computational dtype or storage width. */
-        vals[i] = iv_scalar(
-            poly_uop_is_alu_param(u)
-                ? cast_lane(il_int(*(int64_t *)args[arg_index]), POLY_INT64, u->dtype)
-                : il_ptr(args[arg_index])
-        );
+        /* PythonProgram loads numeric pvals, not dtype-sized storage. Select
+         * the lane's numeric domain without rounding to the declared width;
+         * CAST/ALU/STORE apply that width when they consume the value. */
+        InterpLane value = il_ptr(args[arg_index]);
+        if (poly_uop_is_alu_param(u)) {
+          int64_t binding = *(int64_t *)args[arg_index];
+          value = poly_dtype_is_float(u->dtype) ? il_flt((double)binding) : il_int(binding);
+        }
+        vals[i] = iv_scalar(value);
         iv_fixup(&vals[i]);
       } else {
         fprintf(

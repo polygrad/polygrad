@@ -5,6 +5,8 @@
 #include <limits.h>
 
 #include "../src/ctx.h"
+#include "../src/arena.h"
+#include "../src/interp.h"
 #include "../src/ir.h"
 #include "../src/device.h"
 #include "../src/engine/jit.h"
@@ -858,6 +860,86 @@ TEST(schedule_runtime, interp_scalar_params_use_numeric_bindings) {
       poly_time_call_finish(ctx, &runner, POLY_DEVICE_INTERP);
     }
     poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(schedule_runtime, interp_scalar_params_round_only_at_consumers) {
+  /* Pinned PythonProgram loads numeric pvals unchanged; CAST, not PARAM,
+   * applies the destination width. Keep both paths in the same regression. */
+  struct {
+    PolyDType dtype;
+    int64_t input;
+    int64_t casted;
+  } cases[] = {
+      {POLY_FLOAT32, -16777217, -16777216},
+      {POLY_FLOAT32, 16777217, 16777216},
+      {POLY_FLOAT16, -2049, -2048},
+      {POLY_FLOAT16, 2049, 2048},
+      {POLY_FLOAT16, 65505, 65504},
+      {POLY_BFLOAT16, -257, -256},
+      {POLY_BFLOAT16, 257, 256},
+      {POLY_BFLOAT16, 65537, 65536},
+      {POLY_INT8, -129, 127},
+      {POLY_INT8, 128, -128},
+      {POLY_INT8, 257, 1},
+      {POLY_UINT8, 256, 0},
+      {POLY_UINT8, 257, 1},
+      {POLY_INT64, -INT64_C(9007199254740993), -INT64_C(9007199254740993)},
+      {POLY_INT64, INT64_C(9007199254740993), INT64_C(9007199254740993)},
+  };
+  bool correct = true;
+  for (size_t c = 0; c < sizeof(cases) / sizeof(*cases); c++) {
+    for (int explicit_cast = 0; explicit_cast < 2; explicit_cast++) {
+      PolyCtx *ctx = poly_ctx_new();
+      bool integer_output = poly_dtype_eq(cases[c].dtype, POLY_INT64);
+      PolyDType output_dtype = integer_output ? POLY_INT64 : POLY_FLOAT64;
+      PolyUOp *out = poly_test_program_param(ctx, output_dtype, 1, 0);
+      PolyParamArg arg = {
+          .slot = 1,
+          .addrspace = POLY_ADDR_ALU,
+          .name = "scalar",
+          .has_minmax = true,
+          .min_val = poly_arg_int(INT64_MIN + 1),
+          .max_val = poly_arg_int(INT64_MAX)};
+      PolyUOp *param = poly_uop0(ctx, POLY_OP_PARAM, cases[c].dtype, poly_arg_param(&arg));
+      PolyUOp *zero = poly_uop_const_int(ctx, 0);
+      PolyUOp *index = poly_uop_index(ctx, out, &zero, 1);
+      PolyUOp *linear[8] = {out, param, zero, index};
+      int n = 4;
+      PolyUOp *value = param;
+      if (explicit_cast) {
+        value = poly_uop1(ctx, POLY_OP_CAST, cases[c].dtype, value, poly_arg_none());
+        linear[n++] = value;
+      }
+      value = poly_uop1(ctx, POLY_OP_CAST, output_dtype, value, poly_arg_none());
+      linear[n++] = value;
+      linear[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, value, poly_arg_none());
+      size_t arena_used = ctx->arena->total_used;
+      for (int repeat = 0; repeat < 128; repeat++) {
+        union {
+          int64_t i;
+          double f;
+        } output = {0};
+        int64_t binding = cases[c].input;
+        void *args[] = {&output, &binding};
+        int rc = poly_interp_eval(ctx, linear, n, args, 2);
+        int64_t expected = explicit_cast ? cases[c].casted : cases[c].input;
+        bool matches = integer_output ? output.i == expected : output.f == (double)expected;
+        if (rc || !matches) {
+          fprintf(
+              stderr, "scalar dtype=%s input=%lld cast=%d rc=%d got=%.17g expected=%lld\n",
+              cases[c].dtype.name, (long long)binding, explicit_cast, rc,
+              integer_output ? (double)output.i : output.f, (long long)expected
+          );
+          correct = false;
+          break;
+        }
+      }
+      correct &= ctx->arena->total_used == arena_used;
+      poly_ctx_destroy(ctx);
+    }
   }
   ASSERT_TRUE(correct);
   PASS();

@@ -21,8 +21,8 @@ extern "C" {
  *
  * lin/n_lin: linearized UOps (output of poly_linearize, includes
  *            full_rewrite_to_sink decompositions).
- * args:      buffer pointers, indexed by PARAM arg.i, followed by
- *            int32_t* pointers for ALU PARAMs (numeric values, not raw bits).
+ * args:      buffer pointers in PARAM occurrence order, followed by
+ *            int64_t* pointers for ALU PARAMs (numeric values, not raw bits).
  * n_args:    total number of args (buffer params + var params).
  *
  * Returns 0 on success, <0 on error.
