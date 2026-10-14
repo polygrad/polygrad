@@ -3931,6 +3931,27 @@ TEST(codegen, render_missing_operands_fail_closed) {
   PASS();
 }
 
+TEST(codegen, clang_rejects_unlowered_bf16_arithmetic) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(-2.0));
+  PolyUOp *cases[] = {
+      poly_uop2(ctx, POLY_OP_ADD, POLY_BFLOAT16, a, b, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, b, poly_arg_none()),
+      poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, a, poly_arg_none()),
+  };
+  bool rejected = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    PolyUOp *linear[] = {a, b, cases[i]};
+    char *source = poly_render_c(ctx, linear, 3, "unlowered_bf16");
+    rejected &= source == NULL;
+    free(source);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+  PASS();
+}
+
 TEST(codegen, render_sparse_param_slots_use_compact_call_abi) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -4994,6 +5015,36 @@ TEST(codegen, webgpu_keeps_reciprocal_without_fdiv_like_pinned_wgsl) {
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_FDIV), 0);
 
   free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, clang_bf16_roundtrip_keeps_rounding_before_render) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *in = program_param(ctx, POLY_FLOAT32, 1, 1);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, zero, poly_arg_none());
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
+  PolyUOp *value = poly_uop_cast(ctx, poly_uop_cast(ctx, load, POLY_BFLOAT16), POLY_FLOAT32);
+  PolyUOp *sink = poly_uop_sink1(
+      ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, value, poly_arg_none())
+  );
+  PolyRewriteOpts opts = {
+      .caps = poly_c_renderer_caps(),
+      .device = POLY_DEVICE_CPU,
+      .extra_matcher = poly_clang_renderer_extra_matcher(),
+  };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  ASSERT_NOT_NULL(rewritten);
+  int n = 0, shifts = 0;
+  PolyUOp **topo = poly_uop_toposort_alloc(ctx, rewritten, &n);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n; i++)
+    shifts += topo[i]->op == POLY_OP_SHR;
+  poly_uop_toposort_free(topo);
+  ASSERT_TRUE(shifts > 0); /* A float->BF16->float cast is not an identity. */
   poly_ctx_destroy(ctx);
   PASS();
 }

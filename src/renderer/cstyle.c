@@ -126,6 +126,11 @@ static void smap_destroy(StrMap *m) {
 PolyRendererCaps poly_c_renderer_caps(void) {
   bool has_threads = poly_getenv_flag_default("THREADS", true);
   int threads = has_threads ? poly_cpu_thread_count() : 0;
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__) || defined(__arm__)
+  bool has_bf16 = true;
+#else
+  bool has_bf16 = false;
+#endif
   return (PolyRendererCaps){
       .device = "CPU",
       .has_mulacc = false,
@@ -138,9 +143,9 @@ PolyRendererCaps poly_c_renderer_caps(void) {
       .has_sin = false,
       .has_fdiv = true,
       .supports_float16 = true,
-      /* The runtime C compiler does not provide Tinygrad Clang's portable
-       * x86/arm __bf16 surface; pm_dtype_decomps lowers BF16 to float32. */
-      .supports_bfloat16 = false,
+      /* Keep BF16 until the Clang matcher rounds each operation. Storage is
+       * unsigned short, so this does not require the compiler's __bf16 type. */
+      .supports_bfloat16 = has_bf16,
       .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
@@ -566,7 +571,14 @@ static char *render_const_literal(PolyUOp *c, PolyDType dtype, bool vector_bool)
   if (!c || c->op != POLY_OP_CONST) return NULL;
   PolyDType scalar = dtype;
   char val[192];
-  if (poly_dtype_is_float(scalar)) {
+  if (poly_dtype_eq(scalar, POLY_BFLOAT16)) {
+    /* BF16 registers use raw unsigned-short storage, including accumulator
+     * initializers and vector constants. A numeric C cast would corrupt bits. */
+    double value = c->arg.kind == POLY_ARG_FLOAT  ? c->arg.f
+                   : c->arg.kind == POLY_ARG_BOOL ? c->arg.b
+                                                  : poly_arg_integer_to_double(c->arg);
+    snprintf(val, sizeof(val), "((unsigned short)0x%04xu)", poly_float_to_bf16((float)value));
+  } else if (poly_dtype_is_float(scalar)) {
     render_float_const(c->arg.f, scalar, val, sizeof(val));
   } else if (poly_dtype_is_bool(scalar)) {
     snprintf(val, sizeof(val), "%d", c->arg.b ? (vector_bool ? -1 : 1) : 0);
@@ -899,6 +911,25 @@ typedef struct {
 
 char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   if (!ctx || n < 0 || (n && !uops)) return NULL;
+  /* Raw BF16 storage is not a C arithmetic type. All arithmetic and numeric
+   * casts must have passed through the Clang BF16 lowering before rendering. */
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i];
+    if (u->op != POLY_OP_CAST && !poly_opset_has(POLY_GROUP_ALU, u->op)) continue;
+    /* CAST of a weak/bool scalar literal is encoded by render_const_literal,
+     * not emitted as a numeric C cast of raw BF16 storage. */
+    if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0]->op == POLY_OP_CONST &&
+        (poly_dtype_is_weak(u->src[0]->dtype) || poly_dtype_is_bool(u->src[0]->dtype)) &&
+        render_uop_lanes(ctx, u) == 1)
+      continue;
+    bool bf16 = render_is_bf16(u->dtype);
+    for (int j = 0; j < u->n_src; j++)
+      bf16 |= render_is_bf16(u->src[j]->dtype);
+    if (bf16) {
+      fprintf(stderr, "polygrad: C renderer received unlowered BF16 %s\n", poly_op_name(u->op));
+      return NULL;
+    }
+  }
   StrBuf decls; /* variable declarations at function scope */
   StrBuf body; /* function body with assignments */
   sb_init(&decls);

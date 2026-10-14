@@ -566,14 +566,16 @@ TEST(f16, bitcast_bf16_int16_roundtrip_e2e) {
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, second_sink, second_binds, 2), 0);
   for (int i = 0; i < 3; i++)
     ASSERT_INT_EQ(roundtrip[i], bf16_data[i]);
-  /* Pinned pm_float_decomp applies only when BF16 is unsupported. CUDA SM80+
-   * and HIP keep the native same-width BITCAST and preserve the raw words;
+  /* Pinned pm_float_decomp applies only when BF16 is unsupported. Clang CPU,
+   * CUDA SM80+ and HIP keep same-width BITCAST and preserve the raw words;
    * emulated renderers numerically convert the ordinary untagged STORE and
    * flush BF16 subnormals to signed zero
    * (uop/decompositions.py:533-562, renderer/cstyle.py:463). */
   /* Pinned PythonRenderer supports BF16 natively and its BITCAST operates on
    * the exact uint16 storage words (`ops_python.py:125`, `uop/ops.py:1199-1208`). */
-  bool native_bf16 = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
+  bool native_bf16 = (poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CPU &&
+                      poly_c_renderer_caps().supports_bfloat16) ||
+                     poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   native_bf16 |=
       poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
@@ -621,7 +623,9 @@ TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
       POLY_TEST_HOST_VIEW(bf16_out, roundtrip),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, second_sink, second_binds, 2), 0);
-  bool native_bf16 = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
+  bool native_bf16 = (poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CPU &&
+                      poly_c_renderer_caps().supports_bfloat16) ||
+                     poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   native_bf16 |=
       poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
@@ -747,7 +751,9 @@ TEST(f16, bf16_chain_matches_native_or_emulated_renderer_rounding) {
       POLY_TEST_HOST_VIEW(c, c_data), POLY_TEST_HOST_VIEW(out, out_data)};
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 4), 0);
   PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
-  bool per_op_bf16_rounding = preferred == POLY_DEVICE_HIP || preferred == POLY_DEVICE_INTERP;
+  bool per_op_bf16_rounding =
+      (preferred == POLY_DEVICE_CPU && poly_c_renderer_caps().supports_bfloat16) ||
+      preferred == POLY_DEVICE_HIP || preferred == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   per_op_bf16_rounding |= preferred == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
 #endif

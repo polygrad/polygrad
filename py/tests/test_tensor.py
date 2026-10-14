@@ -16,8 +16,10 @@ from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp, _dispose_uops_for_ctx
 
 
-def test_interp_floating_rounding_at_cast_alu_and_storage():
-    with Runtime(device='INTERP') as rt:
+@pytest.mark.parametrize('device', ['CPU', 'INTERP'])
+@pytest.mark.parametrize('noopt', [0, 1])
+def test_floating_rounding_at_cast_alu_and_storage(device, noopt):
+    with Context(NOOPT=noopt), Runtime(device=device) as rt:
         x = rt.Tensor([1.005859375, 1.00390625, 1.01171875, -1.005859375]).realize()
         expected = [1.0078125, 1., 1.015625, -1.0078125]
         np.testing.assert_array_equal(x.cast(dtypes.bfloat16).cast(dtypes.float32).numpy(), expected)
@@ -28,6 +30,71 @@ def test_interp_floating_rounding_at_cast_alu_and_storage():
         np.testing.assert_array_equal((a + b).cast(dtypes.float32).numpy(), [1.0078125, 1.015625])
         wide = rt.Tensor([16777217.], dtype=dtypes.float64).realize()
         np.testing.assert_array_equal(wide.cast(dtypes.float32).cast(dtypes.float64).numpy(), [16777216.])
+
+
+@pytest.mark.parametrize('noopt', [0, 1])
+@pytest.mark.parametrize('size', [1, 4, 17])
+def test_cpu_bfloat16_rounds_between_operations(size, noopt):
+    # ClangRenderer rounds each BF16 ALU result, not just stores. Keep sources
+    # realized so constant folding cannot supply the expected rounding.
+    with Context(NOOPT=noopt), Runtime(device='CPU') as rt:
+        a = rt.Tensor([1.] * size, dtype=dtypes.bfloat16).realize()
+        b = rt.Tensor([1 / 256] * size, dtype=dtypes.bfloat16).realize()
+        c = rt.Tensor([1 / 256] * size, dtype=dtypes.bfloat16).realize()
+        # Both compilers simplify (a+b)+b into a+2*b; distinct buffers keep
+        # this a two-addition regression rather than testing reassociation.
+        np.testing.assert_array_equal(((a + b) + c).float().numpy(), [1.] * size)
+        np.testing.assert_array_equal(((a + b) > a).numpy(), [False] * size)
+        np.testing.assert_array_equal((a + b).bitcast(dtypes.uint16).numpy(), [0x3f80] * size)
+
+
+@pytest.mark.parametrize('noopt', [0, 1])
+def test_cpu_bfloat16_constants_specials_and_reductions(noopt):
+    with Context(NOOPT=noopt), Runtime(device='CPU') as rt:
+        raw = np.array([0, 0x8000, 1, 0x8001, 0x3f80, 0xbf80, 0x7f80, 0xff80, 0x7fc1], dtype=np.uint16)
+        x = rt.Tensor(raw).realize().bitcast(dtypes.bfloat16).realize()
+        np.testing.assert_array_equal(x.bitcast(dtypes.uint16).numpy(), raw)
+        expected = (raw.astype(np.uint32) << 16).view(np.float32)
+        np.testing.assert_equal(x.float().numpy(), expected)
+        # Constants and masked values must carry raw BF16 bits, including -0.
+        gate = rt.Tensor([True, False] * 4 + [True]).realize()
+        for value in (1., -2., -0., np.inf, -np.inf, np.nan):
+            constant = rt.Tensor.full((9,), float(value), dtype=dtypes.bfloat16)
+            out = gate.where(constant, x).float().numpy()
+            np.testing.assert_equal(out, np.where([True, False] * 4 + [True], value, expected))
+        y = rt.Tensor([[1., -2., 3., -4.], [5., -6., 7., -8.]], dtype=dtypes.bfloat16).realize()
+        np.testing.assert_array_equal(y.max(axis=1).float().numpy(), [3., 7.])
+        np.testing.assert_array_equal(y.min(axis=1).float().numpy(), [-4., -8.])
+        np.testing.assert_array_equal(y.sum(axis=1).float().numpy(), [-2., -2.])
+
+
+@pytest.mark.parametrize('noopt', [0, 1])
+def test_cpu_bfloat16_math_casts_matmul_softmax(noopt):
+    # Exact pinned v0.14 Clang CPU results, including intermediate BF16 rounding.
+    with Context(NOOPT=noopt), Runtime(device='CPU') as rt:
+        x = rt.Tensor([.125, .5, 1., 1.5, 3.], dtype=dtypes.bfloat16).realize()
+        expected = {
+            'exp': [1.1328125, 1.6484375, 2.71875, 4.46875, 20.125],
+            'log': [-2.078125, -.69140625, 0., .404296875, 1.09375],
+            'sqrt': [.353515625, .70703125, 1., 1.2265625, 1.734375],
+            'sin': [.12451171875, .478515625, .83984375, .99609375, .1416015625],
+        }
+        for name, values in expected.items():
+            np.testing.assert_array_equal(getattr(x, name)().float().numpy(), values)
+        for dtype in (dtypes.int32, dtypes.float16, dtypes.float64):
+            values = [257, -259, 1027] if dtype == dtypes.int32 else [1.005859375, -1.01171875, .125]
+            expected_cast = [256., -260., 1024.] if dtype == dtypes.int32 else [1.0078125, -1.015625, .125]
+            source = rt.Tensor(values, dtype=dtype).realize()
+            np.testing.assert_array_equal(source.cast(dtypes.bfloat16).float().numpy(), expected_cast)
+        a = rt.Tensor(np.arange(15, dtype=np.float32).reshape(3, 5) / 16, dtype=dtypes.bfloat16).realize()
+        b = rt.Tensor(np.arange(20, dtype=np.float32).reshape(5, 4) / 32, dtype=dtypes.bfloat16).realize()
+        np.testing.assert_array_equal((a @ b).float().numpy(), [
+            [.234375, .25390625, .2734375, .29296875],
+            [.625, .6953125, .76171875, .828125],
+            [1.015625, 1.1328125, 1.25, 1.3671875],
+        ])
+        np.testing.assert_array_equal(a.softmax().float().numpy(),
+                                      [[.1748046875, .1865234375, .19921875, .2109375, .2255859375]] * 3)
 
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])
