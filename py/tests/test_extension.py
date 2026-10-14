@@ -8,6 +8,48 @@ from polygrad import create
 LIB = Path(__file__).resolve().parents[2] / "build/extension/author.so"
 
 
+@pytest.mark.parametrize('dtype', ['float32', 'float64'])
+@pytest.mark.parametrize('kind,x,value,gradient', [
+    (5, 8., 1.1224297172982928e-29, -1.8097067968559843e-28),
+    (6, 0., 0., .886226925452758),
+    (7, .5, 0., 2.5066282746310005),
+    (8, 6., 1.7061176684318005, .1813229557371153),
+    (9, 3.2, .8854048271549091, .9988388912865996),
+    (10, -12., -75.4106730015688, 12.0822141752545),
+])
+def test_extension_probability_model(kind, x, value, gradient, dtype):
+    with create(device='CPU', logical='always') as rt:
+        author = rt.load_extension(LIB)
+        input = rt.Tensor.empty(1, dtype=dtype).copy_from(np.array([x], dtype=dtype))
+        outputs = []
+        model = restored = None
+        try:
+            outputs = author.build([input, input, input], [kind])
+            names = {'value': outputs[0], 'gradient': outputs[1]}
+            if kind == 9:
+                second, = outputs[1].sum().gradient(input)
+                outputs.append(second)
+                names['second'] = second
+            model = rt.Model.from_tensors(inputs={'x': input}, outputs=names)
+            restored = rt.Model.load(model.save())
+            author.dispose()
+            for m in (model, restored):
+                result = m.call('forward', {'x': np.array([x], dtype=dtype)})
+                tolerance = 4e-5 if dtype == 'float32' else 2e-10
+                for name, expected in [('value', value), ('gradient', gradient)]:
+                    np.testing.assert_allclose(result[name], [expected], rtol=tolerance,
+                                               atol=0 if expected else tolerance)
+                if kind == 9:
+                    np.testing.assert_allclose(result['second'], [.3663211907314008],
+                                               rtol=tolerance, atol=0)
+        finally:
+            if restored: restored.dispose()
+            if model: model.dispose()
+            for output in outputs: output.dispose()
+            input.dispose()
+            author.dispose()
+
+
 def test_extension_bind_checks_contract_and_every_import():
     import ctypes as c
     from polygrad import _ffi

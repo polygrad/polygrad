@@ -22,6 +22,37 @@ int extension_density(PolyCtx *ctx, PolyTensor **inputs, int kind, PolyTensor **
     owned[count] = (expr);                                                                         \
     if (!owned[count++]) goto done;                                                                \
   } while (0)
+  if (kind >= 5) {
+    /* Import the shared functions, not copies of their mathematical formulas. */
+    switch (kind) {
+    case 5:
+      OWN(poly_tensor_erfc(ctx, inputs[0]));
+      break;
+    case 6:
+      OWN(poly_tensor_erfinv(ctx, inputs[0]));
+      break;
+    case 7:
+      OWN(poly_tensor_ndtri(ctx, inputs[0]));
+      break;
+    case 8:
+      OWN(poly_tensor_digamma(ctx, inputs[0]));
+      break;
+    case 9:
+      OWN(poly_tensor_lgamma(ctx, inputs[0]));
+      break;
+    case 10:
+      OWN(poly_tensor_log_ndtr(ctx, inputs[0]));
+      break;
+    default:
+      goto done;
+    }
+    OWN(poly_tensor_sum(ctx, owned[0], &axis, 1, false));
+    OWN(poly_tensor_gradient(ctx, owned[1], inputs[0]));
+    outputs[0] = poly_tensor_retain(owned[0]);
+    outputs[1] = poly_tensor_retain(owned[2]);
+    ok = 1;
+    goto done;
+  }
   OWN(poly_tensor_alu2(ctx, POLY_OP_MUL, inputs[0], inputs[0]));
   OWN(poly_tensor_sum(ctx, owned[0], &axis, 1, false));
   OWN(poly_tensor_const_like_float(ctx, owned[1], -.5));

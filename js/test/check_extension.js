@@ -53,6 +53,37 @@ async function checkExtension(pg,source,create) {
     }
     reject(()=>author.build([theta,X,y],[2]),/construction failed/)
     equal(await theta.toArrayAsync(),[1,2,3])
+    for (const [kind, value, expected, derivative] of [
+      [5,8,1.1224297172982928e-29,-1.8097067968559843e-28],
+      [6,0,0,.886226925452758], [7,.5,0,2.5066282746310005],
+      [8,6,1.7061176684318005,.1813229557371153],
+      [9,3.2,.8854048271549091,.9988388912865996],
+      [10,-12,-75.4106730015688,12.0822141752545]
+    ]) {
+      const x=own(pg.Tensor.empty(1))
+      await x.copyFromAsync(new Float32Array([value]))
+      const [y,g]=author.build([x,x,x],[kind]);own(y);own(g)
+      const outputs={value:y,gradient:g}
+      if(kind===9) {
+        const sum=own(g.sum()),[second]=sum.gradient(x)
+        outputs.second=own(second)
+      }
+      const original=await pg.Model.fromTensors({inputs:{x},outputs})
+      let restored
+      try {
+        restored=pg.Model.load(await original.saveAsync())
+        for(const m of [original,restored]) {
+          const got=await m.callAsync('forward',{x:new Float32Array([value])})
+          const checks=[['value',expected],['gradient',derivative]]
+          if(kind===9)checks.push(['second',.3663211907314008])
+          for(const [name,want] of checks) {
+            const error=Math.abs(got[name][0]-want)
+            if(!Number.isFinite(error)||error>4e-5*(Math.abs(want)||1))
+              throw Error(`extension probability ${kind}/${name}: ${got[name][0]} != ${want}`)
+          }
+        }
+      } finally {if(restored)await restored.dispose();await original.dispose()}
+    }
     const arrays=author.build([theta,X,y],[4]);arrays.forEach(own)
     equal(await arrays[0].toArrayAsync(),[2,3])
     equal(await arrays[1].toArrayAsync(),[1,2,3])
@@ -97,6 +128,6 @@ async function checkExtension(pg,source,create) {
   pg.clearScheduleCache();pg.collect()
   const s=pg.stats().coreStats
   if(s.tensorRecords||s.bufferOwnedBytes)throw Error(`extension leak: ${JSON.stringify(s)}`)
-  return {gradient:'passed',checkpoint:'passed',rollback:'passed',bufferBytes:s.bufferOwnedBytes}
+  return {gradient:'passed',probability:'passed',checkpoint:'passed',rollback:'passed',bufferBytes:s.bufferOwnedBytes}
 }
 if(typeof module!=='undefined')module.exports=checkExtension
