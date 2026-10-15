@@ -213,9 +213,10 @@ async function runTensorTests(pg, createRuntime) {
   if (supportsF16) await test('upstream backports: half rounding and max gradient', isolatedRuntime(async runtime => {
     const Tensor = runtime.Tensor
     const rounded = Array.from(await new Tensor([70000, 1.0001, -70000]).cast('float16').cast('float32').toArray())
-    // Pinned software emulation clamps fused casts; mantissa rounding happens
-    // at storage. Native half instructions round at the cast itself.
-    const middle = runtime.device.toLowerCase() === 'wasm' ? Math.fround(1.0001) : 1
+    // WASM and INTERP emulate half (like pinned Python 3.11). Mantissa rounding
+    // happens at storage; the approved upstream cast backport preserves overflow.
+    const emulated = ['wasm', 'interp'].includes(runtime.device.toLowerCase())
+    const middle = emulated ? Math.fround(1.0001) : 1
     assert(rounded[0] === Infinity && rounded[1] === middle && rounded[2] === -Infinity, `half roundtrip: ${rounded}`)
     const stored = await new Tensor([1.0001]).cast('float16').contiguous().cast('float32').toArray()
     assert(stored[0] === 1, 'stored half must round on every backend')
@@ -225,8 +226,8 @@ async function runTensorTests(pg, createRuntime) {
     await x.max().backward()
     const values = await x.grad.cast('float32').toArray()
     // Test the count overflow independently of emulation's storage rounding.
-    const expected = runtime.device.toLowerCase() === 'wasm' ? Math.fround(1 / 70000) : 240 / 16777216
-    assert(values.length === 70000 && values.every(v => v === expected), 'half tie gradient')
+    const expected = emulated ? Math.fround(1 / 70000) : 240 / 16777216
+    assert(values.length === 70000 && values.every(v => v === expected), `half tie gradient: ${values[0]}, expected ${expected}`)
   }))
 
   async function testIf(cond, name, fn) {

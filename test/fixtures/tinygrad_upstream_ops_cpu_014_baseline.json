@@ -23,7 +23,7 @@
     "failure_signature": "source-path-and-message-v2",
     "python": "3.11.12 (main, Apr  9 2025, 04:04:00) [Clang 20.1.0 ]",
     "reference_commit": "6f87158d77f66a36d5f8bbe915170b24e2acabe8",
-    "runner_sha256": "6f6b3c579a64e3f25a30f33d2287c4dc6d8058c8f57cc5b9da213542d40b9845",
+    "runner_sha256": "8c737fa0ee48d216543f46b7169012084ba43a4b443ff96afe8e2d1c6b7bfbaa",
     "test_sha256": {
       "test/backend/test_ops.py": "b0b8f94a538c555d3ecc094cc7d001de157805b340671b5efa845d54e0cefaf1"
     },

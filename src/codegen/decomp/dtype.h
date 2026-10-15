@@ -11,6 +11,7 @@ typedef struct {
 
 typedef struct {
   PolyRendererCaps caps;
+  int emulated_mask;
   bool seen_long;
   uint8_t seen_fp8;
   bool seen_float16;

@@ -1281,13 +1281,19 @@ static PolyUOp *detect_dtype_decomp(PolyCtx *ctx, PolyUOp *x, const PolyBindings
   return NULL;
 }
 
+static bool dtype_needs_emulation(const PolyDTypeDecompsContext *dctx, PolyDType dtype) {
+  int id = poly_dtype_id_by_name(dtype.name);
+  return (id >= 0 && id < 31 && (dctx->emulated_mask & (1 << id))) ||
+         !poly_renderer_supports_dtype(dctx->caps, dtype);
+}
+
 static PolyUOp *do_dtype_decomps(PolyCtx *ctx, PolyUOp *sink, const PolyBindings *b) {
   (void)b;
   PolyDTypeDecompsContext *dctx = poly_graph_rewrite_userctx();
   if (!dctx || !sink || sink->op != POLY_OP_SINK) return NULL;
   PolyUOp *ret = sink;
   unsigned char long_ctx = 0;
-  if (dctx->seen_long && !poly_renderer_supports_dtype(dctx->caps, POLY_INT64))
+  if (dctx->seen_long && dtype_needs_emulation(dctx, POLY_INT64))
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_long_decomp(), &long_ctx, true);
   const PolyDType fp8s[] = {
       POLY_FP8E4M3,
@@ -1296,17 +1302,16 @@ static PolyUOp *do_dtype_decomps(PolyCtx *ctx, PolyUOp *sink, const PolyBindings
       POLY_FP8E5M2FNUZ,
   };
   for (int i = 0; ret && i < 4; i++) {
-    if (!(dctx->seen_fp8 & (1u << i)) || poly_renderer_supports_dtype(dctx->caps, fp8s[i]))
-      continue;
+    if (!(dctx->seen_fp8 & (1u << i)) || !dtype_needs_emulation(dctx, fp8s[i])) continue;
     /* Upstream 988651638: half loses the smallest e5m2fnuz normals. */
     PolyFloatDecompContext float_ctx = {.from = fp8s[i], .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
-  if (ret && dctx->seen_float16 && !poly_renderer_supports_dtype(dctx->caps, POLY_FLOAT16)) {
+  if (ret && dctx->seen_float16 && dtype_needs_emulation(dctx, POLY_FLOAT16)) {
     PolyFloatDecompContext float_ctx = {.from = POLY_FLOAT16, .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }
-  if (ret && dctx->seen_bfloat16 && !poly_renderer_supports_dtype(dctx->caps, POLY_BFLOAT16)) {
+  if (ret && dctx->seen_bfloat16 && dtype_needs_emulation(dctx, POLY_BFLOAT16)) {
     PolyFloatDecompContext float_ctx = {.from = POLY_BFLOAT16, .to = POLY_FLOAT32};
     ret = poly_graph_rewrite_ctx_ex(ctx, ret, poly_pm_float_decomp(), &float_ctx, true);
   }

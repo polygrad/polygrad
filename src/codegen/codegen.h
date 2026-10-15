@@ -67,6 +67,8 @@ PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 /* Default CPU/C renderer capabilities, matching tinygrad's ClangRenderer:
  * float4-capable, no local memory scheduling, no native MULACC/THREEFRY. */
 PolyRendererCaps poly_c_renderer_caps(void);
+/* Native CPU capabilities, excluding emulation; bits are public dtype IDs. */
+int poly_c_native_dtype_mask(void);
 
 /* GPU dims: replace outermost RANGE with SPECIAL thread indices.
  * Returns rewritten sink (or original if no suitable RANGE found). */

@@ -3468,6 +3468,7 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
    * THREADS/SSA and compiled target features are C renderer configuration. */
   uint32_t values[] = {
       (uint32_t)poly_get_noopt(),
+      (uint32_t)poly_get_emulated_dtypes(),
       (uint32_t) !!poly_get_beam_compare(),
       (uint32_t)poly_get_default_float(),
       (uint32_t)poly_get_default_int(),

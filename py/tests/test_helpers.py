@@ -457,3 +457,23 @@ def test_fetch_sha256_validation(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="fetch sha mismatch"):
         fetch("https://example.invalid/bad", name="bad", sha256=expected)
     assert not (tmp_path / "bad").exists()
+def test_emulated_dtypes_changes_codegen_and_restores():
+    import numpy as np
+    import polygrad as pg
+    from polygrad.helpers import Context, EMULATED_DTYPES
+
+    with pg.create(device='CPU') as rt:
+        x = rt.Tensor([1.005859375], dtype='float32').realize()
+        def evaluate():
+            return (x.cast(pg.dtypes.bfloat16).float() - x).numpy()
+        with Context(EMULATED_DTYPES=''):
+            native = evaluate()
+            np.testing.assert_array_equal(native, [0.001953125])
+            with Context(EMULATED_DTYPES='bfloat16'):
+                assert EMULATED_DTYPES.tolist(pg.dtypes) == [pg.dtypes.bfloat16]
+                np.testing.assert_array_equal(evaluate(), [0.0])
+            np.testing.assert_array_equal(evaluate(), native)
+            with pytest.raises(ValueError, match='emulated dtype'):
+                with Context(EMULATED_DTYPES='float32'):
+                    pass
+            assert EMULATED_DTYPES.value == ''

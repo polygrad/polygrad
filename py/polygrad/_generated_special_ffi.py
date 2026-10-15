@@ -50,6 +50,10 @@ def bind(lib, types, only=None):
         fn = lib.poly_buffer_write
         fn.restype = ctypes.c_int
         fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    if only is None or only == 'poly_c_native_dtype_mask':
+        fn = lib.poly_c_native_dtype_mask
+        fn.restype = ctypes.c_int
+        fn.argtypes = []
     if only is None or only == 'poly_can_run_op':
         fn = lib.poly_can_run_op
         fn.restype = ctypes.c_int
@@ -154,6 +158,10 @@ def bind(lib, types, only=None):
         fn.argtypes = []
     if only is None or only == 'poly_get_default_int':
         fn = lib.poly_get_default_int
+        fn.restype = ctypes.c_int
+        fn.argtypes = []
+    if only is None or only == 'poly_get_emulated_dtypes':
+        fn = lib.poly_get_emulated_dtypes
         fn.restype = ctypes.c_int
         fn.argtypes = []
     if only is None or only == 'poly_get_ignore_beam_cache':
@@ -558,6 +566,10 @@ def bind(lib, types, only=None):
         fn.argtypes = [ctypes.c_int]
     if only is None or only == 'poly_set_default_int':
         fn = lib.poly_set_default_int
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_int]
+    if only is None or only == 'poly_set_emulated_dtypes':
+        fn = lib.poly_set_emulated_dtypes
         fn.restype = ctypes.c_int
         fn.argtypes = [ctypes.c_int]
     if only is None or only == 'poly_set_frontend_buffer_release':

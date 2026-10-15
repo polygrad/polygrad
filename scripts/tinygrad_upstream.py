@@ -40,6 +40,12 @@ CPU_NN_SHA256 = {
     'test/backend/test_optim.py': '1b6a8537c1c826ee5500cca1134a6a4a61dc302b2a3440393d64fc163370faa6',
 }
 NN_HELPERS_SHA256 = 'cfe8184a8d5349030a74bfc3322823574ea060713f71685524d6f6b9fbf98366'
+DTYPE_SOURCES = {
+    'test/backend/test_dtype.py': '77b5a7effde80fab29f13fe608ecca7dc20cf16420729a82d9ab6e03bc2d8e9e',
+    'test/unit/test_dtype_spec.py': '798ffbd00ff6d90e6eec57c6591e1a74eaccbc33d15f4c7de97a1ff5069db1d5',
+    'test/helpers.py': NN_HELPERS_SHA256,
+    'tinygrad/dtype.py': '78e4ddbbaa5630013f459001415ea6649bd882cf64d5957b5fa9e11d67232ee4',
+}
 ENVIRONMENT = {
     "DEV": "CPU", "CACHELEVEL": "0", "DEBUG": "0",
     "FORWARD_ONLY": "0", "TINY_BACKEND": "0", "SKIP_SLOW_TEST": "0", "IMAGE": "0",
@@ -143,6 +149,53 @@ def adapt_cpu_ops(source):
 def check_cpu_ops_mode(device, renderer, interface, image):
     if (device, renderer, interface, image) != ('CPU', '', '', 0):
         raise ValueError('CPU ops adapter requires DEV=CPU, no renderer/interface override, IMAGE=0')
+
+
+def adapt_cpu_dtype(source, reference=REFERENCE):
+    """Extract locked scalar oracles, not runtime code; keep every test body.
+
+    PTX/NIR isinstance predicates are false in this explicit Clang CPU lane.
+    Polygrad queries native C capabilities, not can_run (which includes emulation).
+    EMULATED_DTYPES remains the real provider's compiler setting.
+    """
+    sources = {path: (reference / path).read_text(encoding='utf-8') for path in DTYPE_SOURCES}
+    if (source != sources['test/backend/test_dtype.py'] or any(
+            hashlib.sha256(text.encode()).hexdigest() != DTYPE_SOURCES[path] for path, text in sources.items())):
+        raise ValueError('CPU dtype adapter source lock mismatch; review the upstream change')
+
+    def extract(path, names):
+        found = {}
+        for node in ast.parse(sources[path]).body:
+            keys = ([node.name] if isinstance(node, ast.FunctionDef) else
+                    [n.id for n in node.targets if isinstance(n, ast.Name)] if isinstance(node, ast.Assign) else
+                    [node.target.id] if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) else [])
+            for name in keys:
+                if name in names: found[name] = ast.get_source_segment(sources[path], node)
+        if set(found) != set(names): raise ValueError('CPU dtype adapter missing oracle definitions')
+        return '\n\n'.join(found.values())
+
+    prelude = ('\nimport ctypes, struct\nfrom typing import Callable\n'
+               'def _native_dtypes():\n'
+               '  if not hasattr(Tensor, "_core_realize_batch"):\n'
+               '    return Device[Device.DEFAULT].renderer.supported_dtypes()\n'
+               '  from polygrad import _ffi\n'
+               '  mask = _ffi.get_lib().poly_c_native_dtype_mask()\n'
+               '  return {dt for dt in dtypes.all if mask & (1 << _ffi.get_lib().poly_dtype_id_by_name(dt.name.encode()))}\n'
+               'supported_dtypes = _native_dtypes()\n')
+    prelude += extract('tinygrad/dtype.py', {'float_to_fp16', 'float_to_bf16', '_fp8_cfg',
+                                          'float_to_fp8', 'fp8_to_float', 'truncate'}) + '\n'
+    prelude += extract('test/helpers.py', {'min_normal', 'rand_for_dtype'}) + '\n'
+    prelude += extract('test/unit/test_dtype_spec.py', {'core_dtypes', 'dtype_ints', 'dtype_floats',
+                          'FP8E4M3_MAX', 'FP8E5M2_MAX', 'FP8E4M3FNUZ_MAX', 'FP8E5M2FNUZ_MAX', '_assert_eq'}) + '\n'
+    source = source.replace('from tinygrad.dtype import DType, DTYPES_DICT, least_upper_dtype, fp8_to_float, float_to_fp8, _to_np_dtype, _to_torch_dtype, truncate',
+                            'from tinygrad.dtype import DType, DTYPES_DICT, least_upper_dtype, strong_dtype, _to_np_dtype, _to_torch_dtype')
+    source = '\n'.join('' if line.startswith(('from tinygrad.renderer.', 'from test.helpers import',
+                                              'from test.unit.test_dtype_spec import')) else line for line in source.split('\n'))
+    source = source.replace('supported_dtypes = Device[Device.DEFAULT].renderer.supported_dtypes()', prelude)
+    for predicate in ('isinstance(Device[Device.DEFAULT].renderer, (PTXRenderer, NIRRenderer))',
+                      'isinstance(Device[Device.DEFAULT].renderer, PTXRenderer)'):
+        source = source.replace(predicate, 'False')
+    return source
 
 
 def adapt_cpu_nn(source, path, helpers, reference=REFERENCE):
@@ -392,7 +445,7 @@ def child(request):
                 raise RuntimeError(f"wrong Polygrad library: {loaded}")
             result["library"] = {"path": str(loaded), "sha256": digest(loaded)}
         test, pytest_root, adapted = request['test'], reference, None
-        if request.get('adapter') in ('cpu-ops', 'cpu-nn'):
+        if request.get('adapter') in ('cpu-ops', 'cpu-nn', 'cpu-dtype'):
             if request['adapter'] == 'cpu-nn' and request['engine'] == 'polygrad':
                 helper = types.ModuleType('_polygrad_nn_schedule')
                 helper.check_schedule = polygrad_nn_check_schedule
@@ -404,6 +457,10 @@ def child(request):
                 from tinygrad.renderer.nir import NIRRenderer
                 if isinstance(tinygrad.Device["CPU"].renderer, NIRRenderer):
                     raise ValueError('CPU ops adapter cannot remove an active NIR skip')
+            if request['engine'] == 'tinygrad' and request['adapter'] == 'cpu-dtype':
+                from tinygrad.renderer.cstyle import ClangRenderer
+                if type(tinygrad.Device["CPU"].renderer) is not ClangRenderer:
+                    raise ValueError('CPU dtype adapter requires the default Clang renderer')
             original, *node = test.split('::')
             if request['adapter'] == 'cpu-ops' and original != 'test/backend/test_ops.py':
                 raise ValueError('CPU ops adapter only supports test/backend/test_ops.py')
@@ -412,6 +469,7 @@ def child(request):
             dest.parent.mkdir(parents=True, exist_ok=True)
             source = (reference / original).read_text(encoding='utf-8')
             modified = (adapt_cpu_ops(source) if request['adapter'] == 'cpu-ops' else
+                        adapt_cpu_dtype(source, reference) if request['adapter'] == 'cpu-dtype' else
                         adapt_cpu_nn(source, original, (reference / 'test/helpers.py').read_text(encoding='utf-8'), reference))
             dest.write_text(modified, encoding='utf-8')
             result['adaptation'] = {'id':request['adapter'], 'original_sha256':digest(reference / original),
@@ -644,7 +702,7 @@ def main(argv=None):
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--compare-with", type=Path, help="attach outcome delta against a previous run; not acceptance")
     parser.add_argument("--write-baseline", type=Path, help="write new candidate only; nonpasses require reviewed reasons")
-    parser.add_argument('--adapter', choices=['cpu-ops', 'cpu-nn'], help='explicit CPU-only test adaptation; default tests are unchanged')
+    parser.add_argument('--adapter', choices=['cpu-ops', 'cpu-nn', 'cpu-dtype'], help='explicit CPU-only test adaptation; default tests are unchanged')
     parser.add_argument('--logical-policy', choices=['always', 'until_realize', 'never'], help='explicit Polygrad logical-retention lane')
     parser.add_argument('--poly-device', choices=['cpu', 'interp'], help='Polygrad backend; Tinygrad control stays on CPU')
     parser.add_argument('--policy-matrix', action='store_true', help='six policy/backend lanes against reviewed outcomes, one locked reference')
@@ -679,6 +737,8 @@ def main(argv=None):
             parser.error('CPU ops adapter only supports test/backend/test_ops.py')
         if args.adapter == 'cpu-nn' and test.split('::')[0] not in CPU_NN_SHA256:
             parser.error('CPU NN adapter only supports test_nn.py and test_optim.py')
+        if args.adapter == 'cpu-dtype' and test.split('::')[0] != 'test/backend/test_dtype.py':
+            parser.error('CPU dtype adapter only supports test/backend/test_dtype.py')
     if args.write_baseline and args.write_baseline.exists():
         parser.error("refusing to overwrite a baseline; write a separate review candidate")
     output.mkdir(parents=True, exist_ok=True)

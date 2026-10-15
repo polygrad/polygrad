@@ -405,6 +405,30 @@ class _NOOPT(ContextVar):
         _ffi.get_lib().poly_set_noopt(value)
 
 
+class _EMULATED_DTYPES(ContextVar):
+    @property
+    def value(self):
+        from . import _ffi
+        mask = _ffi.get_lib().poly_get_emulated_dtypes()
+        if mask < 0:
+            raise ValueError('invalid emulated dtype configuration')
+        return ','.join(_default_dtype_name(i) for i in range(31) if mask & (1 << i))
+
+    @value.setter
+    def value(self, value):
+        from . import _ffi
+        if not isinstance(value, str):
+            raise ValueError('emulated dtypes must be comma-separated names')
+        lib, mask = _ffi.get_lib(), 0
+        for name in filter(None, value.split(',')):
+            index = lib.poly_dtype_id_by_name(name.encode())
+            if index < 0 or index >= 31:
+                raise ValueError(f'unknown emulated dtype {name!r}')
+            mask |= 1 << index
+        if lib.poly_set_emulated_dtypes(mask):
+            raise ValueError(f'unsupported emulated dtype in {value!r}')
+
+
 @functools.cache
 def _default_dtype_name(dtype_id):
     from . import _ffi
@@ -444,6 +468,7 @@ class _DEFAULT_DTYPE(ContextVar):
 DEFAULT_FLOAT = _DEFAULT_DTYPE('float', 'float32')
 DEFAULT_INT = _DEFAULT_DTYPE('int', 'int32')
 NOOPT = _NOOPT("NOOPT", 0)
+EMULATED_DTYPES = _EMULATED_DTYPES("EMULATED_DTYPES", "")
 DEV = _DEV("DEV", "")
 CHECK_OOB = _CHECK_OOB("CHECK_OOB", 0)
 IMAGE = _IMAGE("IMAGE", 0)

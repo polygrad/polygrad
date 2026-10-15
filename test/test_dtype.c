@@ -5,6 +5,21 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 
+TEST(dtype, emulation_policy_rejects_unsupported_masks) {
+  int previous = poly_get_emulated_dtypes();
+  int mask = (1 << poly_dtype_id_by_name("half")) | (1 << poly_dtype_id_by_name("long"));
+  int rc = poly_set_emulated_dtypes(mask);
+  int actual = poly_get_emulated_dtypes();
+  int invalid = poly_set_emulated_dtypes(1 << poly_dtype_id_by_name("float32"));
+  int unchanged = poly_get_emulated_dtypes();
+  poly_set_emulated_dtypes(previous);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_INT_EQ(actual, mask);
+  ASSERT_INT_EQ(invalid, -1);
+  ASSERT_INT_EQ(unchanged, mask);
+  PASS();
+}
+
 TEST(dtype, default_storage_types_follow_environment) {
   /* Run this filter in a fresh process with DEFAULT_FLOAT/DEFAULT_INT too. */
   PolyDType f = POLY_FLOAT32, i = POLY_INT32, promoted;

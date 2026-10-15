@@ -934,6 +934,13 @@ typedef enum {
 int poly_get_noopt(void);
 void poly_set_noopt(int value);
 
+/* Tinygrad EMULATED_DTYPES compilation policy. Bits use poly_dtype_by_id IDs;
+ * supported overrides are int64 (both signednesses), half, BF16 and FP8.
+ * Zero restores native capabilities. Invalid masks leave the setting unchanged.
+ * Existing PROGRAMs are unchanged; raw graphs are keyed by this policy. */
+int poly_get_emulated_dtypes(void);
+int poly_set_emulated_dtypes(int mask);
+
 /* Tinygrad helpers.BEAM; the same library/module ownership as NOOPT. */
 int poly_get_beam(void);
 void poly_set_beam(int value);

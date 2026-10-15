@@ -451,6 +451,11 @@ test-compat-tinygrad-ops: build/libpolygrad.so
 		--adapter cpu-ops --test test/backend/test_ops.py $(UPSTREAM_COMPAT_ARGS)
 
 .PHONY: test-compat-tinygrad-nn
+.PHONY: test-compat-tinygrad-dtype
+test-compat-tinygrad-dtype: build/libpolygrad.so
+	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \
+		--adapter cpu-dtype --test test/backend/test_dtype.py $(UPSTREAM_COMPAT_ARGS)
+
 UPSTREAM_NN_BASELINE ?= test/fixtures/tinygrad_upstream_nn_cpu_014_baseline.json
 test-compat-tinygrad-nn: build/libpolygrad.so
 	$(PARITY_PY) scripts/tinygrad_upstream.py --output $(UPSTREAM_COMPAT_DIR) \

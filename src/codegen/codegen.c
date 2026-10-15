@@ -90,6 +90,70 @@ void poly_set_noopt(int value) {
   compiler_setting_set(&noopt, value);
 }
 
+static CompilerSetting emulated_dtypes;
+
+static int emulatable_dtype_mask(void) {
+  const PolyDType types[] = {POLY_INT64,   POLY_FLOAT16,     POLY_BFLOAT16,   POLY_FP8E4M3,
+                             POLY_FP8E5M2, POLY_FP8E4M3FNUZ, POLY_FP8E5M2FNUZ};
+  int mask = 0;
+  for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++)
+    mask |= 1 << poly_dtype_id_by_name(types[i].name);
+  return mask;
+}
+
+int poly_set_emulated_dtypes(int mask) {
+  if (mask < 0 || (mask & ~emulatable_dtype_mask())) return -1;
+  compiler_setting_set(&emulated_dtypes, mask);
+  return 0;
+}
+
+int poly_get_emulated_dtypes(void) {
+  compiler_setting_acquire();
+  if (!emulated_dtypes.initialized) {
+    const char *names = getenv("EMULATED_DTYPES");
+    int mask = 0;
+    while (names && *names) {
+      size_t len = strcspn(names, ",");
+      if (len) {
+        char name[64];
+        if (len >= sizeof(name)) {
+          mask = -1;
+          break;
+        }
+        memcpy(name, names, len);
+        name[len] = '\0';
+        int id = poly_dtype_id_by_name(name);
+        if (id < 0 || id >= 31 || !((1 << id) & emulatable_dtype_mask())) {
+          mask = -1;
+          break;
+        }
+        mask |= 1 << id;
+      }
+      names += len;
+      if (*names) names++;
+    }
+    emulated_dtypes.value = mask;
+    emulated_dtypes.initialized = true;
+  }
+  int value = emulated_dtypes.value;
+  atomic_flag_clear_explicit(&compiler_setting_lock, memory_order_release);
+  return value;
+}
+
+int poly_c_native_dtype_mask(void) {
+  PolyRendererCaps caps = poly_c_renderer_caps();
+  int mask = 0;
+  for (int id = 1; id < poly_dtype_count() && id < 31; id++) {
+    PolyDType dt;
+    if (poly_dtype_by_id(id, &dt) && !poly_dtype_is_weak(dt) &&
+        poly_renderer_supports_dtype(caps, dt))
+      mask |= 1 << id;
+  }
+  if (poly_get_emulated_dtypes() & (1 << poly_dtype_id_by_name("long")))
+    mask &= ~(1 << poly_dtype_id_by_name("double"));
+  return mask;
+}
+
 /* helpers.BEAM: explicit frontend scopes override the environment. Native
  * contexts share this policy; each Wasm module has independent C storage. */
 static CompilerSetting beam;
@@ -2813,6 +2877,7 @@ static bool beam_cache_key(
       poly_getenv_flag_default("BEAM_ESTIMATE", true),
       poly_get_beam_compare() ? (webgpu_compare ? 4 : 3) : 0,
       poly_get_noopt(),
+      poly_get_emulated_dtypes(),
       opts.opt_policy,
       beam_device(opts),
       c.has_mulacc,
@@ -6738,6 +6803,11 @@ static bool device_is_gpu(int device) {
 }
 
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts) {
+  int emulated_mask = poly_get_emulated_dtypes();
+  if (emulated_mask < 0) {
+    fprintf(stderr, "polygrad: invalid EMULATED_DTYPES configuration\n");
+    return NULL;
+  }
   /*
    * Unified pipeline matching tinygrad codegen/__init__.py full_rewrite_to_sink.
    * Backend-specific behavior is controlled by renderer config fields in opts,
@@ -6992,7 +7062,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   PolyPatternMatcher *dtype_and_weak =
       poly_pm_concat(poly_pm_dtype_decomps(), poly_pm_commit_weak());
   if (!dtype_and_weak) return NULL;
-  PolyDTypeDecompsContext dtype_ctx = {.caps = opts.caps};
+  PolyDTypeDecompsContext dtype_ctx = {.caps = opts.caps, .emulated_mask = emulated_mask};
   sink = poly_graph_rewrite_ctx(ctx, sink, dtype_and_weak, &dtype_ctx);
   poly_pm_destroy(dtype_and_weak);
   poly_debug_stage_graph(ctx, "decomp dtypes", sink);

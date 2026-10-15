@@ -416,6 +416,21 @@ def test_cpu_ops_adapter_preserves_all_test_bodies_and_is_hash_locked():
         upstream.adapt_cpu_ops(source + '\n')
 
 
+def test_cpu_dtype_adapter_preserves_assertions_and_forced_emulation():
+    import ast
+    source = (upstream.REFERENCE / 'test/backend/test_dtype.py').read_text()
+    adapted = upstream.adapt_cpu_dtype(source)
+    methods = lambda text: {n.name: ast.dump(ast.Module(body=n.body, type_ignores=[]))
+                           for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef)}
+    before, after = methods(source), methods(adapted)
+    assert all(after[name] == body for name, body in before.items())
+    assert adapted.count('Context(EMULATED_DTYPES=') == source.count('Context(EMULATED_DTYPES=') == 6
+    assert 'poly_c_native_dtype_mask' in adapted
+    assert 'PTXRenderer' not in adapted and 'NIRRenderer' not in adapted
+    with pytest.raises(ValueError, match='source lock'):
+        upstream.adapt_cpu_dtype(source + '\n')
+
+
 def test_cpu_ops_environment_uses_numeric_disabled_modes():
     # test_ops reads TINY_BACKEND with getenv's integer default, not a string.
     assert int(upstream.ENVIRONMENT['TINY_BACKEND']) == 0

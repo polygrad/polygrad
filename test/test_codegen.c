@@ -5045,6 +5045,18 @@ TEST(codegen, clang_bf16_roundtrip_keeps_rounding_before_render) {
     shifts += topo[i]->op == POLY_OP_SHR;
   poly_uop_toposort_free(topo);
   ASSERT_TRUE(shifts > 0); /* A float->BF16->float cast is not an identity. */
+  int previous = poly_get_emulated_dtypes();
+  ASSERT_INT_EQ(poly_set_emulated_dtypes(1 << poly_dtype_id_by_name("bfloat16")), 0);
+  PolyUOp *emulated = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  poly_set_emulated_dtypes(previous);
+  ASSERT_NOT_NULL(emulated);
+  topo = poly_uop_toposort_alloc(ctx, emulated, &n);
+  shifts = 0;
+  for (int i = 0; i < n; i++)
+    shifts += topo[i]->op == POLY_OP_SHR;
+  poly_uop_toposort_free(topo);
+  ASSERT_INT_EQ(shifts, 0); /* Forced emulation retains F32 intermediates. */
+  ASSERT_TRUE(poly_full_rewrite_to_sink_ex(ctx, sink, opts) == rewritten);
   poly_ctx_destroy(ctx);
   PASS();
 }
