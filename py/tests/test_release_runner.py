@@ -24,7 +24,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets[0] == 'test-release-preflight'
     assert len(targets) == len(set(targets))
     assert {'test', 'test-x86', 'test-interp', 'test-cuda', 'test-py',
-            'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-browser',
+            'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-browser', 'test-browser-env',
             'test-js-native-cpu', 'test-js-native-x86', 'test-js-native-interp',
             'test-js-native-cuda', 'test-js-native-gc', 'test-js-wasm',
             'test-py-sdist-install', 'test-py-min-install', 'test-js-package-install',

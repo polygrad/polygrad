@@ -16,7 +16,7 @@ function resolveBrowserCore(name, opts) {
   if (name !== 'auto' && name !== 'wasm') {
     throw new Error(`polygrad: browser bundle only supports core='wasm' (got ${name})`)
   }
-  return createWasmCoreSync(opts.device)
+  return createWasmCoreSync(opts.device, opts.env)
 }
 
 function create(opts) {

@@ -609,6 +609,12 @@ to `true` in the config to expose per-layer text/image/audio hidden states.
 
 ## Devices And Runtimes
 
+Compiler settings use the process environment, shared by native runtimes.
+Set them before running the program, for example
+`REDUCEOP_SPLIT_THRESHOLD=1024 python train.py`. This uses the existing reduction
+splitting rule; lower thresholds can trade extra kernels for shorter accumulation
+chains, but provide no accuracy guarantee. The default threshold is `32768`.
+
 Choose a device explicitly or through the environment:
 
 ```python

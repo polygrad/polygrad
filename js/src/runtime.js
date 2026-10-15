@@ -10,6 +10,7 @@ const state = require('./nn/state')
 const { createBoundTensorClass, normalizeLogicalPolicy } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
 const { createBoundUopNamespace } = require('./uop/ops')
+const { validateEnv } = require('./core/wasm_env')
 
 function normalizeOptions(opts) {
   const options = opts ? { ...opts } : {}
@@ -23,6 +24,7 @@ function normalizeOptions(opts) {
   if (options.kernels != null && typeof options.kernels !== 'boolean') {
     throw new TypeError('kernels must be a boolean')
   }
+  validateEnv(options.env)
 
   return options
 }

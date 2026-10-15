@@ -25,21 +25,6 @@ const generatedDeviceCalls = require('./generated_device_calls')
 function createWasmCoreFromModule(Module, device) {
   const deviceName = device || 'auto'
   const callDevice = generatedDeviceCalls(Module)
-  // Node's process environment is not Emscripten's libc environment. Initialize
-  // each module once; another Runtime must not reset explicit compiler policy.
-  if (!Module.__polygradEnvInitialized) {
-    const env = typeof process !== 'undefined' && process.versions && process.versions.node
-      ? process.env : {}
-    const controls = ['BEAM', 'NOOPT', 'BEAM_COMPARE'].filter(key => env[key])
-    for (const key of controls) {
-      const n = Number(env[key])
-      if (!/^\s*[+-]?\d+\s*$/.test(env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
-        throw new Error(`${key} must be a decimal int32`)
-      }
-    }
-    for (const key of controls) Module[`_poly_set_${key.toLowerCase()}`](Number(env[key]))
-    Module.__polygradEnvInitialized = true
-  }
   Module.__polygradHostBuffers = Module.__polygradHostBuffers || new Map()
 
   // wasm32 pointers span all 4GB. JS bitwise shifts are signed unless >>> is

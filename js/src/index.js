@@ -4,17 +4,18 @@ const { createRuntime, createRuntimeAsync, normalizeOptions } = require('./runti
 const { PolyAsyncRequired, PolyWasmSyncUnsupported } = require('./errors')
 
 function applyNodeEnv(options) {
+  if (options.core === 'auto' && typeof process !== 'undefined' && process.env) {
+    if (process.env.POLY_CORE) options.core = process.env.POLY_CORE
+  }
   if (typeof process !== 'undefined' && process.env) {
+    const env = options.core === 'wasm' ? { ...process.env, ...options.env } : process.env
     for (const key of ['BEAM', 'NOOPT', 'BEAM_COMPARE']) {
-      if (!process.env[key]) continue
-      const n = Number(process.env[key])
-      if (!/^\s*[+-]?\d+\s*$/.test(process.env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
+      if (!env[key]) continue
+      const n = Number(env[key])
+      if (!/^\s*[+-]?\d+\s*$/.test(env[key]) || !Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
         throw new Error(`${key} must be a decimal int32`)
       }
     }
-  }
-  if (options.core === 'auto' && typeof process !== 'undefined' && process.env) {
-    if (process.env.POLY_CORE) options.core = process.env.POLY_CORE
   }
   if (options.device === 'auto' && typeof process !== 'undefined' && process.env) {
     const target = process.env.POLY_DEV || process.env.DEV
@@ -31,9 +32,12 @@ function applyNodeEnv(options) {
 }
 
 function resolveNodeCore(name, opts) {
+  if (opts.env !== undefined && name !== 'wasm') {
+    throw new Error("polygrad: env requires core='wasm'; native settings use process.env")
+  }
   if (name === 'wasm') {
     const { createWasmCoreSync } = require('./core/wasm')
-    return createWasmCoreSync(opts.device)
+    return createWasmCoreSync(opts.device, opts.env)
   }
 
   if (name === 'native') {
@@ -57,9 +61,12 @@ function resolveNodeCore(name, opts) {
 }
 
 async function resolveNodeCoreAsync(name, opts) {
+  if (opts.env !== undefined && name !== 'wasm') {
+    throw new Error("polygrad: env requires core='wasm'; native settings use process.env")
+  }
   if (name === 'wasm') {
     const { createWasmCoreAsync } = require('./core/wasm')
-    return createWasmCoreAsync(opts.device)
+    return createWasmCoreAsync(opts.device, opts.env)
   }
 
   if (name === 'native') {

@@ -50,7 +50,7 @@ def release_gates():
         test-js-native-cuda test-js-native-gc
         test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm
         test-indexing-wasm test-materialization-wasm
-        test-js-wasm test-js-package test-browser test-browser-qwen3
+        test-js-wasm test-js-package test-browser test-browser-env test-browser-qwen3
         test-model-interchange test-py-sdist-install test-py-min-install test-js-package-install
         test-parity test-parity-ir test-parity-ir-opt test-parity-cuda
         test-parity-graph test-release-op-census

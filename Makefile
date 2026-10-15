@@ -1026,6 +1026,7 @@ test-js: test-js-wasm test-js-native test-js-package
 
 test-js-wasm: verify-source-mirrors wasm-pkg
 	$(NODE) js/test/test_wasm.js
+	$(NODE) js/test/test_wasm_env.js
 	$(NODE) --expose-gc js/test/test_gc.js wasm
 	$(NODE) js/test/test_workers.js wasm
 
@@ -1041,6 +1042,14 @@ test-js-native-gc: verify-source-mirrors js/build/Release/polygrad_napi.node
 
 test-js-package: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
+
+.PHONY: test-js-wasm-env test-browser-env
+test-js-wasm-env: wasm-pkg
+	$(NODE) js/test/test_wasm_env.js
+
+test-browser-env: wasm-pkg
+	cd js && bash scripts/build-browser.sh
+	TMPDIR=$(BROWSER_TMPDIR) $(NODE) js/test/test_wasm_env.js --browser
 
 MODEL_INTERCHANGE_ARGS ?=
 test-model-interchange: verify-source-mirrors build/libpolygrad.so js/build/Release/polygrad_napi.node wasm-pkg
@@ -1186,10 +1195,11 @@ wasm-pkg: build/core.async.js build/core.sync.js
 	cp build/core.async.js js/wasm/core.async.js
 	cp build/core.sync.js js/wasm/core.sync.js
 
-build/core.async.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS)
+build/core.async.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS) js/scripts/wasm-env-pre.js
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=createPolygrad \
+		--pre-js js/scripts/wasm-env-pre.js \
 		$(WASM_ASYNCIFY_FLAGS) \
 		-s EXPORTED_FUNCTIONS='[$(WASM_EXPORTS)]' \
 		-s "EXPORTED_RUNTIME_METHODS=['ccall','cwrap','getValue','setValue','HEAPU8','HEAP32','HEAPF32','HEAPF64','UTF8ToString','addFunction']" \
@@ -1201,11 +1211,12 @@ build/core.async.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS)
 		-s ENVIRONMENT='web,node' \
 		-o build/core.async.js $(WASM_SRC)
 
-build/core.sync.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS) js/scripts/wasm-sync-post.js
+build/core.sync.js: $(WASM_SRC) Makefile $(WASM_EXPORT_INPUTS) js/scripts/wasm-sync-post.js js/scripts/wasm-env-pre.js
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 \
 		-s WASM_ASYNC_COMPILATION=0 \
+		--pre-js js/scripts/wasm-env-pre.js \
 		$(WASM_ASYNCIFY_FLAGS) \
 		-s EXPORTED_FUNCTIONS='[$(WASM_EXPORTS)]' \
 		-s "EXPORTED_RUNTIME_METHODS=['ccall','cwrap','getValue','setValue','HEAPU8','HEAP32','HEAPF32','HEAPF64','UTF8ToString','addFunction']" \

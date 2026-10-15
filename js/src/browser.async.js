@@ -16,7 +16,7 @@ async function resolveBrowserCoreAsync(name, opts) {
   if (name !== 'auto' && name !== 'wasm') {
     throw new Error(`polygrad: browser bundle only supports core='wasm' (got ${name})`)
   }
-  return createWasmCoreAsync(opts.device)
+  return createWasmCoreAsync(opts.device, opts.env)
 }
 
 function create() {

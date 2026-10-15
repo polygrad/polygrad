@@ -1,6 +1,7 @@
 'use strict'
 
 const { createWasmCoreFromModule } = require('./wasm_common')
+const { startupEnv } = require('./wasm_env')
 
 let _asyncModuleFactory = null
 
@@ -26,8 +27,8 @@ function getAsyncModuleFactory() {
   return _asyncModuleFactory
 }
 
-async function createWasmCoreAsync(device) {
-  const Module = await getAsyncModuleFactory()()
+async function createWasmCoreAsync(device, env) {
+  const Module = await getAsyncModuleFactory()({ polygradEnv: startupEnv(env) })
   return createWasmCoreFromModule(Module, device)
 }
 

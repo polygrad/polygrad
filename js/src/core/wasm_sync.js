@@ -2,6 +2,7 @@
 
 const { PolyWasmSyncUnsupported } = require('../errors')
 const { createWasmCoreFromModule } = require('./wasm_common')
+const { loadSyncWithEnv, checkSyncEnv } = require('./wasm_env')
 
 let _syncModule = null
 
@@ -30,8 +31,10 @@ function getSyncModule() {
   return _syncModule
 }
 
-function createWasmCoreSync(device) {
-  return createWasmCoreFromModule(getSyncModule(), device)
+function createWasmCoreSync(device, env) {
+  const Module = loadSyncWithEnv(getSyncModule, env)
+  checkSyncEnv(Module, env)
+  return createWasmCoreFromModule(Module, device)
 }
 
 module.exports = { createWasmCoreSync, createWasmCore: createWasmCoreSync }

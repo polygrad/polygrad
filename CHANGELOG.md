@@ -2,6 +2,9 @@
 
 ## 0.7.2 (2026-10-10)
 
+- Forward Node's environment to the Wasm core and expose browser compiler
+  settings through JavaScript `create({env})` and `createAsync({env})`.
+
 - Package a C graph-author SDK in Python and npm installs. New authors use an
   independent construction contract and required-import checks; existing
   core-ABI108 authors retain their loading path.

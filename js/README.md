@@ -704,7 +704,29 @@ then the platform default. Target names are case-insensitive. Native choices
 include `cpu`, `cuda`, `hip`, `x86`, and `interp`; Wasm choices include `wasm`,
 `interp`, and browser `webgpu` when available. Unsupported ordinals/multi-target
 specifications reject rather than selecting another device. `POLY_DEVICE` is
-no longer read. Browsers use runtime options, not process environment variables.
+no longer read. Browsers select devices through runtime options.
+
+Wasm copies Node's `process.env` before C initialization. In browsers, provide
+compiler settings explicitly; Node Wasm accepts the same map as overrides:
+
+```js
+const pg = await polygrad.createAsync({
+  core: 'wasm', device: 'cpu',
+  env: { REDUCEOP_SPLIT_THRESHOLD: '1024' }
+})
+```
+
+`env` is a map of strings using the existing C environment names and meanings;
+it does not introduce a different reduction algorithm. Settings affect the
+whole Wasm module, not individual contexts. The synchronous bundle shares one
+module: configure it on the first `create()`; later maps may only repeat those
+explicit keys and values. New or conflicting keys throw, even if a new key
+matches an inherited value. The module retains only explicit keys for this check.
+Each `createAsync()` initializes a separate module. Changing `process.env`
+after a module starts does not update it. In Node, explicit `env` requires
+`core: 'wasm'`; native runtimes use the process environment directly. Existing
+explicit compiler controls such as `pg.beam` still override their environment
+defaults. Unset settings retain their defaults.
 
 Call `pg.dispose()` when an application or long-running script is done with an
 explicit runtime.

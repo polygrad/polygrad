@@ -61,13 +61,13 @@ def test_python_docs_build_wasm(target):
 
 
 def test_browser_targets_use_short_temporary_directory():
-    result = subprocess.run(['make', '-n', 'test-browser', 'test-browser-qwen3', 'test-release-preflight'],
+    result = subprocess.run(['make', '-n', 'test-browser', 'test-browser-env', 'test-browser-qwen3', 'test-release-preflight'],
                             cwd=ROOT, capture_output=True, text=True,
                             env={**os.environ, 'TMPDIR': '/deep/' + 'nested/' * 30})
     assert result.returncode == 0, result.stderr
     assert 'js/test/browser/run.js --preflight' in result.stdout
     for line in result.stdout.splitlines():
-        if 'test/browser/run.js' in line or 'js/test/browser/qwen_webgpu.js' in line:
+        if 'test/browser/run.js' in line or 'js/test/browser/qwen_webgpu.js' in line or 'test_wasm_env.js --browser' in line:
             assert 'TMPDIR=/tmp ' in line
 
 

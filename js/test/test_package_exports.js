@@ -183,6 +183,11 @@ function testEnvironmentPrecedence() {
 }
 
 function testEnvironmentCompilerControls() {
+  const overridden = nodeEval(`
+    const rt = require('polygrad').create({core:'wasm',env:{BEAM_COMPARE:'0'}});
+    console.log(rt.beamCompare); rt.dispose();
+  `, [], {BEAM_COMPARE:'invalid', POLY_DEBUG:'0'})
+  assert.strictEqual(overridden, '0')
   for (const core of ['native', 'wasm']) {
     const rejected = nodeEval(`
       const assert = require('assert');
