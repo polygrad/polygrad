@@ -614,6 +614,8 @@ Set them before running the program, for example
 `REDUCEOP_SPLIT_THRESHOLD=1024 python train.py`. This uses the existing reduction
 splitting rule; lower thresholds can trade extra kernels for shorter accumulation
 chains, but provide no accuracy guarantee. The default threshold is `32768`.
+Integer settings read by the shared C environment helper diagnose malformed or
+out-of-range values and use their defaults; they do not raise Python exceptions.
 
 Choose a device explicitly or through the environment:
 

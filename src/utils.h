@@ -20,6 +20,8 @@ uint32_t poly_ptr_hash(const void *p);
 char *poly_strfmt(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
 /* Tinygrad-style env helpers */
+/* Absent keys use the default; malformed/out-of-int-range values report to
+ * stderr and use the default. This is not an exception/error-return API. */
 int poly_getenv_int(const char *key, int default_value);
 /* Shared CPU/X86 worker budget: explicit override, cgroup quota, affinity. */
 int poly_cpu_thread_count(void);

@@ -9,7 +9,9 @@ async function checkEnvironment(pg, asyncMode, device, scenario) {
   if (scenario !== 'default' && scenario !== 'inherit') options.env = {
     REDUCEOP_SPLIT_THRESHOLD: '1024', BEAM_COMPARE: '0',
     ...(scenario === 'disabled' ? { SPLIT_REDUCEOP: '0' } : {}),
-    ...(scenario === 'budget' ? { REDUCEOP_SPLIT_SIZE: '0' } : {})
+    ...(scenario === 'budget' ? { REDUCEOP_SPLIT_SIZE: '0' } : {}),
+    ...(scenario === 'invalid' ? { REDUCEOP_SPLIT_THRESHOLD: '1e3' } : {}),
+    ...(scenario === 'overflow' ? { REDUCEOP_SPLIT_THRESHOLD: '2147483648' } : {})
   }
   const rt = await create(options)
   const Module = rt._core.Module
@@ -73,7 +75,7 @@ async function main() {
   }
   if (process.argv[2] !== '--browser') {
     const { spawnSync } = require('node:child_process')
-    for (const mode of ['sync', 'async']) for (const scenario of ['default','env','inherit','disabled','budget']) {
+    for (const mode of ['sync', 'async']) for (const scenario of ['default','env','inherit','disabled','budget','invalid','overflow']) {
       const env = { ...process.env }
       env.POLY_TEST_ENV_SECRET = 'environment-retention-regression-sentinel'
       for (const k of ['SPLIT_REDUCEOP','REDUCEOP_SPLIT_THRESHOLD','REDUCEOP_SPLIT_SIZE','BEAM','NOOPT','BEAM_COMPARE']) delete env[k]
@@ -82,6 +84,8 @@ async function main() {
       const result=spawnSync(process.execPath,[__filename,'--child',mode,scenario],{env,encoding:'utf8'})
       process.stdout.write(result.stdout);process.stderr.write(result.stderr)
       assert.equal(result.status,0,`${mode}/${scenario} failed`)
+      if (scenario === 'invalid' || scenario === 'overflow')
+        assert.match(result.stderr, /REDUCEOP_SPLIT_THRESHOLD requires a decimal integer.*using default 32768/)
     }
     return
   }
@@ -96,12 +100,16 @@ async function main() {
   await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser
   try {
     browser=await chromium.launch(launchOptionsFor({launcherName:'chromium',executablePath:process.env.POLY_BROWSER_PATH||''},'webgpu').opts)
-    for(const [asyncMode,device] of [[false,'cpu'],[true,'cpu'],[true,'webgpu']])for(const scenario of ['default','env','disabled','budget']) {
+    for(const [asyncMode,device] of [[false,'cpu'],[true,'cpu'],[true,'webgpu']])for(const scenario of ['default','env','disabled','budget','invalid','overflow']) {
       const page=await browser.newPage()
+      const messages=[]
+      page.on('console', message => messages.push(message.text()))
       try {
         await page.goto(`http://127.0.0.1:${server.address().port}/${asyncMode?'async':'sync-only'}`)
         const result=await page.evaluate(({source,asyncMode,device,scenario})=>new Function(`return (${source})`)()(polygrad,asyncMode,device,scenario),{source:checkEnvironment.toString(),asyncMode,device,scenario})
         console.log(JSON.stringify(result))
+        if (scenario === 'invalid' || scenario === 'overflow')
+          assert.match(messages.join('\n'), /REDUCEOP_SPLIT_THRESHOLD requires a decimal integer.*using default 32768/)
       } finally { await page.close() }
     }
   } finally { await browser?.close();server.close() }

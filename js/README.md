@@ -727,6 +727,9 @@ after a module starts does not update it. In Node, explicit `env` requires
 `core: 'wasm'`; native runtimes use the process environment directly. Existing
 explicit compiler controls such as `pg.beam` still override their environment
 defaults. Unset settings retain their defaults.
+Integer settings read by the shared C environment helper diagnose malformed or
+out-of-range values and use their defaults; they do not throw. Existing Node
+validation for `BEAM`, `NOOPT` and `BEAM_COMPARE` still rejects invalid values.
 
 Call `pg.dispose()` when an application or long-running script is done with an
 explicit runtime.

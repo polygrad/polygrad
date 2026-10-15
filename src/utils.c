@@ -11,11 +11,11 @@ _Thread_local double poly_compile_deadline_ms;
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <errno.h>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
-#include <errno.h>
 #include <sched.h>
 #endif
 
@@ -111,14 +111,24 @@ uint32_t poly_ptr_hash(const void *p) {
 int poly_getenv_int(const char *key, int default_value) {
   if (!key || !key[0]) return default_value;
   const char *v = getenv(key);
-  if (!v || !v[0]) return default_value;
+  if (!v) return default_value;
 
   char *end = NULL;
+  errno = 0;
   long parsed = strtol(v, &end, 10);
-  if (end == v) return default_value;
+  bool valid = end != v && errno != ERANGE && parsed >= INT_MIN && parsed <= INT_MAX;
   while (*end && isspace((unsigned char)*end))
     end++;
-  if (*end != '\0') return default_value;
+  if (!valid || *end != '\0') {
+    /* This value-only utility cannot propagate an execution error. Keep the
+     * existing fallback, but never silently ignore malformed configuration or
+     * narrow an overflowing long. Do not print environment values. */
+    fprintf(
+        stderr, "polygrad: %s requires a decimal integer in [%d, %d]; using default %d\n", key,
+        INT_MIN, INT_MAX, default_value
+    );
+    return default_value;
+  }
   return (int)parsed;
 }
 

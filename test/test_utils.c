@@ -13,6 +13,10 @@ TEST_BACKEND(harness, runtime_skip_accounting) {
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <sched.h>
 #endif
@@ -66,6 +70,56 @@ static void restore_env(EnvSave *s) {
     unsetenv(s->key);
   free(s->value);
   s->value = NULL;
+}
+
+#ifndef _WIN32
+TEST(utils, getenv_int_reports_invalid_values_and_overflow) {
+  EnvSave saved = save_env("POLY_TEST_INTEGER");
+  FILE *capture = tmpfile();
+  ASSERT_NOT_NULL(capture);
+  fflush(stderr);
+  int original = dup(fileno(stderr));
+  ASSERT_TRUE(original >= 0);
+  ASSERT_TRUE(dup2(fileno(capture), fileno(stderr)) >= 0);
+  const char *invalid[] = {
+      "", " ", "1e3", "12x", "2147483648", "-2147483649", "999999999999999999999999999999999"};
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+    setenv(saved.key, invalid[i], 1);
+    correct &= poly_getenv_int(saved.key, 17) == 17;
+  }
+  fflush(stderr);
+  dup2(original, fileno(stderr));
+  close(original);
+  rewind(capture);
+  char line[512];
+  int diagnostics = 0;
+  while (fgets(line, sizeof(line), capture)) {
+    correct &= strstr(line, saved.key) && strstr(line, "using default 17");
+    diagnostics++;
+  }
+  fclose(capture);
+  restore_env(&saved);
+  ASSERT_TRUE(correct);
+  ASSERT_INT_EQ(diagnostics, 7);
+  PASS();
+}
+#endif
+
+TEST(utils, getenv_int_valid_values_and_absent_default) {
+  EnvSave saved = save_env("POLY_TEST_INTEGER");
+  const char *values[] = {"0", " +42 \t", "-9", "2147483647", "-2147483648"};
+  const int expected[] = {0, 42, -9, INT_MAX, INT_MIN};
+  bool correct = true;
+  for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+    setenv(saved.key, values[i], 1);
+    correct &= poly_getenv_int(saved.key, 17) == expected[i];
+  }
+  unsetenv(saved.key);
+  correct &= poly_getenv_int(saved.key, 17) == 17;
+  restore_env(&saved);
+  ASSERT_TRUE(correct);
+  PASS();
 }
 
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
