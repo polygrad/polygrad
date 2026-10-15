@@ -56,6 +56,10 @@ module.exports = Module => {
       if (args.length !== 4) throw new TypeError('poly_model_read_buf: wrong argument count')
       return Module.ccall('poly_model_read_buf', "number", ["number", "number", "number", "number"], args, options)
     },
+    poly_model_read_bufs: (args, options) => {
+      if (args.length !== 5) throw new TypeError('poly_model_read_bufs: wrong argument count')
+      return Module.ccall('poly_model_read_bufs', "number", ["number", "number", "number", "number", "number"], args, options)
+    },
     poly_model_reset_transient: (args, options) => {
       if (args.length !== 1) throw new TypeError('poly_model_reset_transient: wrong argument count')
       return Module.ccall('poly_model_reset_transient', "number", ["number"], args, options)

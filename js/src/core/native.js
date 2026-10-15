@@ -156,6 +156,9 @@ function createNativeCore(device) {
     bufData(inst, i) {
       return binding.poly_model_buf_data(inst, i)
     },
+    bufDataMany(inst, indices) {
+      return binding.poly_model_read_bufs(inst, indices)
+    },
     writeBuf(inst, i, array) {
       return binding.poly_model_write_buf(inst, i, array)
     },

@@ -1840,16 +1840,23 @@ int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   return rc;
 }
 
-int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
-  if (!ctx || !buf || !dst || nbytes == 0) return -1;
+static const PolyBuffer *buffer_read_source(PolyCtx *ctx, PolyUOp *buf, size_t nbytes) {
   PolyBuffer *cur = poly_uop_buffer_handle(ctx, buf);
-  if (!cur || cur->nbytes < nbytes) return -1;
-  if (cur->base && poly_buffer_refresh_view(ctx, cur) != 0) return -1;
+  if (!cur || cur->nbytes < nbytes) return NULL;
+  if (cur->base && poly_buffer_refresh_view(ctx, cur) != 0) return NULL;
   if (cur->device == POLY_DEVICE_DISK && !cur->ptr &&
       poly_buffer_handle_ensure_allocated(ctx, cur) != 0)
-    return -1;
+    return NULL;
   const PolyBuffer *source = poly_buffer_valid_source(cur);
-  if (!source || source->nbytes < nbytes) return -1;
+  return source && source->nbytes >= nbytes ? source : NULL;
+}
+
+static int buffer_read_source_into(
+    PolyCtx *ctx,
+    const PolyBuffer *source,
+    void *dst,
+    size_t nbytes
+) {
   /* Buffer.as_memoryview copies into caller-owned storage. A read must not
    * publish a persistent CPU mirror; explicit host-pointer access still uses
    * ensure_host_current. Browser HOST keys go through their allocator. */
@@ -1863,4 +1870,53 @@ int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   ctx->buffer_read_count++;
   ctx->buffer_read_bytes += nbytes;
   return 0;
+}
+
+int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
+  if (!ctx || !buf || !dst || !nbytes) return -1;
+  const PolyBuffer *source = buffer_read_source(ctx, buf, nbytes);
+  return source ? buffer_read_source_into(ctx, source, dst, nbytes) : -1;
+}
+
+int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_t *sizes, int n) {
+  if (!ctx || n < 0 || (n && (!bufs || !dsts || !sizes))) return -1;
+  if (!n) return 0;
+  if ((size_t)n > SIZE_MAX / sizeof(PolyBuffer *)) return -1;
+  const PolyBuffer **sources = calloc((size_t)n, sizeof(*sources));
+  if (!sources) return -1;
+  int rc = -1;
+  int active = 0;
+  for (int i = 0; i < n; i++) {
+    if (!sizes[i]) continue;
+    active++;
+    if (!bufs[i] || !dsts[i]) goto done;
+    sources[i] = buffer_read_source(ctx, bufs[i], sizes[i]);
+    if (!sources[i]) goto done;
+  }
+  if (!active) {
+    rc = 0;
+    goto done;
+  }
+#ifdef __EMSCRIPTEN__
+  bool webgpu = true;
+  for (int i = 0; i < n; i++)
+    if (sizes[i] && sources[i]->device != POLY_DEVICE_WEBGPU) webgpu = false;
+  if (webgpu) {
+    rc = poly_webgpu_read_buffers(sources, dsts, sizes, n);
+    if (!rc)
+      for (int i = 0; i < n; i++)
+        if (sizes[i]) {
+          poly_ctx_record_buffer_copy(ctx, sizes[i]);
+          ctx->buffer_read_count++;
+          ctx->buffer_read_bytes += sizes[i];
+        }
+    goto done;
+  }
+#endif
+  rc = 0;
+  for (int i = 0; i < n && !rc; i++)
+    if (sizes[i]) rc = buffer_read_source_into(ctx, sources[i], dsts[i], sizes[i]);
+done:
+  free(sources);
+  return rc;
 }

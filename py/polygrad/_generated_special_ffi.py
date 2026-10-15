@@ -460,6 +460,10 @@ def bind(lib, types, only=None):
         fn = lib.poly_model_read_buf
         fn.restype = ctypes.c_int
         fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+    if only is None or only == 'poly_model_read_bufs':
+        fn = lib.poly_model_read_bufs
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t), ctypes.c_int]
     if only is None or only == 'poly_model_reset_transient':
         fn = lib.poly_model_reset_transient
         fn.restype = ctypes.c_int

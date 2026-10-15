@@ -1922,6 +1922,45 @@ function createWasmCoreFromModule(Module, device) {
       }
       return deviceName === 'webgpu' ? ensureModelDevice(instPtr).then(run) : run()
     },
+    bufDataMany(instPtr, indices) {
+      const run = () => {
+        const n = indices.length
+        if (!n) return []
+        // One allocation owns descriptors and aligned output storage across the
+        // device wait. No heap view or Model buffer pointer survives that wait.
+        let bytes = Math.ceil(n * 12 / 8) * 8
+        const specs = indices.map(index => {
+          const dtypeId = this.bufDtypeId(instPtr, index)
+          const [, itemsize] = storageInfo(dtypeId)
+          const numel = shapeNumel(this.bufCurrentShape(instPtr, index)), offset = bytes
+          const size = numel * itemsize
+          bytes += Math.ceil(size / 8) * 8
+          return {index, dtypeId, numel, size, offset}
+        })
+        if (!Number.isSafeInteger(bytes) || bytes > 0xffffffff) throw new Error('polygrad: output read size overflow')
+        const ptr = malloc(bytes)
+        if (!ptr) throw new Error('polygrad: output read allocation failed')
+        const finish = rc => {
+          if (rc !== 0) throw new Error('polygrad: output read failed (rc=' + rc + ')')
+          return specs.map(s => copyModelStorage(ptr + s.offset, s.numel, s.dtypeId))
+        }
+        try {
+          const heap = heap32()
+          specs.forEach((s, i) => {
+            heap[(ptr >>> 2) + i] = s.index
+            heap[(ptr >>> 2) + n + i] = ptr + s.offset
+            heap[(ptr >>> 2) + n * 2 + i] = s.size
+          })
+          const args = [instPtr, ptr, ptr + n * 4, ptr + n * 8, n]
+          if (deviceName === 'webgpu')
+            return callDevice('poly_model_read_bufs', args).then(finish).finally(() => Module._free(ptr))
+          const result = finish(Module._poly_model_read_bufs(...args))
+          Module._free(ptr)
+          return result
+        } catch (error) { Module._free(ptr); throw error }
+      }
+      return deviceName === 'webgpu' ? ensureModelDevice(instPtr).then(run) : run()
+    },
     writeBuf(instPtr, i, array) {
       const [AT, itemsize] = storageInfo(this.bufDtypeId(instPtr, i))
       const nbytes = shapeNumel(this.bufShape(instPtr, i)) * itemsize

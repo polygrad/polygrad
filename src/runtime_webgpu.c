@@ -282,18 +282,37 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   return 0;
 })
 
-EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nbytes, int host_key), {
+EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nbytes, int host_key, uintptr_t items, int count), {
   const st = await Module.__polygradEnsureWebGPU();
-  const src = st.buffers.get(handle);
-  if (!src) return -1;
-  const target = host_key && Module.__polygradHostBuffers &&
-      Module.__polygradHostBuffers.get(String(dst >>> 0));
-  if (host_key && !target) return -1;
+  const reads = [];
+  let copyBytes = 0;
+  // Snapshot descriptors before waiting. Destinations and source storage remain
+  // owned by the admitted C call; only heap views must be refreshed after await.
+  const entries = items ? count : 1;
+  for (let i = 0; i < entries; i++) {
+    let address = dst >>> 0, key = handle >>> 0, logical = nbytes, host = host_key;
+    if (items) {
+      const p = (items >>> 2) + i * 3;
+      address = HEAPU32[p]; key = HEAPU32[p + 1]; logical = HEAPU32[p + 2]; host = 0;
+    }
+    if (!Number.isSafeInteger(logical) || logical < 0) return -1;
+    if (!logical) continue;
+    const src = st.buffers.get(key);
+    const target = host && Module.__polygradHostBuffers && Module.__polygradHostBuffers.get(String(address));
+    if (!src || (host && !target)) return -1;
+    const offset = Math.ceil(copyBytes / 8) * 8, size = Math.ceil(logical / 4) * 4;
+    const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(key) || 0) : 0;
+    if (Number.isFinite(src.size) && srcOffset + size > src.size) return -1;
+    if (!host && Number.isFinite(HEAPU8.byteLength) && address + logical > HEAPU8.byteLength) return -1;
+    copyBytes = offset + size;
+    reads.push({address, logical, src, srcOffset, offset, size, target});
+  }
+  if (!reads.length) return 0;
+  if (!Number.isSafeInteger(copyBytes)) return -1;
+  // An aggregate larger than one GPUBuffer is still a valid set of reads.
+  // Return a capacity-only fallback signal before submitting or publishing.
+  if (st.device.limits && copyBytes > st.device.limits.maxBufferSize) return items ? 1 : -1;
   if (st.batch && !st.batch.flush()) return -1;
-  const logical = Math.max(0, nbytes | 0);
-  if (logical === 0) return 0;
-  const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
-  const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   // Keep one idle allocation, not a pool. Large transfers remain temporary.
   // Detach while mapping: neither nested reads nor returned arrays may alias it.
   const reusable = copyBytes <= 1024 * 1024;
@@ -306,16 +325,18 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nb
         {size : copyBytes, usage : GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}
     );
     const enc = st.device.createCommandEncoder();
-    enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
+    for (const r of reads) enc.copyBufferToBuffer(r.src, r.srcOffset, staging, r.offset, r.size);
     st.device.queue.submit([enc.finish()]);
     await staging.mapAsync(GPUMapMode.READ, 0, copyBytes);
     const mapped = staging.getMappedRange(0, copyBytes);
-    if (host_key) {
-      const out = new Uint8Array(target.buffer, target.byteOffset, Math.min(logical, target.byteLength));
-      out.set(new Uint8Array(mapped, 0, out.byteLength));
-    } else {
-      // Resolve the current heap after the await: Wasm memory may have grown.
-      HEAPU8.set(new Uint8Array(mapped, 0, logical), dst >>> 0);
+    for (const r of reads) {
+      if (r.target) {
+        const out = new Uint8Array(r.target.buffer, r.target.byteOffset, Math.min(r.logical, r.target.byteLength));
+        out.set(new Uint8Array(mapped, r.offset, out.byteLength));
+      } else {
+        // Resolve the current heap after the await: Wasm memory may have grown.
+        HEAPU8.set(new Uint8Array(mapped, r.offset, r.logical), r.address);
+      }
     }
     staging.unmap();
     success = true;
@@ -769,12 +790,38 @@ static int webgpu_copy_out(
   if (!dst || !src || !src->ptr) return -1;
   if (dst->device == POLY_DEVICE_HOST) {
     if (dst->ptr)
-      return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0);
+      return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0);
     return js_webgpu_read_buffer(
-        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes, 1
+        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes, 1, 0, 0
     );
   }
-  return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0);
+  return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0);
+}
+
+int poly_webgpu_read_buffers(const PolyBuffer **srcs, void **dsts, const size_t *sizes, int n) {
+  if (n < 0 || (n && (!srcs || !dsts || !sizes)) || (size_t)n > SIZE_MAX / (3 * sizeof(uint32_t)))
+    return -1;
+  if (!n) return 0;
+  uint32_t *items = calloc((size_t)n * 3, sizeof(*items));
+  if (!items) return -1;
+  int rc = -1;
+  for (int i = 0; i < n; i++) {
+    if (!sizes[i]) continue;
+    if (!srcs[i] || !srcs[i]->ptr || !dsts[i]) goto done;
+    items[3 * i] = (uintptr_t)dsts[i];
+    items[3 * i + 1] = (uintptr_t)srcs[i]->ptr;
+    items[3 * i + 2] = sizes[i];
+  }
+  rc = js_webgpu_read_buffer(0, 0, 0, 0, (uintptr_t)items, n);
+  if (rc == 1) {
+    rc = 0;
+    for (int i = 0; i < n && !rc; i++)
+      if (sizes[i])
+        rc = js_webgpu_read_buffer(items[3 * i], items[3 * i + 1], items[3 * i + 2], 0, 0, 0);
+  }
+done:
+  free(items);
+  return rc;
 }
 
 static int webgpu_copy_between(

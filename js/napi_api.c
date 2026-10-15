@@ -356,7 +356,13 @@ static int instance_napi_storage_type(
   return 0;
 }
 
-static napi_value read_model_storage_array(napi_env env, PolyModel *model, int index) {
+static napi_value alloc_model_storage_array(
+    napi_env env,
+    PolyModel *model,
+    int index,
+    void **dst,
+    size_t *bytes
+) {
   if (index < 0 || index >= poly_model_buf_count(model)) {
     napi_value result;
     napi_get_null(env, &result);
@@ -384,14 +390,22 @@ static napi_value read_model_storage_array(napi_env env, PolyModel *model, int i
     nbytes *= (size_t)shape[d];
   }
   size_t len = nbytes / itemsize;
-  void *dst = NULL;
   napi_value arraybuf, typed;
-  NAPI_CALL(env, napi_create_arraybuffer(env, len * itemsize, &dst, &arraybuf));
-  if (poly_model_read_buf(model, index, dst, nbytes) != 0) {
+  NAPI_CALL(env, napi_create_arraybuffer(env, nbytes, dst, &arraybuf));
+  *bytes = nbytes;
+  NAPI_CALL(env, napi_create_typedarray(env, type, len, arraybuf, 0, &typed));
+  return typed;
+}
+
+static napi_value read_model_storage_array(napi_env env, PolyModel *model, int index) {
+  void *dst = NULL;
+  size_t bytes = 0;
+  napi_value typed = alloc_model_storage_array(env, model, index, &dst, &bytes);
+  if (!typed || !dst) return typed;
+  if (bytes && poly_model_read_buf(model, index, dst, bytes) != 0) {
     napi_throw_error(env, NULL, "polygrad: Model buffer read failed");
     return NULL;
   }
-  NAPI_CALL(env, napi_create_typedarray(env, type, len, arraybuf, 0, &typed));
   return typed;
 }
 
@@ -3909,6 +3923,54 @@ static napi_value napi_poly_model_buf_data(napi_env env, napi_callback_info info
   int32_t i;
   napi_get_value_int32(env, argv[1], &i);
   return read_model_storage_array(env, inst, i);
+}
+
+static napi_value napi_poly_model_read_bufs(napi_env env, napi_callback_info info) {
+  napi_value argv[2], result;
+  size_t argc = 2;
+  uint32_t n = 0;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "expected Model and indices");
+    return NULL;
+  }
+  PolyModel *inst = get_external(env, argv[0]);
+  NAPI_CALL(env, napi_get_array_length(env, argv[1], &n));
+  if (!inst || n > INT32_MAX || (size_t)n > SIZE_MAX / sizeof(void *)) {
+    napi_throw_range_error(env, NULL, "invalid Model output count");
+    return NULL;
+  }
+  NAPI_CALL(env, napi_create_array_with_length(env, n, &result));
+  if (!n) return result;
+  int *indices = malloc((size_t)n * sizeof(*indices));
+  void **dsts = calloc(n, sizeof(*dsts));
+  size_t *sizes = calloc(n, sizeof(*sizes));
+  bool ok = false;
+  if (!indices || !dsts || !sizes) goto done;
+  for (uint32_t j = 0; j < n; j++) {
+    napi_value index;
+    double value;
+    if (napi_get_element(env, argv[1], j, &index) != napi_ok ||
+        napi_get_value_double(env, index, &value) != napi_ok || !isfinite(value) || value < 0 ||
+        value >= poly_model_buf_count(inst) || value != floor(value))
+      goto done;
+    indices[j] = (int)value;
+    napi_value out = alloc_model_storage_array(env, inst, indices[j], &dsts[j], &sizes[j]);
+    if (!out || (sizes[j] && !dsts[j]) || napi_set_element(env, result, j, out) != napi_ok)
+      goto done;
+  }
+  /* N-API arrays own each destination until this synchronous call returns.
+   * A failed read never publishes the partially written result array. */
+  ok = poly_model_read_bufs(inst, indices, dsts, sizes, (int)n) == 0;
+done:
+  free(indices);
+  free(dsts);
+  free(sizes);
+  if (!ok) {
+    napi_throw_error(env, NULL, "polygrad: Model output read failed");
+    return NULL;
+  }
+  return result;
 }
 
 static napi_value napi_poly_model_write_buf(napi_env env, napi_callback_info info) {

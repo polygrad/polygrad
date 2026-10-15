@@ -1397,16 +1397,18 @@ async function checkModelCaptureFailure(pg) {
 
 async function checkWebGPUReadbackStaging(createRuntime) {
   const rt = await createRuntime({logical:'always'})
-  const x = rt.Tensor.empty(3), y = x.mul(2)
+  const x = rt.Tensor.empty(3), y = x.mul(2), mask = x.gt(2)
   let model, st, create, cached, destroy
   try {
-    model = await rt.Model.fromTensors({inputs:{x},outputs:{y}})
+    model = await rt.Model.fromTensors({inputs:{x},outputs:{y,mask}})
     const first = await model.forwardAsync({x:new Float32Array([1,2,3])})
     st = rt._core.Module.__polygradWebGpuState
     cached = st.readbackStaging
     assert(cached && cached.mapState==='unmapped','readback did not retain idle staging')
     create = st.device.createBuffer
-    let allocations = 0, destroyed = 0
+    let allocations = 0, destroyed = 0, maps = 0
+    const map = cached.mapAsync.bind(cached)
+    cached.mapAsync = (...args) => {maps++;return map(...args)}
     st.device.createBuffer = function(desc) {
       if (desc.usage & GPUBufferUsage.MAP_READ) allocations++
       return create.call(this,desc)
@@ -1414,11 +1416,13 @@ async function checkWebGPUReadbackStaging(createRuntime) {
     for (const values of [[4,5,6],[7,8,9]])
       assertClose((await model.forwardAsync({x:new Float32Array(values)})).y,values.map(x=>x*2),0)
     assert(allocations===0,'warm readback allocated staging')
+    assert(maps===2,'multi-output collection must map once per call')
     assertClose(first.y,[2,4,6],0)
+    assertClose(first.mask,[0,0,1],0)
     // Mapping rejection must discard the allocation and leave the runtime usable.
     cached.mapAsync = async () => {throw new Error('injected readback mapping failure')}
     let rejected = false
-    try {await model.readBufferAsync('y')} catch (_) {rejected=true}
+    try {await model.forwardAsync({x:new Float32Array([7,8,9])})} catch (_) {rejected=true}
     assert(rejected && !st.readbackStaging,'failed mapping kept staging or returned stale data')
     assertClose(await model.readBufferAsync('y'),[14,16,18],0)
     cached = st.readbackStaging
@@ -1433,7 +1437,7 @@ async function checkWebGPUReadbackStaging(createRuntime) {
   } finally {
     if (st && create) st.device.createBuffer=create
     if (model) await model.dispose()
-    await y.dispose();await x.dispose();await rt.dispose()
+    await mask.dispose();await y.dispose();await x.dispose();await rt.dispose()
   }
 }
 
@@ -1447,7 +1451,7 @@ async function checkModelOutputMetadata(pg) {
   const api = pg._core.model, originals = {}, counts = {}
   let restored
   try {
-    for (const name of ['entrypointOutputCount','entrypointOutputName','bufCount','bufName']) {
+    for (const name of ['entrypointOutputCount','entrypointOutputName','bufCount','bufName','bufData','bufDataMany']) {
       originals[name] = api[name]
       api[name] = function(...args) {
         counts[name] = (counts[name] || 0) + 1
@@ -1463,7 +1467,7 @@ async function checkModelOutputMetadata(pg) {
       assertClose(result.value, Array.from(current,v=>v*2),0)
       assertClose(result.mask, Array.from(current,v=>Number(v>2)),0)
     }
-    assert(Object.keys(counts).length===0, `repeated immutable queries: ${JSON.stringify(counts)}`)
+    assert(JSON.stringify(counts)==='{"bufDataMany":2}', `unexpected collection calls: ${JSON.stringify(counts)}`)
     assertClose(first.value, Array.from(data,v=>v*2),0)
     assert(Object.keys(await model.callAsync('mask_only',{x:data})).join(',')==='mask')
     await model.writeBufferAsync('weight',new Float32Array([3]))
@@ -1480,7 +1484,7 @@ async function checkModelOutputMetadata(pg) {
     assertClose((await restored.callAsync('both',{x:data})).value,Array.from(data,v=>v*3),0)
     for (const key of Object.keys(counts)) delete counts[key]
     await restored.callAsync('both',{x:data})
-    assert(Object.keys(counts).length===0,'loaded Model rediscovered output schema')
+    assert(JSON.stringify(counts)==='{"bufDataMany":1}','loaded Model rediscovered output schema')
   } finally {
     Object.assign(api,originals)
     if (restored) await restored.dispose()

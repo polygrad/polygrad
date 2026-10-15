@@ -422,6 +422,16 @@ PolyUOp *poly_model_test_execution(const PolyModel *inst, bool training, bool co
 /* Dynamic bindings read the last admitted view as packed bytes, not its
  * capacity padding. Raw buffer access above still exposes capacity storage. */
 int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len);
+/* Copy current storage in index order; all arrays are borrowed until completion.
+ * Zero sizes are allowed. On failure destinations must be discarded, not used
+ * as partially valid results. Does not retain a host mirror or alias outputs. */
+int poly_model_read_bufs(
+    PolyModel *inst,
+    const int *indices,
+    void **dsts,
+    const size_t *sizes,
+    int n
+);
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len);
 int poly_model_read_buf_named(PolyModel *inst, const char *name, void *host_dst, size_t dst_len);
 int poly_model_write_buf_named(

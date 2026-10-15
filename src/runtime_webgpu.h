@@ -18,6 +18,7 @@ bool poly_webgpu_supports_float16(void);
 void poly_webgpu_batch_begin(void);
 int poly_webgpu_batch_end(int success);
 int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes);
+int poly_webgpu_read_buffers(const PolyBuffer **srcs, void **dsts, const size_t *sizes, int n);
 uintptr_t poly_webgpu_create_buffer_view(uintptr_t base_handle, size_t byte_offset, size_t nbytes);
 
 int poly_webgpu_lower_item(

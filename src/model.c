@@ -3534,22 +3534,58 @@ static void model_weight_written(PolyModel *inst, int index) {
     }
 }
 
-int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) {
-  if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+static PolyUOp *model_read_storage(PolyModel *inst, int i, PolyTensor **packed) {
   NamedBuf *b = &inst->bufs[i];
-  if (b->dynamic && !model_view_is_prefix(b, b->current_shape)) {
-    PolyTensor *packed = model_result_storage(inst->ctx, b, b->current_shape);
-    if (!packed) return -1;
-    PolyUOp *store = poly_uop_store_val(
-        inst->ctx, packed->uop_physical, model_concrete_view(inst->ctx, b, b->current_shape)
-    );
-    int ret = store ? model_run_copies(inst->ctx, &store, 1) : -1;
-    const PolyUOp *buffer = poly_uop_get_buffer_identity(packed->uop_physical);
-    if (!ret) ret = buffer ? poly_buffer_read(inst->ctx, (PolyUOp *)buffer, host_dst, dst_len) : -1;
-    poly_tensor_release(packed);
-    return ret;
+  if (!b->dynamic || model_view_is_prefix(b, b->current_shape)) return b->buffer;
+  *packed = model_result_storage(inst->ctx, b, b->current_shape);
+  if (!*packed) return NULL;
+  PolyUOp *store = poly_uop_store_val(
+      inst->ctx, (*packed)->uop_physical, model_concrete_view(inst->ctx, b, b->current_shape)
+  );
+  if (!store || model_run_copies(inst->ctx, &store, 1)) return NULL;
+  return (PolyUOp *)poly_uop_get_buffer_identity((*packed)->uop_physical);
+}
+
+int poly_model_read_buf(PolyModel *inst, int i, void *host_dst, size_t dst_len) {
+  if (!inst || i < 0 || i >= inst->n_bufs || !host_dst || !dst_len) return -1;
+  PolyTensor *packed = NULL;
+  PolyUOp *buffer = model_read_storage(inst, i, &packed);
+  int rc = buffer ? poly_buffer_read(inst->ctx, buffer, host_dst, dst_len) : -1;
+  if (packed) poly_tensor_release(packed);
+  return rc;
+}
+
+int poly_model_read_bufs(
+    PolyModel *inst,
+    const int *indices,
+    void **dsts,
+    const size_t *sizes,
+    int n
+) {
+  if (!inst || n < 0 || (n && (!indices || !dsts || !sizes))) return -1;
+  if (!n) return 0;
+  if ((size_t)n > SIZE_MAX / sizeof(PolyTensor *)) return -1;
+  for (int j = 0; j < n; j++)
+    if (indices[j] < 0 || indices[j] >= inst->n_bufs || (sizes[j] && !dsts[j])) return -1;
+  PolyUOp **buffers = calloc((size_t)n, sizeof(*buffers));
+  PolyTensor **packed = calloc((size_t)n, sizeof(*packed));
+  int rc = -1;
+  if (!buffers || !packed) goto done;
+  for (int j = 0; j < n; j++) {
+    if (!sizes[j]) continue;
+    /* Retain each packed Tensor across the eventual device wait. Keep the
+     * existing per-view copy schedule; transport batching is not graph fusion. */
+    buffers[j] = model_read_storage(inst, indices[j], &packed[j]);
+    if (!buffers[j]) goto done;
   }
-  return poly_buffer_read(inst->ctx, inst->bufs[i].buffer, host_dst, dst_len);
+  rc = poly_buffer_read_many(inst->ctx, buffers, dsts, sizes, n);
+done:
+  if (packed)
+    for (int j = 0; j < n; j++)
+      if (packed[j]) poly_tensor_release(packed[j]);
+  free(packed);
+  free(buffers);
+  return rc;
 }
 
 int poly_model_write_buf(PolyModel *inst, int i, const void *host_src, size_t src_len) {

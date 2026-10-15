@@ -239,6 +239,10 @@ int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 /* Copy current realized bytes into caller-owned dst without retaining a host
  * mirror. Resolves views and authoritative storage through the backend. */
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
+/* Borrow all arrays/storage through completion. Zero-byte entries are ignored;
+ * validate every source before copying. Backend failures may partially write
+ * destinations; callers must not publish them on failure. */
+int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_t *sizes, int n);
 
 /* Replace logical contents from host bytes, preserving cached device residency. */
 int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes);

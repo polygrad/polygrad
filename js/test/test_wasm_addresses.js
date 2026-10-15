@@ -41,8 +41,8 @@ async function checkHostCopies(address) {
   Object.assign(env, {GPUBufferUsage: {}, GPUMapMode: {READ: 1}})
   assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_wasm', 'handle,src,nbytes', env)(1, address, 4), 0)
   assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_hostkey', 'handle,src_key,nbytes', env)(1, address, 4), 0)
-  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key', env)(address, 1, 4, 1), 0)
-  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key', env)(address, 1, 4, 0), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key,items,count', env)(address, 1, 4, 1), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key,items,count', env)(address, 1, 4, 0), 0)
 }
 
 async function checkReadbackStaging() {
@@ -70,7 +70,7 @@ async function checkReadbackStaging() {
   const Module = {__polygradWebGpuState:st, __polygradEnsureWebGPU:async()=>st}
   const errors=[]
   const env = {Module,HEAPU8:heap,GPUBufferUsage:{},GPUMapMode:{READ:1},console:{error(...args){errors.push(args)}}}
-  const read = bridge('runtime_webgpu.c','js_webgpu_read_buffer','dst,handle,nbytes,host_key',
+  const read = bridge('runtime_webgpu.c','js_webgpu_read_buffer','dst,handle,nbytes,host_key,items,count',
     env)
   for (let i=0;i<5;i++) assert.equal(await read(0,1,4,0),0)
   assert.deepEqual(Array.from(heap.slice(0,4)),[7,7,7,7])
@@ -100,6 +100,57 @@ async function checkReadbackStaging() {
   assert.equal(await read(0,1,4,0),0)
   assert.equal(env.HEAPU8[0],7,'readback must use the grown heap')
   assert.equal(heap[0],0)
+  st.readbackStaging.destroy()
+}
+
+async function checkGroupedReadback() {
+  const heap = new Uint8Array(4096), descriptors = new Uint32Array(heap.buffer, 64, 9)
+  descriptors.set([256,1,3, 288,2,5, 0,999,0])
+  let maps = 0, submits = 0, allocations = 0, failure, grow = false
+  const sources = new Map([[1,{size:16,bytes:new Uint8Array(16).fill(11)}],
+    [2,{size:8,bytes:new Uint8Array(8).fill(22)}]])
+  const st = {buffers:sources,bufferOffsets:new Map([[1,4]]),device:{
+    limits:{maxBufferSize:4096},
+    createBuffer({size}) {
+      if(failure==='allocate')throw Error('allocation failure')
+      allocations++
+      return {size,bytes:new Uint8Array(size),destroyed:false,
+        destroy(){this.destroyed=true},unmap(){},
+        async mapAsync(){maps++;if(failure==='map')throw Error('map failure');if(grow)env.HEAPU8=new Uint8Array(heap.length)},
+        getMappedRange(offset,size){if(failure==='range')throw Error('range failure');return this.bytes.slice(offset,offset+size).buffer}}
+    },
+    createCommandEncoder(){
+      if(failure==='encoder')throw Error('encoder failure')
+      return {copyBufferToBuffer(src,offset,dst,out,size){
+        if(failure==='copy')throw Error('copy failure')
+        dst.bytes.set(src.bytes.subarray(offset,offset+size),out)
+      },finish(){return {}}}
+    },
+    queue:{submit(){submits++;if(failure==='submit')throw Error('submit failure')}}
+  }}
+  const env={Module:{__polygradEnsureWebGPU:async()=>st},HEAPU8:heap,HEAPU32:new Uint32Array(heap.buffer),
+    GPUBufferUsage:{},GPUMapMode:{READ:1},console:{error(){}}}
+  const read=bridge('runtime_webgpu.c','js_webgpu_read_buffer','dst,handle,nbytes,host_key,items,count',env)
+  for(let i=0;i<20;i++)assert.equal(await read(0,0,0,0,64,3),0)
+  assert.equal(maps,20);assert.equal(submits,20);assert.equal(allocations,1)
+  assert.deepEqual(Array.from(heap.slice(256,260)),[11,11,11,0])
+  assert.deepEqual(Array.from(heap.slice(288,294)),[22,22,22,22,22,0])
+  const cached=st.readbackStaging
+  descriptors[4]=999;heap.fill(0,256)
+  assert.equal(await read(0,0,0,0,64,3),-1)
+  assert.equal(maps,20);assert.equal(heap[256],0);descriptors[4]=2
+  st.device.limits.maxBufferSize=12
+  assert.equal(await read(0,0,0,0,64,3),1,'capacity fallback is distinct from an execution failure')
+  assert.equal(maps,20);assert.equal(st.readbackStaging,cached)
+  st.device.limits.maxBufferSize=4096
+  for(failure of ['encoder','copy','submit','map','range','allocate']){
+    if(failure==='allocate'){st.readbackStaging?.destroy();st.readbackStaging=null}
+    assert.equal(await read(0,0,0,0,64,3),-1)
+    assert.equal(st.readbackStaging,null);assert.equal(heap[256],0)
+  }
+  failure=null;grow=true
+  assert.equal(await read(0,0,0,0,64,3),0)
+  assert.equal(heap[256],0);assert.equal(env.HEAPU8[256],11);assert.equal(env.HEAPU8[288],22)
   st.readbackStaging.destroy()
 }
 
@@ -192,5 +243,6 @@ function checkWasm(address, count) {
     await checkWebgpu(address, true, false, -1, 10000)
     for (let count = 0; count <= 9; count++) checkWasm(address, count)
   }
-  console.log('Wasm addresses, timing and readback staging: 85 passed')
+  await checkGroupedReadback()
+  console.log('Wasm addresses, timing and readback staging: 86 scenarios passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })

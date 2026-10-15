@@ -1496,7 +1496,20 @@ class Model:
             # Sealed signatures and declared dtypes are immutable. Never cache
             # current extents, host results, or placement-dependent storage.
             self._output_specs[entrypoint] = specs = tuple(specs)
+        arrays = []
         for name, i, dtype in specs:
             shape = self.buf_current_shape(i)
-            result[name] = self._read_buf_data(i, shape, dtype).reshape(shape)
+            out = np.empty(shape, dtype=dtype)
+            arrays.append(out)
+            result[name] = out
+        n = len(specs)
+        if n:
+            # Keep destinations alive through the device wait; publish nothing
+            # if any buffer fails. Shapes remain live, never wrapper-cached.
+            indices = (ctypes.c_int * n)(*(s[1] for s in specs))
+            dsts = (ctypes.c_void_p * n)(*(a.ctypes.data for a in arrays))
+            sizes = (ctypes.c_size_t * n)(*(a.nbytes for a in arrays))
+            rc = _get_lib().poly_model_read_bufs(self._ptr, indices, dsts, sizes, n)
+            if rc != 0:
+                raise RuntimeError(f'output read failed (ret={rc})')
         return result

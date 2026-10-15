@@ -2235,6 +2235,47 @@ TEST(model, read_write_buf_named_forward_e2e) {
   PASS();
 }
 
+TEST(model, bulk_read_validates_sources_and_owns_destinations) {
+  int len = 0;
+  uint8_t *ir = make_add_ir(&len);
+  PolyModel *m = poly_model_from_ir(ir, len, NULL, 0);
+  ASSERT_NOT_NULL(m);
+  float a[] = {1, 2, 3, 4}, b[] = {10, 20, 30, 40}, x[4] = {0}, y[4] = {0};
+  ASSERT_INT_EQ(poly_model_write_buf_named(m, "a", a, sizeof(a)), 0);
+  ASSERT_INT_EQ(poly_model_write_buf_named(m, "b", b, sizeof(b)), 0);
+  ASSERT_INT_EQ(poly_model_forward(m, NULL, 0), 0);
+  int indices[] = {poly_model_find_buf(m, "output"), poly_model_find_buf(m, "a")};
+  void *dsts[] = {x, y};
+  size_t sizes[] = {sizeof(x), sizeof(y)};
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, 2), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(x[i], a[i] + b[i], 0.0);
+    ASSERT_FLOAT_EQ(y[i], a[i], 0.0);
+  }
+  x[0] = -123;
+  indices[1] = -1;
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, 2), -1);
+  ASSERT_FLOAT_EQ(x[0], -123.0, 0.0);
+  indices[1] = indices[0];
+  sizes[1]++;
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, 2), -1);
+  ASSERT_FLOAT_EQ(x[0], -123.0, 0.0);
+  sizes[1]--;
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, 2), 0);
+  x[0] = -123;
+  ASSERT_FLOAT_EQ(y[0], 11.0, 0.0);
+  sizes[0] = sizes[1] = 0;
+  dsts[0] = dsts[1] = NULL;
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, 2), 0);
+  ASSERT_INT_EQ(poly_model_read_bufs(m, NULL, NULL, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_model_read_bufs(m, indices, dsts, sizes, -1), -1);
+  ASSERT_INT_EQ(poly_model_read_bufs(m, NULL, dsts, sizes, 2), -1);
+  poly_model_free(m);
+  free(ir);
+  ASSERT_FLOAT_EQ(y[0], 11.0, 0.0);
+  PASS();
+}
+
 TEST(model, forward_rebuilds_runtime_cache_after_clear) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);

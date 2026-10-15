@@ -1420,17 +1420,15 @@ function createBoundModelClass(runtime) {
     }
 
     _collectOutputsRaw(entrypoint = 'forward') {
-      const outputs = {}
-      for (const { name, index } of this._outputSpecs(entrypoint))
-        outputs[name] = this._bufDataRaw(index)
-      return outputs
+      const specs = this._outputSpecs(entrypoint)
+      if (!specs.length) return {}
+      const arrays = this._rt._core.model.bufDataMany(this._handle, specs.map(s => s.index))
+      const finish = values => Object.fromEntries(specs.map((s, i) => [s.name, values[i]]))
+      return isPromiseLike(arrays) ? arrays.then(finish) : finish(arrays)
     }
 
     async _collectOutputsRawAsync(entrypoint = 'forward') {
-      const outputs = {}
-      for (const { name, index } of this._outputSpecs(entrypoint))
-        outputs[name] = await this._bufDataRaw(index)
-      return outputs
+      return this._collectOutputsRaw(entrypoint)
     }
 
     _collectOutputs() {

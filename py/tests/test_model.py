@@ -12,7 +12,8 @@ def test_output_metadata_cached_without_freezing_shapes_or_snapshots(monkeypatch
     from polygrad.tensor import Variable
     counts = {}
     for name in ('poly_model_entrypoint_output_count', 'poly_model_entrypoint_output_name',
-                 'poly_model_find_buf', 'poly_model_buf_dtype_id', 'poly_model_buf_current_shape'):
+                 'poly_model_find_buf', 'poly_model_buf_dtype_id', 'poly_model_buf_current_shape',
+                 'poly_model_read_bufs', 'poly_model_read_buf'):
         original = getattr(_ffi._lib, name)
         def counted(*args, _name=name, _fn=original):
             counts[_name] = counts.get(_name, 0) + 1
@@ -37,7 +38,7 @@ def test_output_metadata_cached_without_freezing_shapes_or_snapshots(monkeypatch
                 np.testing.assert_array_equal(result['value'], current * 2)
                 np.testing.assert_array_equal(result['mask'], current > 2)
                 assert result['mask'].dtype == np.bool_
-            assert counts == {'poly_model_buf_current_shape': 4}
+            assert counts == {'poly_model_buf_current_shape': 4, 'poly_model_read_bufs': 2}
             np.testing.assert_array_equal(first['value'], data * 2)
             assert set(model.call('mask_only', {'x': data})) == {'mask'}
             model.write_buffer('weight', np.array([3], np.float32))
@@ -51,7 +52,10 @@ def test_output_metadata_cached_without_freezing_shapes_or_snapshots(monkeypatch
             np.testing.assert_array_equal(restored.call('both', {'x': data})['value'], data * 3)
             counts.clear()
             restored.call('both', {'x': data})
-            assert counts == {'poly_model_buf_current_shape': 2}
+            assert counts == {'poly_model_buf_current_shape': 2, 'poly_model_read_bufs': 1}
+            monkeypatch.setattr(_ffi._lib, 'poly_model_read_bufs', lambda *args: -1)
+            with pytest.raises(RuntimeError, match='output read failed'):
+                model.call('both', {'x': data})
         finally:
             if restored is not None: restored.dispose()
             model.dispose()
