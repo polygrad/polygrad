@@ -272,6 +272,7 @@ function createBoundModelClass(runtime) {
     if (model) {
       model._owner = null
       model._handle = null
+      model._outputSpecsByEntry.clear()
       model._closing = true
     }
     if (!owner.state.alive || !owner.core || !owner.handle) return undefined
@@ -570,6 +571,7 @@ function createBoundModelClass(runtime) {
       }
       this._rt = _runtime
       this._handle = handle
+      this._outputSpecsByEntry = new Map()
       const caps = _runtime && _runtime._core && _runtime._core.caps
       this._asyncHostBridge = Boolean(caps && caps.core === 'wasm' && caps.device === 'webgpu')
       this._asyncTail = Promise.resolve()
@@ -848,6 +850,7 @@ function createBoundModelClass(runtime) {
           this._owner = null
         }
         this._handle = null
+        this._outputSpecsByEntry.clear()
         return undefined
       }
       if (!this._usesAsyncHostBridge()) {
@@ -1394,35 +1397,39 @@ function createBoundModelClass(runtime) {
       return Promise.resolve(run())
     }
 
-    _collectOutputsRaw(entrypoint = 'forward') {
-      const outputs = {}
+    _outputSpecs(entrypoint) {
+      if (!this._handle) throw new Error('Model has been disposed')
+      let specs = this._outputSpecsByEntry.get(entrypoint)
+      if (specs) return specs
       const api = this._rt._core.model
       const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
       if (nOutputs < 0) throw new Error(`polygrad: unknown Model entrypoint '${entrypoint}'`)
+      specs = []
       for (let i = 0; i < nOutputs; i++) {
         const name = api.entrypointOutputName(this._handle, entrypoint, i)
         const bi = this.findBuf(name)
         if (name == null || bi < 0) {
           throw new Error(`polygrad: entrypoint '${entrypoint}' references a missing output`)
         }
-        outputs[name] = this._bufDataRaw(bi)
+        specs.push({ name, index: bi })
       }
+      // Sealed signatures are immutable. Buffer reads still resolve current
+      // extents/storage and return independent copies on every call.
+      this._outputSpecsByEntry.set(entrypoint, specs)
+      return specs
+    }
+
+    _collectOutputsRaw(entrypoint = 'forward') {
+      const outputs = {}
+      for (const { name, index } of this._outputSpecs(entrypoint))
+        outputs[name] = this._bufDataRaw(index)
       return outputs
     }
 
     async _collectOutputsRawAsync(entrypoint = 'forward') {
       const outputs = {}
-      const api = this._rt._core.model
-      const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
-      if (nOutputs < 0) throw new Error(`polygrad: unknown Model entrypoint '${entrypoint}'`)
-      for (let i = 0; i < nOutputs; i++) {
-        const name = api.entrypointOutputName(this._handle, entrypoint, i)
-        const bi = this.findBuf(name)
-        if (name == null || bi < 0) {
-          throw new Error(`polygrad: entrypoint '${entrypoint}' references a missing output`)
-        }
-        outputs[name] = await this._bufDataRaw(bi)
-      }
+      for (const { name, index } of this._outputSpecs(entrypoint))
+        outputs[name] = await this._bufDataRaw(index)
       return outputs
     }
 

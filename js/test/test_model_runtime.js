@@ -1395,6 +1395,59 @@ async function checkModelCaptureFailure(pg) {
   } finally { await x.dispose(); await state.dispose() }
 }
 
+async function checkModelOutputMetadata(pg) {
+  const n = pg.uop.variable('metadata_batch', 1, 8), bound = n.bind(3)
+  const x = pg.Tensor.empty([bound, 2]), weight = new pg.Tensor(new Float32Array([2]))
+  const value = x.mul(weight), mask = x.gt(2)
+  const model = await pg.Model.fromTensors({inputs:{x}, params:{weight}, outputs:{value,mask},
+    entrypoints:[{name:'both',inputs:['x'],outputs:['value','mask']},
+      {name:'mask_only',inputs:['x'],outputs:['mask']}]})
+  const api = pg._core.model, originals = {}, counts = {}
+  let restored
+  try {
+    for (const name of ['entrypointOutputCount','entrypointOutputName','bufCount','bufName']) {
+      originals[name] = api[name]
+      api[name] = function(...args) {
+        counts[name] = (counts[name] || 0) + 1
+        return originals[name].apply(this, args)
+      }
+    }
+    const data = Float32Array.from({length:6},(_,i)=>i)
+    const first = await model.callAsync('both',{x:{data,shape:[3,2]}})
+    for (const key of Object.keys(counts)) delete counts[key]
+    for (const batch of [5,3]) {
+      const current = Float32Array.from({length:batch*2},(_,i)=>i)
+      const result = await model.callAsync('both',{x:{data:current,shape:[batch,2]}})
+      assertClose(result.value, Array.from(current,v=>v*2),0)
+      assertClose(result.mask, Array.from(current,v=>Number(v>2)),0)
+    }
+    assert(Object.keys(counts).length===0, `repeated immutable queries: ${JSON.stringify(counts)}`)
+    assertClose(first.value, Array.from(data,v=>v*2),0)
+    assert(Object.keys(await model.callAsync('mask_only',{x:data})).join(',')==='mask')
+    await model.writeBufferAsync('weight',new Float32Array([3]))
+    assertClose((await model.callAsync('both',{x:data})).value,Array.from(data,v=>v*3),0)
+    assertClose(first.value,Array.from(data,v=>v*2),0)
+    const before = await model.readBufferAsync('x')
+    for (const [entry, input] of [['missing',data],['both',new Float32Array(18)]]) {
+      let rejected = false
+      try { await model.callAsync(entry,{x:input}) } catch (_) { rejected = true }
+      assert(rejected, 'invalid call accepted')
+    }
+    assertClose(await model.readBufferAsync('x'),before,0)
+    restored = await pg.Model.load(await model.saveAsync())
+    assertClose((await restored.callAsync('both',{x:data})).value,Array.from(data,v=>v*3),0)
+    for (const key of Object.keys(counts)) delete counts[key]
+    await restored.callAsync('both',{x:data})
+    assert(Object.keys(counts).length===0,'loaded Model rediscovered output schema')
+  } finally {
+    Object.assign(api,originals)
+    if (restored) await restored.dispose()
+    await model.dispose()
+    for (const tensor of [value,mask,weight,x]) await tensor.dispose()
+    bound.dispose(); n.dispose()
+  }
+}
+
 async function checkModelVariableShapes(pg) {
   await checkModelMultipleAxes(pg)
   await checkModelSingletonTraining(pg)
@@ -3067,6 +3120,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Model output metadata caching preserves live shapes and snapshots', () => checkModelOutputMetadata(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
@@ -3862,6 +3916,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   for (const dtype of ['float32', 'bfloat16'])
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
+  await test('Model output metadata caching preserves live shapes and snapshots', () => checkModelOutputMetadata(pg))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))

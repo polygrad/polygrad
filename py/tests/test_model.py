@@ -6,6 +6,57 @@ from polygrad.model import Model, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP, Graph, Sequential
 from polygrad.tensor import Tensor
 
+
+def test_output_metadata_cached_without_freezing_shapes_or_snapshots(monkeypatch):
+    from polygrad import create, _ffi
+    from polygrad.tensor import Variable
+    counts = {}
+    for name in ('poly_model_entrypoint_output_count', 'poly_model_entrypoint_output_name',
+                 'poly_model_find_buf', 'poly_model_buf_dtype_id', 'poly_model_buf_current_shape'):
+        original = getattr(_ffi._lib, name)
+        def counted(*args, _name=name, _fn=original):
+            counts[_name] = counts.get(_name, 0) + 1
+            return _fn(*args)
+        monkeypatch.setattr(_ffi._lib, name, counted)
+    with create(device='CPU', logical='always') as rt:
+        n = Variable('metadata_batch', 1, 8, _ctx=rt._ctx)
+        x, weight = rt.Tensor.empty(n.bind(3), 2), rt.Tensor([2.0])
+        value, mask = x * weight, x > 2
+        model = rt.Model.from_tensors(inputs={'x': x}, params={'weight': weight},
+            outputs={'value': value, 'mask': mask}, entrypoints=[
+                {'name': 'both', 'inputs': ['x'], 'outputs': ['value', 'mask']},
+                {'name': 'mask_only', 'inputs': ['x'], 'outputs': ['mask']}])
+        restored = None
+        try:
+            data = np.arange(6, dtype=np.float32).reshape(3, 2)
+            first = model.call('both', {'x': data})
+            counts.clear()
+            for batch in (5, 3):
+                current = np.arange(batch * 2, dtype=np.float32).reshape(batch, 2)
+                result = model.call('both', {'x': current})
+                np.testing.assert_array_equal(result['value'], current * 2)
+                np.testing.assert_array_equal(result['mask'], current > 2)
+                assert result['mask'].dtype == np.bool_
+            assert counts == {'poly_model_buf_current_shape': 4}
+            np.testing.assert_array_equal(first['value'], data * 2)
+            assert set(model.call('mask_only', {'x': data})) == {'mask'}
+            model.write_buffer('weight', np.array([3], np.float32))
+            np.testing.assert_array_equal(model.call('both', {'x': data})['value'], data * 3)
+            np.testing.assert_array_equal(first['value'], data * 2)
+            before = model.read_buffer('x')
+            with pytest.raises(RuntimeError): model.call('missing', {'x': data})
+            with pytest.raises(RuntimeError): model.call('both', {'x': np.zeros((9, 2), np.float32)})
+            np.testing.assert_array_equal(model.read_buffer('x'), before)
+            restored = rt.Model.load(model.save())
+            np.testing.assert_array_equal(restored.call('both', {'x': data})['value'], data * 3)
+            counts.clear()
+            restored.call('both', {'x': data})
+            assert counts == {'poly_model_buf_current_shape': 2}
+        finally:
+            if restored is not None: restored.dispose()
+            model.dispose()
+            for tensor in (value, mask, weight, x): tensor.dispose()
+
 def test_probability_methods_capture_and_roundtrip():
     from polygrad import create
     names = ('erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma', 'log_ndtr')

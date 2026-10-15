@@ -375,12 +375,15 @@ class Model:
             raise RuntimeError('Failed to create PolyModel (NULL pointer)')
         model = Model.__new__(Model)
         model._ptr, model._ctx = ptr, ctx
+        model._output_specs = {}
         if ctx:
             _live_models.add(model)
         return model
 
     def _adopt(self, built):
         self._ptr, self._ctx = built._ptr, built._ctx
+        self._output_specs = built._output_specs
+        built._output_specs = {}
         built._ptr = built._ctx = None
         if self._ctx:
             _live_models.add(self)
@@ -408,6 +411,7 @@ class Model:
             _get_lib().poly_model_free(self._ptr)
             self._ptr = None
             self._ctx = None
+            self._output_specs.clear()
 
     def __del__(self):
         if hasattr(self, '_ptr') and self._ptr:
@@ -977,7 +981,10 @@ class Model:
         if i < 0 or i >= self.buf_count:
             return None
         shape = self.buf_current_shape(i)
-        out = np.empty(math.prod(shape), dtype=_storage_dtype(self.buf_dtype(i)))
+        return self._read_buf_data(i, shape, _storage_dtype(self.buf_dtype(i)))
+
+    def _read_buf_data(self, i, shape, dtype):
+        out = np.empty(math.prod(shape), dtype=dtype)
         ret = _get_lib().poly_model_read_buf(self._ptr, i, out.ctypes.data, out.nbytes)
         if ret != 0:
             raise RuntimeError(f'buffer read failed (ret={ret})')
@@ -1466,24 +1473,30 @@ class Model:
 
     def _collect_outputs(self, entrypoint='forward'):
         """Read only outputs declared by the selected entrypoint."""
+        if not self._ptr:
+            raise RuntimeError('Model is disposed')
         result = {}
-        lib = _get_lib()
-        encoded = str(entrypoint).encode('utf-8')
-        n_outputs = lib.poly_model_entrypoint_output_count(self._ptr, encoded)
-        if n_outputs < 0:
-            raise RuntimeError(f"unknown Model entrypoint '{entrypoint}'")
-        for output_index in range(n_outputs):
-            raw_name = lib.poly_model_entrypoint_output_name(
-                self._ptr, encoded, output_index)
-            if not raw_name:
-                raise RuntimeError(f"invalid output {output_index} for entrypoint '{entrypoint}'")
-            name = raw_name.decode('utf-8')
-            i = self.find_buf(name)
-            if i < 0:
-                raise RuntimeError(f"entrypoint '{entrypoint}' references missing output '{name}'")
-            data = self.buf_data(i)
-            if data is not None:
-                # Tensor.numpy() preserves scalar and multidimensional shape.
-                # buf_data already owns a copy; reshape without copying again.
-                result[name] = data.reshape(self.buf_current_shape(i))
+        specs = self._output_specs.get(entrypoint)
+        if specs is None:
+            lib = _get_lib()
+            encoded = str(entrypoint).encode('utf-8')
+            n_outputs = lib.poly_model_entrypoint_output_count(self._ptr, encoded)
+            if n_outputs < 0:
+                raise RuntimeError(f"unknown Model entrypoint '{entrypoint}'")
+            specs = []
+            for output_index in range(n_outputs):
+                raw_name = lib.poly_model_entrypoint_output_name(self._ptr, encoded, output_index)
+                if not raw_name:
+                    raise RuntimeError(f"invalid output {output_index} for entrypoint '{entrypoint}'")
+                name = raw_name.decode('utf-8')
+                i = self.find_buf(name)
+                if i < 0:
+                    raise RuntimeError(f"entrypoint '{entrypoint}' references missing output '{name}'")
+                specs.append((name, i, _storage_dtype(self.buf_dtype(i))))
+            # Sealed signatures and declared dtypes are immutable. Never cache
+            # current extents, host results, or placement-dependent storage.
+            self._output_specs[entrypoint] = specs = tuple(specs)
+        for name, i, dtype in specs:
+            shape = self.buf_current_shape(i)
+            result[name] = self._read_buf_data(i, shape, dtype).reshape(shape)
         return result
