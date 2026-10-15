@@ -21,6 +21,12 @@ function parseArgs(argv) {
     cases: ["mlp_small", "mlp_token", "mlp_batch", "qwen_ffn_token", "qwen_ffn_batch"],
     iters: 10,
     warmup: 2,
+    paired: false,
+    rounds: 1,
+    bundle: "js/dist/polygrad.sync.js",
+    baseline: null,
+    async: false,
+    kernels: false,
     stageBreakdown: false,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -32,14 +38,20 @@ function parseArgs(argv) {
     if (a === "--cases") args.cases = next().split(",").map((x) => x.trim()).filter(Boolean);
     else if (a === "--iters") args.iters = Number(next());
     else if (a === "--warmup") args.warmup = Number(next());
+    else if (a === "--bundle") args.bundle = next();
+    else if (a === "--baseline") args.baseline = next();
+    else if (a === "--async") args.async = true;
+    else if (a === "--kernels") args.kernels = true;
     else if (a === "--stage-breakdown") args.stageBreakdown = true;
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N] [--stage-breakdown]");
+      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N] [--paired] [--rounds N] [--bundle repo/path.js] [--baseline repo/old.js] [--async] [--kernels] [--stage-breakdown]");
       process.exit(0);
-    } else if (a === "--paired" || a === "--quiet") {
-      // Accepted for Makefile BENCH_JAX_JS_EXTRA parity with the Node model bench.
+    } else if (a === "--paired") {
+      args.paired = true;
+    } else if (a === "--quiet") {
+      // Console output is already limited to results.
     } else if (a === "--rounds") {
-      next();
+      args.rounds = Number(next());
     } else {
       throw new Error("unknown option " + a);
     }
@@ -49,6 +61,13 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(args.iters) || args.iters <= 0) throw new Error("--iters must be positive");
   if (!Number.isFinite(args.warmup) || args.warmup < 0) throw new Error("--warmup must be nonnegative");
+  if (!Number.isInteger(args.rounds) || args.rounds <= 0) throw new Error("--rounds must be a positive integer");
+  for (const key of ["bundle", "baseline"]) {
+    if (args[key] === null) continue;
+    const bundlePath = path.resolve(root, args[key]);
+    if (!bundlePath.startsWith(root + path.sep) || !fs.statSync(bundlePath).isFile()) throw new Error("--" + key + " must be a file inside the repository");
+    args[key] = path.relative(root, bundlePath).split(path.sep).map(encodeURIComponent).join("/");
+  }
   args.iters = Math.trunc(args.iters);
   args.warmup = Math.trunc(args.warmup);
   return args;
@@ -69,7 +88,7 @@ function makePage() {
 <meta charset="utf-8">
 <title>polygrad vs jax-js browser wasm model</title>
 <pre id="log"></pre>
-<script src="/js/dist/polygrad.sync.js"></script>
+<script src="/${args.bundle}"></script>
 <script type="module">
 import { checkWorkload, modelReference } from "/bench/wasm_checks.mjs";
 import {
@@ -315,18 +334,41 @@ async function primePipeline(pipeline, inputs) {
   }
 }
 
+async function fingerprintCompilation(call) {
+  const Original = WebAssembly.Module;
+  const kernels = [];
+  // Observe only Polygrad compilation, outside timing; jax-js also exports "kernel".
+  WebAssembly.Module = new Proxy(Original, { construct(target, args) {
+    const module = Reflect.construct(target, args);
+    if (Original.exports(module).some(e => e.name === "kernel")) {
+      const bytes = args[0];
+      kernels.push(new Uint8Array(bytes instanceof ArrayBuffer ? bytes :
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)).slice());
+    }
+    return module;
+  } });
+  try { await call(); }
+  finally { WebAssembly.Module = Original; }
+  return Promise.all(kernels.map(async bytes => {
+    const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    return Array.from(hash, x => x.toString(16).padStart(2, "0")).join("");
+  }));
+}
+
 async function runPolyCase(pg, name, c, inputData) {
   const inputs = await createPolyInputs(pg, c, inputData);
   const pipeline = createPolyPipeline(pg, c);
-  await primePipeline(pipeline, inputs);
-  await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
-  const samples = await timeAsync(() => pipeline.call(inputs), (y) => pipeline.ready(y), (y) => pipeline.disposeOutput(y));
-  const s = median(samples);
-  const schedules = pipeline.scheduleCount;
-  pipeline.dispose();
+  let validation;
+  const compiledKernelHashes = await fingerprintCompilation(async () => {
+    await primePipeline(pipeline, inputs);
+    validation = await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
+  });
   return {
-    name, label: caseLabel(c), seconds: s, us: s * 1e6,
-    tokens_per_s: c.tokens / s, gflops: modelFlops(c) / s / 1e9, schedules,
+    measure: () => timeAsync(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y)),
+    schedules: pipeline.scheduleCount,
+    validation,
+    compiledKernelHashes,
+    dispose() { pipeline.dispose(); for (const x of inputs) x.dispose(); },
   };
 }
 
@@ -335,15 +377,40 @@ async function runJaxCase(name, c, inputData) {
   await blockUntilReady(inputs);
   const pipeline = createJaxPipeline(c);
   await primePipeline(pipeline, inputs);
-  await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
-  const samples = await timeAsync(() => pipeline.call(inputs), (y) => pipeline.ready(y), (y) => pipeline.disposeOutput(y));
-  const s = median(samples);
-  pipeline.dispose();
-  for (const x of inputs) x.dispose();
+  const validation = await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
   return {
-    name, label: caseLabel(c), seconds: s, us: s * 1e6,
-    tokens_per_s: c.tokens / s, gflops: modelFlops(c) / s / 1e9,
+    measure: () => timeAsync(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y)),
+    validation,
+    dispose() { pipeline.dispose(); for (const x of inputs) x.dispose(); },
   };
+}
+
+async function runPairedCase(pg, name, c, inputData) {
+  const lanes = [];
+  const samples = [[], []];
+  const order = [];
+  try {
+    lanes.push(await runPolyCase(pg, name, c, inputData));
+    lanes.push(await runJaxCase(name, c, inputData));
+    for (let round = 0; round < args.rounds; round++) {
+      // Keep compiled pipelines alive; alternate timing order, not compilation.
+      const indices = args.paired && round % 2 ? [1, 0] : [0, 1];
+      for (const i of indices) {
+        order.push(i === 0 ? "polygrad" : "jax-js");
+        samples[i].push(...await lanes[i].measure());
+      }
+    }
+    console.log(JSON.stringify({ case: name, timingOrder: order }));
+    return lanes.map((lane, i) => {
+      const s = median(samples[i]);
+      return { name, label: caseLabel(c), seconds: s, us: s * 1e6,
+        tokens_per_s: c.tokens / s, gflops: modelFlops(c) / s / 1e9,
+        schedules: lane.schedules, samples: samples[i], validation: lane.validation,
+        compiledKernelHashes: lane.compiledKernelHashes };
+    });
+  } finally {
+    for (const lane of lanes) lane.dispose();
+  }
 }
 
 async function runPolyQwenStages(pg, name, c, inputData) {
@@ -471,9 +538,12 @@ async function main() {
     hasWorker: typeof NativeWorker !== "undefined",
     hardwareConcurrency: navigator.hardwareConcurrency || 0,
   };
-  console.log(JSON.stringify({ browser_env: env }));
+  console.log(JSON.stringify({ browser_env: env, args }));
 
-  const pg = await polygrad.create({ core: "wasm", device: "auto" });
+  const pg = await polygrad[args.async ? "createAsync" : "create"]({
+    core: "wasm", device: "auto", kernels: args.kernels,
+    env: args.kernels ? { POLY_DEBUG_KERNELS: "1" } : {},
+  });
   await init("wasm");
   defaultDevice("wasm");
 
@@ -481,11 +551,13 @@ async function main() {
   for (const name of args.cases) inputsByCase.set(name, caseInputs(CASES[name]));
 
   const pgResults = [];
-  for (const name of args.cases) pgResults.push(await runPolyCase(pg, name, CASES[name], inputsByCase.get(name)));
-
   const workerCreatesBeforeJax = workerCreates;
   const jaxResults = [];
-  for (const name of args.cases) jaxResults.push(await runJaxCase(name, CASES[name], inputsByCase.get(name)));
+  for (const name of args.cases) {
+    const [p, j] = await runPairedCase(pg, name, CASES[name], inputsByCase.get(name));
+    pgResults.push(p);
+    jaxResults.push(j);
+  }
   const workerCreatesDuringJax = workerCreates - workerCreatesBeforeJax;
 
   printSummary(pgResults, jaxResults);
@@ -508,7 +580,7 @@ async function main() {
   }
 
   window.__benchResults = {
-    env, workerCreatesDuringJax, stageWorkerCreatesDuringJax,
+    args, env, workerCreatesDuringJax, stageWorkerCreatesDuringJax,
     pgResults, jaxResults, pgStageResults, jaxStageResults,
   };
   await pg.dispose?.();
@@ -562,15 +634,24 @@ async function main() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   const browser = await chromium.launch({ args: ["--no-sandbox"] });
-  const page = await browser.newPage();
-  page.on("console", (msg) => console.log(msg.text()));
-  page.on("pageerror", (err) => console.error("PAGE ERROR:", err.message));
   try {
-    await page.goto("http://127.0.0.1:" + port + "/", { waitUntil: "load" });
-    const timeout = Math.max(180000, (args.iters + args.warmup) * args.cases.length * 30000);
-    const results = await page.waitForFunction(() => window.__benchResults, undefined, { timeout });
-    const value = await results.jsonValue();
-    if (value?.error) throw new Error(value.error + "\\n" + (value.stack || ""));
+    // ABBA pages in one browser isolate bundle identity from browser restarts.
+    const bundles = args.baseline ? [args.baseline, args.bundle, args.bundle, args.baseline] : [args.bundle];
+    for (const bundle of bundles) {
+      args.bundle = bundle;
+      const page = await browser.newPage();
+      page.on("console", msg => console.log(msg.text()));
+      page.on("pageerror", err => console.error("PAGE ERROR:", err.message));
+      try {
+        await page.goto("http://127.0.0.1:" + port + "/", { waitUntil: "load" });
+        const timeout = Math.max(180000, (args.iters + args.warmup) * args.rounds * args.cases.length * 30000);
+        const results = await page.waitForFunction(() => window.__benchResults, undefined, { timeout });
+        const value = await results.jsonValue();
+        if (value?.error) throw new Error(value.error + "\\n" + (value.stack || ""));
+      } finally {
+        await page.close();
+      }
+    }
   } finally {
     await browser.close();
     server.close();
