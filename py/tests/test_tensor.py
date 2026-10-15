@@ -460,6 +460,23 @@ def test_schedule_cache_clear_default_context():
     np.testing.assert_array_equal(x.numpy(), [2, 3])
 
 
+@pytest.mark.parametrize('logical', ['never', 'always', 'until_realize'])
+def test_schedule_cache_reconstruction_binds_current_buffers(logical):
+    import gc
+    with Runtime(device='cpu', logical=logical) as runtime:
+        for i in range(12):
+            data = np.arange(32, dtype=np.float32) + (100 if i % 2 else -100)
+            x = runtime.Tensor(data)
+            out = (x.sin() + 2).sum()
+            np.testing.assert_allclose(out.numpy(), np.sum(np.sin(data) + 2), rtol=1e-6)
+            out.dispose()
+            x.dispose()
+            del out, x
+            gc.collect()
+            runtime.collect()
+        runtime.clear_schedule_cache()
+
+
 @pytest.mark.parametrize('device', ['cpu', 'interp', 'cuda'])
 def test_readback_copy_has_no_retained_host_shadow(device):
     if device == 'cuda' and not Device.cuda_available():

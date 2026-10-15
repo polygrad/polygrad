@@ -1,7 +1,7 @@
 /* Tinygrad UOp.key: op/dtype/arg and ordered child identities, never tags.
- * C uses an exact canonical DAG encoding instead of Python repr + SHA256.
- * This is a cache key, not an interchange format; there is no decoder.
- * Hashes only index maps/cache files: full bytes decide equality. */
+ * The schedule uses cached recursive SHA256 digests. BEAM retains its exact
+ * canonical DAG encoding. Both share field encoding and iterative traversal;
+ * C metadata is encoded explicitly rather than through Python repr. */
 #include "ops.h"
 #include "../ctx.h"
 #include "../utils.h"
@@ -12,6 +12,7 @@
 typedef struct {
   uint8_t *data;
   size_t size, capacity;
+  bool digest_refs;
 } KeyBytes;
 
 static bool key_bytes(KeyBytes *b, const void *data, size_t size) {
@@ -94,6 +95,10 @@ static uint32_t key_hash(const KeyBytes *b) {
 
 static bool key_ref(KeyBytes *b, PolyMap *nodes, const PolyUOp *u) {
   if (!u) return key_int(b, 0);
+  if (b->digest_refs) {
+    const uint8_t *digest = poly_map_get(nodes, poly_ptr_hash(u), u, poly_ptr_eq);
+    return digest && digest != (void *)(uintptr_t)1 && key_int(b, 1) && key_bytes(b, digest, 32);
+  }
   KeyRow *row = poly_map_get(nodes, poly_ptr_hash(u), u, poly_ptr_eq);
   return row && row != (void *)(uintptr_t)1 && key_int(b, row->id);
 }
@@ -266,22 +271,24 @@ static PolyUOp *key_edge(const PolyUOp *u, int i) {
   return i == 0 ? e->ops : i == 1 ? e->lds : e->mem;
 }
 
-uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
+static uint8_t *uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size, bool digest) {
   if (!size) return NULL;
   *size = 0;
   if (!ctx || !root || !poly_ctx_owns_ptr(ctx, root)) return NULL;
+  if (digest && !poly_uop_storage_contains(ctx, root)) return NULL;
+  if (digest && poly_uop_cached_digest(root)) return (uint8_t *)poly_uop_cached_digest(root);
   typedef struct {
     PolyUOp *u;
     int next;
   } Frame;
   size_t depth = 1, capacity = 64;
   Frame *stack = malloc(capacity * sizeof(*stack));
-  PolyMap *nodes = poly_map_new(128), *contents = poly_map_new(128);
+  PolyMap *nodes = poly_map_new(128), *contents = digest ? NULL : poly_map_new(128);
   KeyRow *rows = NULL;
   uint64_t next_id = 1;
   KeyBytes out = {0};
   bool ok = false;
-  if (!stack || !nodes || !contents || !key_int(&out, 1)) goto done;
+  if (!stack || !nodes || (!digest && (!contents || !key_int(&out, 1)))) goto done;
   stack[0] = (Frame){root, 0};
   poly_map_set(nodes, poly_ptr_hash(root), root, (void *)(uintptr_t)1, poly_ptr_eq);
   while (depth) {
@@ -293,6 +300,13 @@ uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
       PolyUOp *child = key_edge(u, frame->next++);
       if (!child) continue;
       if (!poly_ctx_owns_ptr(ctx, child)) goto done;
+      if (digest && !poly_uop_storage_contains(ctx, child)) goto done;
+      if (digest && poly_uop_cached_digest(child)) {
+        poly_map_set(
+            nodes, poly_ptr_hash(child), child, (void *)poly_uop_cached_digest(child), poly_ptr_eq
+        );
+        continue;
+      }
       void *found = poly_map_get(nodes, poly_ptr_hash(child), child, poly_ptr_eq);
       if (found == (void *)(uintptr_t)1) goto done; /* cyclic metadata */
       if (found) continue;
@@ -308,7 +322,7 @@ uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
       poly_map_set(nodes, poly_ptr_hash(child), child, (void *)(uintptr_t)1, poly_ptr_eq);
       continue;
     }
-    KeyRow candidate = {0};
+    KeyRow candidate = {.bytes = {.digest_refs = digest}};
     bool valid = key_int(&candidate.bytes, u->op) && key_dtype(&candidate.bytes, u->dtype) &&
                  key_arg(&candidate.bytes, nodes, u->arg) && key_int(&candidate.bytes, u->n_src);
     for (int i = 0; valid && i < u->n_src; i++)
@@ -316,6 +330,16 @@ uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
     if (!valid) {
       free(candidate.bytes.data);
       goto done;
+    }
+    if (digest) {
+      uint8_t hash[32];
+      poly_sha256(candidate.bytes.data, candidate.bytes.size, hash);
+      free(candidate.bytes.data);
+      const uint8_t *cached = poly_uop_cache_digest(ctx, u, hash);
+      if (!cached) goto done;
+      poly_map_set(nodes, poly_ptr_hash(u), u, (void *)cached, poly_ptr_eq);
+      depth--;
+      continue;
     }
     uint32_t hash = key_hash(&candidate.bytes);
     KeyRow *row = poly_map_get(contents, hash, &candidate, key_equal);
@@ -336,7 +360,7 @@ uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
     poly_map_set(nodes, poly_ptr_hash(u), u, row, poly_ptr_eq);
     depth--;
   }
-  ok = key_ref(&out, nodes, root);
+  ok = digest || key_ref(&out, nodes, root);
 done:
   while (rows) {
     KeyRow *next = rows->next;
@@ -351,6 +375,16 @@ done:
     free(out.data);
     return NULL;
   }
+  if (digest) return (uint8_t *)poly_uop_cached_digest(root);
   *size = out.size;
   return out.data;
+}
+
+uint8_t *poly_uop_key(PolyCtx *ctx, PolyUOp *root, size_t *size) {
+  return uop_key(ctx, root, size, false);
+}
+
+const uint8_t *poly_uop_digest(PolyCtx *ctx, PolyUOp *root) {
+  size_t unused;
+  return uop_key(ctx, root, &unused, true);
 }

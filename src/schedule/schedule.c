@@ -422,6 +422,18 @@ fail:
   return NULL;
 }
 
+typedef struct {
+  uint8_t digest[32];
+  /* Host callbacks/auxiliary objects have no portable content identity. */
+  PolyUOp *fallback;
+} ScheduleKey;
+
+static bool schedule_key_equal(const void *a, const void *b) {
+  const ScheduleKey *x = a, *y = b;
+  return x->fallback || y->fallback ? x->fallback == y->fallback
+                                    : !memcmp(x->digest, y->digest, sizeof(x->digest));
+}
+
 /* Current Tinygrad schedule/__init__.py:116-145. KernelInfo-backed SINKs are
  * already compiler kernels; every other SINK is recursively scheduled. */
 static PolyUOp *lower_sink_to_linear(
@@ -434,20 +446,35 @@ static PolyUOp *lower_sink_to_linear(
       function->arg.kind == POLY_ARG_KERNEL_INFO)
     return NULL;
   bool use_cache = poly_getenv_flag_default("SCACHE", true);
+  ScheduleKey key = {0};
+  uint32_t hash = 0;
+  if (use_cache) {
+    const uint8_t *digest = poly_uop_digest(ctx, function);
+    if (digest) {
+      memcpy(key.digest, digest, sizeof(key.digest));
+      memcpy(&hash, digest, sizeof(hash));
+    } else {
+      key.fallback = function;
+      hash = poly_ptr_hash(function);
+    }
+  }
   PolyUOp *linear =
-      use_cache ? poly_map_get(ctx->schedule_cache, poly_ptr_hash(function), function, poly_ptr_eq)
-                : NULL;
+      use_cache ? poly_map_get(ctx->schedule_cache, hash, &key, schedule_key_equal) : NULL;
   if (linear) return linear;
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, function);
   linear = kernel_graph ? poly_create_schedule(ctx, kernel_graph) : NULL;
-  if (linear && use_cache && poly_uop_retain(ctx, function) == 0) {
-    /* Tinygrad lower_sink_to_linear keys by function.key bytes. This C map
-     * instead owns its pointer key as well as LINEAR; keeping the key valid
-     * retains its source closure until context teardown (PG-PARITY-032). */
-    if (poly_uop_retain(ctx, linear) == 0)
-      poly_map_set(ctx->schedule_cache, poly_ptr_hash(function), function, linear, poly_ptr_eq);
-    else
-      poly_uop_release(ctx, function);
+  if (linear && use_cache) {
+    ScheduleKey *owned = malloc(sizeof(*owned));
+    if (owned) {
+      *owned = key;
+      if (key.fallback && poly_uop_retain(ctx, key.fallback) != 0)
+        free(owned);
+      else if (poly_uop_retain(ctx, linear) != 0) {
+        if (key.fallback) poly_uop_release(ctx, key.fallback);
+        free(owned);
+      } else
+        poly_map_set(ctx->schedule_cache, hash, owned, linear, schedule_key_equal);
+    }
   }
   return linear;
 }
@@ -999,10 +1026,15 @@ size_t poly_schedule_cache_len(PolyCtx *ctx) {
 
 static void schedule_cache_release(const void *key, void *value, void *userdata) {
   PolyCtx *ctx = userdata;
-  /* Unlike Tinygrad's bytes keys, C pointer keys own a source-graph retain.
-   * Both retains were acquired independently, even if their graphs overlap. */
-  poly_uop_release(ctx, (PolyUOp *)key);
+  const ScheduleKey *owned = key;
+  if (owned->fallback) poly_uop_release(ctx, owned->fallback);
   poly_uop_release(ctx, value);
+  free((void *)owned);
+}
+
+void poly_schedule_ctx_cleanup(PolyCtx *ctx) {
+  poly_map_foreach(ctx->schedule_cache, schedule_cache_release, ctx);
+  poly_map_clear(ctx->schedule_cache);
 }
 
 /* Tinygrad schedule.schedule_cache.clear(), with C safe-point admission.
@@ -1010,7 +1042,6 @@ static void schedule_cache_release(const void *key, void *value, void *userdata)
  * before a later collection can reclaim the graph used for pointer lookup. */
 int poly_schedule_cache_clear(PolyCtx *ctx) {
   if (!ctx || ctx->execution_depth || ctx->collecting || ctx->active_jit_capture) return -1;
-  poly_map_foreach(ctx->schedule_cache, schedule_cache_release, ctx);
-  poly_map_clear(ctx->schedule_cache);
+  poly_schedule_ctx_cleanup(ctx);
   return 0;
 }

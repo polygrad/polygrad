@@ -619,10 +619,11 @@ calls is unusable; reads and reuse fail rather than return partial results.
 Recreate affected state from a checkpoint. This does not roll back writes or
 recover a lost GPU device.
 
-The schedule cache has no automatic eviction or size cap. Every distinct
-cached graph keeps its schedule and source graph. Long-lived runtimes producing
-many distinct graphs can therefore accumulate memory; `collect()` alone does
-not evict this cache.
+The schedule cache has no automatic eviction or size cap. Each entry keeps a
+content digest and its schedule, not the source graph. Graphs with host callbacks
+or auxiliary objects still use retained pointer keys. Long-lived runtimes
+producing many distinct graphs can accumulate schedules; `collect()` alone does
+not evict them. Per-node digest caching also adds bookkeeping memory.
 Symbolic bindings that reuse a schedule do not necessarily add cache entries.
 
 At an idle boundary, use Python `pg.clear_schedule_cache()` or

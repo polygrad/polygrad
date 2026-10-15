@@ -794,6 +794,7 @@ typedef struct {
   CseKey key;
   PolyUOpOwnedAllocation *allocations;
   size_t owned_bytes;
+  uint8_t *digest;
   PolyUOp *src[];
 } PolyUOpStorage;
 
@@ -815,8 +816,26 @@ static PolyUOpStorage *uop_storage_new(PolyCtx *ctx, int n_src) {
 
 static size_t uop_storage_size(const PolyUOpStorage *storage) {
   return storage ? sizeof(*storage) + (size_t)storage->uop.n_src * sizeof(PolyUOp *) +
-                       storage->owned_bytes
+                       storage->owned_bytes + (storage->digest ? 32 : 0)
                  : 0;
+}
+
+const uint8_t *poly_uop_cached_digest(const PolyUOp *u) {
+  return ((const PolyUOpStorage *)u)->digest;
+}
+
+const uint8_t *poly_uop_cache_digest(PolyCtx *ctx, PolyUOp *u, const uint8_t digest[32]) {
+  PolyUOpStorage *storage = uop_storage_get(ctx, u);
+  if (!storage) return NULL;
+  if (!storage->digest) {
+    storage->digest = malloc(32);
+    if (!storage->digest) return NULL;
+    memcpy(storage->digest, digest, 32);
+    ctx->uop_storage_bytes += 32;
+    if (ctx->uop_storage_bytes > ctx->uop_storage_high_water)
+      ctx->uop_storage_high_water = ctx->uop_storage_bytes;
+  }
+  return storage->digest;
 }
 
 static void *uop_storage_alloc(PolyUOpStorage *storage, size_t size, size_t align) {
@@ -861,6 +880,7 @@ static void *uop_storage_alloc_live(
 
 static void uop_storage_dispose(PolyUOpStorage *storage) {
   if (!storage) return;
+  free(storage->digest);
   PolyUOpOwnedAllocation *allocation = storage->allocations;
   while (allocation) {
     PolyUOpOwnedAllocation *next = allocation->next;

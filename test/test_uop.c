@@ -82,6 +82,8 @@ static bool content_keys_equal(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   size_t na = 0, nb = 0;
   uint8_t *ka = poly_uop_key(ctx, a, &na), *kb = poly_uop_key(ctx, b, &nb);
   bool equal = ka && kb && na == nb && !memcmp(ka, kb, na);
+  const uint8_t *da = poly_uop_digest(ctx, a), *db = poly_uop_digest(ctx, b);
+  if (!da || !db || equal != (!memcmp(da, db, 32))) abort();
   free(ka);
   free(kb);
   return equal;
@@ -105,6 +107,8 @@ static bool content_args_differ(PolyCtx *ctx, PolyArg a, PolyArg b) {
   size_t nx = 0, ny = 0;
   uint8_t *kx = poly_uop_key(ctx, x, &nx), *ky = poly_uop_key(ctx, y, &ny);
   bool different = kx && ky && (nx != ny || memcmp(kx, ky, nx));
+  const uint8_t *dx = poly_uop_digest(ctx, x), *dy = poly_uop_digest(ctx, y);
+  different &= dx && dy && memcmp(dx, dy, 32);
   free(kx);
   free(ky);
   return different;
@@ -127,6 +131,8 @@ TEST(uop, content_key_context_tags_and_order) {
   PolyUOp *y = poly_uop_alu2(other, POLY_OP_ADD, other_a, other_b);
   size_t nx = 0, ny = 0;
   uint8_t *kx = poly_uop_key(ctx, x, &nx), *ky = poly_uop_key(other, y, &ny);
+  const uint8_t *dx = poly_uop_digest(ctx, x), *dy = poly_uop_digest(other, y);
+  ok &= dx && dy && !memcmp(dx, dy, 32);
   poly_ctx_destroy(ctx);
   poly_ctx_destroy(other);
   ok &= kx && ky && nx == ny && !memcmp(kx, ky, nx);
@@ -228,6 +234,8 @@ TEST(uop, content_key_typed_parameter_and_metadata_edges) {
   uint8_t *key =
       poly_uop_key(ctx, poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_call_info(&other)), &size);
   ok &= key == NULL && size == 0;
+  ok &= poly_uop_digest(ctx, poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_call_info(&other))) ==
+        NULL;
   free(key);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);
@@ -242,6 +250,9 @@ TEST(uop, content_key_deep_graph) {
   size_t size = 0;
   uint8_t *key = poly_uop_key(ctx, u, &size);
   bool ok = key && size > 0;
+  const uint8_t *digest = poly_uop_digest(ctx, u);
+  size_t bytes = ctx->uop_storage_bytes;
+  ok &= digest && poly_uop_digest(ctx, u) == digest && ctx->uop_storage_bytes == bytes;
   free(key);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(ok);

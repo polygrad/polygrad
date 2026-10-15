@@ -173,6 +173,8 @@ build/test_bigint.js: $(WASM_SRC) test/test_main.c test/test_bigint.c test/test_
 .PHONY: test-runtime-wasm
 test-runtime-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips content_key
+	$(SAN_RUN) $(NODE) $< --require-no-skips sha256
+	$(SAN_RUN) $(NODE) $< --require-no-skips cache_does_not_own_source_graph
 	$(SAN_RUN) $(NODE) $< --require-no-skips import_metadata_allocation
 	$(SAN_RUN) $(NODE) $< --require-no-skips program_rejects
 	$(SAN_RUN) $(NODE) $< --require-no-skips view_assign_callify
@@ -239,7 +241,7 @@ test-materialization-wasm: build/test_schedule_runtime.js
 	$(SAN_RUN) $(NODE) $< --require-no-skips extraction_owner
 	$(SAN_RUN) $(NODE) $< --require-no-skips decomposition_owner
 
-build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
+build/test_schedule_runtime.js: $(WASM_SRC) test/test_main.c test/test_schedule_runtime.c test/test_uop.c test/test_utils.c test/test_sym.c test/test_reduce_simplify.c test/test_ir.c test/test_harness.h $(PROJECT_HEADERS) Makefile
 	@mkdir -p build
 	EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) -DPOLY_TESTING -O1 -g \
 		-fsanitize=address,undefined -fno-sanitize-recover=all -s ASSERTIONS=1 -s ALLOW_MEMORY_GROWTH=1 \

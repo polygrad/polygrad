@@ -22,6 +22,7 @@ static void free_buffer_record(const void *key, void *value, void *userdata);
 /* Optional cleanup hooks (defined in other files, linked weakly). */
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_engine_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
+void poly_schedule_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
 int poly_shape_cache_evict_unmarked(PolyCtx *ctx, PolyMap *live);
 void poly_shape_cache_destroy_all(PolyCtx *ctx);
@@ -171,6 +172,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (!ctx) return;
   if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
   if (poly_engine_ctx_cleanup) poly_engine_ctx_cleanup(ctx);
+  if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->to_program_cache);
   poly_map_destroy(ctx->runtime_cache);

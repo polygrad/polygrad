@@ -11,6 +11,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+
+/* SHA-256 content identity; output is 32 bytes in standard big-endian order. */
+void poly_sha256(const void *data, size_t size, uint8_t out[32]);
 
 /* Pointer hashing (splitmix64 finalizer) */
 bool poly_ptr_eq(const void *a, const void *b);

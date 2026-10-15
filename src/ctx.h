@@ -14,6 +14,13 @@
  * graphs use a proportional budget so tracing cost is amortized. */
 #define POLY_IR_COLLECTION_MIN_GROWTH ((size_t)1 << 20)
 
+/* Internal cached UOp.key. Borrowed digest dies with its node. These storage
+ * helpers require an owned UOp; keeping the cache outside public PolyUOp
+ * preserves its ABI. Unsupported host metadata returns NULL from digest. */
+const uint8_t *poly_uop_digest(PolyCtx *ctx, PolyUOp *root);
+const uint8_t *poly_uop_cached_digest(const PolyUOp *u);
+const uint8_t *poly_uop_cache_digest(PolyCtx *ctx, PolyUOp *u, const uint8_t digest[32]);
+
 struct PolyCtx {
   PolyArena *arena;
   PolyArena *scratch;

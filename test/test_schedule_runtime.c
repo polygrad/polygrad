@@ -72,6 +72,29 @@ static PolyUOp *cache_clear_schedule(PolyCtx *ctx, int size) {
   return linear;
 }
 
+TEST(schedule_runtime, cache_does_not_own_source_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_INTERP);
+  PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_INTERP);
+  PolyUOp *requested[] = {poly_uop_add(ctx, a, b)}, *outputs[1];
+  PolyUOp *call = poly_transform_to_call(ctx, requested, 1, outputs);
+  ASSERT_NOT_NULL(call);
+  PolyUOp *source = call->src[0];
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0;
+  ASSERT_NOT_NULL(poly_create_linear_with_vars(ctx, call, &vars, &n_vars));
+  free(vars);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_FALSE(poly_ctx_owns_ptr(ctx, source));
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_NOT_NULL(cache_clear_schedule(ctx, 8));
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_INT_EQ(poly_schedule_cache_clear(ctx), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, failed_batch_invalidates_written_prefix_only) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
