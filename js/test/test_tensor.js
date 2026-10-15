@@ -4250,6 +4250,19 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await a.dot(b).toArray(), [19, 22, 43, 50])
   })
 
+  await test('integer dot restores output dtype after wide accumulation', async () => {
+    for (const dtype of ['int8', 'uint8', 'int16', 'uint16']) {
+      const a = new Tensor([[100, 100, 100]], { dtype })
+      const b = new Tensor([[1], [1], [1]], { dtype })
+      const result = a.dot(b)
+      assert(result.dtype === dtype, `expected ${dtype}, got ${result.dtype}`)
+      assertClose(await result.toArray(), [dtype.endsWith('8') ? 44 : 300])
+      const wide = a.dot(b, 'int32')
+      assert(wide.dtype === 'int32')
+      assertClose(await wide.toArray(), [300])
+    }
+  })
+
   await testIf(supportsF64, 'dot supports an explicit accumulation dtype', async () => {
     const a = new Tensor(new Float32Array([1.25, -2, 0.5, 3, 0.25, -1.5])).reshape(2, 3)
     const b = new Tensor(new Float32Array([0.5, -1, 2, 0.25, -0.75, 3])).reshape(3, 2)

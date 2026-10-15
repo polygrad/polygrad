@@ -7341,7 +7341,10 @@ PolyUOp *poly_uop_dot_dtype(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, const PolyDTyp
   int mul_ndim = mul ? poly_uop_ndim(ctx, mul) : -1;
   if (!mul || mul_ndim < 1) return NULL;
   int64_t sum_axis[] = {mul_ndim - 1};
-  return sum_axes_root_dtype(ctx, mul, sum_axis, 1, false, dtype);
+  PolyUOp *sum = sum_axes_root_dtype(ctx, mul, sum_axis, 1, false, dtype);
+  /* dot restores its output type after sum widens integer accumulators;
+   * an explicit dtype selects both accumulation and output (pinned op.py). */
+  return sum ? poly_uop_cast(ctx, sum, dtype ? *dtype : mul->dtype) : NULL;
 }
 
 PolyUOp *poly_uop_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {

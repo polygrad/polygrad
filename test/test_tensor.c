@@ -6179,6 +6179,24 @@ TEST(tensor, sum_and_dot_accumulation_dtype_match_pinned_topology) {
   PASS();
 }
 
+TEST(tensor, integer_dot_casts_accumulator_to_output_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  const PolyDType types[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};
+  for (int i = 0; i < 4; i++) {
+    PolyTensor *a = poly_tensor_empty(ctx, types[i], (int64_t[]){1, 3}, 2, POLY_DEVICE_CPU);
+    PolyTensor *b = poly_tensor_empty(ctx, types[i], (int64_t[]){3, 1}, 2, POLY_DEVICE_CPU);
+    PolyTensor *dot = poly_tensor_dot(ctx, a, b);
+    PolyUOp *root = poly_tensor_uop(dot);
+    ASSERT_NOT_NULL(root);
+    ASSERT_INT_EQ(root->op, POLY_OP_CAST);
+    ASSERT_TRUE(poly_dtype_eq(root->dtype, types[i]));
+    ASSERT_INT_EQ(root->src[0]->op, POLY_OP_REDUCE);
+    ASSERT_TRUE(poly_dtype_eq(root->src[0]->dtype, i % 2 ? POLY_UINT32 : POLY_INT32));
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, conv2d_promotion_accumulation_and_bias_match_pinned_topology) {
   /* Pinned conv2d uses ordinary promoted multiplication, ReduceMixin.sum's
    * accumulation/cast-back rule, and ordinary promoted bias addition

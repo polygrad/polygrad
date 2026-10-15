@@ -4756,6 +4756,20 @@ class TestMatmulAndLoss:
             mixed.numpy(), [[-3.75, -0.25], [3.125, -7.4375]], rtol=1e-6, atol=1e-6,
         )
 
+    @pytest.mark.parametrize('dtype', [dtypes.int8, dtypes.uint8, dtypes.int16, dtypes.uint16])
+    def test_integer_dot_restores_output_dtype_after_wide_accumulation(self, dtype):
+        a = Tensor([[100, 100, 100]], dtype=dtype)
+        b = Tensor([[1], [1], [1]], dtype=dtype)
+        result = a.dot(b)
+        assert result.dtype == dtype
+        assert result.uop.op_name == 'CAST'
+        assert result.uop.src[0].op_name == 'REDUCE'
+        assert result.uop.src[0].dtype == (dtypes.uint32 if dtype in (dtypes.uint8, dtypes.uint16) else dtypes.int32)
+        np.testing.assert_array_equal(result.numpy(), [[44 if dtype in (dtypes.int8, dtypes.uint8) else 300]])
+        wide = a.dot(b, dtype=dtypes.int32)
+        assert wide.dtype == dtypes.int32
+        np.testing.assert_array_equal(wide.numpy(), [[300]])
+
     def test_matmul_broadcast_mismatch_raises(self):
         a = Tensor(np.zeros((2, 3, 4), dtype=np.float32))
         b = Tensor(np.zeros((5, 4, 6), dtype=np.float32))
