@@ -2294,6 +2294,50 @@ TEST(wasm, packed_group_reduce_relu_executes) {
   PASS();
 }
 
+TEST(wasm, specialized_and_generic_reduction_orders) {
+  const int widths[] = {8192, 8191};
+  for (int i = 0; i < 2; i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    int width = widths[i];
+    PolyUOp *x =
+        poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, 2 * width), (int64_t[]){2, width}, 2);
+    PolyUOp *out = poly_uop_buffer_f32(ctx, 2);
+    PolyUOp *sum = poly_uop_sum_reduce(ctx, x, 1, 0);
+    PolyUOp *schedule =
+        poly_test_create_linear(ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, sum)));
+    ASSERT_NOT_NULL(schedule);
+    ASSERT_INT_EQ(schedule->n_src, 1);
+    PolyUOp *body = poly_test_linear_call_body(schedule, 0);
+    ASSERT_TRUE(poly_wasm_can_render_reduce(body));
+    int size = 0;
+    uint8_t *special = poly_render_wasm_reduce(body, &size);
+    ASSERT_NOT_NULL(special);
+    const char *special_path = "temp/polygrad_test_reduce_order_special.wasm";
+    ASSERT_INT_EQ(wasm_write_module(special_path, special, size), 0);
+    free(special);
+    int count = 0;
+    PolyUOp **linear = wasm_linearize_generic_test(ctx, body, &count);
+    ASSERT_NOT_NULL(linear);
+    uint8_t *generic = poly_render_wasm(ctx, linear, count, &size, true);
+    ASSERT_NOT_NULL(generic);
+    const char *generic_path = "temp/polygrad_test_reduce_order_generic.wasm";
+    ASSERT_INT_EQ(wasm_write_module(generic_path, generic, size), 0);
+    free(generic);
+    free(linear);
+    const char *node = poly_test_node_cmd();
+    ASSERT_NOT_NULL(node);
+    char command[1024];
+    snprintf(
+        command, sizeof(command), "%s js/test/check_wasm_reduction_order.js %s %s %d", node,
+        special_path, generic_path, width
+    );
+    int status = system(command);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(status, 0);
+  }
+  PASS();
+}
+
 TEST(wasm, specialized_row_reduce_relu_executes) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -2321,8 +2365,8 @@ TEST(wasm, specialized_row_reduce_relu_executes) {
   PolyUOp *body = poly_test_linear_call_body(linear_schedule, 0);
   ASSERT_TRUE(poly_wasm_can_render_reduce(body));
 
-  /* Wasm's approved row-reduce renderer consumes the scheduled Tinygrad-form
-   * REDUCE before unmatched kernels enter full_rewrite_to_sink. */
+  /* The specialized row reducer consumes the scheduled REDUCE before shared
+   * optimization. Its numerical-order debt is tracked by PG-PARITY-039. */
   PolyUOp *rewritten = poly_rewrite_wasm(ctx, body);
   ASSERT_NOT_NULL(rewritten);
   ASSERT_TRUE(poly_wasm_can_render_reduce(rewritten));

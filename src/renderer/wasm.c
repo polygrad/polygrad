@@ -5215,9 +5215,9 @@ uint8_t *poly_render_wasm(PolyCtx *ctx, PolyUOp **uops, int n, int *size_out, bo
 }
 
 PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
-  /* Approved Wasm divergence: specialized binary emitters compile supported
-   * scheduled SINKs directly; unmatched kernels follow Tinygrad 2026-08-22/
-   * a9069c177a9d codegen/__init__.py:289-396. */
+  /* PG-PARITY-039: specialized emitters bypass shared optimization and can
+   * change rounding/reduction order. This is recorded debt, not an approved
+   * numerical allowance. Unmatched kernels use shared codegen below. */
   if (poly_wasm_can_render_matmul(sink) || poly_wasm_can_render_reduce(sink))
     return poly_type_verify_tensor(ctx, sink) ? sink : NULL;
   PolyRewriteOpts opts = {

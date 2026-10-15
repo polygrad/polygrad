@@ -25,6 +25,26 @@
   },
   "entries": [
     {
+      "id": "PG-PARITY-039",
+      "status": "open_debt",
+      "stages": ["codegen", "execution"],
+      "area": "Default Wasm specialized matmul and row-reduction numerical order",
+      "tinygrad": "Shared reduce_ranges_to_acc and expand_horizontal_reduce define the optimized accumulator graph; divisible generic Wasm probes add four-term groups into one scalar accumulator.",
+      "polygrad": "Default Wasm specialization bypasses shared optimization for eligible scheduled SINKs. Row reduction keeps four striped accumulators and combines (lane0+lane2)+(lane1+lane3), followed by scalar tails. Transposed-right matmul first tries relaxed SIMD multiply-add, whose fused versus unfused rounding is host-dependent; strict fallback still uses specialized tiling. These paths are separate from opt-in PG-DIV-012 kernels.",
+      "rationale": "Varying and cancellation inputs distinguish special and generic orders; repeated constants do not. Current isolated browser matmuls benefit materially from specialization, but speed does not authorize a numerical mismatch. Independent-lane SIMD policy does not cover reassociated reductions.",
+      "approval": null,
+      "evidence": [
+        "src/renderer/wasm.c:poly_rewrite_wasm",
+        "src/runtime_wasm.c:poly_wasm_lower_item",
+        "test/test_wasm.c:specialized_and_generic_reduction_orders",
+        "js/test/check_wasm_reduction_order.js",
+        "references/tinygrad_latest/tinygrad/codegen/__init__.py:reduce_ranges_to_acc",
+        "references/tinygrad_latest/tinygrad/codegen/__init__.py:expand_horizontal_reduce",
+        "temp/complexity-audit-20261015/report.txt"
+      ],
+      "close_when": "Either preserve the shared optimized arithmetic order, or obtain an explicit stage-scoped numerical policy after representative performance and accuracy measurements. Retain varying-input tests; this debt row permits no mismatch."
+    },
+    {
       "id": "PG-DIV-034",
       "status": "approved",
       "stages": [
