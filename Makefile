@@ -1143,7 +1143,7 @@ RELEASE_MAKE := $(MAKE)
 # user choices remain authoritative and are checked before the matrix starts.
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
-RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
+RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON SPECIAL_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
                    QWEN3_GGUF LLAMA_CHECKPOINT ONNX_ENCODER_DIR BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST BROWSER_TMPDIR
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
@@ -1156,6 +1156,7 @@ test-release-preflight:
 		--make-var 'CC=$(RELEASE_CC)' --make-var 'PYTHON=$(RELEASE_PYTHON)' --make-var 'PARITY_PY=$(PARITY_PY)' \
 		--make-var 'PYTHON_MIN=$(PYTHON_MIN)' \
 		--make-var 'HF_PYTHON=$(HF_PYTHON)' --make-var 'LLAMA_CHECKPOINT=$(LLAMA_CHECKPOINT)' \
+		--make-var 'SPECIAL_PYTHON=$(SPECIAL_PYTHON)' --make-var 'EMCC=$(EMCC)' --make-var 'NODE=$(NODE)' \
 		--make-var 'ONNX_ENCODER_DIR=$(ONNX_ENCODER_DIR)' \
 		--make-var 'CLANG_FORMAT=$(CLANG_FORMAT)' --make-var 'ANALYZER_CC=$(ANALYZER_CC)'
 	TMPDIR=$(BROWSER_TMPDIR) $(NODE) js/test/browser/run.js --preflight

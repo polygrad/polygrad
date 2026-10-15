@@ -2649,6 +2649,6 @@
       "reason": ""
     }
   },
-  "scope_note": "Compatibility baseline only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. test_ops.py executes in the separately reviewed CPU-adapted tinygrad_upstream_ops_cpu_baseline.json lane.",
+  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. test_ops.py executes in the separately reviewed CPU-adapted tinygrad_upstream_ops_cpu_baseline.json lane.",
   "collection_blockers": []
 }

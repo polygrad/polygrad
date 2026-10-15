@@ -45,6 +45,7 @@ def release_gates():
         test test-x86 test-interp test-cuda test-qwen3 test-examples
         test-harness-skip-accounting test-release-gates
         test-py test-py-x86 test-hf-e2e test-llama-pretrained test-onnx-encoder test-kernels test-extension
+        test-special-math test-qwen35 test-gated-delta test-extension-sdk
         test-js-native-cpu test-js-native-x86 test-js-native-interp
         test-js-native-cuda test-js-native-gc
         test-bigint-wasm test-runtime-wasm test-autograd-wasm test-nn-wasm
@@ -128,7 +129,11 @@ def preflight(variables):
     checks.append(('PARITY_PY z3', shlex.split(variables.get('PARITY_PY', sys.executable)) +
                    ['-c', 'import z3'], None))
     checks.append(('HF_PYTHON', shlex.split(variables.get('HF_PYTHON', sys.executable)) +
-                   ['-c', 'import torch, transformers, onnx, onnxruntime'], None))
+                   ['-c', 'import torch, transformers, onnx, onnxruntime, safetensors'], None))
+    checks.append(('SPECIAL_PYTHON', shlex.split(variables.get('SPECIAL_PYTHON', variables.get('PYTHON', sys.executable))) +
+                   ['-c', 'import scipy.special'], None))
+    for name, default in (('EMCC', 'emcc'), ('NODE', 'node')):
+        checks.append((name, shlex.split(variables.get(name, default)) + ['--version'], None))
     for name, default in (('CLANG_FORMAT', 'clang-format-14'), ('ANALYZER_CC', 'clang-14')):
         checks.append((name, shlex.split(variables.get(name, default)) + ['--version'], None))
     fixture_failures = fixture_errors(variables)
@@ -170,7 +175,7 @@ def release_environment(root):
                 'POLY_REQUIRE_HF', 'POLY_REQUIRE_KERNELS', 'POLY_ONNX_ENCODER_DIR',
                 'NODE_OPTIONS', 'NODE_PATH'):
         env.pop(key, None)
-    env.update(DEV='CPU', POLY_DEV='cpu', PYTEST_ADDOPTS='',
+    env.update(DEV='CPU', POLY_DEV='cpu', PYTEST_ADDOPTS='', EMULATED_DTYPES='',
                POLY_KERNELS='0',
                PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', PYTHONUTF8='1', POLY_BROWSER_DEVICES='auto,interp,webgpu',
                POLY_BROWSER_SKIP_UNAVAILABLE='0')

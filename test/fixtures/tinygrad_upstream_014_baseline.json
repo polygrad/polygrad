@@ -2648,6 +2648,6 @@
       "reason": ""
     }
   },
-  "scope_note": "Compatibility baseline only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. Operations and NN/optimizer files execute in separately reviewed CPU-adapted lanes.",
+  "scope_note": "Compatibility frontier only, not parity allowances or source-audit closure. No failures or skips are omitted from execution. Operations and NN/optimizer files execute in separately reviewed CPU-adapted lanes.",
   "collection_blockers": []
 }

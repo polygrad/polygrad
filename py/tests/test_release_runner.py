@@ -41,6 +41,7 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert 'test-symbolic-z3-supported' in targets
     assert 'test-release-py-performance' in targets
     assert {'test-model-workloads', 'test-generative-soak'} <= set(targets)
+    assert {'test-special-math', 'test-extension-sdk', 'test-qwen35', 'test-gated-delta'} <= set(targets)
     assert {'test-kernels', 'test-extension', 'test-examples', 'test-llama-pretrained', 'test-onnx-encoder'} <= set(targets)
     assert targets.index('test-release-py-performance') < targets.index('test')
     perf = next(g for g in runner['release_gates']() if g['target'] == 'test-release-py-performance')
@@ -109,7 +110,8 @@ def test_release_preflight_checks_actual_compiler_and_python(runner, tmp_path, m
         tool.chmod(0o700)
         tools[name] = str(tool)
     variables = dict(CC='clang', PYTHON=sys.executable, PARITY_PY=sys.executable,
-                     PYTHON_MIN=str(floor_python), HF_PYTHON=str(floor_python), **tools)
+                     PYTHON_MIN=str(floor_python), HF_PYTHON=str(floor_python),
+                     SPECIAL_PYTHON=str(floor_python), **tools)
     assert runner['preflight'](variables) == 0
     # GCC accepts the C11 core, but not the CPU renderer's __fp16 storage type.
     assert runner['preflight'](dict(variables, CC='gcc')) == 1
@@ -144,9 +146,11 @@ def test_release_preflight_rejects_unreviewed_tools(runner, tmp_path, tool, vers
                                    **{tool:str(executable)})) == 1
 
 
-def test_release_subprocesses_use_utf8(runner, tmp_path):
+def test_release_subprocesses_use_utf8(runner, tmp_path, monkeypatch):
     assert runner['release_environment'](tmp_path)['PYTHONUTF8'] == '1'
     assert runner['release_environment'](tmp_path)['POLY_KERNELS'] == '0'
+    monkeypatch.setenv('EMULATED_DTYPES', 'bfloat16')
+    assert runner['release_environment'](tmp_path)['EMULATED_DTYPES'] == ''
 
 
 def test_release_fixture_preflight_checks_missing_and_changed_bytes(runner, tmp_path):

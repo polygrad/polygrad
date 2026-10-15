@@ -18,6 +18,8 @@
       "A resolved entry preserves the audit trail but is never assigned to a current finding and never suppresses a recurrence.",
       "An unregistered mismatch is a hard failure.",
       "An entry with stale reference evidence cannot suppress a mismatch.",
+      "kind=upstream_backport identifies an approved fix taken from the exact upstream_commits, not a Polygrad-specific policy; it grants no additional mismatch allowance.",
+      "Close an upstream_backport only after verifying that the new pin contains its fixes and the affected parity/regression checks pass. A release number alone is insufficient; retain regression tests after closure.",
       "Wasm renderer-local independent-lane SIMD packing preserves shared graphs and reduction order; it grants no numeric mismatch allowance."
     ]
   },
@@ -434,6 +436,8 @@
     },
     {
       "id": "PG-DIV-027",
+      "kind": "upstream_backport",
+      "upstream_commits": ["6dfca0b79ecfafb4a9f43d34693225c8391e255e"],
       "status": "approved",
       "stages": ["codegen", "dtype-lowering"],
       "area": "Upstream float-emulation AFTER backport",
@@ -446,6 +450,13 @@
     },
     {
       "id": "PG-DIV-028",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "fede358811ec40bcf10e11e3fc93d9ef55ebd943",
+        "6083de5cfff4f23cead0b025e64e3e09cc9745fb",
+        "38e0fe103b3c6e647e247e068d9228a6ba108713",
+        "bc485d271f13e3e1d6b42bb605f94f0c4b499eb7"
+      ],
       "status": "approved",
       "stages": ["codegen", "renderer"],
       "area": "Upstream X86 address and comparison backports",
@@ -458,6 +469,13 @@
     },
     {
       "id": "PG-DIV-029",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "f48b583ee0a6134da690095afbb5a5a663f8a45d",
+        "0a8d1c71a92a3d6f25eec79073fb000fb82473d0",
+        "0bd725376b00f686f3da6a20859649e7795ad938",
+        "f5b00de3199f2d7fc0ce2d568dd9103aa200cc85"
+      ],
       "status": "approved",
       "stages": ["symbolic", "codegen", "tensor"],
       "area": "Upstream validity, cast-rounding and weak-constant backports",
@@ -474,6 +492,21 @@
     },
     {
       "id": "PG-DIV-030",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "0a1bfc9fadb7815e52c6ceec94215176736030f5",
+        "fdb4109f5f0c82d61f11311ae331a7e9a150e797",
+        "e3c4b3d9b2e0e088cc29f93e1d26949641e7f330",
+        "1c183e6de91ce83affc36f393641baee58f0e78e",
+        "4c20f1d357937d65f606e0aebf4802208aeccfb3",
+        "5c3d0444650599afb4e39ec3bcc91860c8a4b6f1",
+        "65558fef9dfe7dfb6445686d00cd20f048fc8f18",
+        "ee3cd40969b83c95bf95b76c4bd6ce70908b8d2c",
+        "ab24cc89e79c3fc30c2ee32f40cf805f168f94b7",
+        "79c5d241898cc91190938bc990086da6449a0846",
+        "34eabf6574062a382828c3a36c9c11c43fe4c416",
+        "f9d3f00ff6b2a5530ab486f6d2fe065877d306e4"
+      ],
       "status": "approved",
       "stages": ["tensor", "autograd"],
       "area": "Upstream numerical and gradient backports",
@@ -586,6 +619,14 @@
     },
     {
       "id": "PG-DIV-031",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "593aa1e17b1cb0b1b2011482bfa0cf325d6bd9f0",
+        "4de13672b6d15c84445ad8bee24d52c6762c89f1",
+        "1d5d77a153acbe737f1a2d2703dc8bb9c5f9cabf",
+        "26c4b6319edd61f9a1e6cf7a07c057426418e596",
+        "2eacd4fa68c42c1f092ffcacac0cd0ac89930919"
+      ],
       "status": "approved",
       "stages": ["tensor", "mutation"],
       "area": "Upstream view-assignment and shape-operation backports",
@@ -624,6 +665,12 @@
     },
     {
       "id": "PG-DIV-032",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "99fc6102da77545565b3dcc74467b1a653440d45",
+        "988651638ff54c5d0ed55065504a225f35f1242a",
+        "6de721f1e9c36d4c38027842519c1ae77bb6352f"
+      ],
       "status": "approved",
       "stages": ["tensor", "codegen", "symbolic"],
       "area": "Upstream low-precision extrema, emulation and accumulation backports",

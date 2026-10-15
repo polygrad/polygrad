@@ -668,6 +668,11 @@ support at most 8 dimensions.
 WebGPU does not guarantee NaN truthiness or preservation through clipping under
 WGSL finite-math rules. Unsupported features and reviewed divergences are listed
 in the [register](test/fixtures/parity_divergences.json).
+Entries labeled `kind: upstream_backport` identify fixes from newer tinygrad
+commits, separately from Polygrad-specific policies. Their exact `upstream_commits`
+must be included in a future pin, with affected parity and regression tests passing,
+before closing the allowance. A version bump alone does not close it; the regression
+tests remain afterward.
 
 The main intentional differences are:
 
@@ -808,11 +813,13 @@ Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
 ```bash
 make test-release-list  # inspect the gate list without running it
 make test-release PYTHON=/path/to/test/python PARITY_PY=/path/to/parity/python \
-  PYTHON_MIN=/path/to/python3.9 HF_PYTHON=/path/to/hf/python
+  PYTHON_MIN=/path/to/python3.9 HF_PYTHON=/path/to/hf/python \
+  SPECIAL_PYTHON=/path/to/scipy/python
 ```
 
 Release acceptance runs maintained targets serially: sanitizers, backend and
-frontend suites, browser/Qwen, HF fixtures, isolated package installs, interchange,
+frontend suites, browser/Qwen, Qwen3.5/gated-delta references, independent
+special-function references, installed extension SDK, isolated package installs, interchange,
 parity, reviewed analysis, fuzzing and performance checks. CUDA and browser
 WebGPU are required. HIP, HCQ2/GETADDR, genuine multi-GPU and PYLITERAL are
 [excluded](test/fixtures/release_scope.json), not certified. Optional
@@ -828,6 +835,8 @@ Required setup:
   to `PARITY_PY`.
 - `PYTHON_MIN`: Python 3.9 for the isolated minimum-version package check.
 - `HF_PYTHON`: the Torch/Transformers/Hugging Face and ONNX Runtime reference environment.
+- `SPECIAL_PYTHON`: SciPy for independent special-function value and gradient checks.
+- `EMCC` and `NODE`: Emscripten and Node for Wasm and installed extension SDK checks.
 - An AVX2/FMA CPU for the required native custom-kernel lane.
 - `CC`: defaults to Clang for release runs, with CPU-renderer `__fp16` support.
   Formatting uses `CLANG_FORMAT=clang-format-14`; analysis uses
@@ -897,15 +906,17 @@ make test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR=temp/upstream-run-001
 # Select other full files or exact pytest nodeids explicitly:
 make test-compat-tinygrad-upstream UPSTREAM_COMPAT_DIR=temp/upstream-run-002 \
   UPSTREAM_COMPAT_TESTS='test/null/test_dtype.py test/unit/test_conv.py'
-# Reproduce the reviewed frontier (known failures remain visible):
+# Reproduce the reviewed compatibility baseline (known failures remain visible):
 make test-compat-tinygrad-upstream-ratchet UPSTREAM_COMPAT_DIR=temp/upstream-ratchet-001
 # Separate CPU ops lane with the explicit, source-locked NIR-only adaptation:
 make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-001
-# Ratchet the separately reviewed CPU ops frontier:
+# Ratchet the separately reviewed CPU ops baseline:
 make test-compat-tinygrad-ops UPSTREAM_COMPAT_DIR=temp/upstream-ops-002 \
   UPSTREAM_COMPAT_ARGS='--baseline test/fixtures/tinygrad_upstream_ops_cpu_014_baseline.json'
 # NN and optimizer files, with source-locked CPU helper adaptation:
 make test-compat-tinygrad-nn UPSTREAM_COMPAT_DIR=temp/upstream-nn-001
+# Backend dtype diagnostics, including forced emulation (needs BF16-capable Clang):
+make test-compat-tinygrad-dtype UPSTREAM_COMPAT_DIR=temp/upstream-dtype-001
 # Diagnostic refresh of all selected cases per engine, in three serial lanes:
 make test-compat-tinygrad-suite UPSTREAM_COMPAT_DIR=temp/upstream-suite-001
 ```
@@ -913,6 +924,10 @@ make test-compat-tinygrad-suite UPSTREAM_COMPAT_DIR=temp/upstream-suite-001
 Reports record source/library hashes, provider identities, outcomes and
 collection errors. Missing dependencies and incomplete execution fail. CPU ops
 and NN lanes use source-locked helper adaptations, not replacement implementations.
+The CPU dtype lane extracts locked scalar test oracles and uses the core's
+actual emulation controls. It preserves assertions, including the old FP8
+flush-to-zero expectation superseded by approved backport PG-DIV-032; that
+diagnostic failure remains visible rather than weakening the test.
 Ratchets reject regressions and changed test/environment contracts; a passing
 ratchet does not mean every upstream test passes. Review baseline changes;
 see the [runner](scripts/tinygrad_upstream.py) for options.

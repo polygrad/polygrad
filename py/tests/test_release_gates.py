@@ -15,6 +15,34 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_hip_parity_requires_explicit_device_architecture():
+    env = dict(os.environ)
+    env.pop('HIP_ARCH', None)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'test/test_tinygrad_parity.py'),
+         '--runner', str(ROOT / 'Makefile'), '--hip'],
+        cwd=ROOT, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert '--hip requires HIP_ARCH to match the device under test' in result.stderr
+
+
+def test_upstream_backports_have_explicit_provenance():
+    import re
+    register = json.loads((ROOT / 'test/fixtures/parity_divergences.json').read_text())
+    entries = {entry['id']: entry for entry in register['entries']}
+    # These reviewed batches must not become indistinguishable from local policy.
+    for number in range(27, 33):
+        assert entries[f'PG-DIV-{number:03}']['kind'] == 'upstream_backport'
+    for entry in entries.values():
+        if entry.get('kind') != 'upstream_backport':
+            continue
+        commits = entry['upstream_commits']
+        assert commits and len(commits) == len(set(commits))
+        assert all(re.fullmatch('[0-9a-f]{40}', commit) for commit in commits)
+        assert entry['stages'] and entry['approval'] and entry['evidence'] and entry['close_when']
+
+
 @pytest.mark.parametrize('backend', ['cuda', 'hip'])
 def test_requested_native_backend_without_build_support_fails(backend):
     result = subprocess.run(

@@ -1270,7 +1270,7 @@
       "reason": ""
     }
   },
-  "scope_note": "Selected CPU NN/optimizer baseline, not a parity allowance or full compiler API certificate. Test bodies and skips remain unchanged; RUN_SLOW is enabled. Eight Muon controls execute against Torch2.10.0+cpu on both providers.",
+  "scope_note": "Selected CPU NN/optimizer frontier, not a parity allowance or full compiler API certificate. Test bodies and skips remain unchanged; RUN_SLOW is enabled. Eight Muon controls execute against Torch2.10.0+cpu on both providers.",
   "evidence": {
     "report": "temp/tabular-compiled-20261011/upstream-nn-review/report.json",
     "sha256": "b23d7632af407fed12ad9e99fe3963a93b0819379451ffb6bc7161adbadd75c9"
