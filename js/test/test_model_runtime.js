@@ -2620,6 +2620,51 @@ async function checkModelCapturedCalls(pg) {
   }
 }
 
+async function checkModelCapturedMatrixState(pg) {
+  const {Tensor, Model} = pg
+  for (const saved of [false, true]) for (const computed of [false, true]) {
+    const x = Tensor.empty([3]), base = new Tensor([[1,2,3],[4,5,6]], {dtype:'float32'})
+    const state = computed ? base.mul(2) : base, y = state.dot(x)
+    let child, parent, restored
+    const scale = computed ? 2 : 1, data = new Float32Array([1,2,3])
+    try {
+      child = await Model.fromTensors({inputs:{x},params:{state},outputs:{y}})
+      assertClose((await child.forwardAsync({x:data})).y, [14*scale,32*scale], 0)
+      if (saved) {
+        const bytes = await child.saveAsync()
+        await child.dispose()
+        child = Model.load(bytes)
+        await child.placeAsync(String(pg.device).toUpperCase())
+      }
+      // The child's current state may differ from its authored initializer.
+      await child.writeBufferAsync('state', Float32Array.from([1,2,3,4,5,6], v=>v*scale*3))
+      parent = await Model.fromCallableAsync(({x}) => {
+        const a = child.forward({x}).y, b = child.forward({x:x.mul(2)}).y
+        for (const value of [a,b]) {
+          assert(JSON.stringify(pg.uop.shape(value.uopLogical)) === '[2]', 'lost logical state shape')
+          assert(JSON.stringify(pg.uop.shape(value.uopPhysical)) === '[2]', 'lost physical state shape')
+        }
+        const y = a.add(b), [grad] = y.sum().gradient(x)
+        return {y,grad}
+      }, {inputs:{x}})
+      assert(parent.paramCount === 1, 'computed state duplicated across calls')
+      await child.writeBufferAsync('state', new Float32Array(6))
+      await child.dispose(); child = null
+      await pg.collect()
+      restored = Model.load(await parent.saveAsync())
+      await restored.placeAsync(String(pg.device).toUpperCase())
+      for (const model of [parent,restored]) {
+        const result = await model.forwardAsync({x:data})
+        assertClose(result.y, [126*scale,288*scale], 0)
+        assertClose(result.grad, [45*scale,63*scale,81*scale], 0)
+      }
+    } finally {
+      await restored?.dispose(); await parent?.dispose(); await child?.dispose()
+      y.dispose(); if (computed) state.dispose(); base.dispose(); x.dispose()
+    }
+  }
+}
+
 async function checkModelCapturedDevice(pg) {
   const {Tensor, Model} = pg
   const x = Tensor.empty([2], {device:'INTERP'})
@@ -2980,6 +3025,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model checkpoint replacement uses queued readback', () => checkModelCheckpointReplacement(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))
   await test('Model captured calls share weights and own imported graphs', () => checkModelCapturedCalls(pg))
+  await test('Model captured matrix state preserves shapes and gradients', () => checkModelCapturedMatrixState(pg))
   await test('Model captured ONNX calls compose on-device sampling', () => checkModelCapturedOnnx(pg))
   await test('Model captured calls preserve the child device', () => checkModelCapturedDevice(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
@@ -3780,6 +3826,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model registered family dispatch', () => checkFamilyRegistry(pg))
   await test('Model stateful capture owns resumable RNG', () => checkModelCaptureRng(pg))
   await test('Model captured calls share weights and own imported graphs', () => checkModelCapturedCalls(pg))
+  await test('Model captured matrix state preserves shapes and gradients', () => checkModelCapturedMatrixState(pg))
   await test('Model captured ONNX calls compose on-device sampling', () => checkModelCapturedOnnx(pg))
   await test('Model captured calls preserve the child device', () => checkModelCapturedDevice(pg))
   await test('Model stateful capture restores failures and rejects async execution', () => checkModelCaptureFailure(pg))

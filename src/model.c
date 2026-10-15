@@ -4184,10 +4184,9 @@ static bool model_portable_effects_valid(PolyModel *inst, PolyUOp *root) {
   return valid;
 }
 
-/* Activation is the only boundary that binds a named logical value to
- * persistent storage.  This transient result is then consumed by the ordinary
- * explicit placer; the immutable entrypoint and named value roots are never
- * rewritten or retained as a second logical program. */
+/* Placement and composition bind named initializers through the same shaped
+ * storage slots. This transient graph never replaces the immutable entrypoint
+ * or becomes a second retained logical program. */
 static int model_bind_named_values(
     PolyModel *inst,
     PolyUOp **roots,
@@ -6753,6 +6752,9 @@ static int model_inline_entrypoint(
   if (!logical_sink || logical_sink->op != POLY_OP_SINK || !physical_sink ||
       physical_sink->op != POLY_OP_SINK)
     return -1;
+  /* Normalize before substitution: a computed matrix initializer is not a flat
+   * storage slot. Its declared shape must survive replacing the slot below. */
+  if (model_bind_named_values((PolyModel *)child, &logical_sink, 1, &logical_sink) != 0) return -1;
 
   PolyMap *logical_memo = poly_map_new(64);
   PolyMap *physical_memo = poly_map_new(64);
@@ -6766,11 +6768,12 @@ static int model_inline_entrypoint(
   int n_aliases = 0;
   int rc = -1;
   int n_outputs = 0;
+  if (child->n_bufs && !aliases) goto done;
 
   for (int i = 0; i < child->n_bufs; i++) {
     const NamedBuf *b = &child->bufs[i];
     PolyUOp *physical_buffer = use_capture ? b->capture_buffer : b->buffer;
-    PolyUOp *logical_source = model_binding_source(child->ctx, b);
+    PolyUOp *logical_source = b->logical_buffer;
     bool logical_reachable =
         logical_source && poly_uop_reachable(child->ctx, logical_sink, logical_source);
     bool physical_reachable = poly_uop_reachable(child->ctx, physical_sink, physical_buffer);
@@ -6781,6 +6784,20 @@ static int model_inline_entrypoint(
       replacement =
           register_inline_tensor(parent, b, prefix, trainable, aliases, &n_aliases, child->n_bufs);
     if (!replacement || !replacement->uop_logical || !replacement->uop_physical) goto done;
+    PolyUOp *replacement_roots[] = {replacement->uop_logical, replacement->uop_physical};
+    for (int r = 0; r < 2; r++) {
+      PolyShape shape = poly_uop_max_shape_cached(dst_ctx, replacement_roots[r]);
+      if (replacement->owner_ctx != dst_ctx ||
+          !poly_dtype_eq(poly_dtype_strong(replacement_roots[r]->dtype), b->buffer->dtype) ||
+          (!b->dynamic && poly_shape_numel_checked(shape.dims, shape.ndim) != b->numel)) {
+        poly_model_set_error(
+            parent ? parent : (PolyModel *)child, POLY_STATUS_INVALID, __func__,
+            "Model composition binding '%s' dtype/element count mismatch or foreign context",
+            b->name
+        );
+        goto done;
+      }
+    }
     poly_map_set(
         logical_memo, poly_ptr_hash(logical_source), logical_source, replacement->uop_logical,
         poly_ptr_eq
@@ -6970,9 +6987,8 @@ static int model_capture_call(
       );
       goto cleanup;
     }
-    PolyUOp *logical = model_binding_source(inst->ctx, b);
     PolyTensor *tensor = poly_tensor_create_with_roots(
-        inst->ctx, logical, b->buffer, POLY_TENSOR_VALUE, poly_uop_device(b->buffer)
+        inst->ctx, b->logical_buffer, b->buffer, POLY_TENSOR_VALUE, poly_uop_device(b->buffer)
     );
     if (!tensor) goto cleanup;
     /* Capture owns the storage roots, not the child Model. This permits child

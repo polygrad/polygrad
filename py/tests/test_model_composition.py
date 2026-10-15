@@ -40,6 +40,54 @@ def rt(request):
         yield runtime
 
 
+@pytest.mark.parametrize('computed', [False, True])
+@pytest.mark.parametrize('saved', [False, True])
+def test_composed_matrix_state_preserves_shapes_and_gradients(tmp_path, rt, computed, saved):
+    Tensor, Model = rt.Tensor, rt.Model
+    x = Tensor.empty(3)
+    state = Tensor(np.arange(1, 7, dtype=np.float32).reshape(2, 3))
+    if computed:
+        state = state * 2
+    child = Model.from_tensors(inputs={'x': x}, params={'state': state}, outputs={'y': state @ x})
+    data = np.array([1, 2, 3], np.float32)
+    expected = np.array([14, 32], np.float32) * (2 if computed else 1)
+    np.testing.assert_array_equal(child.forward(x=data)['y'], expected)
+    if saved:
+        path = tmp_path / 'child.bundle'
+        child.save(path)
+        child.dispose()
+        child = Model.load(path)
+    # Compose the current stored state, not the initializer expression.
+    scale = 3 * (2 if computed else 1)
+    child.write_buffer('state', np.arange(1, 7, dtype=np.float32) * scale)
+    expected *= 3
+
+    def forward(x):
+        a = child.forward(x=x)['y']
+        b = child.forward(x=x * 2)['y']
+        assert a.shape == b.shape == (2,)
+        return {'y': a + b, 'grad': (a + b).sum().gradient(x)[0]}
+
+    parent = Model(forward, inputs={'x': x})
+    assert parent.param_count == 1
+    child.write_buffer('state', np.zeros(6, np.float32))
+    child.dispose()
+    state.dispose()
+    rt.collect()
+    path = tmp_path / 'parent.bundle'
+    parent.save(path)
+    restored = Model.load(path)
+    try:
+        for model in (parent, restored):
+            result = model.forward(x=data)
+            np.testing.assert_array_equal(result['y'], expected * 3)
+            np.testing.assert_array_equal(result['grad'], np.array([15, 21, 27]) * scale)
+    finally:
+        restored.dispose()
+        parent.dispose()
+        x.dispose()
+
+
 def test_composed_model_reuses_weights_and_survives_child_disposal(tmp_path, rt):
     Tensor, Model = rt.Tensor, rt.Model
     x = Tensor.empty(1, 4)

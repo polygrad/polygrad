@@ -6286,6 +6286,103 @@ TEST(model, inline_forward_copies_prefixed_weights) {
   PASS();
 }
 
+TEST(model, inline_computed_matrix_state_preserves_both_roots) {
+  for (int saved = 0; saved < 2; saved++) {
+    for (int cross_ctx = 0; cross_ctx < 2; cross_ctx++) {
+      PolyCtx *ctx = poly_ctx_new();
+      poly_ctx_set_preferred_device(ctx, POLY_DEVICE_INTERP);
+      poly_ctx_set_logical_policy(ctx, POLY_LOGICAL_ALWAYS);
+      float weights[] = {1, 2, 3, 4, 5, 6};
+      PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){3}, 1, POLY_DEVICE_INTERP);
+      PolyTensor *host =
+          poly_tensor_from_host(ctx, weights, sizeof(weights), POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+      PolyTensor *base = poly_tensor_to_device(ctx, host, POLY_DEVICE_INTERP);
+      PolyTensor *two = poly_tensor_const_float_by_id(
+          ctx, 2, poly_dtype_id_by_name("float32"), POLY_DEVICE_INTERP
+      );
+      PolyTensor *state = poly_tensor_alu2(ctx, POLY_OP_MUL, base, two);
+      PolyTensor *y = poly_tensor_dot(ctx, state, x);
+      PolyBindingSpec bindings[] = {
+          {"x", POLY_ROLE_INPUT, x, 0},
+          {"state", POLY_ROLE_PARAM, state, 0},
+          {"y", POLY_ROLE_OUTPUT, y, 0}};
+      const char *inputs[] = {"x"}, *outputs[] = {"y"};
+      PolyEntrypointSpec ep = {
+          .name = "forward", .inputs = inputs, .n_inputs = 1, .outputs = outputs, .n_outputs = 1};
+      PolyModel *child = poly_model_from_bindings(ctx, bindings, 3, &ep, 1, NULL, NULL);
+      ASSERT_NOT_NULL(child);
+      if (saved) {
+        int len = 0;
+        uint8_t *bytes = poly_model_save_bundle_ex(child, &len, POLY_EXPORT_WEIGHTS_PARAMS);
+        ASSERT_NOT_NULL(bytes);
+        poly_model_free(child);
+        child = poly_model_from_bundle_into(ctx, bytes, len, POLY_DEVICE_INTERP);
+        free(bytes);
+        ASSERT_NOT_NULL(child);
+      }
+      PolyCtx *dst = cross_ctx ? poly_ctx_new() : ctx;
+      poly_ctx_set_preferred_device(dst, POLY_DEVICE_INTERP);
+      poly_ctx_set_logical_policy(dst, POLY_LOGICAL_ALWAYS);
+      PolyModel *parent = poly_model_new(dst, NULL);
+      PolyTensor *input = poly_model_input(parent, "x", POLY_FLOAT32, (int64_t[]){3}, 1);
+      PolyModelInlineBinding bind = {.name = "x", .tensor = input};
+      PolyModelInlineOutput out[1];
+      int count = 0;
+      for (int wrong_dtype = 0; wrong_dtype < 2; wrong_dtype++) {
+        PolyTensor *bad = poly_tensor_empty(
+            dst, wrong_dtype ? POLY_INT32 : POLY_FLOAT32, (int64_t[]){wrong_dtype ? 3 : 2}, 1,
+            POLY_DEVICE_INTERP
+        );
+        PolyModelInlineBinding invalid = {.name = "x", .tensor = bad};
+        ASSERT_EQ(
+            poly_model_inline_entrypoint(
+                parent, child, "forward", "child.", &invalid, 1, false, out, 1, &count
+            ),
+            -1
+        );
+        ASSERT_EQ(count, 0);
+        ASSERT_NOT_NULL(strstr(poly_model_last_error(parent)->message, "binding 'x'"));
+        poly_tensor_release(bad);
+      }
+      ASSERT_EQ(
+          poly_model_inline_entrypoint(
+              parent, child, "forward", "child.", &bind, 1, false, out, 1, &count
+          ),
+          0
+      );
+      ASSERT_EQ(count, 1);
+      PolyUOp *roots[] = {out[0].tensor->uop_logical, out[0].tensor->uop_physical};
+      for (int r = 0; r < 2; r++) {
+        PolyShape shape = poly_uop_max_shape_cached(dst, roots[r]);
+        ASSERT_EQ(shape.ndim, 1);
+        ASSERT_EQ(shape.dims[0], 2);
+      }
+      ASSERT_EQ(poly_model_output(parent, "y", out[0].tensor), 0);
+      ASSERT_EQ(poly_model_entrypoint(parent, "forward", inputs, 1, outputs, 1, NULL), 0);
+      ASSERT_EQ(poly_model_build(parent, NULL), 0);
+      ASSERT_EQ(poly_model_copy_prefixed_weights(parent, child, "child."), 0);
+      poly_model_free(child);
+      poly_tensor_release(out[0].tensor);
+      poly_tensor_release(y);
+      poly_tensor_release(state);
+      poly_tensor_release(two);
+      poly_tensor_release(base);
+      poly_tensor_release(host);
+      poly_tensor_release(x);
+      if (cross_ctx) poly_ctx_destroy(ctx);
+      float data[] = {1, 2, 3}, actual[2];
+      PolyIOBinding io = POLY_IO_BINDING_ARRAY("x", data, POLY_FLOAT32);
+      ASSERT_EQ(poly_model_forward(parent, &io, 1), 0);
+      ASSERT_EQ(poly_model_read_buf_named(parent, "y", actual, sizeof(actual)), 0);
+      ASSERT_FLOAT_EQ(actual[0], 28, 0);
+      ASSERT_FLOAT_EQ(actual[1], 64, 0);
+      poly_model_free(parent);
+      poly_ctx_destroy(dst);
+    }
+  }
+  PASS();
+}
+
 TEST(model, inline_preserves_output_shape_across_repeated_calls) {
   for (int ndim = 0; ndim <= 3; ndim++) {
     PolyCtx *ctx = poly_ctx_new();
