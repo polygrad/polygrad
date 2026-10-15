@@ -740,7 +740,7 @@ endif
 
 ifeq ($(HAS_HIP), 1)
 test-parity-hip: build/polygrad_parity_runner_hip
-	CACHELEVEL=0 HIP_ARCH=gfx90a TINYGRAD_ROOT=tinygrad_latest \
+	CACHELEVEL=0 TINYGRAD_ROOT=tinygrad_latest \
 		$(PARITY_PY) $(PARITY_SCRIPT) \
 		--runner build/polygrad_parity_runner_hip --hip --mode values --atol 1e-4
 
@@ -1395,3 +1395,12 @@ build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 verify: test test-harness-skip-accounting test-parity format-check test-analyze-reviewed fuzz-smoke test-extension
 	@echo "All verification checks passed."
+
+# COMGR error paths run without a driver installation or device.
+.PHONY: test-hip-runtime
+test-hip-runtime: build/test_hip_runtime
+	$(SAN_RUN) ./build/test_hip_runtime
+
+build/test_hip_runtime: test/test_hip_runtime.c src/runtime_hip.c $(PROJECT_HEADERS) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS_DEBUG) -DPOLY_HAS_HIP=1 -o $@ test/test_hip_runtime.c $(LDFLAGS_DEBUG)

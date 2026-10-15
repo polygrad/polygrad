@@ -27,6 +27,7 @@ typedef void *hipFunction_t;
 #define hipSuccess 0
 #define hipMemcpyHostToDevice 1
 #define hipMemcpyDeviceToHost 2
+#define hipMemcpyDeviceToDevice 3
 
 /* hipDeviceProp_tR0600 layout from tinygrad autogen (ROCm 6.x):
  *   SIZE = 1472, warpSize @ 308, gcnArchName @ 1160 (char[256]) */
@@ -162,7 +163,7 @@ static struct {
 
 static enum { HIP_NOT_TRIED, HIP_INIT_OK, HIP_INIT_FAIL } hip_state = HIP_NOT_TRIED;
 static char hip_arch_name[256] = {0};
-static char hip_isa_name[320] = {0}; /* "amdgcn-amd-amdhsa--gfx90a" */
+static char hip_isa_name[320] = {0}; /* comgr ISA prefix plus detected architecture */
 static int hip_warp_size = 64;
 
 /* dlsym helper */
@@ -277,16 +278,23 @@ static bool load_hip_libs(void) {
 /* Extract result data from a comgr data set. Returns malloc'd bytes. */
 static char *comgr_get_data_bytes(amd_comgr_data_set_t ds, int kind, size_t *out_size) {
   amd_comgr_data_t data = {0};
-  if (hip_api.action_data_get_data(ds, kind, 0, &data) != AMD_COMGR_STATUS_SUCCESS) return NULL;
+  char *buf = NULL;
   size_t sz = 0;
-  hip_api.get_data(data, &sz, NULL);
-  char *buf = calloc(1, sz + 2);
-  if (buf) {
-    hip_api.get_data(data, &sz, buf);
-    buf[sz] = '\0';
+  if (out_size) *out_size = 0;
+  if (hip_api.action_data_get_data(ds, kind, 0, &data) != AMD_COMGR_STATUS_SUCCESS) return NULL;
+  if (hip_api.get_data(data, &sz, NULL) != AMD_COMGR_STATUS_SUCCESS || sz == SIZE_MAX) goto done;
+  size_t capacity = sz;
+  buf = calloc(1, capacity + 1);
+  if (!buf) goto done;
+  if (hip_api.get_data(data, &sz, buf) != AMD_COMGR_STATUS_SUCCESS || sz > capacity) {
+    free(buf);
+    buf = NULL;
+    goto done;
   }
-  hip_api.release_data(data);
+  buf[sz] = '\0';
   if (out_size) *out_size = sz;
+done:
+  hip_api.release_data(data);
   return buf;
 }
 
@@ -340,7 +348,7 @@ int poly_hip_init(void) {
   char *colon = strchr(hip_arch_name, ':');
   if (colon) *colon = '\0';
 
-  /* Build ISA name for comgr: "amdgcn-amd-amdhsa--gfx90a" */
+  /* Build the comgr ISA name from the detected device architecture. */
   snprintf(hip_isa_name, sizeof(hip_isa_name), "amdgcn-amd-amdhsa--%s", hip_arch_name);
 
   hip_state = HIP_INIT_OK;
@@ -360,6 +368,7 @@ const char *poly_hip_arch(void) {
 }
 
 void *poly_hip_alloc(size_t bytes) {
+  if (hip_state == HIP_NOT_TRIED && poly_hip_init() != 0) return NULL;
   if (hip_state != HIP_INIT_OK) {
     fprintf(stderr, "polygrad: hip: alloc called but HIP not initialized\n");
     return NULL;
@@ -399,6 +408,16 @@ int poly_hip_copy_dtoh(void *dst, const void *src, size_t bytes) {
   return 0;
 }
 
+int poly_hip_copy_dtod(void *dst, const void *src, size_t bytes) {
+  if (hip_state != HIP_INIT_OK) return -1;
+  hipError_t err = hip_api.hipMemcpy(dst, src, bytes, hipMemcpyDeviceToDevice);
+  if (err != hipSuccess) {
+    fprintf(stderr, "polygrad: hip: hipMemcpy(DtoD) failed (hipError_t=%d)\n", err);
+    return -1;
+  }
+  return 0;
+}
+
 /* Compilation via comgr (matches tinygrad's compile_hip) */
 
 PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
@@ -414,24 +433,27 @@ PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
   char *hsaco = NULL;
   size_t hsaco_size = 0;
 
-  /* Create action info */
-  st = hip_api.create_action_info(&action_info);
-  if (st != AMD_COMGR_STATUS_SUCCESS) goto fail_early;
-  hip_api.set_language(action_info, COMGR_LANGUAGE_HIP);
-  hip_api.set_isa_name(action_info, hip_isa_name);
-  hip_api.set_logging(action_info, true);
-
-  /* Create data sets */
-  hip_api.create_data_set(&ds_src);
-  hip_api.create_data_set(&ds_bc);
-  hip_api.create_data_set(&ds_reloc);
-  hip_api.create_data_set(&ds_exec);
-
-  /* Add source */
-  hip_api.create_data(AMD_COMGR_DATA_KIND_SOURCE, &data_src);
-  hip_api.set_data(data_src, strlen(source), source);
-  hip_api.set_data_name(data_src, "<null>");
-  hip_api.data_set_add(ds_src, data_src);
+  /* Stop before consuming a failed API's output; only owned handles are cleaned up. */
+#define COMGR_CHECK(call)                                                                          \
+  do {                                                                                             \
+    st = (call);                                                                                   \
+    if (st != AMD_COMGR_STATUS_SUCCESS) {                                                          \
+      fprintf(stderr, "polygrad: hip: %s failed (status=%d)\n", #call, st);                        \
+      goto fail;                                                                                   \
+    }                                                                                              \
+  } while (0)
+  COMGR_CHECK(hip_api.create_action_info(&action_info));
+  COMGR_CHECK(hip_api.set_language(action_info, COMGR_LANGUAGE_HIP));
+  COMGR_CHECK(hip_api.set_isa_name(action_info, hip_isa_name));
+  COMGR_CHECK(hip_api.set_logging(action_info, true));
+  COMGR_CHECK(hip_api.create_data_set(&ds_src));
+  COMGR_CHECK(hip_api.create_data_set(&ds_bc));
+  COMGR_CHECK(hip_api.create_data_set(&ds_reloc));
+  COMGR_CHECK(hip_api.create_data_set(&ds_exec));
+  COMGR_CHECK(hip_api.create_data(AMD_COMGR_DATA_KIND_SOURCE, &data_src));
+  COMGR_CHECK(hip_api.set_data(data_src, strlen(source), source));
+  COMGR_CHECK(hip_api.set_data_name(data_src, "<null>"));
+  COMGR_CHECK(hip_api.data_set_add(ds_src, data_src));
 
   /* Step 1: source -> BC (with device libs, matching tinygrad options) */
   {
@@ -447,19 +469,27 @@ PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
         "-nogpuinc",
         "-Wno-gnu-line-marker",
         "-Wno-missing-prototypes",
+        /* Match HIPCompiler: optimize the linked device IR in codegen,
+         * keeping frontend LLVM passes out of the source-to-BC stage. */
+        "-Xclang",
+        "-disable-llvm-passes",
+        "-Xclang",
+        "-aux-triple",
+        "-Xclang",
+        "x86_64-unknown-linux-gnu",
     };
     int n_opts = (int)(sizeof(opts) / sizeof(opts[0]));
 
     /* Append --offload-arch=<arch> */
     char arch_opt[320];
     snprintf(arch_opt, sizeof(arch_opt), "--offload-arch=%s", hip_arch_name);
-    const char *all_opts[16];
-    for (int i = 0; i < n_opts && i < 15; i++)
+    const char *all_opts[sizeof(opts) / sizeof(opts[0]) + 1];
+    for (int i = 0; i < n_opts; i++)
       all_opts[i] = opts[i];
     all_opts[n_opts] = arch_opt;
     n_opts++;
 
-    hip_api.set_option_list(action_info, all_opts, n_opts);
+    COMGR_CHECK(hip_api.set_option_list(action_info, all_opts, n_opts));
     st = hip_api.do_action(
         COMGR_ACTION_COMPILE_SOURCE_WITH_DEVICE_LIBS_TO_BC, action_info, ds_src, ds_bc
     );
@@ -478,7 +508,7 @@ PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
   /* Step 2: BC -> relocatable */
   {
     const char *opts[] = {"-O3", "-mllvm", "-amdgpu-internalize-symbols"};
-    hip_api.set_option_list(action_info, opts, 3);
+    COMGR_CHECK(hip_api.set_option_list(action_info, opts, 3));
     st = hip_api.do_action(COMGR_ACTION_CODEGEN_BC_TO_RELOCATABLE, action_info, ds_bc, ds_reloc);
     if (st != AMD_COMGR_STATUS_SUCCESS) {
       fprintf(stderr, "polygrad: hip: comgr codegen failed (status=%d)\n", st);
@@ -489,7 +519,7 @@ PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
   /* Step 3: relocatable -> executable (HSACO) */
   {
     const char *no_opts[] = {NULL};
-    hip_api.set_option_list(action_info, no_opts, 0);
+    COMGR_CHECK(hip_api.set_option_list(action_info, no_opts, 0));
     st = hip_api.do_action(
         COMGR_ACTION_LINK_RELOCATABLE_TO_EXECUTABLE, action_info, ds_reloc, ds_exec
     );
@@ -546,17 +576,15 @@ PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name) {
   return result;
 
 fail:
-  hip_api.release_data(data_src);
-  hip_api.destroy_data_set(ds_src);
-  hip_api.destroy_data_set(ds_bc);
-  hip_api.destroy_data_set(ds_reloc);
-  hip_api.destroy_data_set(ds_exec);
-  hip_api.destroy_action_info(action_info);
+  free(hsaco);
+  if (data_src.handle) hip_api.release_data(data_src);
+  if (ds_src.handle) hip_api.destroy_data_set(ds_src);
+  if (ds_bc.handle) hip_api.destroy_data_set(ds_bc);
+  if (ds_reloc.handle) hip_api.destroy_data_set(ds_reloc);
+  if (ds_exec.handle) hip_api.destroy_data_set(ds_exec);
+  if (action_info.handle) hip_api.destroy_action_info(action_info);
   return NULL;
-
-fail_early:
-  fprintf(stderr, "polygrad: hip: comgr_create_action_info failed (status=%d)\n", st);
-  return NULL;
+#undef COMGR_CHECK
 }
 
 int poly_hip_launch(

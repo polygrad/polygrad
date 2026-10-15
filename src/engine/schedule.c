@@ -1825,11 +1825,7 @@ static int hip_copy_between_fn(
     void *dev_ctx
 ) {
   (void)dev_ctx;
-  (void)dst;
-  (void)src;
-  (void)n;
-  fprintf(stderr, "polygrad: hip_copy_between: not implemented\n");
-  return -1;
+  return poly_hip_copy_dtod(dst->ptr, src->ptr, n);
 }
 
 const PolyAllocator POLY_HIP_ALLOCATOR = {
@@ -2531,9 +2527,6 @@ double poly_time_call(
     int rc = runner->execute    ? runner->execute(runner, args, n_args)
              : backend->execute ? backend->execute(runner, args, n_args)
                                 : -1;
-#ifdef POLY_HAS_HIP
-    if (rc == 0 && device == POLY_DEVICE_HIP) rc = poly_hip_sync();
-#endif
     double measured =
         isfinite(runner->elapsed_us) ? runner->elapsed_us : (poly_now_ms() - start) * 1000.0;
     double elapsed = measured * original / size;
@@ -3130,6 +3123,7 @@ static int hip_execute(PolyRunner *runner, void **args, int n_args) {
       hh->prog, hip_args, n_args, runner->grid[0], runner->grid[1], runner->grid[2],
       runner->block[0], runner->block[1], runner->block[2]
   );
+  /* Completion and deferred errors belong here, including untimed calls. */
   if (ret == 0) ret = poly_hip_sync();
 
   free(hip_args);
@@ -4223,9 +4217,6 @@ static int poly_exec_linear_program(
                   : backend && backend->execute ? backend->execute(&runner, args, n_runtime_args)
                                                 : -1;
     if (exec_rc != POLY_RUNNER_NOT_STARTED) ctx->execution_write_epoch++;
-#ifdef POLY_HAS_HIP
-    if (exec_rc == 0 && wait && device == POLY_DEVICE_HIP) exec_rc = poly_hip_sync();
-#endif
     double elapsed = !wait                         ? -1.0
                      : isfinite(runner.elapsed_us) ? runner.elapsed_us / 1000.0
                                                    : poly_now_ms() - start;

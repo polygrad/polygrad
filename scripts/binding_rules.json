@@ -219,6 +219,7 @@
   "poly_hip_arch": {"exclude":"C-only"},
   "poly_hip_available": {"exclude":"C-only"},
   "poly_hip_copy_dtoh": {"exclude":"C-only"},
+  "poly_hip_copy_dtod": {"exclude":"C-only"},
   "poly_hip_copy_htod": {"exclude":"C-only"},
   "poly_hip_free": {"exclude":"C-only"},
   "poly_hip_init": {"exclude":"C-only"},

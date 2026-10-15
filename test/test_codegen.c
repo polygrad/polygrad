@@ -3769,26 +3769,34 @@ TEST(codegen, renderers_size_register_buffer_from_casted_shape_const) {
   PolyUOp *uops[] = {weak_twelve, twelve, reg, sink};
 
   char *c = poly_render_c(ctx, uops, 4, "reg_extent");
+#ifdef POLY_HAS_CUDA
   char *cuda = poly_render_cuda(ctx, uops, 4, "reg_extent", 1);
+#endif
 #ifdef POLY_HAS_HIP
   char *hip = poly_render_hip(ctx, uops, 4, "reg_extent", 1, "gfx1100");
 #endif
   char *wgsl = poly_render_wgsl(ctx, uops, 4, "reg_extent");
   ASSERT_NOT_NULL(c);
+#ifdef POLY_HAS_CUDA
   ASSERT_NOT_NULL(cuda);
+#endif
 #ifdef POLY_HAS_HIP
   ASSERT_NOT_NULL(hip);
 #endif
   ASSERT_NOT_NULL(wgsl);
   ASSERT_NOT_NULL(strstr(c, "float r0[12];"));
+#ifdef POLY_HAS_CUDA
   ASSERT_NOT_NULL(strstr(cuda, "float r0[12];"));
+#endif
 #ifdef POLY_HAS_HIP
   ASSERT_NOT_NULL(strstr(hip, "float r0[12];"));
 #endif
   ASSERT_NOT_NULL(strstr(wgsl, "var r0: array<f32,12>;"));
 
   free(c);
+#ifdef POLY_HAS_CUDA
   free(cuda);
+#endif
 #ifdef POLY_HAS_HIP
   free(hip);
 #endif
@@ -3828,18 +3836,17 @@ TEST(codegen, render_range_names_preserve_full_argument_tuple) {
   };
 
   int n_linear = (int)(sizeof(linear) / sizeof(linear[0]));
-  char *sources[4] = {
+  char *sources[] = {
       poly_render_c(ctx, linear, n_linear, "range_identity"),
+#ifdef POLY_HAS_CUDA
       poly_render_cuda(ctx, linear, n_linear, "range_identity", 1),
+#endif
 #ifdef POLY_HAS_HIP
       poly_render_hip(ctx, linear, n_linear, "range_identity", 1, "gfx1100"),
-#else
-      NULL,
 #endif
       poly_render_wgsl(ctx, linear, n_linear, "range_identity"),
   };
-  for (int i = 0; i < 4; i++) {
-    if (i == 2 && !sources[i]) continue;
+  for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++) {
     ASSERT_NOT_NULL(sources[i]);
     ASSERT_NOT_NULL(strstr(sources[i], "Lidx1_0_1"));
     ASSERT_NOT_NULL(strstr(sources[i], "Lidx1_1"));
@@ -3869,7 +3876,9 @@ TEST(codegen, render_long_range_names_without_truncation) {
   PolyUOp *linear[] = {out, bound, range, idx, load, cast, add, store, end, sink};
   char *sources[] = {
       poly_render_c(ctx, linear, 10, "long_range"),
+#ifdef POLY_HAS_CUDA
       poly_render_cuda(ctx, linear, 10, "long_range", 1),
+#endif
       poly_render_wgsl(ctx, linear, 10, "long_range"),
 #ifdef POLY_HAS_HIP
       poly_render_hip(ctx, linear, 10, "long_range", 1, "gfx1100"),
@@ -3910,7 +3919,9 @@ TEST(codegen, render_missing_operands_fail_closed) {
     PolyUOp *linear[] = {zero, cases[i]};
     char *sources[] = {
         poly_render_c(ctx, linear, 2, "missing_operand"),
+#ifdef POLY_HAS_CUDA
         poly_render_cuda(ctx, linear, 2, "missing_operand", 1),
+#endif
         poly_render_wgsl(ctx, linear, 2, "missing_operand"),
 #ifdef POLY_HAS_HIP
         poly_render_hip(ctx, linear, 2, "missing_operand", 1, "gfx1100"),
@@ -4124,6 +4135,15 @@ TEST(codegen, render_half_single_consumer_chain_matches_pinned_c_expression) {
   ASSERT_NOT_NULL(strstr(src, "((__fp16)(1.702"));
   ASSERT_NOT_NULL(strstr(src, "(val0*val1*"));
 
+  bool hip_matches = true;
+#ifdef POLY_HAS_HIP
+  char *hip = poly_render_hip(
+      ctx, linear, (int)(sizeof(linear) / sizeof(linear[0])), "half_chain", 1, NULL
+  );
+  hip_matches = hip && !strstr(hip, "half alu") && strstr(hip, "(val0*val1*");
+  free(hip);
+#endif
+
   if (saved_expand_ssa)
     setenv("EXPAND_SSA", saved_expand_ssa, 1);
   else
@@ -4131,6 +4151,7 @@ TEST(codegen, render_half_single_consumer_chain_matches_pinned_c_expression) {
   free(saved_expand_ssa);
   free(src);
   poly_ctx_destroy(ctx);
+  ASSERT_TRUE(hip_matches);
   PASS();
 }
 
@@ -5956,7 +5977,10 @@ TEST(codegen, hip_gated_bf16_load_legalizes_late_zero_alternative) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   PolyUOp *buf = poly_test_uop_param(ctx, POLY_BFLOAT16, 1, 0, POLY_ADDR_GLOBAL);
-  PolyUOp *gate = poly_test_uop_param(ctx, POLY_BOOL, -1, 1, POLY_ADDR_GLOBAL);
+  PolyParamArg gate_arg = {.slot = 1, .addrspace = POLY_ADDR_ALU};
+  PolyUOp *gate = poly_uop1(
+      ctx, POLY_OP_PARAM, POLY_BOOL, poly_uop_stack(ctx, NULL, 0), poly_arg_param(&gate_arg)
+  );
   PolyUOp *offset = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(0));
   PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_invalid());
   PolyUOp *gated_offset =
@@ -6953,7 +6977,9 @@ TEST(codegen, wgsl_narrow_cast_and_alu_results) {
   PASS();
 }
 
-TEST(codegen, c_custom_intrinsics_format_and_reject_invalid_fields) {
+static bool custom_intrinsics_format_and_reject_invalid_fields(char *(*render
+)(PolyCtx *, PolyUOp **, int, const char *)) {
+  bool correct = true;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop_const_int(ctx, 4), *b = poly_uop_const_int(ctx, 9);
   const char *formats[] = {"({1}+{0}+{1})", "({}+{})", "/* {{literal}} */ ({0})"};
@@ -6968,10 +6994,9 @@ TEST(codegen, c_custom_intrinsics_format_and_reject_invalid_fields) {
       PolyUOp *store = poly_uop_store(ctx, poly_uop_index(ctx, out, &zero, 1), u);
       int count = 0;
       PolyUOp **linear = poly_uop_toposort(ctx, store, &count);
-      char *source = poly_render_c(ctx, linear, count, "custom_format");
-      ASSERT_NOT_NULL(source);
-      ASSERT_NOT_NULL(strstr(source, expected[i]));
-      if (!mode) ASSERT_NOT_NULL(strstr(source, "alu0 = "));
+      char *source = render(ctx, linear, count, "custom_format");
+      correct &= source && strstr(source, expected[i]);
+      if (!mode) correct &= source && strstr(source, "alu0 = ");
       free(source);
     }
   }
@@ -6979,21 +7004,37 @@ TEST(codegen, c_custom_intrinsics_format_and_reject_invalid_fields) {
   for (int i = 0; i < 6; i++) {
     PolyUOp *u = poly_uop2(ctx, POLY_OP_CUSTOMI, POLY_INT32, a, b, poly_arg_str(invalid[i]));
     PolyUOp *linear[] = {a, b, u};
-    char *source = poly_render_c(ctx, linear, 3, "invalid_custom");
-    ASSERT_PTR_EQ(source, NULL);
+    char *source = render(ctx, linear, 3, "invalid_custom");
+    correct &= source == NULL;
+    free(source);
   }
   for (int mode = 0; mode < 2; mode++) {
     PolyUOp *u = poly_uop0(
         ctx, mode ? POLY_OP_CUSTOMI : POLY_OP_CUSTOM, POLY_VOID, poly_arg_str("/* custom_void */")
     );
-    char *source = poly_render_c(ctx, &u, 1, "custom_void_test");
-    ASSERT_NOT_NULL(source);
-    ASSERT_TRUE((strstr(source, "/* custom_void */") != NULL) == !mode);
+    char *source = render(ctx, &u, 1, "custom_void_test");
+    correct &= source && ((strstr(source, "/* custom_void */") != NULL) == !mode);
     free(source);
   }
   poly_ctx_destroy(ctx);
+  return correct;
+}
+
+TEST(codegen, c_custom_intrinsics_format_and_reject_invalid_fields) {
+  ASSERT_TRUE(custom_intrinsics_format_and_reject_invalid_fields(poly_render_c));
   PASS();
 }
+
+#ifdef POLY_HAS_HIP
+static char *render_hip_custom_test(PolyCtx *ctx, PolyUOp **uops, int n, const char *name) {
+  return poly_render_hip(ctx, uops, n, name, 1, NULL);
+}
+
+TEST(codegen, hip_custom_intrinsics_format_and_reject_invalid_fields) {
+  ASSERT_TRUE(custom_intrinsics_format_and_reject_invalid_fields(render_hip_custom_test));
+  PASS();
+}
+#endif
 
 TEST(codegen, wgsl_float_literals_stay_in_range) {
   PolyCtx *ctx = poly_ctx_new();
@@ -10647,7 +10688,9 @@ TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
   ASSERT_NOT_NULL(linear_schedule);
 
   bool found = false;
+#ifdef POLY_HAS_CUDA
   bool cuda_found = false;
+#endif
   for (int i = 0; i < linear_schedule->n_src; i++) {
     int n_lin = 0;
     PolyUOp **lin =
@@ -10663,18 +10706,22 @@ TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
     ASSERT_INT_EQ(dims[2], 1);
     if (strstr(wgsl, "var<workgroup>") && strstr(wgsl, "workgroupBarrier();")) found = true;
     free(wgsl);
+#ifdef POLY_HAS_CUDA
     /* Renderer-only parity: the same tinygrad-shaped LOCAL BUFFER must be
      * accepted by CUDA without probing or opening a CUDA runtime. */
     char *cuda = poly_render_cuda(ctx, lin, n_lin, "reduce_cuda", 256);
     ASSERT_NOT_NULL(cuda);
     if (strstr(cuda, "__shared__") && !strstr(cuda, "(null)")) cuda_found = true;
     free(cuda);
+#endif
     free(lin);
   }
 
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(found);
+#ifdef POLY_HAS_CUDA
   ASSERT_TRUE(cuda_found);
+#endif
   PASS();
 }
 
@@ -10853,4 +10900,28 @@ TEST(codegen, custom_formatter_rejects_missing_source_array) {
   free(rendered);
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(rejected);
+}
+
+TEST(codegen, gpudims_amd_combined_grid_limit) {
+  /* HIPRenderer limits grid*block, while CUDA has independent axis caps. */
+  const char *devices[] = {"AMD", "CUDA"};
+  for (int d = 0; d < 2; d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *ranges[] = {
+        poly_uop_range(ctx, 33554432, 0, POLY_AXIS_GLOBAL),
+        poly_uop_range(ctx, 256, 1, POLY_AXIS_LOCAL)};
+    PolyUOp *sink = poly_test_kernel_sink(ctx, ranges, 2, "combined_grid_limit");
+    PolyRendererCaps caps = {
+        .device = devices[d], .has_local = true, .global_max = {INT32_MAX, 65535, 65535}};
+    PolyUOp *out = poly_add_gpudims_ex(ctx, sink, caps);
+    int n = 0;
+    PolyUOp **topo = out ? poly_uop_toposort(ctx, out, &n) : NULL;
+    int64_t x = special_bound_hi_named(topo, n, "gidx0");
+    int64_t y = special_bound_hi_named(topo, n, "gidx1");
+    int64_t local = special_bound_hi_named(topo, n, "lidx0");
+    bool ok = out && x == (d == 0 ? 8388608 : 33554432) && local == 256 && (d != 0 || y == 4);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(ok);
+  }
+  PASS();
 }

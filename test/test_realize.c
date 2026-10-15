@@ -23,6 +23,14 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Disk alias tests require a filesystem supporting shared mappings. */
+static bool disk_test_path(char *path, size_t capacity, const char *name) {
+  const char *dir = getenv("TMPDIR");
+  if (!dir || !*dir) dir = "temp";
+  int n = snprintf(path, capacity, "%s/polygrad_%s", dir, name);
+  return n >= 0 && (size_t)n < capacity;
+}
+
 static PolyBuffer *realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
   const PolyUOp *buf_uop = poly_uop_get_buffer_identity(realized);
   return buf_uop ? poly_buffer_get(ctx, (PolyUOp *)buf_uop) : NULL;
@@ -7798,8 +7806,9 @@ TEST(realize, pure_movement_view_realize_is_zero_call) {
 }
 
 TEST(realize, disk_contiguous_shrink_is_lazy_and_copies_only_selected_range) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_view_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_view_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[16];
@@ -7943,7 +7952,9 @@ TEST(realize, buffer_copy_rejects_missing_transfer_callbacks) {
 }
 
 TEST(realize, disk_copy_publishes_named_storage_and_preserves_distinct_paths) {
-  char paths[2][64] = {"temp/polygrad_Disk_First_XXXXXX", "temp/polygrad_Disk_Second_XXXXXX"};
+  char paths[2][PATH_MAX];
+  ASSERT_TRUE(disk_test_path(paths[0], sizeof(paths[0]), "Disk_First_XXXXXX"));
+  ASSERT_TRUE(disk_test_path(paths[1], sizeof(paths[1]), "Disk_Second_XXXXXX"));
   for (int i = 0; i < 2; i++) {
     int fd = mkstemp(paths[i]);
     ASSERT_TRUE(fd >= 0);
@@ -7958,7 +7969,7 @@ TEST(realize, disk_copy_publishes_named_storage_and_preserves_distinct_paths) {
       poly_tensor_create_with_roots(ctx, buffer, buffer, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(current);
   for (int i = 0; i < 2; i++) {
-    char device[80];
+    char device[PATH_MAX + 6];
     snprintf(device, sizeof(device), "DISK:%s", paths[i]);
     PolyTensor *next = poly_tensor_to_device_name(ctx, current, device), *out = NULL;
     ASSERT_NOT_NULL(next);
@@ -8667,8 +8678,9 @@ TEST(realize, non_contiguous_expand_still_materializes_before_consumer) {
 }
 
 TEST(realize, disk_reshaped_views_batch_copy_preserves_offsets_and_counts) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_batch_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_batch_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[32];
@@ -8785,8 +8797,9 @@ TEST(realize, disk_reshaped_views_batch_copy_preserves_offsets_and_counts) {
 }
 
 TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_direct_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_direct_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[32];
@@ -8964,8 +8977,9 @@ TEST(realize, typed_cpu_views_of_realized_storage) {
 }
 
 TEST(realize, typed_disk_view_copy_matches_pinned_slice_pipeline) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_bitcast_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_bitcast_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[32];
@@ -9032,8 +9046,9 @@ TEST(realize, typed_disk_view_copy_matches_pinned_slice_pipeline) {
 }
 
 TEST(realize, nested_disk_view_copies_feed_compute_as_ordered_calls) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_nested_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_nested_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[32];
@@ -9145,8 +9160,9 @@ TEST(realize, nested_disk_view_copies_feed_compute_as_ordered_calls) {
 }
 
 TEST(realize, nested_disk_view_copies_hold_contiguous_reduction_without_extra_copy) {
-  char path[256];
-  snprintf(path, sizeof(path), "temp/polygrad_disk_reduce_%ld.bin", (long)getpid());
+  char path[PATH_MAX], name[64];
+  snprintf(name, sizeof(name), "disk_reduce_%ld.bin", (long)getpid());
+  ASSERT_TRUE(disk_test_path(path, sizeof(path), name));
   FILE *file = fopen(path, "wb");
   ASSERT_NOT_NULL(file);
   uint8_t file_data[] = {1, 10, 11, 12, 99, 2, 20, 21, 22};

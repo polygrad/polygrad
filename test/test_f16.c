@@ -797,7 +797,7 @@ TEST(f16, saturated_gelu_family_backward) {
     expected = expected_interp;
   else if (device == POLY_DEVICE_X86)
     expected = expected_x86;
-  else if (device == POLY_DEVICE_CUDA)
+  else if (device == POLY_DEVICE_CUDA || device == POLY_DEVICE_HIP)
     expected = expected_cuda;
 
   for (int quick = 0; quick < 2; quick++) {
@@ -821,13 +821,13 @@ TEST(f16, saturated_gelu_family_backward) {
         POLY_TEST_HOST_VIEW(input, input_data),
         POLY_TEST_HOST_VIEW(output, output_data),
     };
-    ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+    int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(rc, 0);
     for (int i = 0; i < 5; i++) {
       ASSERT_TRUE(isfinite(f16_bits_to_f32(output_data[i])));
       ASSERT_INT_EQ(output_data[i], expected[quick][i]);
     }
-
-    poly_ctx_destroy(ctx);
   }
   PASS();
 }

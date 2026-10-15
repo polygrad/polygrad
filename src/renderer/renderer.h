@@ -3,6 +3,7 @@
 
 #include "codegen/opt/tc.h"
 #include <stdbool.h>
+#include <string.h>
 
 /* Current Tinygrad 2026-08-22/a9069c177a9d renderer/__init__.py:Renderer
  * capabilities represented as immutable C call data. */
@@ -35,6 +36,12 @@ typedef struct {
   const PolyTensorCore *tensor_cores;
   int n_tensor_cores;
 } PolyRendererCaps;
+
+/* HIPRenderer.global_prod_max: grid * block is bounded on each axis.
+ * Keep this derived capability outside the existing by-value caps ABI. */
+static inline uint64_t poly_renderer_global_prod_max(PolyRendererCaps caps) {
+  return caps.device && strcmp(caps.device, "AMD") == 0 ? UINT32_MAX : 0;
+}
 
 /* Tinygrad 2026-08-22/a9069c177a9d Renderer.supported_dtypes(). */
 static inline bool poly_renderer_supports_dtype(PolyRendererCaps caps, PolyDType dtype) {

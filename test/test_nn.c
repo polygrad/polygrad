@@ -324,17 +324,15 @@ TEST(nn, rmsnorm_half_numeric) {
   PolyUOp *output = poly_uop_buffer_f32(ctx, 2);
   float data[] = {1000, 2000}, out[2] = {0};
   PolyTestBufferView views[] = {POLY_TEST_HOST_VIEW(input, data), POLY_TEST_HOST_VIEW(output, out)};
-  ASSERT_INT_EQ(
-      poly_test_realize_buffer_views(
-          ctx, poly_uop_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), views, 2
-      ),
-      0
+  int rc = poly_test_realize_buffer_views(
+      ctx, poly_uop_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), views, 2
   );
-  /* Pinned simplification removes the final half->float cast chain. This is
-   * not a stored-half readback; the separate graph test checks cast placement. */
-  ASSERT_FLOAT_EQ(out[0], 0.63245553f, 1e-6f);
-  ASSERT_FLOAT_EQ(out[1], 1.26491106f, 1e-6f);
   poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  /* PG-DIV-029 preserves the half rounding boundary, matching the current
+   * reference; the pinned simplification elides this cast pair. */
+  ASSERT_FLOAT_EQ(out[0], 0.63232421875f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], 1.2646484375f, 1e-6f);
   PASS();
 }
 

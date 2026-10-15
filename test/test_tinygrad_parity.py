@@ -657,7 +657,9 @@ def main() -> int:
         ).strip().split("\n")[0]
         renderer = CUDARenderer(Target.parse("CUDA:NV:sm_" + arch.replace(".", "")))
     elif args.hip:
-        hip_arch = os.environ.get("HIP_ARCH", "gfx90a")
+        hip_arch = os.environ.get("HIP_ARCH")
+        if not hip_arch:
+            parser.error("--hip requires HIP_ARCH to match the device under test")
         renderer = HIPRenderer(Target.parse("HIP:AMD:" + hip_arch))
     else:
         renderer = ClangRenderer(_cpu_target())

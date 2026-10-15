@@ -395,10 +395,30 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     if (n_local &&
         !get_grouped_dims(ctx, "lidx", local_dims, n_local, caps.local_max, false, local_idxs))
       goto done;
-    if (n_global && !get_grouped_dims(
-                        ctx, no_locals ? "idx" : "gidx", global_dims, n_global, caps.global_max,
-                        true, global_idxs
-                    ))
+    int global_max[3];
+    memcpy(global_max, caps.global_max, sizeof(global_max));
+    uint64_t product_max = no_locals ? 0 : poly_renderer_global_prod_max(caps);
+    if (product_max) {
+      int hw_axis = 0;
+      int64_t hw_local[3] = {1, 1, 1};
+      /* Match pinned add_gpudims: direct local SPECIALs supply hardware extents. */
+      for (int i = 0; i < n_local; i++) {
+        if (local_idxs[i]->op != POLY_OP_SPECIAL) continue;
+        if (hw_axis == 3) goto done;
+        hw_local[hw_axis++] = _dim_max(ctx, local_idxs[i]->src[0]);
+      }
+      for (int i = 0; i < 3; i++) {
+        if (hw_local[i] <= 0) goto done;
+        uint64_t limit = product_max / (uint64_t)hw_local[i];
+        if (!limit) goto done;
+        if (global_max[i] <= 0 || limit < (uint64_t)global_max[i])
+          global_max[i] = limit > INT_MAX ? INT_MAX : (int)limit;
+      }
+    }
+    if (n_global &&
+        !get_grouped_dims(
+            ctx, no_locals ? "idx" : "gidx", global_dims, n_global, global_max, true, global_idxs
+        ))
       goto done;
   }
   for (int i = 0; i < n_topo; i++) {

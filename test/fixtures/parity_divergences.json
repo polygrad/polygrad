@@ -23,6 +23,26 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-034",
+      "status": "approved",
+      "stages": [
+        "codegen"
+      ],
+      "area": "HIP automatic tensor-core wave capability guard",
+      "tinygrad": "Pinned HIPRenderer selects an AMD tensor-core table from the architecture string without checking the executing device's wave size.",
+      "polygrad": "Disables automatic tensor-core selection when the selected template's thread count differs from the detected hardware wave size; ordinary matmul lowering remains available. Explicit WMMA instructions are unchanged.",
+      "rationale": "A tensor-core lane layout must match the executing wave. This backend-only fallback grants no tensor, logical, physical, or numerical mismatch allowance.",
+      "approval": "User approved the tested wave-size capability guard on 2026-10-15.",
+      "evidence": [
+        "src/renderer/hip.c:poly_hip_renderer_caps",
+        "test/test_hip.c:tc_auto_matmul_e2e",
+        "test/test_hip.c:tc_auto_matmul_unique_values",
+        "references/tinygrad_latest/tinygrad/renderer/cstyle.py:HIPRenderer",
+        "temp/amd-validation-20261015/"
+      ],
+      "close_when": "The pinned backend rejects incompatible tensor-core layouts before automatic selection; rerun topology and value probes before removing this allowance."
+    },
+    {
       "id": "PG-DIV-033",
       "status": "approved",
       "stages": ["tensor", "logical", "physical"],

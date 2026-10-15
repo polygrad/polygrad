@@ -350,6 +350,7 @@ void *poly_hip_alloc(size_t bytes);
 void poly_hip_free(void *ptr);
 int poly_hip_copy_htod(void *dst, const void *src, size_t bytes);
 int poly_hip_copy_dtoh(void *dst, const void *src, size_t bytes);
+int poly_hip_copy_dtod(void *dst, const void *src, size_t bytes);
 PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name);
 int poly_hip_launch(
     PolyHipProgram *prog,
