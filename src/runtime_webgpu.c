@@ -282,59 +282,52 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   return 0;
 })
 
-EM_ASYNC_JS(int, js_webgpu_read_buffer_to_wasm, (uint8_t * dst, uintptr_t handle, int nbytes), {
+EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nbytes, int host_key), {
   const st = await Module.__polygradEnsureWebGPU();
   const src = st.buffers.get(handle);
   if (!src) return -1;
+  const target = host_key && Module.__polygradHostBuffers &&
+      Module.__polygradHostBuffers.get(String(dst >>> 0));
+  if (host_key && !target) return -1;
   if (st.batch && !st.batch.flush()) return -1;
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
-  const staging = st.device.createBuffer(
-      {size : copyBytes, usage : GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}
-  );
-  const enc = st.device.createCommandEncoder();
-  enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
-  st.device.queue.submit([enc.finish()]);
-  await staging.mapAsync(GPUMapMode.READ);
-  const mapped = staging.getMappedRange();
-  HEAPU8.set(new Uint8Array(mapped, 0, logical), dst >>> 0);
-  staging.unmap();
-  staging.destroy();
-  return 0;
-})
-
-EM_ASYNC_JS(
-    int,
-    js_webgpu_read_buffer_to_hostkey,
-    (uintptr_t dst_key, uintptr_t handle, int nbytes),
-    {
-      const st = await Module.__polygradEnsureWebGPU();
-      const src = st.buffers.get(handle);
-      const map = Module.__polygradHostBuffers;
-      const dst = map && map.get(String(dst_key >>> 0));
-      if (!src || !dst) return -1;
-      if (st.batch && !st.batch.flush()) return -1;
-      const logical = Math.max(0, nbytes | 0);
-      if (logical === 0) return 0;
-      const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
-      const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
-      const staging = st.device.createBuffer(
-          {size : copyBytes, usage : GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}
-      );
-      const enc = st.device.createCommandEncoder();
-      enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
-      st.device.queue.submit([enc.finish()]);
-      await staging.mapAsync(GPUMapMode.READ);
-      const mapped = staging.getMappedRange();
-      const out = new Uint8Array(dst.buffer, dst.byteOffset, Math.min(logical, dst.byteLength));
+  // Keep one idle allocation, not a pool. Large transfers remain temporary.
+  // Detach while mapping: neither nested reads nor returned arrays may alias it.
+  const reusable = copyBytes <= 1024 * 1024;
+  let staging = reusable ? st.readbackStaging : null;
+  if (reusable) st.readbackStaging = null;
+  let success = false;
+  try {
+    if (staging && staging.size < copyBytes) { staging.destroy(); staging = null; }
+    if (!staging) staging = st.device.createBuffer(
+        {size : copyBytes, usage : GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST}
+    );
+    const enc = st.device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
+    st.device.queue.submit([enc.finish()]);
+    await staging.mapAsync(GPUMapMode.READ, 0, copyBytes);
+    const mapped = staging.getMappedRange(0, copyBytes);
+    if (host_key) {
+      const out = new Uint8Array(target.buffer, target.byteOffset, Math.min(logical, target.byteLength));
       out.set(new Uint8Array(mapped, 0, out.byteLength));
-      staging.unmap();
-      staging.destroy();
-      return 0;
+    } else {
+      // Resolve the current heap after the await: Wasm memory may have grown.
+      HEAPU8.set(new Uint8Array(mapped, 0, logical), dst >>> 0);
     }
-)
+    staging.unmap();
+    success = true;
+    return 0;
+  } catch (error) {
+    console.error('polygrad: WebGPU readback failed:', error);
+    return -1;
+  } finally {
+    if (success && reusable && !st.readbackStaging) st.readbackStaging = staging;
+    else if (staging) staging.destroy();
+  }
+})
 
 EM_JS(
     int,
@@ -776,12 +769,12 @@ static int webgpu_copy_out(
   if (!dst || !src || !src->ptr) return -1;
   if (dst->device == POLY_DEVICE_HOST) {
     if (dst->ptr)
-      return js_webgpu_read_buffer_to_wasm((uint8_t *)dst->ptr, (uintptr_t)src->ptr, (int)nbytes);
-    return js_webgpu_read_buffer_to_hostkey(
-        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes
+      return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0);
+    return js_webgpu_read_buffer(
+        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes, 1
     );
   }
-  return js_webgpu_read_buffer_to_wasm((uint8_t *)dst->ptr, (uintptr_t)src->ptr, (int)nbytes);
+  return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0);
 }
 
 static int webgpu_copy_between(

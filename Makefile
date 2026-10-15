@@ -134,7 +134,7 @@ test-extension-native: check-extension-bindings build/extension/native.node buil
 test-extension-wasm: check-extension-bindings build/extension/author.wasm build/extension-methods/author.wasm wasm-pkg
 	POLY_CORE=wasm $(NODE) js/test/test_extension.js
 
-WASM_ASYNCIFY_IMPORTS = ['poly_webgpu_batch_end','js_webgpu_dispatch','js_webgpu_get_or_create_pipeline','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
+WASM_ASYNCIFY_IMPORTS = ['poly_webgpu_batch_end','js_webgpu_dispatch','js_webgpu_get_or_create_pipeline','js_webgpu_read_buffer']
 # Instrument suspension-bearing paths (including Model I/O and BEAM), preserving
 # the synchronous compiler fast path. Do not rely on helper inlining for safety.
 # Initial Model bindings may already own WebGPU AUX bytes; packing then reads

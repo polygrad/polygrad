@@ -1395,6 +1395,48 @@ async function checkModelCaptureFailure(pg) {
   } finally { await x.dispose(); await state.dispose() }
 }
 
+async function checkWebGPUReadbackStaging(createRuntime) {
+  const rt = await createRuntime({logical:'always'})
+  const x = rt.Tensor.empty(3), y = x.mul(2)
+  let model, st, create, cached, destroy
+  try {
+    model = await rt.Model.fromTensors({inputs:{x},outputs:{y}})
+    const first = await model.forwardAsync({x:new Float32Array([1,2,3])})
+    st = rt._core.Module.__polygradWebGpuState
+    cached = st.readbackStaging
+    assert(cached && cached.mapState==='unmapped','readback did not retain idle staging')
+    create = st.device.createBuffer
+    let allocations = 0, destroyed = 0
+    st.device.createBuffer = function(desc) {
+      if (desc.usage & GPUBufferUsage.MAP_READ) allocations++
+      return create.call(this,desc)
+    }
+    for (const values of [[4,5,6],[7,8,9]])
+      assertClose((await model.forwardAsync({x:new Float32Array(values)})).y,values.map(x=>x*2),0)
+    assert(allocations===0,'warm readback allocated staging')
+    assertClose(first.y,[2,4,6],0)
+    // Mapping rejection must discard the allocation and leave the runtime usable.
+    cached.mapAsync = async () => {throw new Error('injected readback mapping failure')}
+    let rejected = false
+    try {await model.readBufferAsync('y')} catch (_) {rejected=true}
+    assert(rejected && !st.readbackStaging,'failed mapping kept staging or returned stale data')
+    assertClose(await model.readBufferAsync('y'),[14,16,18],0)
+    cached = st.readbackStaging
+    destroy = cached.destroy.bind(cached)
+    cached.destroy = () => {destroyed++;destroy()}
+    const pending = model.forwardAsync({x:new Float32Array([2,3,4])})
+    const closing = rt.dispose()
+    assertClose((await pending).y,[4,6,8],0)
+    await closing
+    assert(!st.readbackStaging && destroyed===1,'queued disposal leaked staging')
+    assertClose(first.y,[2,4,6],0)
+  } finally {
+    if (st && create) st.device.createBuffer=create
+    if (model) await model.dispose()
+    await y.dispose();await x.dispose();await rt.dispose()
+  }
+}
+
 async function checkModelOutputMetadata(pg) {
   const n = pg.uop.variable('metadata_batch', 1, 8), bound = n.bind(3)
   const x = pg.Tensor.empty([bound, 2]), weight = new pg.Tensor(new Float32Array([2]))
@@ -3121,6 +3163,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model output metadata caching preserves live shapes and snapshots', () => checkModelOutputMetadata(pg))
+  if (String(pg.device).toLowerCase()==='webgpu')
+    await test('Model WebGPU readback staging reuse failure and disposal', () => checkWebGPUReadbackStaging(createRuntime))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))
@@ -3917,6 +3961,8 @@ async function runModelSmokeTests(pg, createRuntime) {
     await test(`Qwen3.5 ${dtype} cache prefill decode and reset`, () => checkQwen35Cache(pg, dtype))
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model output metadata caching preserves live shapes and snapshots', () => checkModelOutputMetadata(pg))
+  if (String(pg.device).toLowerCase()==='webgpu')
+    await test('Model WebGPU readback staging reuse failure and disposal', () => checkWebGPUReadbackStaging(createRuntime))
   await test('Tokenizer GGUF and JSON byte BPE', () => checkTokenizerJSON(pg))
   await test('Model empty bindings reject before input writes', () => checkModelEmptyInputAdmission(pg))
   await test('Model minibatches match explicit training steps', () => checkModelMinibatches(pg))

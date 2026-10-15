@@ -41,8 +41,66 @@ async function checkHostCopies(address) {
   Object.assign(env, {GPUBufferUsage: {}, GPUMapMode: {READ: 1}})
   assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_wasm', 'handle,src,nbytes', env)(1, address, 4), 0)
   assert.equal(bridge('runtime_webgpu.c', 'js_webgpu_write_buffer_from_hostkey', 'handle,src_key,nbytes', env)(1, address, 4), 0)
-  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_hostkey', 'dst_key,handle,nbytes', env)(address, 1, 4), 0)
-  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer_to_wasm', 'dst,handle,nbytes', env)(address, 1, 4), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key', env)(address, 1, 4, 1), 0)
+  assert.equal(await bridge('runtime_webgpu.c', 'js_webgpu_read_buffer', 'dst,handle,nbytes,host_key', env)(address, 1, 4, 0), 0)
+}
+
+async function checkReadbackStaging() {
+  const buffers = [], heap = new Uint8Array(1048584)
+  let failure, growHeap = false
+  const st = {buffers:new Map([[1,{}]]), bufferOffsets:new Map([[1,256]]), device:{
+    createBuffer({size}) {
+      if (failure==='allocate') throw Error('injected allocation failure')
+      const b = {size, destroyed:false, destroy(){this.destroyed=true}, unmap(){},
+        async mapAsync(mode,offset,length){
+          assert.equal(offset,0); assert(length<=size && length%4===0)
+          if (failure==='map') throw Error('injected mapping failure')
+          if (growHeap) env.HEAPU8 = new Uint8Array(heap.length)
+        }, getMappedRange(offset,length){
+          if (failure==='range') throw Error('injected range failure')
+          assert.equal(offset,0); assert(length<=size)
+          return new Uint8Array(length).fill(7).buffer
+        }}
+      buffers.push(b)
+      return b
+    },
+    createCommandEncoder(){return {copyBufferToBuffer(src,offset){assert.equal(offset,256)}, finish(){return {}}}},
+    queue:{submit(){if(failure==='submit') throw Error('injected submission failure')}}
+  }}
+  const Module = {__polygradWebGpuState:st, __polygradEnsureWebGPU:async()=>st}
+  const errors=[]
+  const env = {Module,HEAPU8:heap,GPUBufferUsage:{},GPUMapMode:{READ:1},console:{error(...args){errors.push(args)}}}
+  const read = bridge('runtime_webgpu.c','js_webgpu_read_buffer','dst,handle,nbytes,host_key',
+    env)
+  for (let i=0;i<5;i++) assert.equal(await read(0,1,4,0),0)
+  assert.deepEqual(Array.from(heap.slice(0,4)),[7,7,7,7])
+  assert.equal(buffers.length,1,'warm reads must reuse staging storage')
+  assert.equal(buffers[0].destroyed,false)
+  assert.equal(await read(0,1,8,0),0)
+  assert.equal(buffers[0].destroyed,true,'growth releases the smaller allocation')
+  const cache = st.readbackStaging
+  heap.fill(0)
+  assert.equal(await read(0,1,3,0),0)
+  assert.deepEqual(Array.from(heap.slice(0,4)),[7,7,7,0],'alignment padding is not published')
+  assert.equal(await read(0,1,1048580,0),0)
+  assert.equal(st.readbackStaging,cache,'large one-off reads do not evict the small cache')
+  assert.equal(buffers.at(-1).destroyed,true)
+  for (let i=0;i<100;i++) assert.equal(await read(0,1,4,0),0)
+  assert.equal(buffers.length,3,'repeated reads have bounded allocation count')
+  for (failure of ['submit','map','range','allocate']) {
+    if (failure==='allocate') {st.readbackStaging?.destroy();st.readbackStaging=null}
+    heap.fill(0)
+    assert.equal(await read(0,1,4,0),-1)
+    assert.equal(st.readbackStaging,null,'failed staging cannot be reused')
+    assert.equal(buffers.at(-1).destroyed,true)
+    assert.equal(heap[0],0,'failure must not publish stale bytes')
+  }
+  assert.equal(errors.length,4)
+  failure=null;growHeap=true
+  assert.equal(await read(0,1,4,0),0)
+  assert.equal(env.HEAPU8[0],7,'readback must use the grown heap')
+  assert.equal(heap[0],0)
+  st.readbackStaging.destroy()
 }
 
 async function checkWebgpu(address, timed, validationError = false, repeats = 1, sampleUs = 200, failRound = 1) {
@@ -118,6 +176,7 @@ function checkWasm(address, count) {
 }
 
 ;(async () => {
+  await checkReadbackStaging()
   for (const address of [1024, 0x80000400, 0x80000400 | 0]) {
     await checkHostCopies(address)
     for (const timed of [false, true]) await checkWebgpu(address, timed)
@@ -133,5 +192,5 @@ function checkWasm(address, count) {
     await checkWebgpu(address, true, false, -1, 10000)
     for (let count = 0; count <= 9; count++) checkWasm(address, count)
   }
-  console.log('Wasm addresses and timing: 84 passed')
+  console.log('Wasm addresses, timing and readback staging: 85 passed')
 })().catch(error => { console.error(error); process.exitCode = 1 })

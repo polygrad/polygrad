@@ -630,6 +630,11 @@ function createWasmCoreFromModule(Module, device) {
     if (asyncifyDestroyed) return
     asyncifyDestroyed = true
     ffi.poly_ctx_destroy(ctx)
+    const gpu = Module.__polygradWebGpuState
+    if (gpu && gpu.readbackStaging) {
+      gpu.readbackStaging.destroy()
+      gpu.readbackStaging = null
+    }
     if (_scratchPtrArrayPtr) {
       Module._free(_scratchPtrArrayPtr)
       _scratchPtrArrayPtr = 0
