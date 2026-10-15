@@ -1375,7 +1375,7 @@
       "area": "schedule-cache key ownership",
       "tinygrad": "lower_sink_to_linear indexes schedule_cache by function.key bytes; the cache does not retain the source SINK as its key.",
       "polygrad": "The context-local schedule cache uses retained SINK pointer keys and retained LINEAR values, without an eviction policy or size cap. Many distinct cache keys can accumulate source graphs and schedule values; collect alone does not reclaim them. Explicit poly_schedule_cache_clear at an idle boundary releases cache ownership; otherwise it lasts until context teardown. Symbolic bindings that reuse a schedule need not add entries.",
-      "rationale": "This is a cache lifetime difference, not a demonstrated numerical mismatch. The September13 split-owner HLB diagnostic releases source keys while retaining every LINEAR value: host arena_bytes falls by 1,740,007 and 2,729 UOps retire, but CUDA bytes remain unchanged. The 593,152 CUDA bytes belong to cache values, not uniquely to keys; replacing keys alone will not reclaim them. The separate 18,352,660-byte post-function delta disappears at collection and is not this debt. No leak beyond context lifetime is established.",
+      "rationale": "This is a cache lifetime difference, not a demonstrated numerical mismatch. The September13 split-owner HLB diagnostic releases source keys while retaining every LINEAR value: host arena_bytes falls by 1,740,007 and 2,729 UOps retire, but CUDA bytes remain unchanged. The 593,152 CUDA bytes belong to cache values, not uniquely to keys; replacing keys alone will not reclaim them. The separate 18,352,660-byte post-function delta disappears at collection and is not this debt. No leak beyond context lifetime is established. The October15 eager probe attributes 178,508 of 812,436 tracked graph bytes (22%) to source-key retention; LINEAR values retain the remainder. Replacing pointer keys with the existing uncached canonical encoder projects about 113 KB saved before key wrappers, but measured warm scheduling slows 16-24% and eager calls 4.4%. That rejected prototype re-encodes each lookup, unlike Tinygrad's cached recursive digest; it does not evaluate a faithful cached-key port. The cached recursive digest is missing port behavior and is the planned way to close this debt.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/schedule/__init__.py:lower_sink_to_linear",
@@ -1385,7 +1385,8 @@
         "temp/stabilization-20260912.9cb0eR/residency-polygrad-cache.log",
         "temp/cache-ownership-20260913.clmA3m/results.md",
         "temp/cache-ownership-20260913.clmA3m/residency-polygrad.log",
-        "temp/cache-clear-20260913.itgPPu/results.md"
+        "temp/cache-clear-20260913.itgPPu/results.md",
+        "temp/schedule-keys-20261015/report.txt"
       ],
       "close_when": "Use a complete immutable content key without retaining the source SINK, with collision-safe lookup, lifetime and reuse regressions; or explicitly approve the measured context-lifetime difference. Do not replace structural identity with an unchecked 32-bit hash."
     },
