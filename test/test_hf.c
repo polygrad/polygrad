@@ -1147,6 +1147,19 @@ TEST(hf, model_import_rejects_failed_weight_conversion_or_copy) {
   PASS();
 }
 
+TEST(hf, gpt2_decoded_without_options_owns_context) {
+  PolyHfDecoded hf = {0};
+  hf.config =
+      cJSON_Parse("{\"vocab_size\":32,\"n_embd\":16,\"n_head\":2,\"n_layer\":1,\"n_positions\":8}");
+  ASSERT_NOT_NULL(hf.config);
+  PolyModel *model = model_gpt2_from_hf_decoded(&hf, NULL);
+  bool valid = model && poly_model_ctx(model);
+  poly_model_free(model);
+  cJSON_Delete(hf.config);
+  ASSERT_TRUE(valid);
+  PASS();
+}
+
 TEST(hf, hf_load_tiny_gpt2) {
   const char *config = "{\"model_type\":\"gpt2\",\"vocab_size\":32,"
                        "\"n_embd\":16,\"n_head\":2,\"n_layer\":1,"

@@ -190,6 +190,7 @@ int poly_hf_import_feed(PolyHfImport *s, const uint8_t *data, size_t length) {
     return fail(s, "invalid checkpoint feed state");
   Delivery *d = &s->deliveries[s->current];
   const PolyDecodedTensor *t = s->alias ? d->b : d->a;
+  if (!t) return fail(s, "missing checkpoint delivery tensor");
   if (s->sources[t - s->hf->tensors].length != length)
     return fail(s, "short or oversized checkpoint range");
   if (d->b && !s->alias) {

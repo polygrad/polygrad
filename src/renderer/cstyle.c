@@ -628,7 +628,7 @@ static char *render_const_literal(PolyUOp *c, PolyDType dtype, bool vector_bool)
 /* Exact C equivalent of helpers.strip_parens used by pinned
  * cstyle.py:62-63: remove one balanced outer pair, not merely the first and
  * last characters. */
-static char *render_strip_parens(const char *expr) {
+char *poly_render_strip_parens(const char *expr) {
   if (!expr) return strdup("");
   size_t len = strlen(expr);
   if (len < 2 || expr[0] != '(' || expr[len - 1] != ')') return strdup(expr);
@@ -832,7 +832,8 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
 
 /* Pinned cstyle.py base_rewrite formats CUSTOM/CUSTOMI with positional source
  * expressions. Reject malformed fields rather than emitting a zero value. */
-static char *render_custom(const PolyUOp *u, StrMap *names) {
+char *poly_render_custom(const PolyUOp *u, const char *const *sources) {
+  if (!u) return NULL;
   if (u->arg.kind != POLY_ARG_STRING || !u->arg.str) return NULL;
   StrBuf out;
   sb_init(&out);
@@ -858,8 +859,8 @@ static char *render_custom(const PolyUOp *u, StrMap *names) {
           slot = slot * 10 + *p++ - '0';
         }
       }
-      if (*p++ != '}' || slot >= u->n_src) goto invalid;
-      const char *source = smap_get(names, u->src[slot]);
+      if (*p++ != '}' || !sources || slot >= u->n_src) goto invalid;
+      const char *source = sources[slot];
       if (!source) goto invalid;
       sb_puts(&out, source);
     } else if (*p == '}') {
@@ -872,6 +873,42 @@ static char *render_custom(const PolyUOp *u, StrMap *names) {
 invalid:
   free(out.buf);
   return NULL;
+}
+
+static char *render_custom(const PolyUOp *u, StrMap *names) {
+  const char **sources = u->n_src ? malloc((size_t)u->n_src * sizeof(*sources)) : NULL;
+  if (u->n_src && !sources) return NULL;
+  for (int i = 0; i < u->n_src; i++)
+    sources[i] = smap_get(names, u->src[i]);
+  char *result = poly_render_custom(u, sources);
+  free(sources);
+  return result;
+}
+
+/* Count source occurrences, including repeated edges from one consumer. */
+int *poly_render_child_counts(PolyUOp **uops, int n) {
+  PolyMap *map = poly_map_new((size_t)(n > 0 ? n * 2 : 16));
+  int *indices = malloc((size_t)(n > 0 ? n : 1) * sizeof(*indices));
+  int *counts = calloc((size_t)(n > 0 ? n : 1), sizeof(*counts));
+  if (!indices || !counts) {
+    free(indices);
+    free(counts);
+    poly_map_destroy(map);
+    return NULL;
+  }
+  for (int i = 0; i < n; i++) {
+    indices[i] = i;
+    poly_map_set(map, poly_ptr_hash(uops[i]), uops[i], &indices[i], poly_ptr_eq);
+  }
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < uops[i]->n_src; j++) {
+      int *index = poly_map_get(map, poly_ptr_hash(uops[i]->src[j]), uops[i]->src[j], poly_ptr_eq);
+      if (index) counts[*index]++;
+    }
+  }
+  free(indices);
+  poly_map_destroy(map);
+  return counts;
 }
 
 /* C Renderer */
@@ -941,27 +978,16 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   /* Tinygrad 2026-08-22/a9069c177a9d cstyle.py:194,232-237 counts direct
    * consumers, then inlines single-consumer expressions unless EXPAND_SSA.
    */
-  PolyMap *uop_indices = poly_map_new((size_t)(n > 0 ? n * 2 : 16));
-  int *indices = malloc((size_t)n * sizeof(*indices));
-  int *child_count = calloc((size_t)n, sizeof(*child_count));
+  int *child_count = poly_render_child_counts(uops, n);
   RenderParam *params = NULL;
   int param_capacity = 0;
-  if (!indices || !child_count) goto fail;
+  if (!child_count) goto fail;
   for (int i = 0; i < n; i++) {
     if (uops[i]->op == POLY_OP_PARAM) param_capacity++;
-    indices[i] = i;
-    poly_map_set(uop_indices, poly_ptr_hash(uops[i]), uops[i], &indices[i], poly_ptr_eq);
   }
   /* Match CStyleLanguage's parameter dict without allocating by kernel size. */
   params = calloc((size_t)param_capacity, sizeof(*params));
   if (param_capacity && !params) goto fail;
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < uops[i]->n_src; j++) {
-      int *source_index =
-          poly_map_get(uop_indices, poly_ptr_hash(uops[i]->src[j]), uops[i]->src[j], poly_ptr_eq);
-      if (source_index) child_count[*source_index]++;
-    }
-  }
   bool expand_ssa = poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
 
   /* function parameter entries: (type_str, name_str, sort_key) */
@@ -1437,7 +1463,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       for (int j = 0; j < u->n_src && j < 3; j++) {
         const char *source = smap_get(&names, u->src[j]);
         if (associative && u->src[j]->op == u->op) {
-          stripped[j] = render_strip_parens(source);
+          stripped[j] = poly_render_strip_parens(source);
           sources[j] = stripped[j];
         } else {
           sources[j] = source ? source : "";
@@ -1620,8 +1646,6 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   free(decls.buf);
   free(body.buf);
   free(child_count);
-  free(indices);
-  poly_map_destroy(uop_indices);
   smap_destroy(&names);
 
   return out.buf;
@@ -1631,8 +1655,6 @@ fail:
   free(decls.buf);
   free(body.buf);
   free(child_count);
-  free(indices);
-  poly_map_destroy(uop_indices);
   smap_destroy(&names);
   return NULL;
 }

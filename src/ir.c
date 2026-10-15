@@ -346,7 +346,7 @@ static bool br_param_bound(ByteReader *r, PolyArg *out) {
     uint8_t negative = br_u8(r);
     uint32_t count = br_u32(r);
     if (negative > 1 || count == 0 || count > INT_MAX / sizeof(uint32_t) ||
-        br_remaining(r) < (int64_t)count * sizeof(uint32_t))
+        br_remaining(r) < (int64_t)count * (int64_t)sizeof(uint32_t))
       return false;
     uint32_t *limbs = malloc((size_t)count * sizeof(*limbs));
     if (!limbs) return false;
@@ -602,6 +602,12 @@ typedef struct {
   int64_t tag_identity, canonical_tag;
 } NodeMapEntry;
 
+static uint32_t find_node_index(const NodeMapEntry *nodes, int count, const PolyUOp *u) {
+  for (int i = 0; i < count; i++)
+    if (nodes[i].uop == u) return nodes[i].idx;
+  return UINT32_MAX;
+}
+
 static bool identity_eq(const void *a, const void *b) {
   return *(const int64_t *)a == *(const int64_t *)b;
 }
@@ -796,16 +802,7 @@ static uint8_t *poly_graph_export(const PolyIrSpec *spec, int *out_len, bool exe
   }
 
 /* Helper: find index of a UOp */
-#define FIND_IDX(u)                                                                                \
-  ({                                                                                               \
-    uint32_t _idx = UINT32_MAX;                                                                    \
-    for (int _i = 0; _i < n_nodes; _i++)                                                           \
-      if (node_map[_i].uop == (u)) {                                                               \
-        _idx = node_map[_i].idx;                                                                   \
-        break;                                                                                     \
-      }                                                                                            \
-    _idx;                                                                                          \
-  })
+#define FIND_IDX(u) find_node_index(node_map, n_nodes, (u))
 
   /* Module boundaries are metadata over the exported program, not extra graph
    * roots. Reject rows outside the selected entrypoint/interface closure

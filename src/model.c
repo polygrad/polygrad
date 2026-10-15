@@ -5129,6 +5129,7 @@ static int prepare_model_io(
     int n_io,
     const ModelInvocation *inv
 ) {
+  if (n_io < 0 || (n_io && !io)) return -1;
 
   /* Snapshot conflicting Tensor inputs before touching any named input,
    * including host rows. Copy disjoint realized inputs straight to their

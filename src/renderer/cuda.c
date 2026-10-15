@@ -732,17 +732,17 @@ char *poly_render_cuda(
       if (!poly_render_param_name(ctx, u, name, sizeof(name))) goto cleanup;
       csmap_set(&names, u, strdup(name));
 
-      char type[64];
+      char *type;
       if (poly_uop_is_alu_param(u)) {
         char base_type[64];
         cuda_render_ctype_nonptr(u->dtype, 1, base_type, sizeof(base_type));
-        snprintf(type, sizeof(type), "const %s", base_type);
+        type = poly_strfmt("const %s", base_type);
       } else {
         char base_type[64];
         cuda_render_ctype_nonptr(u->dtype, 1, base_type, sizeof(base_type));
-        snprintf(type, sizeof(type), "%s* __restrict__", base_type);
+        type = poly_strfmt("%s* __restrict__", base_type);
       }
-      param_types[n_params] = strdup(type);
+      param_types[n_params] = type;
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)slot;
       n_params++;

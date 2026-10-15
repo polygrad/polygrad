@@ -10844,3 +10844,13 @@ TEST(codegen, e2e_neg) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+TEST(codegen, custom_formatter_rejects_missing_source_array) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop_const(ctx, poly_arg_float(1.0), POLY_FLOAT32);
+  PolyUOp *custom = poly_uop1(ctx, POLY_OP_CUSTOMI, POLY_FLOAT32, x, poly_arg_str("{}"));
+  char *rendered = poly_render_custom(custom, NULL);
+  bool rejected = rendered == NULL;
+  free(rendered);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(rejected);
+}
