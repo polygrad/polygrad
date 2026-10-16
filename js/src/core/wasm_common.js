@@ -2408,12 +2408,12 @@ function createWasmCoreFromModule(Module, device) {
       finally { Module._free(entryPtr); Module._free(namePtr) }
     },
 
-    call(instPtr, entrypoint, names, arrays, controls = [], tensorOutputs = false, capture = false) {
+    call(instPtr, entrypoint, names, arrays, controls = [], tensorOutputs = false, capture = false, hostSpecs = null) {
       const n = names.length
       const bindings = packModelBindings(names, arrays)
       const bindingPtr = bindings.ptr
       const cleanup = bindings.free
-      let entrypointPtr, count, outputPtr, controlPtr
+      let entrypointPtr, count, outputPtr, controlPtr, sizesPtr
       try {
         entrypointPtr = bindings.string(entrypoint)
         // wasm32 PolyControlBinding has an 8-byte-aligned int64 at offset 8.
@@ -2423,29 +2423,49 @@ function createWasmCoreFromModule(Module, device) {
           heap32()[(controlPtr + i * 16) >>> 2] = namePtr
           new DataView(heapU8().buffer).setBigInt64(controlPtr + i * 16 + 8, controls[i][1], true)
         }
-        count = tensorOutputs ? Module._poly_model_entrypoint_output_count(instPtr, entrypointPtr) : 0
+        count = hostSpecs ? hostSpecs.length : tensorOutputs ? Module._poly_model_entrypoint_output_count(instPtr, entrypointPtr) : 0
         if (count < 0) throw new Error('Model Tensor output signature failed')
-        outputPtr = tensorOutputs ? bindings.alloc(Math.max(1, count) * 4) : 0
+        outputPtr = tensorOutputs || hostSpecs ? bindings.alloc(Math.max(1, count) * 4) : 0
+        sizesPtr = hostSpecs ? bindings.alloc(Math.max(1, count) * 4) : 0
       } catch (error) { cleanup(); throw error }
       const finish = rc => {
+        if (hostSpecs) {
+          if (rc !== 0) throw new Error(this.lastError(instPtr) || 'Model call/read failed')
+          // C owns exact current extents until this call returns. Copy then
+          // release every snapshot even if conversion of a later output fails.
+          const pointers = readPtrArray(outputPtr, count)
+          try {
+            return hostSpecs.map((s, i) => {
+              const dtype = this.bufDtypeId(instPtr, s.index)
+              const [, itemsize] = storageInfo(dtype)
+              const size = heap32()[(sizesPtr >>> 2) + i] >>> 0
+              return copyModelStorage(pointers[i], size / itemsize, dtype)
+            })
+          } finally { for (const ptr of pointers) Module._free(ptr) }
+        }
         if (!tensorOutputs) return rc
         if (rc !== 0) throw new Error(this.lastError(instPtr) || 'Model Tensor call failed')
         return readPtrArray(outputPtr, count)
       }
-      const symbol = tensorOutputs ? 'poly_model_call_tensors_with_controls' : 'poly_model_call_with_controls'
+      const symbol = hostSpecs ? 'poly_model_call_read' : tensorOutputs ? 'poly_model_call_tensors_with_controls' : 'poly_model_call_with_controls'
       const args = [instPtr, entrypointPtr, bindingPtr, n, controlPtr, controls.length]
       if (tensorOutputs) args.push(outputPtr, count)
+      if (hostSpecs) args.push(outputPtr, sizesPtr, count)
       if (!capture && deviceName === 'webgpu' && Module.ccall) {
         return ensureModelDevice(instPtr).then(() => {
           return callDevice(symbol, args)
         }).then(finish).finally(cleanup)
       }
       try {
-        const rc = tensorOutputs
+        const rc = hostSpecs ? Module._poly_model_call_read(...args) : tensorOutputs
           ? Module._poly_model_call_tensors_with_controls(...args)
           : Module._poly_model_call_with_controls(...args)
         return finish(rc)
       } finally { cleanup() }
+    },
+
+    callAndCollect(instPtr, entrypoint, names, arrays, controls, specs) {
+      return this.call(instPtr, entrypoint, names, arrays, controls, false, false, specs)
     },
 
     callTensors(instPtr, entrypoint, names, arrays, controls = [], capture = false) {

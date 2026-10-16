@@ -1335,6 +1335,12 @@ function createBoundModelClass(runtime) {
         return this._wrapTensorOutputs(String(entrypoint),
           this._rt._core.model.callTensors(this._handle, String(entrypoint), names, arrays, controlRows, capture))
       }
+      if (readback && this._rt._core.model.callAndCollect) {
+        const specs = this._outputSpecs(String(entrypoint))
+        const values = this._rt._core.model.callAndCollect(this._handle, String(entrypoint), names, arrays, controlRows, specs)
+        if (isPromiseLike(values)) throw new PolyAsyncRequired('call()', 'callAsync()')
+        return Object.fromEntries(specs.map((s, i) => [s.name, values[i]]))
+      }
       const rc = this._rt._core.model.call(this._handle, String(entrypoint), names, arrays, controlRows)
       if (isPromiseLike(rc)) throw new PolyAsyncRequired('call()', 'callAsync()')
       if (rc !== 0) throw this._error(`polygrad: call('${entrypoint}') failed (rc=${rc})`)
@@ -1354,6 +1360,12 @@ function createBoundModelClass(runtime) {
           const handles = this._rt._core.model.callTensors(this._handle, entrypoint, names, arrays, controlRows)
           return isPromiseLike(handles) ? handles.then(v => this._wrapTensorOutputs(entrypoint, v))
             : this._wrapTensorOutputs(entrypoint, handles)
+        }
+        if (readback && this._rt._core.model.callAndCollect) {
+          const specs = this._outputSpecs(entrypoint)
+          const values = this._rt._core.model.callAndCollect(this._handle, entrypoint, names, arrays, controlRows, specs)
+          const finish = arrays => Object.fromEntries(specs.map((s, i) => [s.name, arrays[i]]))
+          return isPromiseLike(values) ? values.then(finish) : finish(values)
         }
         const rc = this._rt._core.model.call(this._handle, entrypoint, names, arrays, controlRows)
         if (isPromiseLike(rc)) {
@@ -1403,7 +1415,7 @@ function createBoundModelClass(runtime) {
       if (specs) return specs
       const api = this._rt._core.model
       const nOutputs = api.entrypointOutputCount(this._handle, entrypoint)
-      if (nOutputs < 0) throw new Error(`polygrad: unknown Model entrypoint '${entrypoint}'`)
+      if (nOutputs < 0) throw new Error(`polygrad: no '${entrypoint}' entrypoint`)
       specs = []
       for (let i = 0; i < nOutputs; i++) {
         const name = api.entrypointOutputName(this._handle, entrypoint, i)

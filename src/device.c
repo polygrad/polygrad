@@ -1878,13 +1878,22 @@ int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   return source ? buffer_read_source_into(ctx, source, dst, nbytes) : -1;
 }
 
-int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_t *sizes, int n) {
-  if (!ctx || n < 0 || (n && (!bufs || !dsts || !sizes))) return -1;
-  if (!n) return 0;
-  if ((size_t)n > SIZE_MAX / sizeof(PolyBuffer *)) return -1;
-  const PolyBuffer **sources = calloc((size_t)n, sizeof(*sources));
-  if (!sources) return -1;
+int poly_buffer_read_many_checked(
+    PolyCtx *ctx,
+    PolyUOp **bufs,
+    void **dsts,
+    const size_t *sizes,
+    int n,
+    int *execution_status
+) {
+  bool end_batch = execution_status != NULL;
+  const PolyBuffer **sources = NULL;
   int rc = -1;
+  if (execution_status) *execution_status = 0;
+  if (!ctx || n < 0 || (n && (!bufs || !dsts || !sizes))) goto done;
+  if ((size_t)n > SIZE_MAX / sizeof(PolyBuffer *)) goto done;
+  sources = calloc((size_t)(n ? n : 1), sizeof(*sources));
+  if (!sources) goto done;
   int active = 0;
   for (int i = 0; i < n; i++) {
     if (!sizes[i]) continue;
@@ -1902,7 +1911,8 @@ int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_
   for (int i = 0; i < n; i++)
     if (sizes[i] && sources[i]->device != POLY_DEVICE_WEBGPU) webgpu = false;
   if (webgpu) {
-    rc = poly_webgpu_read_buffers(sources, dsts, sizes, n);
+    rc = poly_webgpu_read_buffers(sources, dsts, sizes, n, execution_status);
+    end_batch = false;
     if (!rc)
       for (int i = 0; i < n; i++)
         if (sizes[i]) {
@@ -1913,10 +1923,26 @@ int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_
     goto done;
   }
 #endif
+#ifdef __EMSCRIPTEN__
+  if (end_batch) {
+    *execution_status = poly_webgpu_batch_end(1);
+    end_batch = false;
+    if (*execution_status) goto done;
+  }
+#endif
   rc = 0;
   for (int i = 0; i < n && !rc; i++)
     if (sizes[i]) rc = buffer_read_source_into(ctx, sources[i], dsts[i], sizes[i]);
 done:
+#ifdef __EMSCRIPTEN__
+  if (end_batch) *execution_status = poly_webgpu_batch_end(1);
+#else
+  (void)end_batch;
+#endif
   free(sources);
   return rc;
+}
+
+int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_t *sizes, int n) {
+  return poly_buffer_read_many_checked(ctx, bufs, dsts, sizes, n, NULL);
 }

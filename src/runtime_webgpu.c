@@ -56,6 +56,24 @@ EM_JS(void, poly_webgpu_batch_begin, (), {
         this.scoped = true;
       }
     },
+    end(success) {
+      if (!success) this.failed = true;
+      if (--this.depth) return this.failed ? -1 : 0;
+      this.flush(success);
+      const failed = this.failed;
+      this.failed = false;
+      if (!this.scoped) return failed ? -1 : 0;
+      this.scoped = false;
+      const checks = [st.device.popErrorScope(), st.device.popErrorScope(), st.device.popErrorScope()];
+      return Promise.all(checks).then(errors => {
+        const error = errors.find(error => error);
+        if (error) console.error('polygrad: WebGPU batch validation failed:', error.message);
+        return failed || error ? -1 : 0;
+      }, error => {
+        console.error('polygrad: WebGPU batch validation failed:', error);
+        return -1;
+      });
+    },
     computePass() {
       this.ensureScope();
       // Submit bounded chunks so GPU execution can overlap further encoding.
@@ -79,25 +97,9 @@ EM_JS(int, poly_webgpu_batch_end, (int success), {
     return Asyncify.handleAsync(() => {});
   const st = Module.__polygradWebGpuState, batch = st && st.batch;
   if (!batch || !batch.depth) return success ? 0 : -1;
-  if (!success) batch.failed = true;
-  if (--batch.depth) return batch.failed ? -1 : 0;
-  batch.flush(success);
-  const failed = batch.failed;
-  batch.failed = false;
-  // A Wasm/INTERP LINEAR in a module which also has WebGPU must stay synchronous.
-  if (!batch.scoped) return failed ? -1 : 0;
-  batch.scoped = false;
-  const checks = [st.device.popErrorScope(), st.device.popErrorScope(), st.device.popErrorScope()];
-  return Asyncify.handleAsync(async () => {
-    try {
-      const error = (await Promise.all(checks)).find(error => error);
-      if (error) console.error('polygrad: WebGPU batch validation failed:', error.message);
-      return failed || error ? -1 : 0;
-    } catch (error) {
-      console.error('polygrad: WebGPU batch validation failed:', error);
-      return -1;
-    }
-  });
+  const result = batch.end(success);
+  // Wasm/INTERP and nested batches must remain synchronous.
+  return typeof result === 'number' ? result : Asyncify.handleAsync(() => result);
 });
 
 EM_JS(int, js_webgpu_supports_float16, (), {
@@ -282,8 +284,12 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   return 0;
 })
 
-EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nbytes, int host_key, uintptr_t items, int count), {
+EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nbytes, int host_key, uintptr_t items, int count, uintptr_t execution_status), {
   const st = await Module.__polygradEnsureWebGPU();
+  // Only the combined Model call closes its outer execution batch here. Pop
+  // before readback commands: a mapping failure is not an execution failure.
+  const checks = execution_status ? Promise.resolve(st.batch && st.batch.depth ? st.batch.end(true) : 0) : null;
+  try {
   const reads = [];
   let copyBytes = 0;
   // Snapshot descriptors before waiting. Destinations and source storage remain
@@ -327,7 +333,9 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nb
     const enc = st.device.createCommandEncoder();
     for (const r of reads) enc.copyBufferToBuffer(r.src, r.srcOffset, staging, r.offset, r.size);
     st.device.queue.submit([enc.finish()]);
-    await staging.mapAsync(GPUMapMode.READ, 0, copyBytes);
+    const mappedReady = staging.mapAsync(GPUMapMode.READ, 0, copyBytes);
+    const [execution] = await Promise.all([checks, mappedReady]);
+    if (execution) return -1;
     const mapped = staging.getMappedRange(0, copyBytes);
     for (const r of reads) {
       if (r.target) {
@@ -347,6 +355,14 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer, (uintptr_t dst, uintptr_t handle, int nb
   } finally {
     if (success && reusable && !st.readbackStaging) st.readbackStaging = staging;
     else if (staging) staging.destroy();
+  }
+  } finally {
+    // Even descriptor/allocation/map failure must finish validation before C
+    // releases storage or allows another call into the Asyncify runtime.
+    if (checks) {
+      const status = await checks;
+      HEAP32[execution_status >>> 2] = status;
+    }
   }
 })
 
@@ -790,34 +806,52 @@ static int webgpu_copy_out(
   if (!dst || !src || !src->ptr) return -1;
   if (dst->device == POLY_DEVICE_HOST) {
     if (dst->ptr)
-      return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0);
+      return js_webgpu_read_buffer(
+          (uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0, 0
+      );
     return js_webgpu_read_buffer(
-        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes, 1, 0, 0
+        (uintptr_t)(dst->src ? dst->src : dst), (uintptr_t)src->ptr, (int)nbytes, 1, 0, 0, 0
     );
   }
-  return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0);
+  return js_webgpu_read_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes, 0, 0, 0, 0);
 }
 
-int poly_webgpu_read_buffers(const PolyBuffer **srcs, void **dsts, const size_t *sizes, int n) {
+int poly_webgpu_read_buffers(
+    const PolyBuffer **srcs,
+    void **dsts,
+    const size_t *sizes,
+    int n,
+    int *execution_status
+) {
+  if (execution_status) *execution_status = -1;
   if (n < 0 || (n && (!srcs || !dsts || !sizes)) || (size_t)n > SIZE_MAX / (3 * sizeof(uint32_t)))
     return -1;
-  if (!n) return 0;
+  if (!n) {
+    if (execution_status) *execution_status = poly_webgpu_batch_end(1);
+    return execution_status ? *execution_status : 0;
+  }
   uint32_t *items = calloc((size_t)n * 3, sizeof(*items));
-  if (!items) return -1;
+  if (!items) {
+    if (execution_status) *execution_status = poly_webgpu_batch_end(1);
+    return -1;
+  }
   int rc = -1;
   for (int i = 0; i < n; i++) {
     if (!sizes[i]) continue;
-    if (!srcs[i] || !srcs[i]->ptr || !dsts[i]) goto done;
+    if (!srcs[i] || !srcs[i]->ptr || !dsts[i]) {
+      if (execution_status) *execution_status = poly_webgpu_batch_end(1);
+      goto done;
+    }
     items[3 * i] = (uintptr_t)dsts[i];
     items[3 * i + 1] = (uintptr_t)srcs[i]->ptr;
     items[3 * i + 2] = sizes[i];
   }
-  rc = js_webgpu_read_buffer(0, 0, 0, 0, (uintptr_t)items, n);
+  rc = js_webgpu_read_buffer(0, 0, 0, 0, (uintptr_t)items, n, (uintptr_t)execution_status);
   if (rc == 1) {
-    rc = 0;
+    rc = execution_status ? *execution_status : 0;
     for (int i = 0; i < n && !rc; i++)
       if (sizes[i])
-        rc = js_webgpu_read_buffer(items[3 * i], items[3 * i + 1], items[3 * i + 2], 0, 0, 0);
+        rc = js_webgpu_read_buffer(items[3 * i], items[3 * i + 1], items[3 * i + 2], 0, 0, 0, 0);
   }
 done:
   free(items);

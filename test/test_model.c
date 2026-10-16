@@ -2193,6 +2193,47 @@ TEST(model, forward_add) {
   PASS();
 }
 
+TEST(model, call_read_owns_host_snapshots_and_clears_failed_outputs) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {4};
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *y = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, x, y);
+  PolyBindingSpec bindings[] = {
+      {.name = "a", .role = POLY_ROLE_INPUT, .tensor = x},
+      {.name = "b", .role = POLY_ROLE_INPUT, .tensor = y},
+      {.name = "output", .role = POLY_ROLE_OUTPUT, .tensor = sum},
+  };
+  const char *inputs[] = {"a", "b"}, *outputs[] = {"output"};
+  PolyEntrypointSpec ep = {
+      .name = "forward", .inputs = inputs, .n_inputs = 2, .outputs = outputs, .n_outputs = 1};
+  PolyModel *m = poly_model_from_bindings(ctx, bindings, 3, &ep, 1, NULL, NULL);
+  ASSERT_NOT_NULL(m);
+  poly_tensor_release(sum);
+  poly_tensor_release(y);
+  poly_tensor_release(x);
+  float a[] = {1, 2, 3, 4}, b[] = {10, 20, 30, 40};
+  PolyIOBinding io[] = {
+      POLY_IO_BINDING_ARRAY("a", a, POLY_FLOAT32), POLY_IO_BINDING_ARRAY("b", b, POLY_FLOAT32)};
+  void *first[1], *next[1];
+  size_t sizes[1];
+  ASSERT_INT_EQ(poly_model_call_read(m, "forward", io, 2, NULL, 0, first, sizes, 1), 0);
+  ASSERT_INT_EQ(sizes[0], sizeof(a));
+  ASSERT_FLOAT_EQ(((float *)first[0])[0], 11, 0);
+  a[0] = 5;
+  ASSERT_INT_EQ(poly_model_call_read(m, "forward", io, 2, NULL, 0, next, sizes, 1), 0);
+  ASSERT_FLOAT_EQ(((float *)first[0])[0], 11, 0);
+  ASSERT_FLOAT_EQ(((float *)next[0])[0], 15, 0);
+  free(next[0]);
+  ASSERT_INT_EQ(poly_model_call_read(m, "missing", io, 2, NULL, 0, next, sizes, 1), -1);
+  ASSERT_TRUE(next[0] == NULL && sizes[0] == 0);
+  poly_model_free(m);
+  ASSERT_FLOAT_EQ(((float *)first[0])[3], 44, 0);
+  free(first[0]);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, read_write_buf_named_forward_e2e) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);

@@ -24,6 +24,10 @@ module.exports = Module => {
       if (args.length !== 3) throw new TypeError('poly_jit_run: wrong argument count')
       return Module.ccall('poly_jit_run', "number", ["number", "number", "number"], args, options)
     },
+    poly_model_call_read: (args, options) => {
+      if (args.length !== 9) throw new TypeError('poly_model_call_read: wrong argument count')
+      return Module.ccall('poly_model_call_read', "number", ["number", "number", "number", "number", "number", "number", "number", "number", "number"], args, options)
+    },
     poly_model_call_tensors_with_controls: (args, options) => {
       if (args.length !== 8) throw new TypeError('poly_model_call_tensors_with_controls: wrong argument count')
       return Module.ccall('poly_model_call_tensors_with_controls', "number", ["number", "number", "number", "number", "number", "number", "number", "number"], args, options)

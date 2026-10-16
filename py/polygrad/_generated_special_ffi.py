@@ -312,6 +312,10 @@ def bind(lib, types, only=None):
         fn = lib.poly_model_call
         fn.restype = ctypes.c_int
         fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(types['PolyIOBinding']), ctypes.c_int]
+    if only is None or only == 'poly_model_call_read':
+        fn = lib.poly_model_call_read
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(types['PolyIOBinding']), ctypes.c_int, ctypes.POINTER(types['PolyControlBinding']), ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t), ctypes.c_int]
     if only is None or only == 'poly_model_call_tensors':
         fn = lib.poly_model_call_tensors
         fn.restype = ctypes.c_int

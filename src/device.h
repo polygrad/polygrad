@@ -243,6 +243,16 @@ int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
  * validate every source before copying. Backend failures may partially write
  * destinations; callers must not publish them on failure. */
 int poly_buffer_read_many(PolyCtx *ctx, PolyUOp **bufs, void **dsts, const size_t *sizes, int n);
+/* Internal transport join: closes an open outer WebGPU batch even on read
+ * failure. Execution status is separate so state commits survive map failures. */
+int poly_buffer_read_many_checked(
+    PolyCtx *ctx,
+    PolyUOp **bufs,
+    void **dsts,
+    const size_t *sizes,
+    int n,
+    int *execution_status
+);
 
 /* Replace logical contents from host bytes, preserving cached device residency. */
 int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes);

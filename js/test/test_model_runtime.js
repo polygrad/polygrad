@@ -1405,6 +1405,27 @@ async function checkWebGPUReadbackStaging(createRuntime) {
     st = rt._core.Module.__polygradWebGpuState
     cached = st.readbackStaging
     assert(cached && cached.mapState==='unmapped','readback did not retain idle staging')
+    // A checked host-output call must queue its map before waiting for the
+    // execution scopes. Hold their completion without relying on GPU timing.
+    const popScope = st.device.popErrorScope, mapEarly = cached.mapAsync
+    let releaseChecks, checksReleased = false, mappedBeforeChecks = false
+    const checksGate = new Promise(resolve => { releaseChecks = resolve })
+    const timer = setTimeout(() => { checksReleased = true; releaseChecks() }, 100)
+    st.device.popErrorScope = function() { return popScope.call(this).then(async error => {
+      await checksGate; return error
+    }) }
+    cached.mapAsync = function(...args) {
+      mappedBeforeChecks = !checksReleased
+      releaseChecks()
+      return mapEarly.apply(this, args)
+    }
+    try {
+      assertClose((await model.forwardAsync({x:new Float32Array([1,2,3])})).y,[2,4,6],0)
+      assert(mappedBeforeChecks,'Model waited for validation before queuing output mapping')
+    } finally {
+      clearTimeout(timer); releaseChecks()
+      st.device.popErrorScope = popScope; cached.mapAsync = mapEarly
+    }
     create = st.device.createBuffer
     let allocations = 0, destroyed = 0, maps = 0
     const map = cached.mapAsync.bind(cached)
@@ -1425,6 +1446,28 @@ async function checkWebGPUReadbackStaging(createRuntime) {
     try {await model.forwardAsync({x:new Float32Array([7,8,9])})} catch (_) {rejected=true}
     assert(rejected && !st.readbackStaging,'failed mapping kept staging or returned stale data')
     assertClose(await model.readBufferAsync('y'),[14,16,18],0)
+    const randomInput = rt.Tensor.empty(4)
+    let randomModel
+    try {
+      randomModel = await rt.Model.fromCallableAsync(({x}) => ({y:x.add(rt.Tensor.rand(4))}),
+        {inputs:{x:randomInput}})
+      const values = {x:new Float32Array(4)}
+      await randomModel.forwardAsync(values)
+      const counter = Array.from({length:randomModel.bufCount},(_,i)=>randomModel.bufName(i))
+        .find(name => name.startsWith('__rng.') && name.endsWith('.counter'))
+      const before = Number((await randomModel.readBufferAsync(counter))[0])
+      st.readbackStaging.mapAsync = async () => {throw new Error('injected stateful readback failure')}
+      let failed = false
+      try { await randomModel.forwardAsync(values) } catch (error) {
+        failed = /output read failed after successful execution/.test(error.message)
+      }
+      assert(failed, 'stateful readback failure returned results')
+      assert(Number((await randomModel.readBufferAsync(counter))[0])===before+4,
+        'read failure rolled back or replayed successful state update')
+      await randomModel.readBufferAsync('y')
+      assert(Number((await randomModel.readBufferAsync(counter))[0])===before+4,
+        'read-only retry advanced RNG')
+    } finally { if (randomModel) await randomModel.dispose(); await randomInput.dispose() }
     cached = st.readbackStaging
     destroy = cached.destroy.bind(cached)
     cached.destroy = () => {destroyed++;destroy()}
@@ -1451,7 +1494,8 @@ async function checkModelOutputMetadata(pg) {
   const api = pg._core.model, originals = {}, counts = {}
   let restored
   try {
-    for (const name of ['entrypointOutputCount','entrypointOutputName','bufCount','bufName','bufData','bufDataMany']) {
+    for (const name of ['entrypointOutputCount','entrypointOutputName','bufCount','bufName','bufData','bufDataMany',
+      ...(api.callAndCollect ? ['callAndCollect'] : [])]) {
       originals[name] = api[name]
       api[name] = function(...args) {
         counts[name] = (counts[name] || 0) + 1
@@ -1467,7 +1511,8 @@ async function checkModelOutputMetadata(pg) {
       assertClose(result.value, Array.from(current,v=>v*2),0)
       assertClose(result.mask, Array.from(current,v=>Number(v>2)),0)
     }
-    assert(JSON.stringify(counts)==='{"bufDataMany":2}', `unexpected collection calls: ${JSON.stringify(counts)}`)
+    const collector = api.callAndCollect ? 'callAndCollect' : 'bufDataMany'
+    assert(JSON.stringify(counts)===JSON.stringify({[collector]:2}), `unexpected collection calls: ${JSON.stringify(counts)}`)
     assertClose(first.value, Array.from(data,v=>v*2),0)
     assert(Object.keys(await model.callAsync('mask_only',{x:data})).join(',')==='mask')
     await model.writeBufferAsync('weight',new Float32Array([3]))
@@ -1484,7 +1529,7 @@ async function checkModelOutputMetadata(pg) {
     assertClose((await restored.callAsync('both',{x:data})).value,Array.from(data,v=>v*3),0)
     for (const key of Object.keys(counts)) delete counts[key]
     await restored.callAsync('both',{x:data})
-    assert(JSON.stringify(counts)==='{"bufDataMany":1}','loaded Model rediscovered output schema')
+    assert(JSON.stringify(counts)===JSON.stringify({[collector]:1}),'loaded Model rediscovered output schema')
   } finally {
     Object.assign(api,originals)
     if (restored) await restored.dispose()
@@ -1810,7 +1855,7 @@ async function checkModelTensorIO(pg) {
   }
 }
 
-async function checkModelBatchFailure(pg, chunked = false) {
+async function checkModelBatchFailure(pg, chunked = false, hostOutputs = false) {
   if (String(pg.device).toLowerCase() !== 'webgpu') return
   const input = new pg.Tensor(new Float32Array([1,2,3,4]))
   const placeholder = pg.Tensor.empty([4])
@@ -1843,7 +1888,7 @@ async function checkModelBatchFailure(pg, chunked = false) {
       }
       return encoder
     }
-    try { result = await model.forwardAsync({x:input}) } catch (_) { failed = true }
+    try { result = await model.forwardAsync({x:hostOutputs ? new Float32Array([1,2,3,4]) : input}) } catch (_) { failed = true }
     finally { device.createCommandEncoder = create; device.queue.submit = submit }
     assert(failed && !result && dispatches > 1, 'Model published outputs from an invalid batch')
     if (chunked) assert(submissionsBeforeFailure > 0, 'No earlier chunk was submitted before failure')
@@ -3165,6 +3210,10 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
+  await test('Model WebGPU host collection validation failure', async () => {
+    await checkModelBatchFailure(pg, false, true)
+    await checkModelBatchFailure(pg, true, true)
+  })
   await test('Model variable shapes preserve results and portable signatures', () => checkModelVariableShapes(pg))
   await test('Model output metadata caching preserves live shapes and snapshots', () => checkModelOutputMetadata(pg))
   if (String(pg.device).toLowerCase()==='webgpu')
@@ -3952,6 +4001,10 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model Tensor I/O owns device results', () => checkModelTensorIO(pg))
   await test('Model WebGPU batch failure preserves independent values', () => checkModelBatchFailure(pg))
   await test('Model WebGPU later chunk failure preserves independent values', () => checkModelBatchFailure(pg, true))
+  await test('Model WebGPU host collection validation failure', async () => {
+    await checkModelBatchFailure(pg, false, true)
+    await checkModelBatchFailure(pg, true, true)
+  })
   await test('Qwen rotary state and shared import', () => checkQwenRotaryState(pg))
   await test('Vision models reference and portable state', () => checkVisionModels(pg))
   await test('PyTorch checkpoint shared loader and portable state', () => checkTorchCheckpoint(pg))

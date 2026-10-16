@@ -490,6 +490,22 @@ int poly_model_call_with_controls(
     const PolyControlBinding *controls,
     int n_controls
 );
+/* Execute and collect host snapshots in entrypoint output order. On success,
+ * outputs[i] is malloc-owned (free each); sizes[i] is its current byte extent.
+ * n_outputs must match the signature. On failure all slots are NULL/zero.
+ * A transport failure does not roll back successful state updates: callers
+ * may read named outputs again, but must not replay the invocation to retry. */
+int poly_model_call_read(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls,
+    void **outputs,
+    size_t *sizes,
+    int n_outputs
+);
 int poly_model_call_tensors_with_controls(
     PolyModel *inst,
     const char *entrypoint,

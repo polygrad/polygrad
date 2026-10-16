@@ -5241,6 +5241,14 @@ cleanup:
   return ret;
 }
 
+static void model_fail_invocation(PolyModel *inst, PolyUOp *linear, PolyIOBinding *io, int n_io) {
+  for (int i = 0; i < n_io; i++) {
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi >= 0) poly_buffer_fail(poly_buffer_get(inst->ctx, inst->bufs[bi].buffer));
+  }
+  if (linear) poly_fail_linear_outputs(inst->ctx, linear, linear->n_src, NULL, 0);
+}
+
 static int model_end_webgpu_batch(
     PolyModel *inst,
     PolyUOp *linear,
@@ -5254,11 +5262,7 @@ static int model_end_webgpu_batch(
     /* Delayed validation covers input copies as well as the entrypoint.
      * Do not publish result Tensors or leave potentially unwritten storage
      * readable. Earlier synchronous failures already mark their own prefix. */
-    for (int i = 0; i < n_io; i++) {
-      int bi = find_buf_by_name(inst, io[i].name);
-      if (bi >= 0) poly_buffer_fail(poly_buffer_get(inst->ctx, inst->bufs[bi].buffer));
-    }
-    if (linear) poly_fail_linear_outputs(inst->ctx, linear, linear->n_src, NULL, 0);
+    model_fail_invocation(inst, linear, io, n_io);
     return -1;
   }
 #else
@@ -5380,13 +5384,16 @@ int poly_model_call(PolyModel *inst, const char *entrypoint, PolyIOBinding *io, 
   return poly_model_call_with_controls(inst, entrypoint, io, n_io, NULL, 0);
 }
 
-int poly_model_call_with_controls(
+static int model_call_collect(
     PolyModel *inst,
     const char *entrypoint,
     PolyIOBinding *io,
     int n_io,
     const PolyControlBinding *controls,
-    int n_controls
+    int n_controls,
+    void **outputs,
+    size_t *sizes,
+    int n_outputs
 ) {
   if (!inst || inst->stage != POLY_MODEL_BUILT || !entrypoint || inst->ctx->execution_depth ||
       inst->ctx->collecting || inst->ctx->active_jit_capture)
@@ -5405,17 +5412,131 @@ int poly_model_call_with_controls(
       inst->entry_executables ? &inst->entry_executables[ep_idx] : NULL;
   ModelInvocation inv = {0};
   const RuntimeEntrypoint *entry = &inst->entrypoints[ep_idx];
+  if (outputs && entry->n_outputs != n_outputs) return -1;
+  int *indices = NULL;
+  PolyUOp **buffers = NULL;
+  bool prefix = true;
+  bool executed = false;
   int rc = bind_model_io(inst, entry, io, n_io, controls, n_controls, &inv);
+  if (rc == 0 && outputs) {
+    indices = calloc((size_t)(n_outputs ? n_outputs : 1), sizeof(*indices));
+    buffers = calloc((size_t)(n_outputs ? n_outputs : 1), sizeof(*buffers));
+    if (!indices || !buffers) rc = -1;
+    for (int i = 0; !rc && i < n_outputs; i++) {
+      int bi = find_buf_by_name(inst, entry->outputs[i]);
+      if (bi < 0) {
+        rc = -1;
+        break;
+      }
+      NamedBuf *b = &inst->bufs[bi];
+      size_t bytes = poly_dtype_itemsize(b->buffer->dtype);
+      if (!bytes) {
+        rc = -1;
+        break;
+      }
+      for (int d = 0; d < b->ndim; d++) {
+        int64_t dim = inv.shapes[bi][d];
+        if (dim < 0 || (dim && bytes > SIZE_MAX / (uint64_t)dim)) {
+          rc = -1;
+          break;
+        }
+        bytes *= (size_t)dim;
+      }
+      if (rc) break;
+      sizes[i] = bytes;
+      outputs[i] = malloc(bytes ? bytes : 1);
+      if (!outputs[i]) {
+        rc = -1;
+        break;
+      }
+      indices[i] = bi;
+      buffers[i] = b->buffer;
+      if (b->dynamic && !model_view_is_prefix(b, inv.shapes[bi])) prefix = false;
+    }
+  }
   if (rc == 0) {
     if (entry->writes_state) model_mutated(inst, entry->writes_transient);
+#ifdef __EMSCRIPTEN__
+    if (outputs && prefix) poly_webgpu_batch_begin();
+#endif
     rc = run_model_sink_bound(inst, entry, sink, io, n_io, cached_executable, &inv);
+    if (outputs && prefix) {
+      int execution = rc;
+      if (!rc) {
+        rc = poly_buffer_read_many_checked(
+            inst->ctx, buffers, outputs, sizes, n_outputs, &execution
+        );
+        if (execution) {
+          model_fail_invocation(
+              inst, cached_executable ? cached_executable->linear : NULL, io, n_io
+          );
+          rc = -1;
+        }
+      } else {
+        model_end_webgpu_batch(
+            inst, cached_executable ? cached_executable->linear : NULL, io, n_io, rc
+        );
+      }
+      if (!execution) {
+        model_publish_invocation(inst, &inv);
+        executed = true;
+      }
+    } else if (!rc) {
+      model_publish_invocation(inst, &inv);
+      executed = true;
+      // Non-prefix dynamic views need the existing packing schedule. Finish
+      // execution first so packing/transport failures cannot undo its commit.
+      if (outputs) rc = poly_model_read_bufs(inst, indices, outputs, sizes, n_outputs);
+    }
   }
-  if (rc == 0) model_publish_invocation(inst, &inv);
+  free(buffers);
+  free(indices);
   model_invocation_free(&inv);
   if (rc && !inst->last_error.code)
     poly_model_set_error(
-        inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' execution failed", entrypoint
+        inst, POLY_STATUS_INVALID, __func__,
+        executed ? "entrypoint '%s' output read failed after successful execution"
+                 : "entrypoint '%s' execution failed", entrypoint
     );
+  return rc;
+}
+
+int poly_model_call_with_controls(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls
+) {
+  return model_call_collect(inst, entrypoint, io, n_io, controls, n_controls, NULL, NULL, 0);
+}
+
+int poly_model_call_read(
+    PolyModel *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    const PolyControlBinding *controls,
+    int n_controls,
+    void **outputs,
+    size_t *sizes,
+    int n_outputs
+) {
+  if (n_outputs < 0 || !outputs || !sizes) return -1;
+  for (int i = 0; i < n_outputs; i++) {
+    outputs[i] = NULL;
+    sizes[i] = 0;
+  }
+  int rc = model_call_collect(
+      inst, entrypoint, io, n_io, controls, n_controls, outputs, sizes, n_outputs
+  );
+  if (rc)
+    for (int i = 0; i < n_outputs; i++) {
+      free(outputs[i]);
+      outputs[i] = NULL;
+      sizes[i] = 0;
+    }
   return rc;
 }
 
