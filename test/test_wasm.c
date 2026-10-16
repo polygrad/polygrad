@@ -2502,41 +2502,65 @@ TEST(wasm, row_reduce_noncompare_where_uses_generic_renderer) {
 }
 
 TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
-  PolyCtx *ctx = poly_ctx_new();
-  ASSERT_NOT_NULL(ctx);
+  const int64_t shapes[][3] = {{1, 256, 1024}, {32, 128, 256}, {1, 128, 256}, {16, 768, 3072}};
+  for (int t = 0; t < 4; t++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
 
-  const int64_t tokens = 32, d = 128, hidden = 256;
-  PolyUOp *x =
-      poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, tokens * d), (int64_t[]){tokens, d}, 2);
-  PolyUOp *w0 =
-      poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, hidden * d), (int64_t[]){hidden, d}, 2);
-  PolyUOp *w = poly_uop_permute(ctx, w0, (int64_t[]){1, 0}, 2);
-  PolyUOp *bias =
-      poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, hidden), (int64_t[]){1, hidden}, 2);
-  PolyUOp *bias_e = poly_uop_expand(ctx, bias, (int64_t[]){tokens, hidden}, 2);
-  PolyUOp *h = poly_uop_relu(ctx, poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_dot(ctx, x, w), bias_e));
-  PolyUOp *out = poly_uop_reshape(
-      ctx, poly_uop_buffer_f32(ctx, tokens * hidden), (int64_t[]){tokens, hidden}, 2
-  );
-  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, h));
-  PolyUOp *linear_schedule = poly_test_create_linear(ctx, sink);
-  ASSERT_NOT_NULL(linear_schedule);
-  ASSERT_TRUE(linear_schedule->n_src > 0);
+    const int64_t tokens = shapes[t][0], d = shapes[t][1], hidden = shapes[t][2];
+    PolyUOp *x =
+        poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, tokens * d), (int64_t[]){tokens, d}, 2);
+    PolyUOp *w0 =
+        poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, hidden * d), (int64_t[]){hidden, d}, 2);
+    PolyUOp *w = poly_uop_permute(ctx, w0, (int64_t[]){1, 0}, 2);
+    PolyUOp *bias =
+        poly_uop_reshape(ctx, poly_uop_buffer_f32(ctx, hidden), (int64_t[]){1, hidden}, 2);
+    PolyUOp *bias_e = poly_uop_expand(ctx, bias, (int64_t[]){tokens, hidden}, 2);
+    PolyUOp *h =
+        poly_uop_relu(ctx, poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_dot(ctx, x, w), bias_e));
+    PolyUOp *out = poly_uop_reshape(
+        ctx, poly_uop_buffer_f32(ctx, tokens * hidden), (int64_t[]){tokens, hidden}, 2
+    );
+    PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, h));
+    PolyUOp *linear_schedule = poly_test_create_linear(ctx, sink);
+    ASSERT_NOT_NULL(linear_schedule);
+    ASSERT_TRUE(linear_schedule->n_src > 0);
 
-  int n_lin = 0;
-  PolyUOp **lin = poly_linearize_wasm(ctx, poly_test_linear_call_body(linear_schedule, 0), &n_lin);
-  ASSERT_NOT_NULL(lin);
+    int n_lin = 0;
+    PolyUOp **lin =
+        poly_linearize_wasm(ctx, poly_test_linear_call_body(linear_schedule, 0), &n_lin);
+    ASSERT_NOT_NULL(lin);
 
-  int wasm_size = 0;
-  uint8_t *wasm = poly_render_wasm(ctx, lin, n_lin, &wasm_size, true);
-  ASSERT_NOT_NULL(wasm);
-  const char *path = "temp/polygrad_test_matmul_bias_relu.wasm";
-  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_bias_relu(path, (int)tokens, (int)d, (int)hidden), 0);
+    int wasm_size = 0;
+    uint8_t *wasm = poly_render_wasm(ctx, lin, n_lin, &wasm_size, true);
+    ASSERT_NOT_NULL(wasm);
+    /* Four independent outputs share SIMD arithmetic, not reduction lanes. */
+    int vector_adds = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD);
+    int shuffles = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE);
+    const char *path = "temp/polygrad_test_matmul_bias_relu.wasm";
+    ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+    const char *node = poly_test_node_cmd();
+    ASSERT_NOT_NULL(node);
+    char command[512];
+    snprintf(
+        command, sizeof(command), "%s js/test/check_wasm_contraction_order.js %s %d %d %d", node,
+        path, (int)tokens, (int)d, (int)hidden
+    );
+    int status = system(command);
+    if (tokens == 32 && !status)
+      status = node_run_wasm_matmul_bias_relu(path, (int)tokens, (int)d, (int)hidden);
 
-  free(wasm);
-  free(lin);
-  poly_ctx_destroy(ctx);
+    free(wasm);
+    free(lin);
+    poly_ctx_destroy(ctx);
+    ASSERT_INT_EQ(status, 0);
+    /* The small M=1 control has only one output accumulator in the pin's
+     * schedule; do not invent a new tile to make it match this optimization. */
+    if (t < 2) ASSERT_TRUE(vector_adds >= (t ? 16 : 4));
+    /* Four output rows must reuse the same four transposed weight vectors.
+     * Repeating these gathers is measurably slower in browser engines. */
+    if (t == 1 || t == 3) ASSERT_TRUE(shuffles <= 12);
+  }
   PASS();
 }
 
@@ -3514,6 +3538,53 @@ TEST(wasm, memory_vector_where_broadcasts_full_boolean_masks) {
           failures++;
         }
       }
+  ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+TEST(wasm, structural_gathers_preserve_component_order) {
+  const int sources[4][4] = {{0, 0, 0, 0}, {0, 1, 0, 1}, {0, 1, 2, 0}, {0, 1, 2, 3}};
+  const char *expected[] = {"[3,1,4,2]", "[3,5,4,6]", "[3,5,12,2]", "[3,5,12,14]"};
+  int failures = 0;
+  for (int c = 0; c < 4; c++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+    PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 16, 1);
+    PolyUOp *ops[64], *indices[17], *vectors[4], *lanes[4];
+    int n = 0;
+    ops[n++] = out->src[0];
+    ops[n++] = in->src[0];
+    ops[n++] = out;
+    ops[n++] = in;
+    for (int i = 0; i < 17; i++)
+      ops[n++] = indices[i] = poly_uop_const_int(ctx, i);
+    for (int i = 0; i < 4; i++) {
+      PolyUOp *slice = poly_uop3(
+          ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, indices[i * 4], indices[4], poly_arg_none()
+      );
+      ops[n++] = slice;
+      ops[n++] = vectors[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+    }
+    const int permutation[] = {2, 0, 3, 1};
+    for (int i = 0; i < 4; i++)
+      ops[n++] = lanes[i] = poly_uop2(
+          ctx, POLY_OP_INDEX, POLY_FLOAT32, vectors[sources[c][i]], indices[permutation[i]],
+          poly_arg_none()
+      );
+    PolyUOp *packed = poly_uop_stack(ctx, lanes, 4);
+    ops[n++] = packed;
+    ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+    int size = 0;
+    uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+    if (!wasm || wasm_count_simd_opcode(wasm, size, WASM_SIMD_I8X16_SHUFFLE) != 3) failures++;
+    free(wasm);
+    failures +=
+        wasm_check_memory_module(
+            ctx, ops, n, true, "Float32Array", expected[c],
+            "new Float32Array(mem.buffer,256,16).set(Array.from({length:16},(_,i)=>i+1))", "64,256"
+        ) != 0;
+    poly_ctx_destroy(ctx);
+  }
   ASSERT_INT_EQ(failures, 0);
   PASS();
 }
