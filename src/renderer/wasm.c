@@ -2172,6 +2172,25 @@ static bool wasm_emit_structural_vec_expr(
   for (int lane = 1; lane < n_lanes; lane++)
     if (lanes[lane] != first) same = false;
   if (same) {
+    int lane, source;
+    if (n_lanes == 4 && first->op == POLY_OP_INDEX && first->n_src == 2 &&
+        poly_dtype_eq(first->dtype, POLY_FLOAT32) &&
+        poly_dtype_eq(first->src[0]->dtype, POLY_FLOAT32) &&
+        poly_uop_max_numel(ctx, first->src[0]) == 4 &&
+        wasm_uop_value_is_v128(ctx, first->src[0]) &&
+        wasm_const_index_checked(first->src[1], &lane) && lane >= 0 && lane < 4 &&
+        (source = lm_get(locals, first->src[0])) >= 0) {
+      /* Broadcast the existing SSA vector lane, without a scalar round trip
+       * or a memory reload that could cross an intervening mutation. */
+      for (int i = 0; i < 2; i++) {
+        wb_byte(body, WASM_OP_LOCAL_GET);
+        wb_uleb128(body, source);
+      }
+      uint8_t mask[16];
+      for (int i = 0; i < 16; i++) mask[i] = lane * 4 + i % 4;
+      emit_v128_shuffle(body, mask);
+      return true;
+    }
     int local = lm_get(locals, first);
     if (local < 0) return false;
     if (poly_dtype_is_bool(first->dtype)) {

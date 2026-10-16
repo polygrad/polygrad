@@ -2537,6 +2537,7 @@ TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
     /* Four independent outputs share SIMD arithmetic, not reduction lanes. */
     int vector_adds = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD);
     int shuffles = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE);
+    int splats = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_SPLAT);
     const char *path = "temp/polygrad_test_matmul_bias_relu.wasm";
     ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
     const char *node = poly_test_node_cmd();
@@ -2559,7 +2560,11 @@ TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
     if (t < 2) ASSERT_TRUE(vector_adds >= (t ? 16 : 4));
     /* Four output rows must reuse the same four transposed weight vectors.
      * Repeating these gathers is measurably slower in browser engines. */
-    if (t == 1 || t == 3) ASSERT_TRUE(shuffles <= 12);
+    /* Four lane broadcasts per input row now use a single shuffle each. */
+    if (t == 1 || t == 3) ASSERT_TRUE(shuffles <= 28);
+    /* Per output row: accumulator initialization and two ReLU zero splats;
+     * no extract-then-splat remains in the reduction loop. */
+    if (t < 2) ASSERT_TRUE(splats <= (t ? 12 : 3));
   }
   PASS();
 }
@@ -3586,6 +3591,36 @@ TEST(wasm, structural_gathers_preserve_component_order) {
     poly_ctx_destroy(ctx);
   }
   ASSERT_INT_EQ(failures, 0);
+  PASS();
+}
+
+TEST(wasm, vector_lane_broadcast_preserves_load_before_store) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *two = poly_uop_const_int(ctx, 2);
+  PolyUOp *four = poly_uop_const_int(ctx, 4);
+  PolyUOp *slice = poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, zero, four, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+  PolyUOp *address = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, two, poly_arg_none());
+  PolyUOp *value = poly_uop_const_float(ctx, 99.0f);
+  PolyUOp *write = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, value, poly_arg_none());
+  PolyUOp *lane = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, load, two, poly_arg_none());
+  PolyUOp *packed = poly_uop_stack(ctx, (PolyUOp *[]){lane, lane, lane, lane}, 4);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+  PolyUOp *ops[] = {out->src[0], in->src[0], out, in, zero, two, four, slice,
+                   load, address, value, write, lane, packed, store};
+  int n = (int)(sizeof(ops) / sizeof(ops[0])), size = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  int splats = wasm ? wasm_count_simd_opcode(wasm, size, WASM_SIMD_V128_LOAD32_SPLAT) : -1;
+  free(wasm);
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[3,3,3,3]",
+      "new Float32Array(mem.buffer,256,4).set([1,2,3,4])", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  ASSERT_INT_EQ(splats, 0); /* Broadcasts reuse SSA values, never reload memory. */
   PASS();
 }
 
