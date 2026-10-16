@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertClose, checkWorkload, genericReference, matmulReference, modelReference } from './wasm_checks.mjs';
+import { assessABBA, assertClose, checkWorkload, genericReference, matmulReference, modelReference } from './wasm_checks.mjs';
+
+test('ABBA gate distinguishes regressions, passes and noisy comparisons', () => {
+  const page = ms => ({ pgResults: [{ name: 'mlp', seconds: ms / 1000 }] });
+  const assess = times => assessABBA(times.map(page), 0.1)[0];
+  assert.equal(assess([2, 7, 7.1, 2.1]).status, 'regression');
+  assert.equal(assess([2, 2.05, 2.1, 2.1]).status, 'pass');
+  assert.equal(assess([2, 2.05, 3, 2.1]).status, 'inconclusive');
+  assert.equal(assess([2, 1, 1.1, 2.1]).status, 'pass');
+  assert.throws(() => assessABBA([page(1)], 0.1), /four/);
+  assert.throws(() => assessABBA([page(1), page(NaN), page(1), page(1)], 0.1), /timing/);
+  assert.throws(() => assessABBA([page(1), { pgResults: [] }, page(1), page(1)], 0.1), /cases/);
+  assert.throws(() => assessABBA(Array(4).fill(page(1)), -0.1), /threshold/);
+});
+
+test('historical Polygrad bundles are checked through their public async toArray', async () => {
+  let reads = 0;
+  await checkWorkload({ name: 'historical', call: () => ({
+    async toArray() { reads++; return [2]; },
+  }), ready: async () => {} }, [2]);
+  assert.equal(reads, 3);
+});
 
 test('comparison rejects wrong lengths, nonfinite and wrong values', () => {
   assert.throws(() => assertClose([], [1], 'length'), /length/);

@@ -830,6 +830,14 @@ bench-jax-js-browser-model-wasm: wasm-pkg
 	cd js && bash scripts/build-browser.sh
 	$(NODE) bench/bench_jax_js_browser_model_wasm.mjs --cases $(BENCH_JAX_JS_MODEL_CASES) --iters $(BENCH_JAX_JS_ITERS) --warmup $(BENCH_JAX_JS_WARMUP) $(BENCH_JAX_JS_EXTRA)
 
+# Frozen bundle from a separately built checkout; never replace it automatically.
+BENCH_WASM_BASELINE ?=
+BENCH_WASM_MAX_SLOWDOWN ?= 0.10
+.PHONY: bench-wasm-regression
+bench-wasm-regression:
+	@test -n "$(BENCH_WASM_BASELINE)" || { echo 'Set BENCH_WASM_BASELINE to a separately built browser bundle'; exit 2; }
+	$(MAKE) bench-jax-js-browser-model-wasm BENCH_JAX_JS_EXTRA='--paired --rounds 4 --baseline $(BENCH_WASM_BASELINE) --max-slowdown $(BENCH_WASM_MAX_SLOWDOWN) $(BENCH_JAX_JS_EXTRA)'
+
 bench-compare:
 	$(PYTHON) bench/bench_compare.py $(BENCH_RATIO_BASELINE) $$(ls -t bench/results/2*.json | head -1)
 

@@ -1,8 +1,11 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { chromium } from "../js/node_modules/playwright/index.mjs";
+import { assessABBA } from "./wasm_checks.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +31,8 @@ function parseArgs(argv) {
     async: false,
     kernels: false,
     stageBreakdown: false,
+    output: null,
+    maxSlowdown: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -40,11 +45,13 @@ function parseArgs(argv) {
     else if (a === "--warmup") args.warmup = Number(next());
     else if (a === "--bundle") args.bundle = next();
     else if (a === "--baseline") args.baseline = next();
+    else if (a === "--output") args.output = next();
+    else if (a === "--max-slowdown") args.maxSlowdown = Number(next());
     else if (a === "--async") args.async = true;
     else if (a === "--kernels") args.kernels = true;
     else if (a === "--stage-breakdown") args.stageBreakdown = true;
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N] [--paired] [--rounds N] [--bundle repo/path.js] [--baseline repo/old.js] [--async] [--kernels] [--stage-breakdown]");
+      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N] [--paired] [--rounds N] [--bundle repo/path.js] [--baseline repo/old.js] [--async] [--kernels] [--stage-breakdown] [--output report.json] [--max-slowdown 0.10]");
       process.exit(0);
     } else if (a === "--paired") {
       args.paired = true;
@@ -62,6 +69,11 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.iters) || args.iters <= 0) throw new Error("--iters must be positive");
   if (!Number.isFinite(args.warmup) || args.warmup < 0) throw new Error("--warmup must be nonnegative");
   if (!Number.isInteger(args.rounds) || args.rounds <= 0) throw new Error("--rounds must be a positive integer");
+  if (args.maxSlowdown !== null && (!args.baseline || !Number.isFinite(args.maxSlowdown) || args.maxSlowdown < 0)) {
+    throw new Error("--max-slowdown requires --baseline and a nonnegative fraction");
+  }
+  args.output = path.resolve(root, args.output ?? `temp/performance/wasm-model-${Date.now()}-${process.pid}.json`);
+  if (fs.existsSync(args.output)) throw new Error("refusing to overwrite report: " + args.output);
   for (const key of ["bundle", "baseline"]) {
     if (args[key] === null) continue;
     const bundlePath = path.resolve(root, args[key]);
@@ -368,7 +380,7 @@ async function runPolyCase(pg, name, c, inputData) {
     schedules: pipeline.scheduleCount,
     validation,
     compiledKernelHashes,
-    dispose() { pipeline.dispose(); for (const x of inputs) x.dispose(); },
+    dispose() { pipeline.dispose(); for (const x of inputs) x.dispose?.(); },
   };
 }
 
@@ -631,10 +643,21 @@ const server = http.createServer((req, res) => {
 });
 
 async function main() {
+  const fingerprint = file => ({ path: file, sha256: createHash("sha256").update(fs.readFileSync(file)).digest("hex") });
+  const report = {
+    schema: 1, createdAt: new Date().toISOString(), args: { ...args },
+    machine: { platform: process.platform, arch: process.arch, cpu: os.cpus()[0]?.model, node: process.version, loadBefore: os.loadavg() },
+    artifacts: [...new Set([args.bundle, args.baseline].filter(Boolean))].map(p => fingerprint(path.resolve(root, decodeURIComponent(p)))),
+    reference: fingerprint(path.join(root, "references/jax-js/dist/index.js")),
+    harness: [__filename, path.join(__dirname, "wasm_checks.mjs")].map(fingerprint),
+    pages: [],
+  };
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
-  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  let browser;
   try {
+    browser = await chromium.launch({ args: ["--no-sandbox"] });
+    report.browser = browser.version();
     // ABBA pages in one browser isolate bundle identity from browser restarts.
     const bundles = args.baseline ? [args.baseline, args.bundle, args.bundle, args.baseline] : [args.bundle];
     for (const bundle of bundles) {
@@ -647,14 +670,30 @@ async function main() {
         const timeout = Math.max(180000, (args.iters + args.warmup) * args.rounds * args.cases.length * 30000);
         const results = await page.waitForFunction(() => window.__benchResults, undefined, { timeout });
         const value = await results.jsonValue();
+        report.pages.push(value);
         if (value?.error) throw new Error(value.error + "\\n" + (value.stack || ""));
       } finally {
         await page.close();
       }
     }
+    if (args.baseline) {
+      report.comparison = assessABBA(report.pages, args.maxSlowdown ?? 0.10);
+      console.log(JSON.stringify({ comparison: report.comparison }));
+      if (args.maxSlowdown !== null) {
+        process.exitCode = report.comparison.some(r => r.status === "regression") ? 1
+          : report.comparison.some(r => r.status === "inconclusive") ? 2 : 0;
+      }
+    }
+  } catch (error) {
+    report.error = error.stack || String(error);
+    throw error;
   } finally {
-    await browser.close();
+    await browser?.close();
     server.close();
+    report.machine.loadAfter = os.loadavg();
+    fs.mkdirSync(path.dirname(args.output), { recursive: true });
+    fs.writeFileSync(args.output, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+    console.log("Performance report: " + args.output);
   }
 }
 

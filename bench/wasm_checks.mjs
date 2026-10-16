@@ -1,4 +1,25 @@
 // Untimed, backend-independent references for the Wasm comparison workloads.
+export function assessABBA(pages, threshold) {
+  if (pages.length !== 4) throw new Error('ABBA comparison requires four pages');
+  if (!Number.isFinite(threshold) || threshold < 0) throw new Error('invalid slowdown threshold');
+  const names = pages[0].pgResults.map(r => r.name);
+  if (!names.length || new Set(names).size !== names.length || pages.some(p =>
+    JSON.stringify(p.pgResults.map(r => r.name)) !== JSON.stringify(names))) {
+    throw new Error('ABBA cases must match');
+  }
+  return names.map((name, i) => {
+    const ms = pages.map(p => p.pgResults[i].seconds * 1000);
+    if (ms.some(x => !Number.isFinite(x) || x <= 0)) throw new Error(`${name}: invalid timing`);
+    const baselineMs = [ms[0], ms[3]], candidateMs = [ms[1], ms[2]];
+    // Both candidate pages must exceed both baseline pages to call a regression.
+    // Overlapping the threshold is inconclusive, not a passing gate.
+    const status = Math.min(...candidateMs) > Math.max(...baselineMs) * (1 + threshold)
+      ? 'regression' : Math.max(...candidateMs) <= Math.min(...baselineMs) * (1 + threshold)
+        ? 'pass' : 'inconclusive';
+    return { name, baselineMs, candidateMs, ratio: (ms[1] + ms[2]) / (ms[0] + ms[3]), status };
+  });
+}
+
 export function assertClose(actual, expected, label, { atol = 1e-5, rtol = 1e-5 } = {}) {
   if (actual.length !== expected.length) throw new Error(`${label}: length ${actual.length} != ${expected.length}`);
   let maxAbsError = 0;
@@ -21,7 +42,8 @@ export async function checkWorkload(workload, expected, tolerance) {
       await workload.ready(output);
       const value = output.value ?? output;
       // JAX-JS data() consumes its reference; disposal below owns the original.
-      const actual = value.toArrayAsync ? await value.toArrayAsync() : await value.ref.data();
+      const actual = value.toArrayAsync ? await value.toArrayAsync()
+        : value.toArray ? await value.toArray() : await value.ref.data();
       validation = assertClose(actual, expected, workload.name, tolerance);
     } finally {
       workload.dispose?.(output);

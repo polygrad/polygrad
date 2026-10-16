@@ -809,6 +809,25 @@ BROWSER_MATRIX_DEVICES="auto,interp" make test-browser-matrix
 Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
 `label=engine@/absolute/path`.
 
+### Wasm performance comparisons
+
+For Wasm performance changes, compare against a frozen browser bundle built in
+a separate checkout, using the same toolchain:
+
+```bash
+make bench-wasm-regression BENCH_WASM_BASELINE=temp/old-checkout/js/dist/polygrad.sync.js
+```
+
+This runs correctness-checked model workloads against the pinned jax-js reference,
+with baseline/candidate/candidate/baseline pages in one browser. Reports under
+`temp/performance/` retain samples, bundle/kernel hashes and browser identity;
+the baseline is never overwritten. The default slowdown budget is 10%, adjustable
+with `BENCH_WASM_MAX_SLOWDOWN`. A completed comparison exits 1 on regression or 2
+when inconclusive; setup and correctness failures also fail the command. Rerun
+noisy comparisons. Compare
+both the previous release and a known-fast historical baseline when investigating
+a regression; passing against the immediate parent alone is not recovery.
+
 ### Release acceptance
 
 ```bash
