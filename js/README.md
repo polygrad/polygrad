@@ -710,10 +710,16 @@ Wasm copies Node's `process.env` before C initialization. In browsers, provide
 compiler settings explicitly; Node Wasm accepts the same map as overrides:
 
 ```js
-const pg = await polygrad.createAsync({
-  core: 'wasm', device: 'cpu',
-  env: { REDUCEOP_SPLIT_THRESHOLD: '1024' }
-})
+const { createAsync } = require('polygrad/async')
+
+async function main() {
+  const pg = await createAsync({
+    core: 'wasm', device: 'cpu',
+    env: { REDUCEOP_SPLIT_THRESHOLD: '1024' }
+  })
+  await pg.dispose()
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })
 ```
 
 `env` is a map of strings using the existing C environment names and meanings;
