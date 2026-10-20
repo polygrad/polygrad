@@ -782,7 +782,7 @@ bench-kv: build/libpolygrad.so
 
 .PHONY: test-bench-wasm
 test-bench-wasm:
-	$(NODE) --test bench/test_wasm_checks.mjs
+	$(NODE) --test bench/test_wasm_checks.mjs bench/test_webgpu_profile.mjs
 
 .PHONY: bench-kernel-targets
 .PHONY: test-kernels test-examples
@@ -837,6 +837,11 @@ BENCH_WASM_MAX_SLOWDOWN ?= 0.10
 bench-wasm-regression:
 	@test -n "$(BENCH_WASM_BASELINE)" || { echo 'Set BENCH_WASM_BASELINE to a separately built browser bundle'; exit 2; }
 	$(MAKE) bench-jax-js-browser-model-wasm BENCH_JAX_JS_EXTRA='--paired --rounds 4 --baseline $(BENCH_WASM_BASELINE) --max-slowdown $(BENCH_WASM_MAX_SLOWDOWN) $(BENCH_JAX_JS_EXTRA)'
+
+.PHONY: bench-jax-js-browser-model-webgpu
+bench-jax-js-browser-model-webgpu: wasm-pkg
+	cd js && bash scripts/build-browser.sh
+	$(NODE) bench/bench_jax_js_browser_model_wasm.mjs --device webgpu --cases $(BENCH_JAX_JS_MODEL_CASES) --iters $(BENCH_JAX_JS_ITERS) --warmup $(BENCH_JAX_JS_WARMUP) $(BENCH_JAX_JS_EXTRA)
 
 bench-compare:
 	$(PYTHON) bench/bench_compare.py $(BENCH_RATIO_BASELINE) $$(ls -t bench/results/2*.json | head -1)
