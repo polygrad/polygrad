@@ -579,6 +579,136 @@ async function checkPackedGemmModel(pg, gpuTile = false, provider = null) {
   }
 }
 
+async function checkWasmGemmNumerics(createRuntime, k, n) {
+  if (k == null) {
+    for (const [inner, cols] of [[768,8], [767,19], [17,3]])
+      await checkWasmGemmNumerics(createRuntime, inner, cols)
+    return
+  }
+  const rt = await createRuntime({kernels:true})
+  let model, columns, restored, x, w, wc
+  try {
+    if (rt.core !== 'wasm' || rt.device === 'webgpu' || rt.device === 'interp') return
+    const values = new Float32Array(k).fill(1)
+    x = rt.Tensor.empty([1,k]); w = new rt.Tensor(new Float32Array(n*k)).reshape(n,k)
+    wc = new rt.Tensor(new Float32Array(n*k)).reshape(k,n)
+    await w.realizeAsync()
+    await wc.realizeAsync()
+    model = await rt.Model.fromCallableAsync(({x}) => x.dot(w.transpose()), {inputs:{x}, params:{w}})
+    columns = await rt.Model.fromCallableAsync(({x}) => x.dot(wc), {inputs:{x}, params:{w:wc}})
+    let seed = 0x35c12a97
+    const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return ((seed >>> 0) % 65536 - 32768) / 32768 }
+    for (const pattern of ['serial-exact','striped-exact','paired','random','dynamic']) {
+      const weights = new Float32Array(n*k), columnWeights = new Float32Array(n*k)
+      const expected = new Float32Array(n), serial = new Float32Array(n)
+      for (let j=0;j<n;j++) {
+        const sums=[0,0,0,0]; let reference=0, scale=0
+        for (let r=0;r<k;r++) {
+          const v = pattern==='serial-exact' ? ([2**25,-(2**25),1,0][r] || 0) :
+            pattern==='striped-exact' ? ([2**25,1,-(2**25),0][r] || 0) :
+            pattern==='paired' ? (r%2 ? -1024+2**-12 : 1024) :
+            random() * (pattern==='dynamic' ? 2**(r%17-8) : 1)
+          const p = weights[j*k+r] = Math.fround(v)
+          columnWeights[r*n+j] = p
+          serial[j] = Math.fround(serial[j]+p)
+          reference += p; scale += Math.abs(p)
+          sums[r%4] = Math.fround(sums[r%4]+p)
+        }
+        expected[j] = Math.fround(Math.fround(sums[0]+sums[2])+Math.fround(sums[1]+sums[3]))
+        // Conditioning-aware error, not a promise to dominate serial FP32.
+        // These dyadic reference sums are exact in binary64. Also pin the
+        // actual operation order below so a permissive bound cannot hide drift.
+        const u=2**-24, length=Math.ceil(k/4)+3, gamma=length*u/(1-length*u)
+        assert(Math.abs(expected[j]-reference) <= gamma*scale, `striped error bound ${pattern}`)
+        if (pattern==='random' || pattern==='dynamic')
+          assert(Math.abs(expected[j]-reference) <= 1e-5 + 2e-6*Math.abs(reference), `ordinary GEMM accuracy ${pattern}`)
+      }
+      await model.writeBufferAsync('w', weights)
+      await columns.writeBufferAsync('w', columnWeights)
+      for (let repeat=0;repeat<3;repeat++) {
+        const before=rt.stats().coreStats
+        const result=(await model.forwardAsync({x:values})).output
+        assertClose(result,expected,0)
+        const after=rt.stats().coreStats
+        // GEMM plus Model's output-slot copy: read each input once in the
+        // schedule's estimate, then write/read/write the output values.
+        const parts = n > 4 && n%4 ? 2 : 1
+        assert(after.kernelCount-before.kernelCount===parts+1, 'unexpected Model GEMM kernel count')
+        assert(after.globalMem-before.globalMem===(k*n+parts*k+3*n)*4, 'ordinary GEMM added packing traffic')
+        assertClose((await columns.forwardAsync({x:values})).output,serial,0)
+      }
+    }
+    const program = new TextDecoder().decode(await model.exportProgramAsync())
+    assert(program.includes('wasm_gemm'), 'opt-in Wasm did not select UOp GEMM')
+    assert(new TextDecoder().decode(await columns.exportProgramAsync()).includes('wasm_gemm'),
+      'column-contiguous weights missed UOp GEMM')
+    restored = rt.Model.load(await model.saveAsync())
+    assertClose((await restored.forwardAsync({x:values})).output,(await model.forwardAsync({x:values})).output,0)
+  } finally {
+    if(restored)await restored.dispose(); if(model)await model.dispose(); if(columns)await columns.dispose()
+    x?.dispose(); w?.dispose(); wc?.dispose(); await rt.dispose()
+  }
+  const disabled = await createRuntime({kernels:false})
+  try {
+    const a = disabled.Tensor.empty([1,32])
+    const b = new disabled.Tensor(new Float32Array(8*32).fill(1)).reshape(8,32)
+    await b.realizeAsync()
+    const m = await disabled.Model.fromCallableAsync(({a})=>a.dot(b.transpose()),{inputs:{a},params:{b}})
+    try {
+      assertClose((await m.forwardAsync({a:new Float32Array(32).fill(1)})).output,new Float32Array(8).fill(32),0)
+      assert(!new TextDecoder().decode(await m.exportProgramAsync()).includes('wasm_gemm'),'kernels:false ignored')
+    } finally {await m.dispose();a.dispose();b.dispose()}
+  } finally {await disabled.dispose()}
+}
+
+async function checkSelectedGemmOwnership(createRuntime) {
+  const pg = await createRuntime({kernels:true})
+  const Tensor = pg.Tensor
+  const owned = [], keep = t => { owned.push(t); return t }
+  try {
+    for (const n of [4, 5]) {
+      const a = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
+      const b = keep(keep(new Tensor(new Float32Array(n * 32).fill(1))).reshape(n, 32))
+      await a.realize(b)
+      const bt = keep(b.permute(1, 0)), first = keep(a.matmul(bt))
+      const before = pg.stats().coreStats.kernelCount
+      await first.realize()
+      // The opt-in Wasm provider has one main CALL and, for n=5, one tail.
+      // Native/WebGPU keep their existing selection policy.
+      if (pg.core === 'wasm' && pg.device !== 'webgpu' && pg.device !== 'interp')
+        assert(pg.stats().coreStats.kernelCount - before === (n === 4 ? 1 : 2), 'redundant matmul output copy')
+      assertClose(await first.toArray(), new Array(n).fill(496), 0)
+      const f = pg.jit((x, w) => x.matmul(w.permute(1, 0)))
+      try {
+        await (await f(a, b)).realize()
+        await (await f(a, b)).realize()
+        await b.copyFrom(new Float32Array(n * 32).fill(2))
+        assertClose(await (await f(a, b)).toArray(), new Array(n).fill(992), 0)
+        // Realized eager results own independent storage, not the inputs or
+        // another invocation's output. Sharing a graph is not permission to
+        // reuse an old result as scratch.
+        assertClose(await first.toArray(), new Array(n).fill(496), 0)
+        const next = keep(a.matmul(keep(b.permute(1, 0))))
+        const plus = keep(next.add(1))
+        await next.realize(plus)
+        assertClose(await next.toArray(), new Array(n).fill(992), 0)
+        assertClose(await plus.toArray(), new Array(n).fill(993), 0)
+        const computed = keep(keep(a.add(1)).matmul(keep(b.permute(1, 0))))
+        assertClose(await computed.toArray(), new Array(n).fill(1056), 0)
+      } finally { f.dispose() }
+    }
+    const alias = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
+    const weights = keep(keep(new Tensor(new Float32Array(32 * 32).fill(1))).reshape(32, 32))
+    await alias.realize(weights)
+    const product = keep(alias.matmul(weights))
+    await alias.assign(product).realize()
+    assertClose(await alias.toArray(), new Array(32).fill(496), 0)
+  } finally {
+    for (const t of owned.reverse()) t.dispose()
+    await pg.dispose()
+  }
+}
+
 async function checkPortableGemmModel(createRuntime) {
   const rt = await createRuntime({kernels:true})
   try {
@@ -3160,6 +3290,8 @@ async function runModelRuntimeTests(pg, createRuntime) {
 
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
+  await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
+  await test('Model selected GEMM ownership and mutation', () => checkSelectedGemmOwnership(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
@@ -3971,6 +4103,8 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
+  await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
+  await test('Model selected GEMM ownership and mutation', () => checkSelectedGemmOwnership(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))

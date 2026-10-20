@@ -443,6 +443,13 @@ SIMD128 on Wasm and tiled FP32 GEMM on WebGPU. Unsupported shapes use the defaul
 path. Policy is fixed at first compilation; portable bundles keep the original operations.
 These kernels are opt-in experiments, not guaranteed speedups.
 
+The Wasm FP32 GEMM provider consumes ordinary weights without a packing copy.
+For K-contiguous weights it accumulates four K-strided partial sums and combines
+them as `(s0+s2)+(s1+s3)`; column-contiguous weights retain serial K order.
+Both paths use strict multiply and add, not relaxed multiply-add. Changing the
+sum order can improve or worsen cancellation error; it is not bitwise parity
+with the generic reduction. Scalar tails follow the same documented order.
+
 The same policy optimizes FP32 interval sums expressed as
 `((arange(N) >= lo) & (arange(N) < hi)).where(values, 0).sum(1)`, with
 int32 bounds `[S,1,1]` and values `[1,N,W]`. CPU, X86, interpreter, Wasm,

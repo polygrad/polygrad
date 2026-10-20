@@ -89,6 +89,10 @@ static PolyUOp *memory_coalescing_offset(
  * loads/stores. */
 PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (!ctx || !sink || poly_getenv_flag("DMC")) return sink;
+  /* Like pinned DSP's must_divide=False, Wasm permits unaligned vector accesses.
+   * Only adjacent existing accesses with the same predicate are bundled; this
+   * does not widen the accessed interval or change arithmetic (PG-DIV-035). */
+  bool must_divide = !caps.device || strcmp(caps.device, "WASM") != 0;
   int n_topo = 0;
   PolyUOp **topo = poly_uop_toposort_alloc(ctx, sink, &n_topo);
   if (!topo || n_topo <= 0) {
@@ -232,7 +236,7 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
         for (int c = 0; c < n_candidates; c++) {
           if (candidates[c] <= remaining) {
             PolyUOp *test_offset = memory_coalescing_offset(ctx, r, offsets[pos]);
-            if (candidates[c] == 1 || poly_uop_divides(ctx, test_offset, candidates[c])) {
+            if (!must_divide || candidates[c] == 1 || poly_uop_divides(ctx, test_offset, candidates[c])) {
               length = candidates[c];
               break;
             }

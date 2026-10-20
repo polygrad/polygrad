@@ -25,6 +25,28 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-035",
+      "status": "approved",
+      "stages": ["codegen"],
+      "area": "Wasm unaligned vector memory coalescing",
+      "tinygrad": "Pinned memory_coalescing requires an offset divisible by vector length, except on DSP where must_divide=False.",
+      "polygrad": "Uses the same exemption for Wasm ordinary vector loads/stores. Existing width and dtype limits remain; only contiguous accesses to the same storage with the same predicate are grouped. CPU, X86, WebGPU and other target policies are unchanged.",
+      "rationale": "Wasm ordinary SIMD memory operations permit unaligned addresses. Requiring vector alignment needlessly scalarizes odd-stride kernels. This changes lowered memory grouping, not accessed elements, masks, arithmetic order or numerical tolerances; it does not apply to atomic accesses.",
+      "approval": "User explicitly approved Wasm-only unaligned coalescing on 2026-10-19, with alignment/bounds regressions and affected gates.",
+      "evidence": [
+        "src/codegen/late/coalesce.c:poly_memory_coalescing",
+        "references/tinygrad_latest/tinygrad/codegen/late/coalesce.py:memory_coalescing",
+        "https://webassembly.github.io/spec/core/exec/instructions.html",
+        "test/test_codegen.c:wasm_unaligned_coalescing_preserves_accesses_and_predicates",
+        "test/test_wasm.c:unaligned_coalescing_at_memory_end",
+        "temp/wasm-known-fast-20261016/unaligned-results.json",
+        "temp/wasm-known-fast-20261016/unaligned-red.log",
+        "temp/wasm-known-fast-20261016/unaligned-report-20261019.txt",
+        "temp/wasm-scope-review-20261020/report.txt"
+      ],
+      "close_when": "The pinned lowering supports Wasm unaligned vector memory coalescing, or an equivalent target capability removes this difference; retain access, mask, bounds and value regressions."
+    },
+    {
       "id": "PG-PARITY-039",
       "status": "open_debt",
       "stages": ["codegen", "execution"],
@@ -264,14 +286,39 @@
     {
       "id": "PG-DIV-012",
       "status": "approved",
-      "stages": ["rangeify", "codegen", "renderer-source"],
-      "area": "opt-in physical packed GEMM",
+      "stages": [
+        "rangeify",
+        "codegen",
+        "renderer-source",
+        "execution",
+        "value"
+      ],
+      "area": "Opt-in physical UOp GEMM providers",
       "tinygrad": "Pinned llm/kernels/amd.py selects UOp-authored custom kernels for supported AMD quantized Linear inputs; it has no equivalent FP32 AVX2 matmul kernel.",
       "polygrad": "POLY_KERNELS=1 selects fixed-shape FP32 broadcast matmuls and rank-three autograd contractions on native AVX2/FMA CPUs before decomposition, including resolved ordinary FUNCTION bodies. A 4x24 UOp kernel consumes scheduled panel packing; unsupported cases fall back. Existing CPU workers receive even output-tile-axis slices, using the pin's thread-count candidates and work floor; each output retains serial K accumulation. On the same opt-in path, a last-axis normalized exponential feeding matmul is materialized once when its fixed FP32 table is at most 32 MiB and reused across output columns. Authoring and portable logical graphs remain unchanged. Serial FMA accumulation and physical materialization can round differently from generic reductions.",
-      "rationale": "User-approved custom-kernel experiment. Runtime kernels=true additionally selects 4x8 UOp tiles with packed panels on Wasm SIMD128, and a separate WebGPU builder with 32x64 workgroup tiles, cooperative local-memory staging, two barriers per K tile and no weight-packing dispatch. Both use separate multiply/add operations with serial K order but may round differently from generic reductions. Renderer-local Wasm vector register packing preserves each lane's scalar operation order. Policy is context-local and locked at first lowering; unsupported shapes fall back. Default pinned scheduling, authoring graphs and portable bundles are unchanged. No new executor, persistent packed-state cache or default numerical-parity allowance is introduced.",
-      "approval": "User 2026-09-25: proceed with guarded physical custom-kernel integration and attention materialization. User 2026-09-26: proceed to Wasm and WebGPU kernels to verify target generalizability.",
-      "evidence": ["references/tinygrad_latest/tinygrad/llm/kernels/amd.py", "src/kernels/cpu.c", "src/kernels/gemm.c", "src/kernels/webgpu.c", "test/test_codegen.c:cpu_packed_gemm_selection", "test/test_codegen.c:webgpu_gemm_workgroup_tiling", "py/tests/test_cpu_gemm.py", "bench/bench_onnx_encoders.py", "temp/avx2-uop-20260925/ablation/results.json", "temp/attention-20260925/report.md", "temp/webgpu-tiled-20260926.md"],
-      "close_when": "Re-evaluate selection and finite FP32 numerical tolerances before default enablement or expanding the supported kernel shapes/ISAs. This row grants no default Tensor, gradient, logical-graph or export mismatch allowance."
+      "rationale": "The opt-in Wasm path replaces the packed 4x8 provider with one no-pack UOp provider, selected before fusion. Fixed FP32 M<=512 and K,N<=4096 with a shared right operand are supported. Contiguous K rows use four K%4 accumulators, combined (s0+s2)+(s1+s3); contiguous output columns use serial K accumulation through the shared GEMM builder. Both use separate strict multiply/add. Fixed tails preserve those orders, and output-column prefix/tail CALLs write disjoint views of one buffer without packing. The striped order can improve or worsen cancellation error: [2^25,-2^25,1,0,...] gives0 versus serial1; swapping the middle terms reverses which order loses1. Tests pin the orders, repeated results and binary64 errors; no promise of being no worse than serial is made. All providers remain opt-in through kernels=true or POLY_KERNELS=1. The default renderer specializer remains separate open debt under PG-PARITY-039. WebGPU uses32x64 workgroup tiles and serial K, with no packing dispatch. Unsupported cases fall back. Authoring, gradients and portable bundles retain generic operations. Policy locks at first lowering. No persistent packed-state cache, host-dependent relaxed arithmetic or new executor is introduced.",
+      "approval": "User 2026-09-25: proceed with guarded physical custom-kernel integration and attention materialization. User 2026-09-26: proceed to Wasm and WebGPU kernels. User approved the strict four-partial-sum opt-in replacement and subsequent explicit cancellation tradeoff qualification; default enablement remains a separate decision.",
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/llm/kernels/amd.py",
+        "src/kernels/cpu.c",
+        "src/kernels/gemm.c",
+        "src/kernels/webgpu.c",
+        "src/kernels/portable.c",
+        "test/test_codegen.c:gemm_selection_is_opt_in_and_preserves_weight_layout",
+        "test/test_wasm.c:uop_matmul_uses_strict_simd_and_executes",
+        "js/test/test_model_runtime.js:checkWasmGemmNumerics",
+        "test/test_codegen.c:cpu_packed_gemm_selection",
+        "test/test_codegen.c:webgpu_gemm_workgroup_tiling",
+        "py/tests/test_cpu_gemm.py",
+        "bench/bench_onnx_encoders.py",
+        "temp/wasm-known-fast-20261016/framework-numerics-final.json",
+        "temp/wasm-known-fast-20261016/striped-accuracy-final.json",
+        "temp/avx2-uop-20260925/ablation/results.json",
+        "temp/attention-20260925/report.md",
+        "temp/webgpu-tiled-20260926.md",
+        "temp/wasm-opt-in-landing-20261020/report.txt"
+      ],
+      "close_when": "Re-evaluate selection, numerical error and matched performance before default enablement or expanding supported shapes. This opt-in allowance covers the documented physical matmul order, not authoring, differentiation or portable-export mismatches."
     },
     {
       "id": "PG-DIV-013",

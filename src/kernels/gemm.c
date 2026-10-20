@@ -10,6 +10,24 @@ static PolyUOp *param(PolyCtx *c, int size, int slot) {
   );
 }
 
+PolyUOp *poly_kernel_gemm_operand(PolyCtx *c, PolyUOp *view, int size, int slot, PolyUOp **input) {
+  PolyUOp *base = view;
+  while (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_PERMUTE)
+    base = base->src[0];
+  int nd = poly_uop_ndim(c, base);
+  int64_t dims[POLY_MAX_DIMS];
+  if (nd < 0 || nd > POLY_MAX_DIMS) return NULL;
+  for (int i = 0; i < nd; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(c, base, i);
+    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT) return NULL;
+    dims[i] = dim->arg.i;
+  }
+  PolyUOp *p = poly_uop_reshape(c, param(c, size, slot), dims, nd);
+  p = p ? poly_uop_substitute(c, view, &base, &p, 1) : NULL;
+  *input = poly_uop_reshape(c, poly_uop_contiguous(c, base), (int64_t[]){size}, 1);
+  return p ? poly_uop_reshape(c, p, (int64_t[]){size}, 1) : NULL;
+}
+
 static PolyUOp *ci(PolyCtx *c, int n) {
   return poly_uop_const_int(c, n);
 }
@@ -28,12 +46,13 @@ static PolyUOp *ld(PolyCtx *c, PolyUOp *p, PolyUOp *i) {
 
 /* Explicit register state mirrors tinygrad llm/kernels/amd.py:_reg and
  * _quant_linear_wmma. Lanes are independent output columns, never partial sums. */
-static PolyUOp *kernel(
+PolyUOp *poly_kernel_gemm_program(
     PolyCtx *c,
     int M,
     int K,
     int N,
     PolyUOp *a,
+    PolyUOp *b,
     const PolyGemmTile *tile,
     int workers,
     int thread_axis
@@ -41,7 +60,6 @@ static PolyUOp *kernel(
   const int rows = tile->rows, lanes = tile->lanes, vectors = tile->vectors;
   const int cols = lanes * vectors, regs = rows * vectors;
   PolyUOp *out = param(c, M * N, 0);
-  PolyUOp *b = param(c, K * N, 2);
   PolyUOp *m = poly_uop_range(c, M / rows, 1, POLY_AXIS_LOOP);
   PolyUOp *n = poly_uop_range(c, N / cols, 0, POLY_AXIS_LOOP);
   PolyUOp *ranges[] = {m, n, NULL};
@@ -172,7 +190,8 @@ PolyUOp *poly_kernel_gemm_lower(
   PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(device));
   PolyUOp *out = poly_uop_new_buffer(ctx, dev, M * N, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
   if (!ap || !left || !right || !out) return NULL;
-  PolyUOp *body = kernel(ctx, (int)M, (int)K, (int)N, ap, tile, workers, thread_axis);
+  PolyUOp *body = poly_kernel_gemm_program(ctx, (int)M, (int)K, (int)N, ap,
+      param(ctx, K * N, 2), tile, workers, thread_axis);
   PolyUOp *src[] = {body, out, left, right};
   PolyCallInfo info = {0};
   PolyUOp *call =

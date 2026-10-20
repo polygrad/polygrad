@@ -110,6 +110,47 @@ TEST(codegen, gemm_recognizes_forward_and_backward_views) {
   PASS();
 }
 
+TEST(codegen, gemm_selection_is_opt_in_and_preserves_weight_layout) {
+  const char *old = getenv("POLY_KERNELS");
+  char *saved = old ? strdup(old) : NULL;
+  unsetenv("POLY_KERNELS");
+  bool correct = true;
+  const PolyDevice devices[] = {POLY_DEVICE_WASM, POLY_DEVICE_CPU, POLY_DEVICE_WEBGPU};
+  const int rows[] = {1, 16, 64}, inner[] = {32, 128, 64}, cols[] = {8, 192, 128};
+  const char *names[] = {"wasm_gemm", "avx2_gemm", "webgpu_gemm"};
+  for (int target = 0; target < 3; target++)
+    for (int policy = -1; policy <= 1; policy++) {
+      PolyCtx *ctx = poly_ctx_new();
+      if (policy >= 0) correct &= poly_ctx_set_kernel_policy(ctx, policy) == 0;
+      PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){rows[target], inner[target]}, 2, devices[target]);
+      PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){cols[target], inner[target]}, 2, devices[target]);
+      PolyUOp *dot = poly_uop_dot(ctx, a->uop_physical,
+          poly_uop_permute(ctx, b->uop_physical, (int64_t[]){1, 0}, 2));
+      PolyUOp *chosen = poly_kernel_select(ctx, dot);
+      bool expect = policy == 1;
+      correct &= chosen && (chosen != dot) == expect;
+      int n = 0, calls = 0;
+      PolyUOp **nodes = poly_uop_toposort_alloc(ctx, chosen, &n);
+      for (int i = 0; i < n; i++) if (nodes[i]->op == POLY_OP_CALL) {
+        calls++;
+        /* Ordinary row-major weights stay in producer order, not panel packed. */
+        PolyUOp *right = nodes[i]->src[3];
+        while (right->op == POLY_OP_RESHAPE || right->op == POLY_OP_CONTIGUOUS)
+          right = right->src[0];
+        if (target == 0) correct &= right == poly_uop_base(b->uop_physical);
+        correct &= nodes[i]->src[0]->arg.kind == POLY_ARG_KERNEL_INFO &&
+                   !strcmp(nodes[i]->src[0]->arg.kernel_info->name, names[target]);
+      }
+      correct &= calls == (expect ? 1 : 0);
+      poly_uop_toposort_free(nodes);
+      poly_tensor_release(a); poly_tensor_release(b); poly_ctx_destroy(ctx);
+    }
+  if (saved) { setenv("POLY_KERNELS", saved, 1); free(saved); }
+  else unsetenv("POLY_KERNELS");
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
 TEST(codegen, portable_packed_gemm_selection) {
   const char *old = getenv("POLY_KERNELS");
   char *saved = old ? strdup(old) : NULL;
@@ -148,11 +189,11 @@ TEST(codegen, portable_packed_gemm_selection) {
   PASS();
 }
 
-TEST(codegen, wasm_gemm_small_work_fallback) {
+TEST(codegen, wasm_gemm_non_float32_fallback) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_kernel_policy(ctx, 1);
-  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){32, 64}, 2, POLY_DEVICE_WASM);
-  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){64, 64}, 2, POLY_DEVICE_WASM);
+  PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT64, (int64_t[]){32, 63}, 2, POLY_DEVICE_WASM);
+  PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT64, (int64_t[]){63, 64}, 2, POLY_DEVICE_WASM);
   PolyUOp *dot = poly_uop_dot(ctx, poly_tensor_uop_physical(a), poly_tensor_uop_physical(b));
   bool unchanged = poly_kernel_select(ctx, dot) == dot;
   poly_tensor_release(a);
@@ -521,6 +562,67 @@ TEST(codegen, bundle_coalesce_param_alignment) {
 
 TEST(codegen, bundle_coalesce_fp8_storage) {
   ASSERT_INT_EQ(bundle_coalesced_loads(POLY_FP8E4M3, false, false), 1);
+  PASS();
+}
+
+TEST(codegen, wasm_unaligned_coalescing_preserves_accesses_and_predicates) {
+  const char *devices[] = {"WASM", "CPU", "WEBGPU", NULL};
+  bool correct = true;
+  for (int device = 0; device < 4; device++)
+    for (int store = 0; store < 2; store++)
+      for (int start = 0; start < 4; start++)
+        for (int count = 1; count <= 7; count++)
+          for (int masked_tail = 0; masked_tail < 2; masked_tail++) {
+            PolyCtx *ctx = poly_ctx_new();
+            PolyUOp *buf = poly_test_program_param(ctx, POLY_FLOAT32, start + count, 0);
+            PolyUOp *gate = poly_uop_variable(
+                ctx, "valid", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true
+            );
+            PolyUOp *accesses[7];
+            for (int j = 0; j < count; j++) {
+              PolyUOp *idx = poly_uop_const_int(ctx, start + j);
+              if (masked_tail && j == count - 1)
+                idx = poly_uop3(ctx, POLY_OP_WHERE, idx->dtype, gate, idx,
+                               poly_uop_const(ctx, poly_arg_invalid(), idx->dtype), poly_arg_none());
+              PolyUOp *address = poly_uop_index(ctx, buf, &idx, 1);
+              accesses[j] = store ? poly_uop_store(ctx, address, poly_uop_const_float(ctx, j))
+                                  : poly_uop_load(ctx, address);
+            }
+            PolyUOp *out = poly_memory_coalescing(
+                ctx, poly_uop_sink(ctx, accesses, count),
+                (PolyRendererCaps){.device = devices[device], .max_vec_width = 4}
+            );
+            int n = 0, widths[7] = {0};
+            unsigned covered = 0;
+            PolyUOp **nodes = out ? poly_uop_toposort_alloc(ctx, out, &n) : NULL;
+            correct &= nodes != NULL;
+            for (int j = 0; j < n; j++) {
+              if (nodes[j]->op != (store ? POLY_OP_STORE : POLY_OP_LOAD)) continue;
+              PolyUOp *address = nodes[j]->src[0], *idx = address->src[1];
+              bool gated = idx->op == POLY_OP_WHERE;
+              if (gated) { correct &= idx->src[0] == gate; idx = idx->src[1]; }
+              int offset = (int)idx->arg.i - start;
+              int width = address->op == POLY_OP_SHRINK ? (int)address->src[2]->arg.i : 1;
+              if (offset < 0 || offset + width > count) { correct = false; continue; }
+              correct &= gated == (masked_tail && offset == count - 1);
+              if (masked_tail && !gated) correct &= offset + width <= count - 1;
+              unsigned bits = ((1u << width) - 1) << offset;
+              correct &= !(covered & bits);
+              covered |= bits;
+              widths[offset] = width;
+            }
+            correct &= covered == (1u << count) - 1;
+            for (int pos = 0; pos < count;) {
+              int remaining = count - pos - (masked_tail && pos != count - 1);
+              int expected = 4;
+              while (expected > remaining || (device != 0 && (start + pos) % expected)) expected /= 2;
+              correct &= widths[pos] == expected;
+              pos += expected;
+            }
+            poly_uop_toposort_free(nodes);
+            poly_ctx_destroy(ctx);
+          }
+  ASSERT_TRUE(correct);
   PASS();
 }
 

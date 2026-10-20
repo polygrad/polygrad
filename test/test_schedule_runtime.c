@@ -72,6 +72,58 @@ static PolyUOp *cache_clear_schedule(PolyCtx *ctx, int size) {
   return linear;
 }
 
+TEST(schedule_runtime, selected_gemm_materializes_once) {
+  for (int mode = 0; mode < 9; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_kernel_policy(ctx, 1);
+    int cols = mode == 6 ? 32 : mode == 7 ? 5 : 4;
+    PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 32, POLY_DEVICE_WASM);
+    PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, cols * 32, POLY_DEVICE_WASM);
+    a = poly_uop_reshape(ctx, a, (int64_t[]){1, 32}, 2);
+    b = poly_uop_reshape(ctx, b, (int64_t[]){cols, 32}, 2);
+    PolyUOp *input = mode == 8 ? poly_uop_add(ctx, a, poly_uop_const_float(ctx, 1)) : a;
+    PolyUOp *dot = poly_uop_dot(ctx, input, poly_uop_permute(ctx, b, (int64_t[]){1, 0}, 2));
+    PolyUOp *requested[] = {dot, NULL}, *target = NULL;
+    if (mode == 1) requested[0] = poly_uop_reshape(ctx, dot, (int64_t[]){cols}, 1);
+    if (mode == 2) requested[0] = poly_uop_contiguous(ctx, dot);
+    if (mode == 3) requested[0] = poly_uop_add(ctx, dot, poly_uop_const_float(ctx, 1));
+    if (mode == 4) requested[1] = poly_uop_add(ctx, dot, poly_uop_const_float(ctx, 1));
+    if (mode == 5 || mode == 6) {
+      target = mode == 6
+                   ? a
+                   : poly_uop_reshape(
+                         ctx, poly_test_buffer_on_device(ctx, POLY_FLOAT32, cols, POLY_DEVICE_WASM),
+                         (int64_t[]){1, cols}, 2
+                     );
+      requested[0] = poly_uop_after(ctx, target, poly_uop_store_val(ctx, target, dot));
+    }
+    PolyUOp *outputs[2] = {0};
+    PolyUOp *call = poly_transform_to_call(ctx, requested, mode == 4 ? 2 : 1, outputs);
+    PolyVarBinding *vars = NULL;
+    int n_vars = 0;
+    PolyUOp *linear = call ? poly_create_linear_with_vars(ctx, call, &vars, &n_vars) : NULL;
+    int kernels = linear ? linear->n_src : -1;
+    bool shape = outputs[0] && poly_uop_ndim(ctx, outputs[0]) == (mode == 1 ? 1 : 2) &&
+                 poly_shape_numel(poly_uop_max_shape_cached(ctx, outputs[0])) == cols;
+    bool identity =
+        !target || poly_uop_get_buffer_identity(outputs[0]) == poly_uop_get_buffer_identity(target);
+    if (mode == 4)
+      identity &=
+          poly_uop_get_buffer_identity(outputs[0]) != poly_uop_get_buffer_identity(outputs[1]);
+    free(vars);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(shape);
+    ASSERT_TRUE(identity);
+    /* Assignment (including an aliased input) keeps its destination and copy.
+     * Shared results execute once; computed inputs and epilogues need one more
+     * kernel. A column tail is a second provider CALL, not an output copy. */
+    int expected = mode <= 2 ? 1 : 2;
+    if (kernels != expected) fprintf(stderr, "selected GEMM mode%d: ", mode);
+    ASSERT_INT_EQ(kernels, expected);
+  }
+  PASS();
+}
+
 TEST(schedule_runtime, cache_does_not_own_source_graph) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_INTERP);

@@ -92,24 +92,6 @@ static PolyUOp *kernel(PolyCtx *c, int M, int N, int K, PolyUOp *a, PolyUOp *b) 
 
 /* Carry movement indexing into the kernel. Ordinary row-major weights need
  * no transpose/packing dispatch; computed producers still materialize once. */
-static PolyUOp *operand(PolyCtx *c, PolyUOp *view, int size, int slot, PolyUOp **input) {
-  PolyUOp *base = view;
-  while (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_PERMUTE)
-    base = base->src[0];
-  int nd = poly_uop_ndim(c, base);
-  int64_t dims[POLY_MAX_DIMS];
-  if (nd < 0 || nd > POLY_MAX_DIMS) return NULL;
-  for (int i = 0; i < nd; i++) {
-    PolyUOp *dim = poly_uop_shape_dim(c, base, i);
-    if (!dim || dim->op != POLY_OP_CONST || dim->arg.kind != POLY_ARG_INT) return NULL;
-    dims[i] = dim->arg.i;
-  }
-  PolyUOp *p = poly_uop_reshape(c, buffer(c, size, slot, POLY_ADDR_GLOBAL), dims, nd);
-  p = p ? poly_uop_substitute(c, view, &base, &p, 1) : NULL;
-  *input = poly_uop_reshape(c, poly_uop_contiguous(c, base), (int64_t[]){size}, 1);
-  return p ? poly_uop_reshape(c, p, (int64_t[]){size}, 1) : NULL;
-}
-
 const char *poly_kernel_webgpu_supported(PolyCtx *c, const PolyGemmDesc *d) {
   const char *reason = poly_kernel_gemm_supported(c, d, 32, 64);
   if (reason) return reason;
@@ -118,8 +100,8 @@ const char *poly_kernel_webgpu_supported(PolyCtx *c, const PolyGemmDesc *d) {
 
 PolyUOp *poly_kernel_webgpu_lower(PolyCtx *c, const PolyGemmDesc *d) {
   PolyUOp *left = NULL, *right = NULL;
-  PolyUOp *a = operand(c, d->a, d->M * d->K, 1, &left);
-  PolyUOp *b = operand(c, d->b, d->K * d->N, 2, &right);
+  PolyUOp *a = poly_kernel_gemm_operand(c, d->a, d->M * d->K, 1, &left);
+  PolyUOp *b = poly_kernel_gemm_operand(c, d->b, d->K * d->N, 2, &right);
   if (!a || !b || !left || !right) return NULL;
   PolyUOp *dev = poly_uop0(c, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(d->device));
   PolyUOp *out = poly_uop_new_buffer(c, dev, d->M * d->N, POLY_FLOAT32, poly_ctx_next_unique_id(c));

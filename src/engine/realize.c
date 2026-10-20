@@ -6,6 +6,7 @@
 #include "ctx.h"
 #include "engine/jit.h"
 #include "engine/schedule.h"
+#include "kernels/kernels.h"
 #include "uop/ops.h"
 #include "placer.h"
 #include "uop/upat.h"
@@ -1577,6 +1578,38 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
   PolyUOp *ret = changed ? poly_rebuild_with_sources(ctx, u, new_src) : u;
   if (new_src != src_buf) free(new_src);
   if (!ret) return NULL;
+
+  /* Select before materialization: otherwise callify allocates a destination
+   * and the provider allocates another, leaving a STORE that only copies.
+   * Carry the original tag onto the shaped AFTER so ordinary finalize_after
+   * publishes the provider's fresh storage. Explicit assignment destinations
+   * still go through their existing STORE/hazard rules. */
+  if (ret->op == POLY_OP_REDUCE && ctx->kernel_policy != 0) {
+    PolyUOp *selected = poly_kernel_select_node(ctx, ret);
+    if (!selected) return NULL;
+    if (selected != ret) {
+      PolyUOp *after = poly_uop_base(selected);
+      PolyUOp *shaped;
+      if (after && after->op == POLY_OP_AFTER && after->n_src == 2) {
+        PolyUOp *value = poly_uop_substitute(ctx, selected, &after, &after->src[0], 1);
+        PolyUOp *src[] = {value, after->src[1]};
+        shaped = value ? poly_uop_with_metadata_from(
+                             ctx, ret, POLY_OP_AFTER, selected->dtype, src, 2, poly_arg_none()
+                         )
+                       : NULL;
+      } else {
+        /* Some providers insert a materialization boundary rather than CALL. */
+        shaped = poly_uop_with_metadata_from(
+            ctx, ret, selected->op, selected->dtype, selected->src, selected->n_src, selected->arg
+        );
+      }
+      PolyUOp *result =
+          shaped ? poly_transform_to_call_rewrite_nested_contiguous(ctx, shaped, outer, tctx, memo)
+                 : NULL;
+      if (result) poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
+      return result;
+    }
+  }
 
   /* Pinned pm_early_transform_tensor_graph transforms precompiled FUNCTIONs
    * before resolving their enclosing GETTUPLE(TUPLE(...)) selectors

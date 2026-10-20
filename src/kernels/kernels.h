@@ -19,6 +19,11 @@ typedef struct {
   int rows, lanes, vectors;
 } PolyGemmTile;
 
+/* Ordinary UOp body; b indexes [N/cols,K,cols]. It may be a parameter view,
+ * not packed storage. Caller owns input materialization and CALL construction. */
+PolyUOp *poly_kernel_gemm_program(PolyCtx *, int M, int K, int N, PolyUOp *a, PolyUOp *b,
+    const PolyGemmTile *, int workers, int thread_axis);
+
 typedef struct {
   const char *name;
   /* NULL means supported; otherwise a static diagnostic reason. Lowering
@@ -37,6 +42,9 @@ PolyUOp *poly_kernel_gemm_lower(
     int thread_axis
 );
 PolyUOp *poly_kernel_probabilities_lower(PolyCtx *, const PolyGemmDesc *);
+/* Carry reshape/permute indexing into a kernel parameter while retaining the
+ * producer's storage order. Other producers keep a normal contiguous boundary. */
+PolyUOp *poly_kernel_gemm_operand(PolyCtx *, PolyUOp *view, int size, int slot, PolyUOp **input);
 const PolyKernelImpl *poly_cpu_kernel_impls(int *count);
 const PolyKernelImpl *poly_portable_kernel_impls(const char *device, int *count);
 const char *poly_kernel_webgpu_supported(PolyCtx *, const PolyGemmDesc *);
@@ -49,5 +57,7 @@ typedef struct {
 bool poly_kernel_match_segment(PolyCtx *, PolyUOp *, PolySegmentDesc *);
 PolyUOp *poly_kernel_segment_lower(PolyCtx *, const PolySegmentDesc *);
 PolyUOp *poly_kernel_select(PolyCtx *, PolyUOp *);
+/* One already-rewritten tensor node; NULL is failure, unchanged is no match. */
+PolyUOp *poly_kernel_select_node(PolyCtx *, PolyUOp *);
 
 #endif

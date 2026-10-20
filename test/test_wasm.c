@@ -11,6 +11,8 @@
 #include "../src/frontend.h"
 #include "../src/tensor.h"
 #include "../src/uop/spec.h"
+#include "../src/kernels/kernels.h"
+#include "../src/codegen/late/coalesce.h"
 #include "../src/wasm_builder.h"
 
 static int wasm_run_c_i32(
@@ -104,9 +106,25 @@ static int wasm_write_module(const char *path, const uint8_t *wasm, int wasm_siz
 
 static int wasm_count_simd_opcode(const uint8_t *wasm, int wasm_size, int opcode) {
   int count = 0;
-  for (int i = 0; wasm && i + 1 < wasm_size; i++)
-    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == opcode) count++;
+  for (int i = 0; wasm && i + 1 < wasm_size; i++) {
+    if (wasm[i] != WASM_SIMD_PREFIX) continue;
+    unsigned value = 0, shift = 0;
+    for (int j = i + 1; j < wasm_size && shift < 28; j++, shift += 7) {
+      value |= (unsigned)(wasm[j] & 127) << shift;
+      if (!(wasm[j] & 128)) {
+        if (value == (unsigned)opcode) count++;
+        break;
+      }
+    }
+  }
   return count;
+}
+
+TEST(wasm, simd_opcode_counter_decodes_extended_opcodes) {
+  const uint8_t bytes[] = {0xfd, 0xe6, 1, 0xfd, 0x85, 2};
+  ASSERT_INT_EQ(wasm_count_simd_opcode(bytes, sizeof(bytes), WASM_SIMD_F32X4_MUL), 1);
+  ASSERT_INT_EQ(wasm_count_simd_opcode(bytes, sizeof(bytes), WASM_SIMD_F32X4_RELAXED_MADD), 1);
+  PASS();
 }
 
 static int wasm_count_uops(PolyUOp **uops, int n, PolyOps op) {
@@ -200,6 +218,7 @@ static PolyUOp **wasm_linearize_generic_test(PolyCtx *ctx, PolyUOp *sink, int *n
 
       .caps =
           {
+              .device = "WASM",
               .has_mulacc = true,
               .has_threefry = false,
               .has_int64 = true,
@@ -223,6 +242,57 @@ static int node_compile_wasm_module(const char *path) {
       "%s -e \"const fs=require('fs');new WebAssembly.Module(fs.readFileSync('%s'))\"", node, path
   );
   return system(cmd);
+}
+
+TEST(wasm, unaligned_coalescing_at_memory_end) {
+  /* Put either the source or destination against linear memory's end. Any
+   * accidental widening traps; prefix sentinels also catch shifted stores. */
+  for (int start = 0; start < 4; start++)
+    for (int count = 1; count <= 9; count++) {
+      PolyCtx *ctx = poly_ctx_new();
+      PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, start + count, 0);
+      PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, start + count, 1);
+      PolyUOp *stores[9];
+      for (int i = 0; i < count; i++) {
+        PolyUOp *idx = poly_uop_const_int(ctx, start + i);
+        stores[i] = poly_uop_store(ctx, poly_uop_index(ctx, out, &idx, 1),
+                                 poly_uop_load(ctx, poly_uop_index(ctx, in, &idx, 1)));
+      }
+      PolyUOp *sink = poly_memory_coalescing(
+          ctx, poly_uop_sink(ctx, stores, count),
+          (PolyRendererCaps){.device = "WASM", .max_vec_width = 4}
+      );
+      int n = 0, size = 0;
+      PolyUOp **linear = poly_uop_toposort_ex_alloc(ctx, sink, &n, NULL, false);
+      uint8_t *wasm = poly_render_wasm(ctx, linear, n, &size, true);
+      const char *path = "temp/polygrad_test_unaligned_memory_end.wasm";
+      int written = wasm ? wasm_write_module(path, wasm, size) : -1;
+      bool vectorized = count < 4 || wasm_count_simd_opcode(wasm, size, WASM_SIMD_V128_LOAD) > 0;
+      free(wasm);
+      poly_uop_toposort_free(linear);
+      poly_ctx_destroy(ctx);
+      ASSERT_INT_EQ(written, 0);
+      ASSERT_TRUE(vectorized);
+      const char *node = poly_test_node_cmd_for_wasm(path);
+      ASSERT_NOT_NULL(node);
+      char cmd[2048];
+      snprintf(
+          cmd, sizeof(cmd),
+          "%s -e \"const fs=require('fs'),memory=new WebAssembly.Memory({initial:1});"
+          "const x=new Uint32Array(memory.buffer),start=%d,n=%d,end=x.length-start-n;"
+          "const m=new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync('%s')),{env:{memory}});"
+          "for(let reverse=0;reverse<2;reverse++){const a=reverse?16:end,b=reverse?end:16;"
+          "x.fill(0x12345678);for(let j=0;j<n;j++)x[a+start+j]=(j===0?0x80000000:0x3f000001+j*12345);"
+          "const expected=x.slice(a+start,a+start+n);m.exports.kernel(a*4,b*4);"
+          "for(let j=0;j<n;j++)if(x[b+start+j]!==expected[j])throw Error('copy bits');"
+          "for(let j=0;j<start;j++)if(x[b+j]!==0x12345678)throw Error('prefix overwritten');"
+          "let trapped=false;try{m.exports.kernel((a+1)*4,(b+1)*4)}catch(e){trapped=e instanceof WebAssembly.RuntimeError}"
+          "if(!trapped)throw Error('out-of-bounds access did not trap');}\"",
+          node, start, count, path
+      );
+      ASSERT_INT_EQ(system(cmd), 0);
+    }
+  PASS();
 }
 
 static int node_run_wasm_i32(const char *path, int32_t expected) {
@@ -1735,6 +1805,52 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   free(wasm);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static uint8_t *wasm_render_scheduled(PolyCtx *ctx, PolyUOp *body, int *size) {
+  int n = 0;
+  PolyUOp **lin = wasm_linearize_generic_test(ctx, body, &n);
+  if (!lin) return NULL;
+  uint8_t *bytes = poly_render_wasm(ctx, lin, n, size, true);
+  free(lin);
+  return bytes;
+}
+
+TEST(wasm, uop_matmul_uses_strict_simd_and_executes) {
+  for (int transposed = 0; transposed <= 1; transposed++)
+  for (int m = 1; m <= 8; m *= 8)
+  for (int k = 31; k <= 32; k++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_kernel_policy(ctx, 1);
+    int n = 16;
+    PolyTensor *a = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){m,k}, 2, POLY_DEVICE_WASM);
+    PolyTensor *b = poly_tensor_empty(ctx, POLY_FLOAT32,
+        (int64_t[]){transposed ? n : k, transposed ? k : n}, 2, POLY_DEVICE_WASM);
+    PolyUOp *bt = transposed ? poly_uop_permute(ctx, b->uop_physical, (int64_t[]){1,0}, 2) : b->uop_physical;
+    PolyUOp *selected = poly_kernel_select(ctx, poly_uop_dot(ctx, a->uop_physical, bt));
+    int count = 0;
+    PolyUOp **nodes = poly_uop_toposort_alloc(ctx, selected, &count), *body = NULL;
+    for (int i = 0; i < count; i++)
+      if (nodes[i]->op == POLY_OP_CALL) body = nodes[i]->src[0];
+    poly_uop_toposort_free(nodes);
+    ASSERT_NOT_NULL(body);
+    int size = 0;
+    uint8_t *bytes = wasm_render_scheduled(ctx, body, &size);
+    ASSERT_NOT_NULL(bytes);
+    ASSERT_TRUE(wasm_count_simd_opcode(bytes, size, WASM_SIMD_F32X4_MUL) > 0);
+    ASSERT_TRUE(wasm_count_simd_opcode(bytes, size, WASM_SIMD_F32X4_ADD) > 0);
+    ASSERT_INT_EQ(wasm_count_simd_opcode(bytes, size, WASM_SIMD_F32X4_RELAXED_MADD), 0);
+    const char *path = "temp/polygrad_test_uop_matmul.wasm";
+    ASSERT_INT_EQ(wasm_write_module(path, bytes, size), 0);
+    ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+    ASSERT_INT_EQ(transposed ? node_run_wasm_matmul_abt(path, m, n, k)
+                             : node_run_wasm_matmul_ab(path, m, n, k), 0);
+    free(bytes);
+    poly_tensor_release(a);
+    poly_tensor_release(b);
+    poly_ctx_destroy(ctx);
+  }
   PASS();
 }
 
@@ -3594,6 +3710,265 @@ TEST(wasm, structural_gathers_preserve_component_order) {
   PASS();
 }
 
+TEST(wasm, transpose_gathers_share_pair_interleaves) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 16, 1);
+  PolyUOp *ops[96], *indices[17], *vectors[4];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  for (int i = 0; i < 17; i++)
+    ops[n++] = indices[i] = poly_uop_const_int(ctx, i);
+  for (int i = 0; i < 4; i++) {
+    ops[n++] = poly_uop3(
+        ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, indices[4 * i], indices[4], poly_arg_none()
+    );
+    PolyUOp *slice = ops[n - 1];
+    ops[n++] = vectors[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+  }
+  /* Noncanonical column order exercises both the first definition and reuse
+   * of each pair. Stores must not invalidate the captured input vectors. */
+  const int columns[] = {1, 0, 3, 2};
+  for (int c = 0; c < 4; c++) {
+    PolyUOp *lanes[4];
+    for (int i = 0; i < 4; i++)
+      ops[n++] = lanes[i] = poly_uop2(
+          ctx, POLY_OP_INDEX, POLY_FLOAT32, vectors[i], indices[columns[c]], poly_arg_none()
+      );
+    PolyUOp *packed = poly_uop_stack(ctx, lanes, 4);
+    ops[n++] = packed;
+    PolyUOp *slice = poly_uop3(
+        ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, indices[4 * c], indices[4], poly_arg_none()
+    );
+    ops[n++] = slice;
+    ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, slice, packed, poly_arg_none());
+  }
+  int size = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  int shuffles = wasm ? wasm_count_simd_opcode(wasm, size, WASM_SIMD_I8X16_SHUFFLE) : -1;
+  free(wasm);
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[2,6,10,14,1,5,9,13,4,8,12,16,3,7,11,15]",
+      "new Float32Array(mem.buffer,256,16).set(Array.from({length:16},(_,i)=>i+1))", "64,256"
+  );
+  int bits_status = 0;
+  for (int alias = 0; alias < 2; alias++) {
+    char setup[512];
+    snprintf(
+        setup, sizeof(setup),
+        "const values=[0x80000000,0,0x7fc12345,0xff800000,1,0x7f800000,0xffc12345,"
+        "0x80000001,0x3f800000,0xbf800000,0x7fc56789,0x00800000,0x7f7fffff,"
+        "0xff7fffff,0x007fffff,0x807fffff];new Uint32Array(mem.buffer,%d,16).set(values)",
+        alias ? 64 : 256
+    );
+    bits_status |= wasm_check_memory_module(
+        ctx, ops, n, true, "Uint32Array",
+        "[1,5,9,13,0,4,8,12,3,7,11,15,2,6,10,14].map(i=>values[i])", setup,
+        alias ? "64,64" : "64,256"
+    );
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  ASSERT_INT_EQ(bits_status, 0);
+  ASSERT_INT_EQ(shuffles, 8); /* Four shared pair interleaves plus four joins. */
+  PASS();
+}
+
+TEST(wasm, bounded_loads_use_memory_offsets) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 16, 1);
+  PolyUOp *ops[40], *indices[4];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  for (int i = 0; i < 4; i++)
+    ops[n++] = indices[i] = poly_uop_const_int(ctx, 4 * i);
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *slice =
+        poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, indices[i], indices[1], poly_arg_none());
+    ops[n++] = slice;
+    PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+    ops[n++] = value;
+    PolyUOp *dst =
+        poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, indices[i], indices[1], poly_arg_none());
+    ops[n++] = dst;
+    ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, value, poly_arg_none());
+  }
+  int size = 0, offsets = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  for (int i = 0; wasm && i + 3 < size; i++)
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_V128_LOAD && wasm[i + 2] == 2 &&
+        (wasm[i + 3] == 16 || wasm[i + 3] == 32 || wasm[i + 3] == 48))
+      offsets++;
+  free(wasm);
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Uint32Array",
+      "[0x80000000,0,0x7fc12345,0xff800000,1,0x7f800000,0xffc12345,0x80000001,"
+      "0x3f800000,0xbf800000,0x7fc56789,0x00800000,0x7f7fffff,0xff7fffff,0x007fffff,0x807fffff]",
+      "new Uint32Array(mem.buffer,256,16).set([0x80000000,0,0x7fc12345,0xff800000,1,"
+      "0x7f800000,0xffc12345,0x80000001,0x3f800000,0xbf800000,0x7fc56789,0x00800000,"
+      "0x7f7fffff,0xff7fffff,0x007fffff,0x807fffff])",
+      "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  ASSERT_INT_EQ(offsets, 3);
+  PASS();
+}
+
+TEST(wasm, load_offsets_preserve_gates_and_negative_indices) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 3, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 3, 1);
+  PolyUOp *ops[32];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  PolyUOp *zero = poly_uop_const_int(ctx, 0), *one = poly_uop_const_int(ctx, 1);
+  PolyUOp *two = poly_uop_const_int(ctx, 2), *minus = poly_uop_const_int(ctx, -1);
+  PolyUOp *alt = poly_uop_const_float(ctx, 9);
+  PolyUOp *gate = poly_uop_const(ctx, poly_arg_bool(false), POLY_BOOL);
+  ops[n++] = zero;
+  ops[n++] = one;
+  ops[n++] = two;
+  ops[n++] = minus;
+  ops[n++] = alt;
+  ops[n++] = gate;
+  PolyUOp *indices[] = {zero, one, minus};
+  PolyUOp *dsts[] = {zero, one, two};
+  for (int i = 0; i < 3; i++) {
+    PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, indices[i], poly_arg_none());
+    ops[n++] = addr;
+    PolyUOp *value =
+        i == 0 ? poly_uop3(ctx, POLY_OP_LOAD, POLY_FLOAT32, addr, alt, gate, poly_arg_none())
+               : poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, addr, poly_arg_none());
+    ops[n++] = value;
+    PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, dsts[i], poly_arg_none());
+    ops[n++] = dst;
+    ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, value, poly_arg_none());
+  }
+  /* The masked first load must not leave an uninitialized shared base. A
+   * negative index still uses the original wrapping address arithmetic. */
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[9,42,21]",
+      "new Float32Array(mem.buffer,256,3).set([21,33,42])", "64,260"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  PASS();
+}
+
+TEST(wasm, load_offsets_follow_loop_indices) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 16, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 16, 1);
+  PolyUOp *ops[64];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  PolyUOp *four = poly_uop_const_int(ctx, 4);
+  PolyUOp *range = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  ops[n++] = four;
+  ops[n++] = range;
+  PolyUOp *base = poly_uop_mul(ctx, range, four);
+  ops[n++] = base;
+  PolyUOp *stores[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *c = poly_uop_const_int(ctx, i);
+    PolyUOp *index = poly_uop_add(ctx, base, c);
+    ops[n++] = c;
+    ops[n++] = index;
+    PolyUOp *addr = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, index, poly_arg_none());
+    ops[n++] = addr;
+    PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, addr, poly_arg_none());
+    ops[n++] = value;
+    PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, index, poly_arg_none());
+    ops[n++] = dst;
+    ops[n++] = stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, value, poly_arg_none());
+  }
+  PolyUOp *group = poly_uop_group(ctx, stores, 4);
+  ops[n++] = group;
+  ops[n++] = poly_uop_end(ctx, group, &range, 1);
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "Array.from({length:16},(_,i)=>i-7)",
+      "new Float32Array(mem.buffer,256,16).set(Array.from({length:16},(_,i)=>i-7))", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  PASS();
+}
+
+TEST(wasm, lowered_affine_loads_use_memory_offsets) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 48, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 48, 1);
+  PolyUOp *ops[80];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  PolyUOp *three = poly_uop_const_int(ctx, 3);
+  PolyUOp *range = poly_uop_range(ctx, 3, 0, POLY_AXIS_LOOP);
+  PolyUOp *r = poly_uop_cast(ctx, range, POLY_INT32);
+  PolyUOp *sixteen = poly_uop_cast(ctx, poly_uop_const_int(ctx, 16), POLY_INT32);
+  PolyUOp *four = poly_uop_const_int(ctx, 4);
+  PolyUOp *two = poly_uop_cast(ctx, poly_uop_const_int(ctx, 2), POLY_INT32);
+  ops[n++] = three;
+  ops[n++] = sixteen->src[0];
+  ops[n++] = sixteen;
+  ops[n++] = four;
+  ops[n++] = two->src[0];
+  ops[n++] = two;
+  ops[n++] = range;
+  ops[n++] = r;
+  PolyUOp *stores[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *c = poly_uop_cast(ctx, poly_uop_const_int(ctx, i), POLY_INT32);
+    PolyUOp *shift = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, c, two, poly_arg_none());
+    PolyUOp *index = poly_uop3(ctx, POLY_OP_MULACC, POLY_INT32, r, sixteen, shift, poly_arg_none());
+    ops[n++] = c->src[0];
+    ops[n++] = c;
+    ops[n++] = shift;
+    ops[n++] = index;
+    PolyUOp *addr = poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, index, four, poly_arg_none());
+    ops[n++] = addr;
+    PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, addr, poly_arg_none());
+    ops[n++] = value;
+    PolyUOp *dst = poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, index, four, poly_arg_none());
+    ops[n++] = dst;
+    ops[n++] = stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, value, poly_arg_none());
+  }
+  PolyUOp *group = poly_uop_group(ctx, stores, 4);
+  ops[n++] = group;
+  ops[n++] = poly_uop_end(ctx, group, &range, 1);
+  int size = 0, offsets = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  for (int i = 0; wasm && i + 3 < size; i++)
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_V128_LOAD && wasm[i + 2] == 2 &&
+        (wasm[i + 3] == 16 || wasm[i + 3] == 32 || wasm[i + 3] == 48))
+      offsets++;
+  free(wasm);
+  int status = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "Array.from({length:48},(_,i)=>i-17)",
+      "new Float32Array(mem.buffer,256,48).set(Array.from({length:48},(_,i)=>i-17))", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(status, 0);
+  ASSERT_INT_EQ(offsets, 3);
+  PASS();
+}
+
 TEST(wasm, vector_lane_broadcast_preserves_load_before_store) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
@@ -3759,6 +4134,313 @@ TEST(wasm, memory_dynamic_reg_index_fails_closed) {
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(rejected);
   ASSERT_INT_EQ(bytes, 0);
+  PASS();
+}
+
+TEST(wasm, structural_mixed_float_int_lanes) {
+  /* The exponent construction used by lowered exp2 must stay vector-valued
+   * through float/int conversion and bit operations, without changing math. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+  PolyUOp *ops[64], *values[4], *idx[5];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  for (int i = 0; i < 5; i++)
+    ops[n++] = idx[i] = poly_uop_const_int(ctx, i);
+  PolyUOp *bias = wasm_test_literal(ctx, POLY_INT32, 127);
+  PolyUOp *shift = wasm_test_literal(ctx, POLY_INT32, 23);
+  ops[n++] = bias;
+  ops[n++] = shift;
+  PolyUOp *slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, idx[0], idx[4], poly_arg_none());
+  ops[n++] = slice;
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+  ops[n++] = load;
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *x = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, load, idx[i], poly_arg_none());
+    ops[n++] = x;
+    PolyUOp *integer = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, x, poly_arg_none());
+    ops[n++] = integer;
+    PolyUOp *exponent = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, integer, bias, poly_arg_none());
+    ops[n++] = exponent;
+    PolyUOp *bits = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, exponent, shift, poly_arg_none());
+    ops[n++] = bits;
+    ops[n++] = values[i] = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT32, bits, poly_arg_none());
+  }
+  PolyUOp *packed = poly_uop_stack(ctx, values, 4);
+  ops[n++] = packed;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+  int size = 0;
+  uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  int converts = wasm ? wasm_count_simd_opcode(wasm, size, WASM_SIMD_I32X4_TRUNC_SAT_F32X4_S) : -1;
+  free(wasm);
+  int rc = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[0.25,0.5,1,4]",
+      "new Float32Array(mem.buffer,256,4).set([-2,-1,0,2])", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_INT_EQ(converts, 1);
+  PASS();
+}
+
+TEST(wasm, structural_lowered_exp2_lanes) {
+  WasmVecKernel k = wasm_make_vec_unary(POLY_OP_EXP2, 2816);
+  int n = 0, size = 0;
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n);
+  ASSERT_NOT_NULL(lin);
+  uint8_t *bytes = poly_render_wasm(k.ctx, lin, n, &size, true);
+  int converts = bytes ? wasm_count_simd_opcode(bytes, size, WASM_SIMD_F32X4_CONVERT_I32X4_S) : -1;
+  free(bytes);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  /* Covers the decomposed math graph, including comparisons of bool masks,
+   * not only a synthetic cast/shift tree. */
+  ASSERT_TRUE(converts > 0);
+  PASS();
+}
+
+TEST(wasm, structural_mixed_shared_dag) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 4, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+  PolyUOp *ops[128], *values[4], *idx[5];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  for (int i = 0; i < 5; i++)
+    ops[n++] = idx[i] = poly_uop_const_int(ctx, i);
+  PolyUOp *slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, idx[0], idx[4], poly_arg_none());
+  ops[n++] = slice;
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+  ops[n++] = load;
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *x = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, load, idx[i], poly_arg_none());
+    ops[n++] = x;
+    ops[n++] = x = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, x, poly_arg_none());
+    /* A shared expression stays a DAG, not an exponentially expanded tree. */
+    for (int j = 0; j < 18; j++)
+      ops[n++] = x = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, x, poly_arg_none());
+    ops[n++] = values[i] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x, poly_arg_none());
+  }
+  PolyUOp *packed = poly_uop_stack(ctx, values, 4);
+  ops[n++] = packed;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+  int size = 0;
+  uint8_t *bytes = poly_render_wasm(ctx, ops, n, &size, true);
+  int adds = bytes ? wasm_count_simd_opcode(bytes, size, WASM_SIMD_I32X4_ADD) : -1;
+  free(bytes);
+  int rc = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[262144,524288,786432,1048576]",
+      "new Float32Array(mem.buffer,256,4).set([1,2,3,4])", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_INT_EQ(adds, 18);
+  PASS();
+}
+
+TEST(wasm, structural_mixed_shared_scalar) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 12, 0);
+  PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 4, 1);
+  PolyUOp *ops[96], *values[4], *shifted[4], *mixed[4], *idx[9];
+  int n = 0;
+  ops[n++] = out->src[0];
+  ops[n++] = in->src[0];
+  ops[n++] = out;
+  ops[n++] = in;
+  for (int i = 0; i < 9; i++)
+    ops[n++] = idx[i] = poly_uop_const_int(ctx, i);
+  PolyUOp *slice =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, idx[0], idx[4], poly_arg_none());
+  ops[n++] = slice;
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+  ops[n++] = load;
+  PolyUOp *small =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, idx[0], idx[2], poly_arg_none());
+  ops[n++] = small;
+  ops[n++] = small = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, small, poly_arg_none());
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *x = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, load, idx[i], poly_arg_none());
+    ops[n++] = x;
+    ops[n++] = x = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, x, poly_arg_none());
+    ops[n++] = values[i] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x, poly_arg_none());
+  }
+  for (int i = 0; i < 4; i++)
+    ops[n++] = shifted[i] =
+        poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, values[i], values[0], poly_arg_none());
+  for (int i = 0; i < 4; i++) {
+    if (i % 2 == 0) {
+      mixed[i] = values[i / 2];
+      continue;
+    }
+    PolyUOp *x = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, small, idx[i / 2], poly_arg_none());
+    ops[n++] = x;
+    ops[n++] = x = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, x, poly_arg_none());
+    ops[n++] = mixed[i] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x, poly_arg_none());
+  }
+  PolyUOp *packed = poly_uop_stack(ctx, values, 4), *second = poly_uop_stack(ctx, shifted, 4);
+  ops[n++] = packed;
+  ops[n++] = second;
+  PolyUOp *third = poly_uop_stack(ctx, mixed, 4);
+  ops[n++] = third;
+  PolyUOp *tail =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, idx[4], idx[4], poly_arg_none());
+  ops[n++] = tail;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, tail, second, poly_arg_none());
+  PolyUOp *last =
+      poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, out, idx[8], idx[4], poly_arg_none());
+  ops[n++] = last;
+  ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, last, third, poly_arg_none());
+  int rc = wasm_check_memory_module(
+      ctx, ops, n, true, "Float32Array", "[1,2,3,4,2,3,4,5,1,1,2,2]",
+      "new Float32Array(mem.buffer,256,4).set([1.5,2.5,3.5,4.5])", "64,256"
+  );
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(rc, 0);
+  PASS();
+}
+
+TEST(wasm, structural_mixed_lanes_match_scalar_consumers) {
+  ASSERT_NOT_NULL(poly_test_node_cmd());
+  struct {
+    PolyOps op;
+    PolyDType dtype;
+    int opcode;
+    bool varying_shift;
+  } cases[] = {
+      {POLY_OP_CAST, POLY_INT32, WASM_SIMD_I32X4_TRUNC_SAT_F32X4_S, false},
+      {POLY_OP_CAST, POLY_UINT32, WASM_SIMD_I32X4_TRUNC_SAT_F32X4_U, false},
+      {POLY_OP_ADD, POLY_INT32, WASM_SIMD_I32X4_ADD, false},
+      {POLY_OP_SUB, POLY_UINT32, WASM_SIMD_I32X4_SUB, false},
+      {POLY_OP_MUL, POLY_INT32, WASM_SIMD_I32X4_MUL, false},
+      {POLY_OP_AND, POLY_UINT32, WASM_SIMD_V128_AND, false},
+      {POLY_OP_OR, POLY_INT32, WASM_SIMD_V128_OR, false},
+      {POLY_OP_XOR, POLY_INT32, WASM_SIMD_V128_XOR, false},
+      {POLY_OP_SHL, POLY_INT32, WASM_SIMD_I32X4_SHL, false},
+      {POLY_OP_SHR, POLY_INT32, WASM_SIMD_I32X4_SHR_S, false},
+      {POLY_OP_SHR, POLY_UINT32, WASM_SIMD_I32X4_SHR_U, false},
+      {POLY_OP_SHL, POLY_INT32, WASM_SIMD_I32X4_SHL, true},
+      {POLY_OP_CMPLT, POLY_INT32, WASM_SIMD_I32X4_LT_S, false},
+      {POLY_OP_CMPLT, POLY_UINT32, WASM_SIMD_I32X4_LT_U, false},
+      {POLY_OP_CMPEQ, POLY_INT32, WASM_SIMD_I32X4_EQ, false},
+      {POLY_OP_CMPNE, POLY_UINT32, WASM_SIMD_I32X4_NE, false},
+      {POLY_OP_AND, POLY_BOOL, WASM_SIMD_V128_AND, false},
+      {POLY_OP_OR, POLY_BOOL, WASM_SIMD_V128_OR, false},
+      {POLY_OP_XOR, POLY_BOOL, WASM_SIMD_V128_XOR, false},
+      {POLY_OP_CMPLT, POLY_BOOL, WASM_SIMD_I32X4_LT_U, false},
+      {POLY_OP_CMPEQ, POLY_BOOL, WASM_SIMD_I32X4_EQ, false},
+      {POLY_OP_CMPNE, POLY_BOOL, WASM_SIMD_I32X4_NE, false},
+  };
+  int failures = 0;
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *out = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0);
+    PolyUOp *in = poly_test_program_param(ctx, POLY_FLOAT32, 8, 1);
+    PolyUOp *ops[160], *idx[9], *result[4];
+    int n = 0;
+    ops[n++] = out->src[0];
+    ops[n++] = in->src[0];
+    ops[n++] = out;
+    ops[n++] = in;
+    for (int i = 0; i < 9; i++)
+      ops[n++] = idx[i] = poly_uop_const_int(ctx, i);
+    PolyUOp *vectors[2];
+    for (int i = 0; i < 2; i++) {
+      PolyUOp *slice =
+          poly_uop3(ctx, POLY_OP_SHRINK, POLY_FLOAT32, in, idx[4 * i], idx[4], poly_arg_none());
+      ops[n++] = slice;
+      ops[n++] = vectors[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, slice, poly_arg_none());
+    }
+    PolyUOp *count = wasm_test_literal(ctx, POLY_INT32, -1);
+    PolyUOp *zero = wasm_test_literal(ctx, POLY_FLOAT32, 0);
+    ops[n++] = count;
+    ops[n++] = zero;
+    for (int i = 0; i < 4; i++) {
+      PolyUOp *f[2], *v[2];
+      for (int j = 0; j < 2; j++) {
+        ops[n++] = f[j] =
+            poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, vectors[j], idx[i], poly_arg_none());
+        v[j] = poly_dtype_is_bool(cases[c].dtype)
+                   ? poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, f[j], zero, poly_arg_none())
+                   : poly_uop1(
+                         ctx, cases[c].op == POLY_OP_CAST ? POLY_OP_CAST : POLY_OP_BITCAST,
+                         cases[c].dtype, f[j], poly_arg_none()
+                     );
+        ops[n++] = v[j];
+      }
+      bool cmp = cases[c].op == POLY_OP_CMPLT || cases[c].op == POLY_OP_CMPEQ ||
+                 cases[c].op == POLY_OP_CMPNE;
+      bool shift = cases[c].op == POLY_OP_SHL || cases[c].op == POLY_OP_SHR;
+      PolyUOp *value = cases[c].op == POLY_OP_CAST
+                           ? v[0]
+                           : poly_uop2(
+                                 ctx, cases[c].op, cmp ? POLY_BOOL : cases[c].dtype, v[0],
+                                 shift && !cases[c].varying_shift ? count : v[1], poly_arg_none()
+                             );
+      if (value != v[0]) ops[n++] = value;
+      if (cmp || poly_dtype_is_bool(cases[c].dtype)) {
+        PolyUOp *src[] = {value, f[0], f[1]};
+        result[i] = poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32, src, 3, poly_arg_none());
+      } else {
+        result[i] = poly_uop1(
+            ctx, cases[c].op == POLY_OP_CAST ? POLY_OP_CAST : POLY_OP_BITCAST, POLY_FLOAT32, value,
+            poly_arg_none()
+        );
+      }
+      ops[n++] = result[i];
+    }
+    PolyUOp *packed = poly_uop_stack(ctx, result, 4);
+    ops[n++] = packed;
+    ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
+    /* Independent scalar stores keep their dependencies alive. Compare the
+     * packed result with the same expression emitted by the scalar fallback. */
+    for (int i = 0; i < 4; i++) {
+      PolyUOp *address =
+          poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, idx[i + 4], poly_arg_none());
+      ops[n++] = address;
+      ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, address, result[i], poly_arg_none());
+    }
+    int size = 0;
+    uint8_t *bytes = poly_render_wasm(ctx, ops, n, &size, true);
+    int packed_ops = bytes ? wasm_count_simd_opcode(bytes, size, cases[c].opcode) : -1;
+    int rc = bytes ? wasm_write_module("temp/polygrad_test_mixed.wasm", bytes, size) : -1;
+    free(bytes);
+    if (packed_ops < 0 || (cases[c].varying_shift ? packed_ops != 0 : packed_ops < 1)) failures++;
+    if (!rc) {
+      char command[2400];
+      snprintf(
+          command, sizeof(command),
+          "%s -e \"const fs=require('fs'),a=require('assert/strict'),m=new "
+          "WebAssembly.Memory({initial:1});"
+          "const k=new WebAssembly.Instance(new "
+          "WebAssembly.Module(fs.readFileSync('temp/"
+          "polygrad_test_mixed.wasm')),{env:{memory:m}}).exports.kernel;"
+          "const x=new Uint32Array(m.buffer,256,8),y=new Uint32Array(m.buffer,64,8);let s=43981;"
+          "const edge=[0,2147483648,2139095040,4286578688,2143289344,1,4294967295,1065353216];"
+          "for(let j=0;j<128;j++){for(let "
+          "i=0;i<8;i++){s=(Math.imul(s,1664525)+1013904223)>>>0;x[i]=j<8?edge[(i+j)%%8]:s;}"
+          "k(64,256);a.deepEqual(Array.from(y.slice(0,4)),Array.from(y.slice(4)));}\"",
+          poly_test_node_cmd()
+      );
+      rc = system(command);
+    }
+    if (rc) {
+      fprintf(stderr, "mixed lane case %zu failed\n", c);
+      failures++;
+    }
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_INT_EQ(failures, 0);
   PASS();
 }
 

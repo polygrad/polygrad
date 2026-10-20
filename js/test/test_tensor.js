@@ -3215,6 +3215,27 @@ async function runTensorTests(pg, createRuntime) {
     assert(Math.abs(arr[0]) < 0.01, `silu(0) should be ~0, got ${arr[0]}`)
   })
 
+  await test('transcendental vector widths and silu gradients', async () => {
+    // Lowered exponentials mix float arithmetic, integer casts and bool masks.
+    // Include both complete vector widths and scalar tails.
+    const input = [-10, -4, -1, -0, 0, 0.125, 0.5, 1, 4, 10]
+    const sigmoid = x => 1 / (1 + Math.exp(-x))
+    for (const n of [1, 3, 4, 5, 17]) {
+      const values = Array.from({length: n}, (_, i) => input[i % input.length])
+      const x = new Tensor(values, { dtype: 'float32' })
+      const y = x.silu()
+      await y.sum().backward()
+      assertClose(await y.toArray(), values.map(v => v * sigmoid(v)), 2e-5)
+      assertClose(await x.grad.toArray(), values.map(v => {
+        const s = sigmoid(v)
+        return s + v * s * (1 - s)
+      }), 2e-5)
+    }
+    const special = new Tensor([-Infinity, -90, 0, 90, Infinity, NaN, -1])
+    const actual = await special.sigmoid().toArray()
+    assertClose(actual, [0, 0, 0.5, 1, 1, NaN, sigmoid(-1)], 2e-5)
+  })
+
   // -- Comparisons --
   console.log('\n-- Comparisons --')
 

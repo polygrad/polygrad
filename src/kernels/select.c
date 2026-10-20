@@ -8,9 +8,7 @@ typedef struct {
   bool failed, debug;
 } KernelSelection;
 
-static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
-  (void)bindings;
-  KernelSelection *s = poly_graph_rewrite_userctx();
+static PolyUOp *select_node(PolyCtx *ctx, PolyUOp *u, KernelSelection *s) {
   if (s->failed) return NULL;
   PolySegmentDesc segment;
   if (poly_kernel_match_segment(ctx, u, &segment)) {
@@ -51,9 +49,22 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
   return NULL;
 }
 
+static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
+  (void)bindings;
+  return select_node(ctx, u, poly_graph_rewrite_userctx());
+}
+
+PolyUOp *poly_kernel_select_node(PolyCtx *ctx, PolyUOp *u) {
+  ctx->kernel_policy_locked = true;
+  if (!ctx->kernel_policy) return u;
+  KernelSelection s = {.debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0};
+  PolyUOp *result = select_node(ctx, u, &s);
+  return s.failed ? NULL : result ? result : u;
+}
+
 PolyUOp *poly_kernel_select(PolyCtx *ctx, PolyUOp *sink) {
   ctx->kernel_policy_locked = true;
-  if (!ctx->kernel_policy) return sink;
+  if (ctx->kernel_policy == 0) return sink;
   KernelSelection s = {.debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0};
   static _Thread_local PolyPatternMatcher *pm;
   if (!pm) {
