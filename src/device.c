@@ -23,6 +23,12 @@ static _Thread_local PolyFrontendBufferReleaseFn g_frontend_buffer_release = NUL
 
 #ifdef POLY_TESTING
 static _Thread_local int buffer_handle_fail_after = -1;
+static _Thread_local int buffer_view_proof_count;
+int poly_test_buffer_view_proof_count(bool reset) {
+  int count = buffer_view_proof_count;
+  if (reset) buffer_view_proof_count = 0;
+  return count;
+}
 void poly_test_buffer_handle_fail_after(int count) {
   buffer_handle_fail_after = count;
 }
@@ -933,6 +939,9 @@ bool poly_uop_contiguous_view_info(
     size_t *out_byte_offset
 ) {
   if (!ctx || !u || !out_identity || !out_shape || !out_numel || !out_byte_offset) return false;
+#ifdef POLY_TESTING
+  buffer_view_proof_count++;
+#endif
   *out_identity = NULL;
   *out_shape = (PolyShape){.ndim = -1};
   *out_numel = -1;
@@ -1318,12 +1327,20 @@ PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
        u->op == POLY_OP_AFTER) &&
       u->n_src >= 1)
     return poly_uop_buffer(ctx, u->src[0]);
+  /* Pinned UOp.buffer checks buffers before contiguous_view (ops.py:926).
+   * Geometry is immutable; context borrower records protect the cached base.
+   * Allocation/validity still refresh at use time, not at this lookup. */
+  if ((u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u))
+    return u;
   /* Pinned UOp.buffer creates a typed Buffer.view for BITCAST after resolving
    * the source Buffer/view (uop/ops.py:838-856). This is what makes an
    * unequal-width DISK BITCAST a zero-copy typed file view instead of a
    * scalar reinterpretation kernel. Attach the non-owning runtime alias to
    * the immutable BITCAST node; graph topology stays unchanged. */
   if (u->op == POLY_OP_BITCAST && u->n_src == 1) {
+#ifdef POLY_TESTING
+    buffer_view_proof_count++;
+#endif
     PolyBuffer *source = poly_uop_buffer_handle(ctx, u->src[0]);
     PolyShape shape = poly_uop_max_shape_cached(ctx, u);
     uint64_t numel = 0;

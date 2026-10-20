@@ -8603,6 +8603,8 @@ TEST(realize, mselect_call_executes_selected_scalar_lane_like_pinned) {
   PASS();
 }
 
+extern int poly_test_buffer_view_proof_count(bool reset);
+
 TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -8649,8 +8651,10 @@ TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
 
   PolyCtxStats first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
+  poly_test_buffer_view_proof_count(true);
   for (int i = 0; i < 100; i++)
     ASSERT_PTR_EQ(poly_uop_buffer(ctx, contiguous), view_key);
+  int warm_proofs = poly_test_buffer_view_proof_count(false);
   PolyCtxStats replay = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay), 0);
   ASSERT_INT_EQ(ctx->next_unique_id, unique_before);
@@ -8668,6 +8672,57 @@ TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
   ASSERT_TRUE(replay.kernel_count == 0);
 
   poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(warm_proofs, 0);
+  PASS();
+}
+
+TEST(realize, cached_typed_view_preserves_storage_lifetime_and_failures) {
+  PolyCtx *ctx = poly_ctx_new();
+  uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  uint8_t next[8] = {10, 11, 12, 13, 14, 15, 16, 17};
+  PolyUOp *base = poly_test_buffer_on_device(ctx, POLY_UINT8, 8, POLY_DEVICE_CPU);
+  PolyBuffer storage = poly_buffer_make_host_view(data, sizeof(data));
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, base, &storage), 0);
+  poly_uop_retain(ctx, base);
+  PolyUOp *slice = poly_uop_shrink(ctx, base, (int64_t[][2]){{2, 6}}, 1);
+  PolyUOp *typed = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT16, slice, poly_arg_none());
+  poly_uop_retain(ctx, typed);
+  PolyBuffer *view = poly_uop_buffer_handle(ctx, typed);
+  ASSERT_NOT_NULL(view);
+  ASSERT_TRUE(poly_test_buffer_view_proof_count(true) > 0);
+  for (int i = 0; i < 100; i++)
+    ASSERT_PTR_EQ(poly_uop_buffer_handle(ctx, typed), view);
+  int warm_proofs = poly_test_buffer_view_proof_count(false);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+
+  /* A cached view owns no bytes but keeps its base residency alive. Writes
+   * remain visible; replacing that storage while the view lives is rejected. */
+  uint8_t got[4] = {0};
+  data[3] = 99;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, typed, got, sizeof(got)), 0);
+  ASSERT_TRUE(memcmp(got, data + 2, sizeof(got)) == 0);
+  PolyBuffer replacement = poly_buffer_make_host_view(next, sizeof(next));
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, base, &replacement), -1);
+  ASSERT_PTR_EQ(poly_uop_buffer_handle(ctx, typed), view);
+  poly_uop_release(ctx, typed);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_INT_EQ(poly_buffer_attach(ctx, base, &replacement), 0);
+
+  /* After collection, recreate the same shape against the new storage. */
+  slice = poly_uop_shrink(ctx, base, (int64_t[][2]){{2, 6}}, 1);
+  typed = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT16, slice, poly_arg_none());
+  poly_uop_retain(ctx, typed);
+  ASSERT_NOT_NULL(poly_uop_buffer_handle(ctx, typed));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, typed, got, sizeof(got)), 0);
+  ASSERT_TRUE(memcmp(got, next + 2, sizeof(got)) == 0);
+  poly_buffer_fail(poly_buffer_get(ctx, base));
+  ASSERT_NOT_NULL(poly_uop_buffer_handle(ctx, typed));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, typed, got, sizeof(got)), -1);
+  poly_uop_release(ctx, typed);
+  poly_uop_release(ctx, base);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(warm_proofs, 0);
   PASS();
 }
 
