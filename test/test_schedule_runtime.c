@@ -1992,6 +1992,131 @@ TEST(schedule_runtime, run_linear_executes_current_call_graph) {
 }
 
 extern int poly_test_runtime_env_stamp_count(bool reset);
+extern int poly_test_linear_scratch_allocations(bool reset);
+extern void poly_test_linear_scratch_fail_after(int count);
+
+static PolyUOp *scratch_copy_call(PolyCtx *ctx, PolyUOp *dst, PolyUOp *src) {
+  PolyUOp *copy = poly_uop1(
+      ctx, POLY_OP_COPY, src->dtype, src,
+      poly_arg_str(poly_uop_device_uop_cached(ctx, dst, NULL)->arg.str)
+  );
+  PolyUOp *args[] = {copy, dst, src};
+  return poly_uop(ctx, POLY_OP_CALL, POLY_VOID, args, 3, poly_arg_none());
+}
+
+TEST(schedule_runtime, linear_scratch_reused_but_bindings_are_fresh) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *b = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *c = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+  PolyUOp *calls[] = {
+      scratch_copy_call(ctx, b, a), scratch_copy_call(ctx, c, b), scratch_copy_call(ctx, b, c)};
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 3, poly_arg_none());
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  bool ok = true;
+  int counts[3];
+  float inputs[] = {1, 2, 3};
+  for (int i = 0; i < 3; i++) {
+    float got = 0;
+    PolyBuffer replacement = poly_buffer_make_host_view(&inputs[i], sizeof(inputs[i]));
+    ok &= poly_buffer_attach(ctx, a, &replacement) == 0;
+    poly_test_linear_scratch_allocations(true);
+    ok &= poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false) == 0;
+    counts[i] = poly_test_linear_scratch_allocations(false);
+    ok &= poly_buffer_read(ctx, c, &got, sizeof(got)) == 0 && got == inputs[i];
+  }
+  PolyUOp *empty = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 0, poly_arg_none());
+  poly_test_linear_scratch_allocations(true);
+  ok &= poly_run_linear(ctx, empty, NULL, 0, NULL, 0, true, true, false) == 0;
+  int empty_count = poly_test_linear_scratch_allocations(false);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  for (int i = 0; i < 3; i++)
+    ASSERT_INT_EQ(counts[i], 3);
+  ASSERT_INT_EQ(empty_count, 0);
+  PASS();
+}
+
+TEST(schedule_runtime, linear_scratch_growth_failure_preserves_untouched_outputs) {
+  /* First COPY needs two arguments, then PROGRAM needs three. Failure while
+   * growing scratch may invalidate the written prefix, never the suffix. */
+  for (int failure = -1; failure < 6; failure++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+    PolyUOp *out[3];
+    float input = 2, old = 7, got = 0;
+    ASSERT_INT_EQ(poly_buffer_write(ctx, a, &input, sizeof(input)), 0);
+    for (int i = 0; i < 3; i++) {
+      out[i] = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+      ASSERT_INT_EQ(poly_buffer_write(ctx, out[i], &old, sizeof(old)), 0);
+    }
+    PolyUOp *program = poly_compile_linear(
+        ctx, poly_test_create_linear(
+                 ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out[1], poly_uop_add(ctx, out[0], a)))
+             ), 0
+    );
+    ASSERT_NOT_NULL(program);
+    ASSERT_INT_EQ(poly_test_linear_call_n_buffers(program, 0), 3);
+    PolyUOp *calls[] = {
+        scratch_copy_call(ctx, out[0], a), program->src[0],
+        scratch_copy_call(ctx, out[2], out[1]), program->src[0]};
+    PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 4, poly_arg_none());
+    poly_test_linear_scratch_allocations(true);
+    poly_test_linear_scratch_fail_after(failure);
+    int rc = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false);
+    poly_test_linear_scratch_fail_after(-1);
+    int count = poly_test_linear_scratch_allocations(false);
+    bool ok = rc == (failure < 0 ? 0 : -1);
+    ok &= poly_buffer_failed(poly_buffer_get(ctx, out[0])) == (failure >= 3);
+    for (int i = 1; i < 3; i++)
+      ok &= !poly_buffer_failed(poly_buffer_get(ctx, out[i])) &&
+            poly_buffer_read(ctx, out[i], &got, sizeof(got)) == 0 &&
+            got == (failure < 0 ? 4 : old);
+    ok &= !poly_buffer_failed(poly_buffer_get(ctx, a));
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(ok);
+    ASSERT_INT_EQ(count, failure >= 0 && failure < 3 ? 3 : 6);
+  }
+  PASS();
+}
+
+TEST(schedule_runtime, linear_scratch_clears_multi_and_scalar_items) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *input[2], *out[2];
+  for (int i = 0; i < 2; i++) {
+    input[i] = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+    out[i] = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_INTERP);
+    float value = (float)(10 + i);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, input[i], &value, sizeof(value)), 0);
+  }
+  PolyUOp *in_stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, input, 2, poly_arg_none());
+  PolyUOp *out_stack = poly_uop(ctx, POLY_OP_MSTACK, POLY_FLOAT32, out, 2, poly_arg_none());
+  /* COPY's body describes the transfer; the CALL carries the MultiBuffers. */
+  PolyUOp *scalar = scratch_copy_call(ctx, out[0], input[0]);
+  PolyUOp *multi_args[] = {scalar->src[0], out_stack, in_stack};
+  PolyUOp *multi = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, multi_args, 3, poly_arg_none());
+  PolyUOp *calls[] = {multi, scalar, multi};
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 3, poly_arg_none());
+  poly_test_linear_scratch_allocations(true);
+  int rc = poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false);
+  int count = poly_test_linear_scratch_allocations(false);
+  bool ok = rc == 0;
+  for (int i = 0; i < 2; i++) {
+    float got = 0;
+    ok &= poly_buffer_read(ctx, out[i], &got, sizeof(got)) == 0 && got == 10 + i;
+  }
+  /* Resolve the destination's allocated lane array, then fail on the source.
+   * Cleanup must free those items without invalidating an unwritten output. */
+  poly_buffer_fail(poly_buffer_get(ctx, input[0]));
+  PolyUOp *failed = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, multi, poly_arg_none());
+  ok &= poly_run_linear(ctx, failed, NULL, 0, NULL, 0, true, true, false) == -1;
+  for (int i = 0; i < 2; i++)
+    ok &= !poly_buffer_failed(poly_buffer_get(ctx, out[i]));
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  ASSERT_INT_EQ(count, 3);
+  PASS();
+}
 
 TEST(schedule_runtime, replay_reads_compiler_policy_once_per_invocation) {
   PolyCtx *ctx = poly_ctx_new();

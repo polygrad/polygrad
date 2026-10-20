@@ -3981,12 +3981,18 @@ static int poly_resolve_linear_arg(
   return 0;
 }
 
-static void poly_resolved_linear_args_free(PolyResolvedLinearArg *args, int n_args) {
+static void poly_resolved_linear_args_release_items(PolyResolvedLinearArg *args, int n_args) {
   if (!args) return;
   for (int i = 0; i < n_args; i++)
     if (args[i].items != &args[i].container) free(args[i].items);
+}
+
+#ifdef POLY_HAS_CUDA
+static void poly_resolved_linear_args_free(PolyResolvedLinearArg *args, int n_args) {
+  poly_resolved_linear_args_release_items(args, n_args);
   free(args);
 }
+#endif
 
 static int poly_linear_lane_count(
     const PolyProgramInfo *info,
@@ -4681,6 +4687,29 @@ fail:
 }
 #endif
 
+#ifdef POLY_TESTING
+static _Thread_local int linear_scratch_allocations, linear_scratch_fail_after = -1;
+int poly_test_linear_scratch_allocations(bool reset) {
+  int count = linear_scratch_allocations;
+  if (reset) linear_scratch_allocations = 0;
+  return count;
+}
+void poly_test_linear_scratch_fail_after(int count) {
+  linear_scratch_fail_after = count;
+}
+static void *poly_linear_scratch_calloc(size_t count, size_t size) {
+  linear_scratch_allocations++;
+  if (linear_scratch_fail_after == 0) {
+    linear_scratch_fail_after = -1;
+    return NULL;
+  }
+  if (linear_scratch_fail_after > 0) linear_scratch_fail_after--;
+  return calloc(count, size);
+}
+#else
+#define poly_linear_scratch_calloc calloc
+#endif
+
 /* C control body for current Tinygrad run_linear; the public wrapper below
  * scopes deferred residency collection across every early return. */
 static int run_linear_impl(
@@ -4707,6 +4736,12 @@ static int run_linear_impl(
   int attempted_calls = 0;
   uint32_t env_stamp = 0;
   bool have_env_stamp = false;
+  /* Invocation-local scratch, never cached residency. Clear resolved items
+   * between CALLs; scalar items point inside this array, so grow only when
+   * none are live. Recursive/suspended invocations keep their own storage. */
+  bool *outs = NULL, *ins = NULL;
+  PolyResolvedLinearArg *resolved = NULL;
+  int arg_capacity = 0;
 
   for (int call_index = 0; call_index < executable->n_src; call_index++) {
     PolyUOp *call = executable->src[call_index];
@@ -4735,16 +4770,21 @@ static int run_linear_impl(
     if (body->op != POLY_OP_COPY && body->op != POLY_OP_PROGRAM) goto failed;
 
     int n_args = poly_call_n_buffer_args(call);
-    bool *outs = n_args > 0 ? calloc((size_t)n_args, sizeof(*outs)) : NULL;
-    bool *ins = n_args > 0 ? calloc((size_t)n_args, sizeof(*ins)) : NULL;
-    PolyResolvedLinearArg *resolved = n_args > 0 ? calloc((size_t)n_args, sizeof(*resolved)) : NULL;
-    if ((n_args > 0 && (!outs || !ins || !resolved)) ||
-        poly_call_get_outs_ins(ctx, call, outs, ins, n_args) != 0) {
+    if (n_args > arg_capacity) {
       free(outs);
       free(ins);
-      poly_resolved_linear_args_free(resolved, n_args);
+      free(resolved);
+      outs = poly_linear_scratch_calloc((size_t)n_args, sizeof(*outs));
+      ins = poly_linear_scratch_calloc((size_t)n_args, sizeof(*ins));
+      resolved = poly_linear_scratch_calloc((size_t)n_args, sizeof(*resolved));
+      arg_capacity = n_args;
+      if (!outs || !ins || !resolved) goto failed;
+    } else if (n_args > 0)
+      memset(resolved, 0, (size_t)n_args * sizeof(*resolved));
+    if (poly_call_get_outs_ins(
+            ctx, call, n_args > 0 ? outs : NULL, n_args > 0 ? ins : NULL, n_args
+        ) != 0)
       goto failed;
-    }
 
     bool ok = true;
     /* exec_kernel resolves every PARAM slot, but only ProgramInfo.globals
@@ -4801,9 +4841,7 @@ static int run_linear_impl(
       );
     }
     if (ctx->execution_write_epoch != before) attempted_calls = call_index + 1;
-    free(outs);
-    free(ins);
-    poly_resolved_linear_args_free(resolved, n_args);
+    poly_resolved_linear_args_release_items(resolved, n_args);
     if (rc != 0) {
       if (debug)
         fprintf(
@@ -4813,6 +4851,9 @@ static int run_linear_impl(
       goto failed;
     }
   }
+  free(outs);
+  free(ins);
+  free(resolved);
 #ifdef __EMSCRIPTEN__
   if (poly_webgpu_batch_end(1) != 0) {
     poly_fail_linear_outputs(ctx, executable, attempted_calls, input_uops, n_input_uops);
@@ -4821,6 +4862,9 @@ static int run_linear_impl(
 #endif
   return 0;
 failed:
+  free(outs);
+  free(ins);
+  free(resolved);
 #ifdef __EMSCRIPTEN__
   poly_webgpu_batch_end(0);
 #endif
