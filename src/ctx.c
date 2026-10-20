@@ -545,9 +545,10 @@ static bool ir_mark_root(IrMarker *marker, PolyUOp *root) {
     PolyUOp *uop = marker->stack[--marker->n_stack];
     if (!uop || poly_map_get(marker->live, poly_ptr_hash(uop), uop, poly_ptr_eq)) continue;
     poly_map_set(marker->live, poly_ptr_hash(uop), uop, uop, poly_ptr_eq);
-    if (uop->n_src > marker->cap_stack - marker->n_stack) {
+    int n_edges = uop->n_src + (uop->device_cache != NULL);
+    if (n_edges > marker->cap_stack - marker->n_stack) {
       int capacity = marker->cap_stack;
-      while (capacity - marker->n_stack < uop->n_src)
+      while (capacity - marker->n_stack < n_edges)
         capacity *= 2;
       PolyUOp **stack = realloc(marker->stack, (size_t)capacity * sizeof(*stack));
       if (!stack) return false;
@@ -556,6 +557,7 @@ static bool ir_mark_root(IrMarker *marker, PolyUOp *root) {
     }
     for (int i = 0; i < uop->n_src; i++)
       marker->stack[marker->n_stack++] = uop->src[i];
+    if (uop->device_cache) marker->stack[marker->n_stack++] = uop->device_cache;
     /* Tinygrad UOp args are Python owners. C copies ProgramInfo/KernelInfo
      * beside the UOp, so trace their symbolic UOp fields explicitly. */
     if (uop->arg.kind == POLY_ARG_PROGRAM_INFO && uop->arg.program_info) {

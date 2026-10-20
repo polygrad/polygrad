@@ -2592,6 +2592,84 @@ TEST(uop, device_query_preserves_exact_physical_identity) {
   PASS();
 }
 
+extern int poly_test_device_query_count(bool reset);
+extern int poly_test_device_admission_count(bool reset);
+
+TEST(uop, device_admission_reuses_immutable_proof) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *good = poly_uop1(
+      ctx, POLY_OP_SINK, POLY_VOID, poly_device_uop_from_name(ctx, "CPU:1"), poly_arg_none()
+  );
+  PolyUOp *bad = poly_uop1(
+      ctx, POLY_OP_SINK, POLY_VOID, poly_device_uop_from_name(ctx, "CUDA:1"), poly_arg_none()
+  );
+  poly_test_device_admission_count(true);
+  bool ok = true;
+  for (int i = 0; i < 10; i++) {
+    ok &= poly_uop_explicit_devices_supported(ctx, good);
+    ok &= !poly_uop_explicit_devices_supported(ctx, bad);
+  }
+  int visits = poly_test_device_admission_count(false);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  ASSERT_INT_EQ(visits, 2);
+  PASS();
+}
+
+TEST(uop, device_property_reuses_node_owned_result) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyParamArg arg = {.slot = 0, .addrspace = POLY_ADDR_GLOBAL, .device = "CPU:1"};
+  PolyUOp *param =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_uop_const_int(ctx, 4), poly_arg_param(&arg));
+  ASSERT_INT_EQ(poly_uop_retain(ctx, param), 0);
+  poly_test_device_query_count(true);
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, param, NULL);
+  ASSERT_NOT_NULL(device);
+  ASSERT_STR_EQ(device->arg.str, "CPU:1");
+  for (int i = 0; i < 100; i++)
+    ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), device);
+  ASSERT_INT_EQ(poly_test_device_query_count(false), 1);
+  /* A derived DEVICE is not a source edge. Its querying node must own it,
+   * but must not keep it alive after that node is collected. */
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(poly_uop_storage_contains(ctx, device));
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), device);
+  poly_uop_release(ctx, param);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_FALSE(poly_uop_storage_contains(ctx, device));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, device_property_collection_preserves_tuple_and_replacement) {
+  PolyCtx *ctx = poly_ctx_new();
+  const char *names[] = {"CPU", "CPU:1"};
+  PolyParamArg arg = {
+      .slot = 0,
+      .addrspace = POLY_ADDR_GLOBAL,
+      .device_is_tuple = true,
+      .devices = names,
+      .n_devices = 2};
+  PolyUOp *param =
+      poly_uop1(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_uop_const_int(ctx, 4), poly_arg_param(&arg));
+  ASSERT_INT_EQ(poly_uop_retain(ctx, param), 0);
+  PolyUOp *tuple = poly_uop_device_uop_cached(ctx, param, NULL);
+  ASSERT_NOT_NULL(tuple);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_TRUE(poly_uop_storage_contains(ctx, tuple));
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), tuple);
+  ASSERT_INT_EQ(tuple->arg.string_tuple.n, 2);
+  ASSERT_STR_EQ(tuple->arg.string_tuple.vals[1], "CPU:1");
+  PolyUOp *copy = poly_uop1(ctx, POLY_OP_COPY, POLY_FLOAT32, param, poly_arg_str("CPU:2"));
+  ASSERT_STR_EQ(poly_uop_device_name(ctx, copy), "CPU:2");
+  ASSERT_PTR_EQ(poly_uop_device_uop_cached(ctx, param, NULL), tuple);
+  poly_uop_release(ctx, param);
+  ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+  ASSERT_FALSE(poly_uop_storage_contains(ctx, tuple));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, create_int_tuple_arg) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t perm[] = {1, 0, 2};

@@ -27,6 +27,11 @@ struct PolyUOp {
   int64_t minmax_vmax;
   void *ranges_cache;
   void *ended_ranges_cache;
+  /* Derived immutable property, not a graph edge or residency owner. The IR
+   * collector traces synthesized DEVICE nodes while their querying node lives. */
+  PolyUOp *device_cache;
+  uint8_t device_admission; /* 0 unknown, 1 supported, 2 unsupported. */
+  uint8_t placement_admission; /* 0 unknown, 1 complete, 2 has unplaced BUFFER. */
 };
 
 /* Derive the backend implementation from an exact DEVICE identity.  This does

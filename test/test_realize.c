@@ -48,6 +48,36 @@ static PolyTensor *physical_tensor_from_uop(
   return poly_tensor_create_with_roots(ctx, NULL, physical, role, device);
 }
 
+extern int poly_test_placement_query_count(bool reset);
+
+TEST(realize, placement_admission_reuses_graph_proof) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *device = poly_device_uop(ctx, POLY_DEVICE_CPU);
+  PolyUOp *storage = poly_uop_new_buffer(ctx, device, 4, POLY_FLOAT32, 0);
+  PolyUOp *logical = poly_uop_new_logical_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *good = poly_uop_reshape(ctx, storage, (int64_t[]){2, 2}, 2);
+  /* The outer device is insufficient: COPY still depends on unplaced input. */
+  PolyUOp *bad = poly_uop_copy_to_device(ctx, logical, device);
+  ASSERT_NOT_NULL(good);
+  ASSERT_NOT_NULL(bad);
+  poly_test_placement_query_count(true);
+  bool ok = true;
+  for (int i = 0; i < 10; i++) {
+    ok &= !poly_tensor_root_has_unplaced_buffer(ctx, good);
+    ok &= poly_tensor_root_has_unplaced_buffer(ctx, bad);
+  }
+  int visits = poly_test_placement_query_count(false);
+  /* New topology must not inherit a proof from its placed child. */
+  PolyUOp *changed = poly_uop_sink(ctx, (PolyUOp *[]){good, bad}, 2);
+  ok &= poly_tensor_root_has_unplaced_buffer(ctx, changed);
+  ok &= poly_tensor_root_has_unplaced_buffer(ctx, NULL);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  ASSERT_INT_EQ(visits, 2);
+  PASS();
+}
+
 static PolyTensor *initialized_f32_tensor(
     PolyCtx *ctx,
     const int64_t *shape,
@@ -6878,6 +6908,62 @@ TEST(realize, poly_jit_uses_movement_base_as_input_buffer) {
   PASS();
 }
 
+#ifdef POLY_TESTING
+TEST(realize, poly_jit_reuses_static_input_validation_without_stale_views) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {4};
+  float data[] = {1, 2, 3, 4}, changed[] = {10, 20, 30, 40}, got[4];
+  PolyUOp *buf = NULL;
+  PolyTensor *input = initialized_f32_tensor(ctx, shape, 1, data, POLY_DEVICE_CPU, &buf);
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, &input, 1), 0);
+  PolyTensor *one =
+      poly_tensor_const_float_by_id(ctx, 1, poly_dtype_id_by_name("float32"), POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, input, one), *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit, ctx->tensors, ctx->n_tensors), 0);
+  PolyUOp *out_buf = (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(out));
+  bool correct = poly_jit_run(jit, &input, 1) == 0;
+  correct &= poly_buffer_write(ctx, buf, changed, sizeof(changed)) == 0;
+  /* A warmed immutable view needs no substitution, but buffer writes remain
+   * visible. This hook observes graph work, not a wall-clock threshold. */
+  poly_uop_test_substitute_fail_after(0);
+  correct &= poly_jit_run(jit, &input, 1) == 0;
+  poly_uop_test_substitute_fail_after(-1);
+  correct &= poly_buffer_read(ctx, out_buf, got, sizeof(got)) == 0;
+  for (int i = 0; i < 4; i++)
+    correct &= got[i] == changed[i] + 1;
+
+  PolyTensor *wrong = poly_tensor_reshape(ctx, input, (int64_t[]){2, 2}, 2);
+  correct &= poly_jit_run(jit, &wrong, 1) == -1;
+  PolyTensor *fresh = initialized_f32_tensor(ctx, shape, 1, data, POLY_DEVICE_CPU, NULL);
+  /* A different root must be validated, even when its shape matches. Failure
+   * must leave the old successful proof intact and allow retry. */
+  poly_uop_test_substitute_fail_after(0);
+  correct &= poly_jit_run(jit, &fresh, 1) == -1;
+  poly_uop_test_substitute_fail_after(-1);
+  correct &= poly_jit_run(jit, &fresh, 1) == 0;
+  if (correct) {
+    /* Only inspect cache ownership after proving that the cache exists: the
+     * pre-optimization implementation is allowed to collect this root. */
+    PolyUOp *fresh_root = poly_tensor_uop_physical(fresh);
+    poly_tensor_release(fresh);
+    correct &= poly_ctx_collect(ctx) == 0;
+    fresh = physical_tensor_from_uop(ctx, fresh_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+    poly_uop_test_substitute_fail_after(0);
+    correct &= fresh && poly_jit_run(jit, &fresh, 1) == 0;
+    poly_uop_test_substitute_fail_after(-1);
+  }
+  correct &= poly_buffer_read(ctx, out_buf, got, sizeof(got)) == 0;
+  for (int i = 0; i < 4; i++)
+    correct &= got[i] == data[i] + 1;
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
+
 TEST(realize, poly_jit_replays_symbolic_input_view_with_current_bind) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -6925,6 +7011,13 @@ TEST(realize, poly_jit_replays_symbolic_input_view_with_current_bind) {
       poly_tensor_shrink_uop(ctx, input, replay_starts_4, capture_sizes, 1);
   ASSERT_NOT_NULL(replay_input_4);
   ASSERT_INT_EQ(count_bound_vars(ctx, poly_tensor_uop_physical(replay_input_4)), 1);
+  ASSERT_INT_EQ(poly_jit_run(jit, &replay_input_4, 1), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 104.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 105.0f, 1e-5f);
+
+  /* Bound-symbolic inputs must keep supplying values on repeated replay, not
+   * accidentally reuse the capture's value after warming an input-view cache. */
   ASSERT_INT_EQ(poly_jit_run(jit, &replay_input_4, 1), 0);
   ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
   ASSERT_FLOAT_EQ(got[0], 104.0f, 1e-5f);

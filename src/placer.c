@@ -88,6 +88,21 @@ static bool device_uop_identity_supported(PolyUOp *device) {
 
 static char no_device_uop_cache_value;
 
+#ifdef POLY_TESTING
+static _Thread_local int device_query_count;
+static _Thread_local int device_admission_count;
+int poly_test_device_admission_count(bool reset) {
+  int count = device_admission_count;
+  if (reset) device_admission_count = 0;
+  return count;
+}
+int poly_test_device_query_count(bool reset) {
+  int count = device_query_count;
+  if (reset) device_query_count = 0;
+  return count;
+}
+#endif
+
 /* Exact-device counterpart of tinygrad@2026-08-22/a9069c177a9d
  * uop/ops.py:847-861. DEVICE transports explicit placement policy in C;
  * PARAM/STAGE/BUFFER use ParamArg, COPY uses arg, AFTER follows its value,
@@ -95,10 +110,14 @@ static char no_device_uop_cache_value;
  * singleton/empty tuples, must not pass through constructor canonicalization. */
 PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
   if (!ctx || !u) return NULL;
+  if (u->device_cache) return u->device_cache;
   if (cache) {
     void *cached = poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq);
     if (cached) return cached == &no_device_uop_cache_value ? NULL : cached;
   }
+#ifdef POLY_TESTING
+  device_query_count++;
+#endif
 
   PolyUOp *result = NULL;
   if (u->op == POLY_OP_DEVICE) {
@@ -157,6 +176,10 @@ PolyUOp *poly_uop_device_uop_cached(PolyCtx *ctx, PolyUOp *u, PolyMap *cache) {
       result = poly_uop_device_uop_cached(ctx, u->src[i], cache);
   }
 
+  /* Pinned UOp.device is a recursive_property. Cache successful results on
+   * the node even without a pass-local map. NULL can also mean allocation
+   * failure, so do not make it a permanent negative result. */
+  u->device_cache = result;
   if (cache)
     poly_map_set(
         cache, poly_ptr_hash(u), u, result ? (void *)result : (void *)&no_device_uop_cache_value,
@@ -200,6 +223,10 @@ PolyDevice poly_uop_device_from_device_uop(PolyUOp *device) {
  * exact ParamArg.device semantics (device.py:19-35; uop/ops.py:847-860). */
 bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return false;
+  if (root->device_admission) return root->device_admission == 1;
+#ifdef POLY_TESTING
+  device_admission_count++;
+#endif
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n = 0;
   PolyUOp **topo = poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
@@ -253,6 +280,9 @@ bool poly_uop_explicit_devices_supported(PolyCtx *ctx, PolyUOp *root) {
     }
   }
   poly_ctx_scratch_rewind(ctx, scratch);
+  /* Admission depends only on immutable names/tuples, not driver availability
+   * or buffer residency. A failed traversal allocation above is not cached. */
+  root->device_admission = supported ? 1 : 2;
   return supported;
 }
 

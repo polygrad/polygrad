@@ -1041,6 +1041,7 @@ test-js: test-js-wasm test-js-native test-js-package
 
 test-js-wasm: verify-source-mirrors wasm-pkg
 	$(NODE) js/test/test_wasm.js
+	$(NODE) js/test/test_jit_boundaries.js
 	$(NODE) js/test/test_wasm_env.js
 	$(NODE) --expose-gc js/test/test_gc.js wasm
 	$(NODE) js/test/test_workers.js wasm
@@ -1112,6 +1113,7 @@ test-browser-runner:
 BROWSER_TMPDIR ?= /tmp
 test-js-browser: test-browser-runner verify-source-mirrors wasm-pkg build/extension/author.wasm build/extension-methods/author.wasm
 	cd js && bash scripts/build-browser.sh && TMPDIR=$(BROWSER_TMPDIR) $(NODE) test/browser/run.js
+	TMPDIR=$(BROWSER_TMPDIR) $(NODE) js/test/test_jit_boundaries.js --browser
 
 test-browser-matrix: test-js-browser-matrix
 

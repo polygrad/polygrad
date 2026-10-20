@@ -1991,6 +1991,43 @@ TEST(schedule_runtime, run_linear_executes_current_call_graph) {
   PASS();
 }
 
+extern int poly_test_runtime_env_stamp_count(bool reset);
+
+TEST(schedule_runtime, replay_reads_compiler_policy_once_per_invocation) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_INTERP);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_INTERP);
+  PolyUOp *linear = poly_test_create_linear(
+      ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, poly_uop_add(ctx, a, a)))
+  );
+  PolyUOp *compiled = poly_compile_linear(ctx, linear, 0);
+  ASSERT_NOT_NULL(compiled);
+  ASSERT_INT_EQ(compiled->n_src, 1);
+  PolyUOp *calls[] = {compiled->src[0], compiled->src[0]};
+  PolyUOp *twice = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 2, poly_arg_none());
+  ASSERT_INT_EQ(poly_uop_retain(ctx, twice), 0);
+  float input[] = {2, 3}, got[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, input, sizeof(input)), 0);
+  int old = poly_get_noopt(), counts[3];
+  bool ok = true;
+  for (int i = 0; i < 3; i++) {
+    poly_set_noopt(i == 1 ? !old : old);
+    poly_test_runtime_env_stamp_count(true);
+    ok &= poly_run_linear(ctx, twice, NULL, 0, NULL, 0, true, true, false) == 0;
+    counts[i] = poly_test_runtime_env_stamp_count(false);
+    ok &= poly_runtime_cache_len(ctx) == (i == 0 ? 1u : 2u);
+    ok &= poly_buffer_read(ctx, out, got, sizeof(got)) == 0;
+    ok &= got[0] == 4 && got[1] == 6;
+  }
+  poly_set_noopt(old);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  ASSERT_INT_EQ(counts[0], 1);
+  ASSERT_INT_EQ(counts[1], 1);
+  ASSERT_INT_EQ(counts[2], 1);
+  PASS();
+}
+
 TEST(schedule_runtime, noopt_separates_program_cache) {
   int old = poly_get_noopt();
   PolyCtx *ctx = poly_ctx_new();

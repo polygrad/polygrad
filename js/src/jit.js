@@ -121,6 +121,7 @@ function createBoundJit(runtime) {
       this.captured = false
       this.ret = null
       this.signature = null
+      this.inputShapes = null
       this.inputCount = 0
       this._jit = 0
       this.disposed = false
@@ -142,6 +143,7 @@ function createBoundJit(runtime) {
       this.captured = false
       this.ret = null
       this.signature = null
+      this.inputShapes = null
       this.inputCount = 0
       this.callCount = 0
       this.replayCount = 0
@@ -216,6 +218,24 @@ function createBoundJit(runtime) {
       }
     }
 
+    _checkInputShapes(inputs) {
+      // C validates normalized views, dtype and exact device before execution.
+      // Keep the frontend's stricter shape check: a bare C BUFFER view can
+      // deliberately accept a different backing-buffer size.
+      if (JSON.stringify(inputs.map(t => t.shape)) !== this.inputShapes) {
+        throw new Error(`args mismatch in jit: expected ${this.signature}, got ${inputSignature(inputs)}`)
+      }
+    }
+
+    _throwReplayError(inputs) {
+      // Device strings and the full signature are only needed for diagnostics.
+      const sig = inputSignature(inputs)
+      if (sig !== this.signature) {
+        throw new Error(`args mismatch in jit: expected ${this.signature}, got ${sig}`)
+      }
+      throw new Error('poly_jit_run failed')
+    }
+
     call(...args) {
       if (this.disposed) throw new Error('jit has been disposed')
       if (!ffi.poly_jit_new) throw new Error('polygrad core does not expose poly_jit')
@@ -272,6 +292,7 @@ function createBoundJit(runtime) {
         }
         this.ret = ret
         this.signature = sig
+        this.inputShapes = JSON.stringify(JSON.parse(sig).map(t => t.shape))
         this.inputCount = inputs.length
         this.captured = true
       } else {
@@ -279,12 +300,9 @@ function createBoundJit(runtime) {
         if (inputs.length !== this.inputCount) {
           throw new Error(`args mismatch in jit: expected ${this.inputCount} inputs, got ${inputs.length}`)
         }
-        const sig = inputSignature(inputs)
-        if (sig !== this.signature) {
-          throw new Error(`args mismatch in jit: expected ${this.signature}, got ${sig}`)
-        }
+        this._checkInputShapes(inputs)
         if (ffi.poly_jit_run(this._jit, tensorHandles(inputs)) !== 0) {
-          throw new Error('poly_jit_run failed')
+          this._throwReplayError(inputs)
         }
         ret = this.ret
         replayed = true
@@ -354,6 +372,7 @@ function createBoundJit(runtime) {
         }
         this.ret = ret
         this.signature = sig
+        this.inputShapes = JSON.stringify(JSON.parse(sig).map(t => t.shape))
         this.inputCount = inputs.length
         this.captured = true
       } else {
@@ -361,13 +380,10 @@ function createBoundJit(runtime) {
         if (inputs.length !== this.inputCount) {
           throw new Error(`args mismatch in jit: expected ${this.inputCount} inputs, got ${inputs.length}`)
         }
-        const sig = inputSignature(inputs)
-        if (sig !== this.signature) {
-          throw new Error(`args mismatch in jit: expected ${this.signature}, got ${sig}`)
-        }
+        this._checkInputShapes(inputs)
         const run = ffi.poly_jit_run_async || ffi.poly_jit_run
         if (await run(this._jit, tensorHandles(inputs)) !== 0) {
-          throw new Error('poly_jit_run failed')
+          this._throwReplayError(inputs)
         }
         ret = this.ret
         replayed = true

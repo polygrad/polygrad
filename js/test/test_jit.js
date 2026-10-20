@@ -53,6 +53,30 @@ async function runJitTests(pg, filter = '') {
 
   console.log('\n== JIT ==')
 
+  await test('base inspection uses one C query for nested views', async () => {
+    const { UOp } = require('../src/uop/ops')
+    const x = new Tensor(new Float32Array([1, 2, 3, 4]))
+    const shaped = x.reshape(2, 2), transposed = shaped.permute(1, 0)
+    const detached = transposed.detach(), computed = detached.add(1)
+    try {
+      for (const value of [x, shaped, transposed, detached, computed]) {
+        const uop = value.uopPhysical, original = uop.ffi
+        const ffi = Object.fromEntries(Object.getOwnPropertyNames(original).map(k => [k, original[k]]))
+        let calls = 0
+        ffi.poly_uop_base = raw => { calls++; return original.poly_uop_base(raw) }
+        // A borrowed wrapper is sufficient for inspection; it must not add an owner.
+        const borrowed = new UOp(uop.ctx, ffi, uop.raw, false)
+        try {
+          const actual = borrowed._baseRaw, expected = original.poly_uop_base(uop.raw)
+          assert(original.poly_uop_key(actual) === original.poly_uop_key(expected), 'C/JS base differs')
+          assert(calls === 1, `expected one C base query, got ${calls}`)
+        } finally { borrowed.dispose(); uop.dispose() }
+      }
+    } finally {
+      for (const value of [computed, detached, transposed, shaped, x]) await value.dispose()
+    }
+  })
+
   await test('lifetime: failed captures release handles and retry without another warmup', async () => {
     const original = pg._core.ffi
     const ffi = Object.fromEntries(Object.getOwnPropertyNames(original).map(k => [k, original[k]]))
@@ -232,6 +256,44 @@ async function runJitTests(pg, filter = '') {
     assertClose(await (await f(x)).toArray(), [2, 3, 4])
     assertClose(await (await f(x)).toArray(), [2, 3, 4])
     await assertThrowsAsync(() => f(y), 'args mismatch')
+  })
+
+  for (const asynchronous of [false, true]) await test(`${asynchronous ? 'async ' : ''}replay delegates dtype and device validation to C`, async () => {
+    const f = (asynchronous ? pg.jit.async : pg.jit)(x => x.add(1))
+    const x = new Tensor(new Float32Array([1, 2, 3]))
+    const replacement = new Tensor(new Float32Array([10, 20, 30]))
+    const wrongShape = new Tensor(new Float32Array([1, 2, 3, 4]))
+    const wrongDtype = new Tensor(new Int32Array([1, 2, 3]))
+    let output
+    try {
+      if (!asynchronous && pg._usesAsyncHostBridge()) {
+        await assertThrowsAsync(() => f(x), 'requires async backend work')
+        return
+      }
+      await (await f(x)).realizeAsync()
+      output = await f(x)
+      await replacement.realizeAsync()
+      let queries = 0
+      for (const t of [x, replacement]) Object.defineProperty(t, 'device', {
+        configurable: true,
+        get() { queries++; return Reflect.get(Object.getPrototypeOf(this), 'device', this) }
+      })
+      try {
+        await f(x)
+        await f(replacement)
+      } finally { for (const t of [x, replacement]) delete t.device }
+      assert(queries === 0, `successful replays repeated ${queries} device-string queries`)
+      assertClose(await output.toArrayAsync(), [11, 21, 31])
+      await assertThrowsAsync(() => f(wrongShape), 'args mismatch')
+      await assertThrowsAsync(() => f(wrongDtype), 'args mismatch')
+      // Rejected inputs must not execute the captured program or strand replay.
+      assertClose(await output.toArrayAsync(), [11, 21, 31])
+      assertClose(await (await f(x)).toArrayAsync(), [2, 3, 4])
+    } finally {
+      for (const t of [x, replacement]) delete t.device
+      await f.dispose()
+      for (const t of [output, wrongDtype, wrongShape, replacement, x]) await t?.dispose()
+    }
   })
 
   await test('accepts movement-view inputs and replays against their bases', async () => {

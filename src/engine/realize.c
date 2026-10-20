@@ -2337,8 +2337,21 @@ static int poly_realize_linear(
   return poly_run_linear(ctx, linear, var_bindings, n_var_bindings, NULL, 0, true, false, false);
 }
 
+#ifdef POLY_TESTING
+static _Thread_local int placement_query_count;
+int poly_test_placement_query_count(bool reset) {
+  int count = placement_query_count;
+  if (reset) placement_query_count = 0;
+  return count;
+}
+#endif
+
 bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root) {
   if (!ctx || !root) return true;
+  if (root->placement_admission) return root->placement_admission == 2;
+#ifdef POLY_TESTING
+  placement_query_count++;
+#endif
   PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n = 0;
   /* CALL/FUNCTION bodies contain placeholders, not Tensor storage. Their
@@ -2357,6 +2370,9 @@ bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root) {
     }
   }
   poly_ctx_scratch_rewind(ctx, scratch);
+  /* Placement is an immutable graph property, not a residency/validity check.
+   * Rewritten roots get their own proof; failed traversals above stay uncached. */
+  root->placement_admission = unplaced ? 2 : 1;
   return unplaced;
 }
 

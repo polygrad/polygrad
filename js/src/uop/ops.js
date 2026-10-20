@@ -120,16 +120,7 @@ class UOp {
   }
 
   get _baseRaw() {
-    const ops = this.ffi.__polygradOps || {}
-    let raw = this.raw
-    while (raw) {
-      const op = Number(this.ffi.poly_uop_op(raw))
-      if (!(op === ops.RESHAPE || op === ops.EXPAND || op === ops.PERMUTE ||
-        op === ops.PAD || op === ops.SHRINK || op === ops.FLIP ||
-        op === ops.MULTI || op === ops.DETACH) || !this.ffi.poly_uop_n_src(raw)) break
-      raw = this.ffi.poly_uop_src(raw, 0)
-    }
-    return raw
+    return this.ffi.poly_uop_base(this.raw)
   }
 
   get base() {

@@ -19,6 +19,7 @@ struct PolyJit {
   PolyCtx *ctx;
   PolyUOp **input_buffers;
   PolyUOp **input_views;
+  PolyUOp **validated_static_roots;
   PolyDType *input_dtypes;
   PolyUOp **input_devices;
   int n_inputs;
@@ -55,6 +56,7 @@ static void poly_jit_clear(PolyJit *jit) {
   for (int i = 0; jit->ctx && i < jit->n_inputs; i++) {
     if (jit->input_buffers[i]) poly_uop_release(jit->ctx, jit->input_buffers[i]);
     if (jit->input_views[i]) poly_uop_release(jit->ctx, jit->input_views[i]);
+    if (jit->validated_static_roots[i]) poly_uop_release(jit->ctx, jit->validated_static_roots[i]);
     if (jit->input_devices[i]) poly_uop_release(jit->ctx, jit->input_devices[i]);
   }
   for (int i = 0; jit->ctx && i < jit->n_var_bindings; i++)
@@ -63,6 +65,7 @@ static void poly_jit_clear(PolyJit *jit) {
   free(jit->var_bindings);
   free(jit->input_buffers);
   free(jit->input_views);
+  free(jit->validated_static_roots);
   free(jit->input_dtypes);
   free(jit->input_devices);
   jit->linears = NULL;
@@ -71,6 +74,7 @@ static void poly_jit_clear(PolyJit *jit) {
   jit->captured_root_retained = false;
   jit->input_buffers = NULL;
   jit->input_views = NULL;
+  jit->validated_static_roots = NULL;
   jit->input_dtypes = NULL;
   jit->input_devices = NULL;
   jit->n_linears = 0;
@@ -438,6 +442,10 @@ static bool poly_jit_input_matches_spec(
   if (!root) return false;
   if (!poly_dtype_eq(root->dtype, jit->input_dtypes[index])) return false;
   if (poly_uop_device_uop_cached(jit->ctx, buf, NULL) != jit->input_devices[index]) return false;
+  /* A retained immutable root has the same normalized view. Cache only proofs
+   * with no input bindings: bound-symbolic inputs must still supply their
+   * current values on every replay. Buffer contents/residency are not cached. */
+  if (root == jit->validated_static_roots[index]) return true;
   PolyUOp *view = NULL;
   PolyVarBinding *input_bindings = NULL;
   int n_input_bindings = 0;
@@ -454,6 +462,17 @@ static bool poly_jit_input_matches_spec(
       free(input_bindings);
       return false;
     }
+  }
+  if (n_input_bindings == 0) {
+    if (poly_uop_retain(jit->ctx, root) != 0) {
+      free(input_bindings);
+      return false;
+    }
+    /* One successful proof per input, bounded by the JIT's lifetime. Retain
+     * before replacing it so collection cannot recycle a cached identity. */
+    PolyUOp *old = jit->validated_static_roots[index];
+    jit->validated_static_roots[index] = root;
+    if (old) poly_uop_release(jit->ctx, old);
   }
   free(input_bindings);
   return true;
@@ -734,9 +753,11 @@ int poly_jit_begin_capture(PolyJit *jit, PolyTensor **inputs, int n_inputs) {
   if (n_inputs > 0) {
     jit->input_buffers = calloc((size_t)n_inputs, sizeof(*jit->input_buffers));
     jit->input_views = calloc((size_t)n_inputs, sizeof(*jit->input_views));
+    jit->validated_static_roots = calloc((size_t)n_inputs, sizeof(*jit->validated_static_roots));
     jit->input_dtypes = calloc((size_t)n_inputs, sizeof(*jit->input_dtypes));
     jit->input_devices = calloc((size_t)n_inputs, sizeof(*jit->input_devices));
-    if (!jit->input_buffers || !jit->input_views || !jit->input_dtypes || !jit->input_devices) {
+    if (!jit->input_buffers || !jit->input_views || !jit->validated_static_roots ||
+        !jit->input_dtypes || !jit->input_devices) {
       poly_jit_clear(jit);
       return -1;
     }

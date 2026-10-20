@@ -3445,7 +3445,18 @@ static uint64_t poly_counter_add_sat(uint64_t a, uint64_t b) {
 static PolyUOp *poly_call_device_num_var(PolyCtx *ctx, PolyUOp *body);
 
 /* C runtime-cache key extension for switches that change rendered PROGRAMs. */
+#ifdef POLY_TESTING
+static _Thread_local int runtime_env_stamp_count;
+int poly_test_runtime_env_stamp_count(bool reset) {
+  int count = runtime_env_stamp_count;
+  if (reset) runtime_env_stamp_count = 0;
+  return count;
+}
+#endif
 static uint32_t poly_runtime_cache_env_stamp(void) {
+#ifdef POLY_TESTING
+  runtime_env_stamp_count++;
+#endif
   uint32_t stamp = 2166136261u;
 #ifdef __EMSCRIPTEN__
   const uint8_t wasm_features = 1;
@@ -3857,35 +3868,35 @@ PolyUOp *poly_test_resolve_linear_param(
 }
 #endif
 
-static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) {
-  if (!ctx || !uop) return -1;
+static PolyBuffer *poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) {
+  if (!ctx || !uop) return NULL;
   if (uop->op == POLY_OP_MSTACK) {
     for (int i = 0; i < uop->n_src; i++)
-      if (poly_ensure_linear_arg_buffer(ctx, uop->src[i], read) != 0) return -1;
-    return poly_uop_buffer_handle(ctx, uop) ? 0 : -1;
+      if (!poly_ensure_linear_arg_buffer(ctx, uop->src[i], read)) return NULL;
+    return poly_uop_buffer_handle(ctx, uop);
   }
   if (uop->op == POLY_OP_MSELECT && uop->n_src == 1) {
-    if (poly_ensure_linear_arg_buffer(ctx, uop->src[0], read) != 0) return -1;
-    return poly_uop_buffer_handle(ctx, uop) ? 0 : -1;
+    if (!poly_ensure_linear_arg_buffer(ctx, uop->src[0], read)) return NULL;
+    return poly_uop_buffer_handle(ctx, uop);
   }
 
   PolyBuffer *buffer = poly_uop_buffer_handle(ctx, uop);
   /* Current Tinygrad UOp.buffer + exec_kernel: tuple BUFFERs resolve to one
    * MultiBuffer whose children are allocated and checked per launch lane. */
   if (buffer && poly_buffer_is_multi(buffer)) {
-    if (buffer->n_bufs <= 0 || !buffer->bufs) return -1;
+    if (buffer->n_bufs <= 0 || !buffer->bufs) return NULL;
     bool valid = true;
     for (int i = 0; i < buffer->n_bufs; i++) {
       PolyBuffer *child = buffer->bufs[i];
       if (!child || poly_buffer_is_multi(child) ||
           poly_buffer_handle_ensure_allocated(ctx, child) != 0)
-        return -1;
+        return NULL;
       valid = valid && child->valid;
     }
     buffer->valid = valid;
     /* Tinygrad Buffer.ensure_allocated permits reads from Tensor.empty; its
      * initialization state is allocation, not defined bytes (device.py:137-143). */
-    return 0;
+    return buffer;
   }
 
   const PolyUOp *identity = poly_uop_get_buffer_identity(uop);
@@ -3899,12 +3910,12 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
    * immutable-UOp device binding before exposing the runtime handle. */
   if (identity && device_uop && device_uop->arg.kind != POLY_ARG_STRING_TUPLE &&
       device != POLY_DEVICE_AUTO) {
-    if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0) return -1;
+    if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0) return NULL;
     buffer = poly_uop_buffer_handle(ctx, uop);
   }
   if (buffer && !poly_buffer_is_multi(buffer)) {
     int rc = poly_buffer_handle_ensure_allocated(ctx, buffer);
-    if (poly_debug_at_least(7) && (rc != 0 || (read && !buffer->valid)))
+    if ((rc != 0 || (read && !buffer->valid)) && poly_debug_at_least(7))
       fprintf(
           stderr,
           "[polygrad:run_linear] buffer op=%s ensure=%d read=%d valid=%d base=%p ptr=%p "
@@ -3912,21 +3923,20 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
           poly_op_name(uop->op), rc, read, buffer->valid, (void *)buffer->base, buffer->ptr,
           buffer->nbytes, buffer->offset
       );
-    if (poly_debug_at_least(7) && buffer->base && rc != 0)
+    if (buffer->base && rc != 0 && poly_debug_at_least(7))
       fprintf(
           stderr, "[polygrad:run_linear] base device=%d valid=%d ptr=%p bytes=%zu src=%p\n",
           buffer->base->device, buffer->base->valid, buffer->base->ptr, buffer->base->nbytes,
           (void *)buffer->base->src
       );
-    if (poly_debug_at_least(7) && (rc != 0 || (read && !buffer->valid))) {
+    if ((rc != 0 || (read && !buffer->valid)) && poly_debug_at_least(7)) {
       char *graph = poly_uop_graph_str(uop);
       fprintf(
           stderr, "[polygrad:run_linear] buffer graph=%s\n", graph ? graph : "<allocation failure>"
       );
       free(graph);
     }
-    if (rc != 0) return -1;
-    return 0;
+    return rc == 0 ? buffer : NULL;
   }
   if (poly_debug_at_least(7)) {
     char *graph = poly_uop_graph_str(uop);
@@ -3936,14 +3946,14 @@ static int poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, bool read) 
     );
     free(graph);
   }
-  if (!identity || !device_uop) return -1;
-  if (device == POLY_DEVICE_AUTO || device_uop->arg.kind == POLY_ARG_STRING_TUPLE) return -1;
+  if (!identity || !device_uop) return NULL;
+  if (device == POLY_DEVICE_AUTO || device_uop->arg.kind == POLY_ARG_STRING_TUPLE) return NULL;
 
   int rc = read ? poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, device)
                 : poly_buffer_ensure_device_allocated(ctx, (PolyUOp *)identity, device);
-  if (rc != 0) return -1;
+  if (rc != 0) return NULL;
   buffer = poly_uop_buffer_handle(ctx, uop);
-  return buffer && (!read || buffer->valid) ? 0 : -1;
+  return buffer && (!read || buffer->valid) ? buffer : NULL;
 }
 
 static int poly_resolve_linear_arg(
@@ -3952,10 +3962,10 @@ static int poly_resolve_linear_arg(
     bool read,
     PolyResolvedLinearArg *out
 ) {
-  if (!ctx || !uop || !out || poly_ensure_linear_arg_buffer(ctx, uop, read) != 0) return -1;
+  if (!ctx || !uop || !out) return -1;
   memset(out, 0, sizeof(*out));
   out->uop = uop;
-  out->container = poly_uop_buffer_handle(ctx, uop);
+  out->container = poly_ensure_linear_arg_buffer(ctx, uop, read);
   if (!out->container) return -1;
   if (poly_buffer_is_multi(out->container)) {
     out->n_items = out->container->n_bufs;
@@ -3963,9 +3973,9 @@ static int poly_resolve_linear_arg(
     if (out->n_items <= 0 || !out->items) return -1;
     memcpy(out->items, out->container->bufs, (size_t)out->n_items * sizeof(*out->items));
   } else {
-    out->items = malloc(sizeof(*out->items));
-    if (!out->items) return -1;
-    out->items[0] = out->container;
+    /* The resolved array does not move during execution. Borrow its scalar
+     * slot instead of allocating one pointer per ordinary CALL argument. */
+    out->items = &out->container;
     out->n_items = 1;
   }
   return 0;
@@ -3974,7 +3984,7 @@ static int poly_resolve_linear_arg(
 static void poly_resolved_linear_args_free(PolyResolvedLinearArg *args, int n_args) {
   if (!args) return;
   for (int i = 0; i < n_args; i++)
-    free(args[i].items);
+    if (args[i].items != &args[i].container) free(args[i].items);
   free(args);
 }
 
@@ -4127,7 +4137,8 @@ static int poly_exec_linear_program(
     PolyVarBinding *bindings,
     int n_bindings,
     bool update_stats,
-    bool wait
+    bool wait,
+    uint32_t env_stamp
 ) {
   PolyUOp *program = call && call->n_src > 0 ? call->src[0] : NULL;
   const PolyProgramInfo *info = poly_program_info(ctx, program);
@@ -4159,7 +4170,7 @@ static int poly_exec_linear_program(
     PolyRunner runner = {0};
     PolyRuntimeCacheEntry *runtime_entry = NULL;
     int lower_rc = poly_lower_compute_call_cached(
-        ctx, call, device_uop, device, poly_runtime_cache_env_stamp(), &runner, true, &runtime_entry
+        ctx, call, device_uop, device, env_stamp, &runner, true, &runtime_entry
     );
     if (lower_rc != 0) return -1;
     runner.n_params = info->n_globals;
@@ -4694,6 +4705,8 @@ static int run_linear_impl(
 #endif
   bool debug = poly_debug_at_least(7);
   int attempted_calls = 0;
+  uint32_t env_stamp = 0;
+  bool have_env_stamp = false;
 
   for (int call_index = 0; call_index < executable->n_src; call_index++) {
     PolyUOp *call = executable->src[call_index];
@@ -4777,8 +4790,14 @@ static int run_linear_impl(
         if (resolved[i].n_items != lanes) ok = false;
       if (ok) rc = poly_exec_linear_copy(ctx, resolved, n_args, lanes, update_stats);
     } else if (ok) {
+      /* Compiler policy is one invocation's configuration, not per-kernel
+       * argument data. Read it anew on each replay; COPY-only calls need none. */
+      if (!have_env_stamp) {
+        env_stamp = poly_runtime_cache_env_stamp();
+        have_env_stamp = true;
+      }
       rc = poly_exec_linear_program(
-          ctx, call, resolved, n_args, var_bindings, n_var_bindings, update_stats, wait
+          ctx, call, resolved, n_args, var_bindings, n_var_bindings, update_stats, wait, env_stamp
       );
     }
     if (ctx->execution_write_epoch != before) attempted_calls = call_index + 1;
