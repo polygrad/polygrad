@@ -661,54 +661,6 @@ async function checkWasmGemmNumerics(createRuntime, k, n) {
   } finally {await disabled.dispose()}
 }
 
-async function checkSelectedGemmOwnership(createRuntime) {
-  const pg = await createRuntime({kernels:true})
-  const Tensor = pg.Tensor
-  const owned = [], keep = t => { owned.push(t); return t }
-  try {
-    for (const n of [4, 5]) {
-      const a = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
-      const b = keep(keep(new Tensor(new Float32Array(n * 32).fill(1))).reshape(n, 32))
-      await a.realize(b)
-      const bt = keep(b.permute(1, 0)), first = keep(a.matmul(bt))
-      const before = pg.stats().coreStats.kernelCount
-      await first.realize()
-      // The opt-in Wasm provider has one main CALL and, for n=5, one tail.
-      // Native/WebGPU keep their existing selection policy.
-      if (pg.core === 'wasm' && pg.device !== 'webgpu' && pg.device !== 'interp')
-        assert(pg.stats().coreStats.kernelCount - before === (n === 4 ? 1 : 2), 'redundant matmul output copy')
-      assertClose(await first.toArray(), new Array(n).fill(496), 0)
-      const f = pg.jit((x, w) => x.matmul(w.permute(1, 0)))
-      try {
-        await (await f(a, b)).realize()
-        await (await f(a, b)).realize()
-        await b.copyFrom(new Float32Array(n * 32).fill(2))
-        assertClose(await (await f(a, b)).toArray(), new Array(n).fill(992), 0)
-        // Realized eager results own independent storage, not the inputs or
-        // another invocation's output. Sharing a graph is not permission to
-        // reuse an old result as scratch.
-        assertClose(await first.toArray(), new Array(n).fill(496), 0)
-        const next = keep(a.matmul(keep(b.permute(1, 0))))
-        const plus = keep(next.add(1))
-        await next.realize(plus)
-        assertClose(await next.toArray(), new Array(n).fill(992), 0)
-        assertClose(await plus.toArray(), new Array(n).fill(993), 0)
-        const computed = keep(keep(a.add(1)).matmul(keep(b.permute(1, 0))))
-        assertClose(await computed.toArray(), new Array(n).fill(1056), 0)
-      } finally { f.dispose() }
-    }
-    const alias = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
-    const weights = keep(keep(new Tensor(new Float32Array(32 * 32).fill(1))).reshape(32, 32))
-    await alias.realize(weights)
-    const product = keep(alias.matmul(weights))
-    await alias.assign(product).realize()
-    assertClose(await alias.toArray(), new Array(32).fill(496), 0)
-  } finally {
-    for (const t of owned.reverse()) t.dispose()
-    await pg.dispose()
-  }
-}
-
 async function checkPortableGemmModel(createRuntime) {
   const rt = await createRuntime({kernels:true})
   try {
@@ -3291,7 +3243,6 @@ async function runModelRuntimeTests(pg, createRuntime) {
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
-  await test('Model selected GEMM ownership and mutation', () => checkSelectedGemmOwnership(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
@@ -4104,7 +4055,6 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
-  await test('Model selected GEMM ownership and mutation', () => checkSelectedGemmOwnership(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
   await test('Model CPU attention probabilities', () => checkCpuAttentionModel(pg))
   await test('Model stateful capture shares train eval state', () => checkModelStatefulCapture(pg))

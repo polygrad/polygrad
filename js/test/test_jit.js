@@ -34,7 +34,7 @@ async function assertThrowsAsync(fn, expected) {
   throw new Error('expected function to throw')
 }
 
-async function runJitTests(pg, filter = '') {
+async function runJitTests(pg, filter = '', createRuntime) {
   const Tensor = pg.Tensor
   let passed = 0
   let failed = 0
@@ -52,6 +52,54 @@ async function runJitTests(pg, filter = '') {
   }
 
   console.log('\n== JIT ==')
+
+  await test('lifetime: selected matmul owns one result and preserves mutation semantics', async () => {
+    const pg = await createRuntime({kernels:true})
+    const Tensor = pg.Tensor
+    const owned = [], keep = t => { owned.push(t); return t }
+    try {
+      for (const n of [4, 5]) {
+        const a = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
+        const b = keep(keep(new Tensor(new Float32Array(n * 32).fill(1))).reshape(n, 32))
+        await a.realize(b)
+        const bt = keep(b.permute(1, 0)), first = keep(a.matmul(bt))
+        const before = pg.stats().coreStats.kernelCount
+        await first.realize()
+        // The selected Wasm provider has one main CALL and, for n=5, one tail.
+        // Native/WebGPU keep their existing selection policy.
+        if (pg.core === 'wasm' && pg.device !== 'webgpu' && pg.device !== 'interp')
+          assert(pg.stats().coreStats.kernelCount - before === (n === 4 ? 1 : 2), 'redundant matmul output copy')
+        assertClose(await first.toArray(), new Array(n).fill(496), 0)
+        const f = pg.jit((x, w) => x.matmul(w.permute(1, 0)))
+        try {
+          await (await f(a, b)).realize()
+          await (await f(a, b)).realize()
+          await b.copyFrom(new Float32Array(n * 32).fill(2))
+          assertClose(await (await f(a, b)).toArray(), new Array(n).fill(992), 0)
+          // Realized eager results own independent storage, not the inputs or
+          // another invocation's output. Sharing a graph is not permission to
+          // reuse an old result as scratch.
+          assertClose(await first.toArray(), new Array(n).fill(496), 0)
+          const next = keep(a.matmul(keep(b.permute(1, 0))))
+          const plus = keep(next.add(1))
+          await next.realize(plus)
+          assertClose(await next.toArray(), new Array(n).fill(992), 0)
+          assertClose(await plus.toArray(), new Array(n).fill(993), 0)
+          const computed = keep(keep(a.add(1)).matmul(keep(b.permute(1, 0))))
+          assertClose(await computed.toArray(), new Array(n).fill(1056), 0)
+        } finally { f.dispose() }
+      }
+      const alias = keep(keep(new Tensor(Float32Array.from({length: 32}, (_, i) => i))).reshape(1, 32))
+      const weights = keep(keep(new Tensor(new Float32Array(32 * 32).fill(1))).reshape(32, 32))
+      await alias.realize(weights)
+      const product = keep(alias.matmul(weights))
+      await alias.assign(product).realize()
+      assertClose(await alias.toArray(), new Array(32).fill(496), 0)
+    } finally {
+      for (const t of owned.reverse()) t.dispose()
+      await pg.dispose()
+    }
+  })
 
   await test('base inspection uses one C query for nested views', async () => {
     const { UOp } = require('../src/uop/ops')

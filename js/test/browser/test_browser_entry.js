@@ -17,5 +17,5 @@ window.__runModelSmokeTests = runModelSmokeTests
 window.__checkOnnxEncoder = checkOnnxEncoder
 window.__checkExtension = require('../check_extension')
 window.__checkExtensionMethods = require('../check_extension_methods')
-window.__runJitLifetimeTests = pg => require('../test_jit').runJitTests(pg, 'lifetime:')
+window.__runJitLifetimeTests = (pg, createRuntime) => require('../test_jit').runJitTests(pg, 'lifetime:', createRuntime)
 window.__runOptimLifetimeTests = pg => require('../test_optim').runOptimTests(pg, 'lifetime:')

@@ -507,7 +507,7 @@ async function main() {
     instanceResult = await window.__runModelRuntimeTests(pg, createRuntime)
   }
 
-  const jitLifetime = await window.__runJitLifetimeTests(pg)
+  const jitLifetime = await window.__runJitLifetimeTests(pg, createRuntime)
   const optimLifetime = await window.__runOptimLifetimeTests(pg)
   let webgpuCapsResult = { passed: 0, failed: 0, skipped: 0 }
   let webgpuLifecycleResult = { passed: 0, failed: 0, skipped: 0 }
