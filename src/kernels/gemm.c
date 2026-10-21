@@ -190,8 +190,9 @@ PolyUOp *poly_kernel_gemm_lower(
   PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(device));
   PolyUOp *out = poly_uop_new_buffer(ctx, dev, M * N, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
   if (!ap || !left || !right || !out) return NULL;
-  PolyUOp *body = poly_kernel_gemm_program(ctx, (int)M, (int)K, (int)N, ap,
-      param(ctx, K * N, 2), tile, workers, thread_axis);
+  PolyUOp *body = poly_kernel_gemm_program(
+      ctx, (int)M, (int)K, (int)N, ap, param(ctx, K * N, 2), tile, workers, thread_axis
+  );
   PolyUOp *src[] = {body, out, left, right};
   PolyCallInfo info = {0};
   PolyUOp *call =

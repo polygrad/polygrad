@@ -991,7 +991,8 @@ not approvals. Durable reviews live in `test/fixtures/migration/`.
 `make test` runs only the C suite. `make test-browser` runs deterministic Wasm
 performance snapshots after its browser tests; the serial release runner lists
 the snapshot as a separate gate. Node-only `make test-js-wasm` needs no browser.
-Snapshots cover five MLP/FFN workloads, using default and opt-in kernels.
+Snapshots cover five MLP/FFN workloads with default, explicitly enabled and
+explicitly disabled kernel selection.
 They require Emscripten, the JS
 dependencies, Playwright Chromium and Binaryen's `wasm-dis` (`WASM_DIS` overrides
 its path). Kernel hashes, decoded instruction counts, dispatches and frontend
