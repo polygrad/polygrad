@@ -162,6 +162,9 @@ PolyUOp._fields_ = [
     ("minmax_vmax", ctypes.c_int64),
     ("ranges_cache", ctypes.c_void_p),
     ("ended_ranges_cache", ctypes.c_void_p),
+    ("device_cache", PolyUOpPtr),
+    ("device_admission", ctypes.c_uint8),
+    ("placement_admission", ctypes.c_uint8),
 ]
 
 
