@@ -6,6 +6,28 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
   const m = author.methods
   let x, y, model, restored, a, b
   try {
+    const shaped = pg.Tensor.empty([2, 3]), scalar = new pg.Tensor(1)
+    assert(Number(m.example_static_dim(shaped, 0)) === 2, 'static first extent')
+    assert(Number(m.example_static_dim(shaped, 1)) === 3, 'static second extent')
+    assert(Number(m.example_static_dim(shaped, 2)) === -1, 'invalid axis')
+    assert(Number(m.example_static_dim(shaped, -1)) === -1, 'negative axis')
+    assert(Number(m.example_static_dim(scalar, 0)) === -1, 'scalar has no axis')
+    const large = pg.Tensor.empty(2**34), empty = pg.Tensor.empty([0, 3])
+    const dynamic = pg.Tensor.empty([pg.uop.variable('author_shape', 1, 8).bind(3), 2])
+    assert(m.example_static_dim(large, 0) === 2**34, 'int64 extent lost across SDK')
+    assert(m.example_static_dim(empty, 0) === 0, 'empty extent')
+    assert(m.example_static_dim(dynamic, 0) === -1, 'variable extent accepted as static')
+    assert(m.example_static_dim(dynamic, 1) === 2, 'static axis of symbolic shape')
+    if (pg.core === 'wasm') {
+      const M=pg._core.Module, original=M._poly_tensor_static_dim
+      let failing
+      try {
+        M._poly_tensor_static_dim=()=>{throw Error('shape probe failure')}
+        failing=await pg.loadExtension(source)
+        reject(()=>failing.methods.example_static_dim(shaped,0), /shape probe failure/)
+      } finally {M._poly_tensor_static_dim=original;if(failing)await failing.dispose()}
+    }
+    shaped.dispose(); scalar.dispose(); large.dispose(); empty.dispose(); dynamic.dispose()
     m.example_reset()
     x = pg.Tensor.empty(1); await x.copyFromAsync(new Float32Array([1]))
     const stale = m.example_new(x, 'old generation')
@@ -32,6 +54,8 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
     const parameter = m.example_input(a)
     try { model = await pg.Model.fromTensors({params:{x:parameter}, outputs:{y}}) }
     finally { await parameter.dispose() }
+    assert(m.example_model_buffers(model) === model.bufCount, 'borrowed Model admission')
+    reject(()=>m.example_model_buffers(x), /live Model/)
     model.setMetadata('example', {name:'μ', schema:1})
     await y.dispose(); y = null
     await author.dispose()
@@ -51,6 +75,7 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
       const ext = await rt.loadExtension(source), t = rt.Tensor.empty(1)
       await t.copyFromAsync(new Float32Array([0]))
       const o = ext.methods.example_new(t, 'runtime owned')
+      reject(()=>ext.methods.example_model_buffers(model), /live Model/)
       reject(()=>second.methods.example_new(t,'foreign'), /runtime/)
       await rt.dispose()
       reject(()=>ext.methods.example_finish(o), /disposed/)
@@ -86,7 +111,7 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
         if (rt._core) { rt._disposePromise=null; await rt.dispose() }
       }
     }
-    return {methods:9, ownership:true, metadata:true}
+    return {methods:11, ownership:true, metadata:true}
   } finally {
     await author.dispose(); await second.dispose()
     if(restored)await restored.dispose();if(model)await model.dispose()

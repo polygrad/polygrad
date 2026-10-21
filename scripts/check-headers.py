@@ -64,10 +64,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix='core-header-', dir=ROOT / 'temp') as directory:
         executable = Path(directory) / 'core'
         unit = '''#include "polygrad.h"
+#include "frontend.h"
 #include "uop/ops.h"
 #include <stdio.h>
 #include <stdlib.h>
 int main(void) {
+  if (poly_get_proc_address("poly_model_call") != NULL) return 2;
+  if (poly_get_proc_address("poly_tensor_abs") != (PolyProc)poly_tensor_abs) return 3;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sum = poly_uop_alu2(ctx, POLY_OP_ADD, poly_uop_const_int(ctx, 2), poly_uop_const_int(ctx, 3));
   size_t size = 0;

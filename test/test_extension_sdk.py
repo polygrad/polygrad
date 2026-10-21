@@ -154,6 +154,7 @@ const pg = require(path.resolve('node_modules/polygrad'))
             parameter = author.methods.example_input(obj)
             model = rt.Model.from_tensors(params={'x': parameter}, outputs={'y': y})
             parameter.dispose()
+            assert author.methods.example_model_buffers(model) == model.buf_count
             model.set_metadata('example', {'schema': 1})
             y.dispose(); author.dispose()
             np.testing.assert_allclose(model.call('forward', {})['y'], [np.e], rtol=1e-6)

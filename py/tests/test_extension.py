@@ -9,6 +9,30 @@ LIB = Path(__file__).resolve().parents[2] / "build/extension/author.so"
 METHOD_LIB = LIB.parent.parent / 'extension-methods/author.so'
 
 
+def test_author_static_shape_query():
+    import polygrad as pg
+    rt = pg.create()
+    author = rt.load_extension(METHOD_LIB)
+    try:
+        x = rt.Tensor.empty(2, 3)
+        scalar = rt.Tensor(1.)
+        assert author.methods.example_static_dim(x, 0) == 2
+        assert author.methods.example_static_dim(x, 1) == 3
+        assert author.methods.example_static_dim(x, 2) == -1
+        assert author.methods.example_static_dim(x, -1) == -1
+        assert author.methods.example_static_dim(scalar, 0) == -1
+        large = rt.Tensor.empty(1 << 34)
+        empty = rt.Tensor.empty(0, 3)
+        dynamic = rt.Tensor.empty(rt.Variable('author_shape', 1, 8).bind(3), 2)
+        assert author.methods.example_static_dim(large, 0) == 1 << 34
+        assert author.methods.example_static_dim(empty, 0) == 0
+        assert author.methods.example_static_dim(dynamic, 0) == -1
+        assert author.methods.example_static_dim(dynamic, 1) == 2
+        for t in (x, scalar, large, empty, dynamic): t.dispose()
+    finally:
+        author.dispose(); rt.dispose()
+
+
 def test_extension_methods_ownership_and_runtime_teardown():
     import gc
     rt = create(device='CPU', logical='always')
@@ -44,6 +68,11 @@ def test_extension_methods_ownership_and_runtime_teardown():
     parameter = methods.example_input(a)
     model = rt.Model.from_tensors(params={'x': parameter}, outputs={'y': y})
     y.dispose(); parameter.dispose()
+    assert methods.example_model_buffers(model) == model.buf_count
+    with pytest.raises(ValueError, match='live Model'):
+        observer.methods.example_model_buffers(model)
+    with pytest.raises(ValueError, match='live Model'):
+        methods.example_model_buffers(x)
     model.set_metadata('example', {'name': 'μ', 'schema': 1})
     author.dispose()
     assert observer.methods.example_order() == 21
@@ -51,6 +80,8 @@ def test_extension_methods_ownership_and_runtime_teardown():
     a.dispose(); b.dispose()
     np.testing.assert_allclose(model.call('forward', {})['y'], [np.exp(2)], rtol=1e-6)
     model.dispose()
+    with pytest.raises(ValueError, match='live Model'):
+        observer.methods.example_model_buffers(model)
     with pytest.raises(RuntimeError, match='disposed'):
         methods.example_finish(a)
     # Runtime owns consumers and closes them before their retained Tensor roots.

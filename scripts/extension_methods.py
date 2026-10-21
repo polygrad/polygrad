@@ -2,7 +2,8 @@
 
 Generated methods.c includes the author source exactly once. Compile it instead
 of the original source, alongside extension.c. The wire adapter is internal:
-frontends expose owned objects/Tensors, never pointer-valued numbers.
+frontends expose owned objects/Tensors, never pointer-valued numbers. Model
+arguments are borrowed for one synchronous invocation; authors cannot retain them.
 """
 import json
 
@@ -28,6 +29,8 @@ def describe(rules, decls, signature):
                 kind = {'kind': t}
             elif t == 'PolyTensor *' and r == {'tensor': 'borrowed'}:
                 kind = {'kind': 'tensor'}
+            elif t == 'PolyModel *' and r == {'model': 'borrowed'}:
+                kind = {'kind': 'model'}
             elif t == 'const char *' and r == {'string': 'borrowed'}:
                 kind = {'kind': 'string'}
             elif isinstance(r, dict) and set(r) == {'object'} and t.endswith(' *') and t not in ('PolyTensor *', 'PolyCtx *'):
@@ -108,7 +111,7 @@ def generate(source, methods, export_definitions):
         for j, a in enumerate(m['args']):
             k = a['kind']
             if k == 'context': args.append('ctx')
-            elif k in ('object', 'tensor'):
+            elif k in ('object', 'tensor', 'model'):
                 c.append(f'if (!handles[{j}]) return -1;')
                 args.append(f'({a["ctype"]})handles[{j}]')
             elif k == 'string':

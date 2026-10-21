@@ -7,5 +7,7 @@
   "example_name_copy": {"args": {"b": {"object": "builder"}}, "return": {"string": "owned", "release": "example_free_string"}},
   "example_live": {"return": "value"},
   "example_order": {"return": "value"},
-  "example_reset": {"return": "status"}
+  "example_reset": {"return": "status"},
+  "example_model_buffers": {"args": {"model": {"model": "borrowed"}}, "return": "value"},
+  "example_static_dim": {"args": {"value": {"tensor": "borrowed"}}, "return": "value"}
 }

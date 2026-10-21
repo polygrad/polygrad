@@ -23,7 +23,7 @@ function validateMethods(spec) {
       throw Error('invalid extension string ownership')
   }
   for (const m of spec.methods) for (const a of m.args) {
-    if (!a || !['context','object','tensor','string','int','double'].includes(a.kind) ||
+    if (!a || !['context','object','tensor','model','string','int','double'].includes(a.kind) ||
         (a.kind === 'object' && !objects.has(a.object))) throw Error('invalid extension method argument')
   }
 }
@@ -88,6 +88,10 @@ function attachMethods(rt, spec, invoke, release, wrap, idle) {
         } else if (a.kind === 'tensor') {
           if (!x || x._rt !== rt || !x._tensor) throw Error('extension method requires a live Tensor from this runtime')
           handles[i] = x._tensor
+        } else if (a.kind === 'model') {
+          if (!(x instanceof rt.Model) || x._rt !== rt || !x._handle || x._closing)
+            throw Error('extension method requires a live Model from this runtime')
+          handles[i] = x._handle
         } else if (a.kind === 'string') {
           if (typeof x !== 'string' || x.includes('\0') || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(x))
             throw TypeError('extension string must be valid UTF-8 without NUL')

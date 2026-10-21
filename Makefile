@@ -131,6 +131,7 @@ test-extension-python: check-extension-bindings build/extension/author.so build/
 	PYTHONPATH=py POLY_LIB=$(CURDIR)/build/libpolygrad.so $(PYTHON) -m pytest -q py/tests/test_extension.py py/tests/test_extension_bindings.py
 test-extension-native: check-extension-bindings build/extension/native.node build/extension-methods/native.node js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_extension.js
+	$(NODE) js/test/test_extension_native_contract.js
 test-extension-wasm: check-extension-bindings build/extension/author.wasm build/extension-methods/author.wasm wasm-pkg
 	POLY_CORE=wasm $(NODE) js/test/test_extension.js
 

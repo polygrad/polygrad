@@ -1,4 +1,4 @@
-"""Construction-only C extensions attached to an existing Runtime."""
+"""Managed C authors attached to an existing Runtime."""
 
 import ctypes as c
 import json
@@ -89,7 +89,7 @@ class Extension:
                 objects.add(m['result']['object'])
         for m in methods:
             for a in m['args']:
-                if (a.get('kind') not in ('context','object','tensor','string','int','double') or
+                if (a.get('kind') not in ('context','object','tensor','model','string','int','double') or
                         (a['kind'] == 'object' and a.get('object') not in objects)):
                     raise ValueError('invalid extension method argument')
         lib = self._lib
@@ -133,6 +133,13 @@ class Extension:
                     if not getattr(x, '_tensor', None) or x._ctx != self._rt._ctx:
                         raise ValueError('extension method requires a live Tensor from this runtime')
                     handles[i] = x._tensor
+                elif kind == 'model':
+                    from .model import Model
+                    from .tensor import _ptr_value
+                    if (not isinstance(x, Model) or not x._ptr or
+                            _ptr_value(x._ctx) != _ptr_value(self._rt._ctx)):
+                        raise ValueError('extension method requires a live Model from this runtime')
+                    handles[i] = x._ptr
                 elif kind == 'string':
                     if not isinstance(x, str) or '\0' in x: raise ValueError('extension string must be UTF-8 without NUL')
                     strings[i] = x.encode('utf-8')

@@ -1003,7 +1003,7 @@ function create({ polygrad: pg }) {
 
 ## C-authored graphs
 
-`pg.loadExtension(source)` attaches a construction-only C author to the current
+`pg.loadExtension(source)` attaches a C author to the current
 runtime: pass a generated Node addon in native mode, or Wasm bytes/a compiled
 `WebAssembly.Module` in Wasm mode. The author calls existing `poly_tensor_*`
 functions. Polygrad owns symbol resolution, array copying and Tensor adoption.
@@ -1070,11 +1070,19 @@ Wasm also exports `poly_extension_invoke` and `poly_extension_release`.
 Call `author.methods.<name>(...)`; context arguments are supplied automatically.
 Consumer objects expose `dispose()`, never raw handles. Borrowed strings last
 for the call and returned strings are copied. Authors retain saved Tensor roots
-and clean up partial failures. Methods only build graphs, not execute them.
+and clean up partial failures.
 Method manifests require construction contract 2; stateless authors retain 1.
 Await disposal on WebGPU: objects close in reverse creation order, and runtime
 disposal closes extensions before Models/Tensors. GC cleanup uses the same
 deferred queue but is not a substitute for explicit disposal.
+
+A `PolyModel *` argument annotated `{"model": "borrowed"}` accepts a live Model
+from this runtime for one synchronous invocation. The author must not retain or
+free it. Native authors can use the public Model call/read and signature queries
+through the resolver, without frontend callbacks in their evaluation loop.
+Native-only pointer/record imports reject on Wasm before instantiation. Browser
+execution still uses its asynchronous frontend contract. Public record layouts
+and ownership are part of the extension ABI; callers serialize the context.
 
 `model.setMetadata('owner', value)` and `model.getMetadata('owner')` write/read
 detached application JSON; `null` removes the key. `transformer`, `polygrad` and

@@ -1,5 +1,7 @@
 /* Stateful installed-SDK example: owns graph terms, never executes them. */
 #include "polygrad.h"
+#include "model.h"
+#include "frontend.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -80,4 +82,13 @@ int example_reset(void) {
   if (live) return -1;
   serial = closed_order = 0;
   return 0;
+}
+
+/* Model is borrowed only for this invocation; never store it in an author. */
+int example_model_buffers(PolyCtx *ctx, PolyModel *model) {
+  return poly_model_ctx(model) == ctx ? poly_model_buf_count(model) : -1;
+}
+
+double example_static_dim(PolyCtx *ctx, PolyTensor *value, int axis) {
+  return (double)poly_tensor_static_dim(ctx, value, axis);
 }

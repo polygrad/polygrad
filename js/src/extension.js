@@ -56,9 +56,13 @@ async function loadExtension(rt,source) {
         env[imp.name]=()=>{};continue
       }
       const name=imp.name,d=api[name],fn=M['_'+name]
+      if(d?.native)throw Error(`extension import requires native core: ${name}`)
       if(imp.module!=='env'||imp.kind!=='function'||!d||typeof fn!=='function')throw Error(`unsupported extension import: ${name}`)
+      // Wasm i64 imports require BigInt even on the error path. Preserve the
+      // original provider error instead of masking it with a coercion failure.
+      const failure = d.return === 'int64_t' || d.return === 'uint64_t' ? BigInt(d.failure) : d.failure
       env[name]=(...args)=>{
-        if(error&&!d.cleanup)return d.failure
+        if(error&&!d.cleanup)return failure
         const allocations=[]
         try {
           for(const [i,ci,width,direction] of d.arrays) {
@@ -77,7 +81,7 @@ async function loadExtension(rt,source) {
           for(const {ptr,target,len,direction} of allocations)if(direction==='out')
             new Uint8Array(instance.exports.memory.buffer,ptr,len).set(M.HEAPU8.subarray(target,target+len))
           return result
-        } catch(e) {error ||= e;return d.failure}
+        } catch(e) {error ||= e;return failure}
         finally {for(const {target} of allocations)M._free(target)}
       }
     }

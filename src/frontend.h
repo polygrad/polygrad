@@ -8,11 +8,14 @@
 extern "C" {
 #endif
 
-/* Construction-only extension contract, independent of private core layouts.
+/* Extension contract, independent of private core layouts.
  * Within this version, preserve existing function signatures, enum/dtype IDs,
  * array widths, ownership, failure and lifetime rules. Additions are compatible;
  * consumers must still resolve every required import. Handles are opaque:
- * private struct access and execution are outside this contract. */
+ * private struct access is outside this contract. Reviewed native-only imports
+ * may execute Models using public records; their layouts are also ABI contracts.
+ * A managed Model argument is borrowed only until its synchronous method returns.
+ * Authors must neither retain nor free it; callers serialize the owning context. */
 #define POLYGRAD_EXTENSION_ABI_VERSION 1
 int poly_extension_abi_version(void);
 /* The legacy query stays at 1 for already compiled authors. Method-bearing
@@ -21,7 +24,9 @@ int poly_extension_supports_abi(int version);
 
 /* Address lookup in this loaded core, not a second mathematical API. Call only
  * through the exact declared function type after verifying the construction
- * ABI. Unsupported symbols return NULL. The provider must outlive consumers. */
+ * ABI. Unsupported symbols return NULL. The provider must outlive consumers.
+ * Optional Model symbols require linked Model objects; weak imports do not
+ * pull those objects from a static archive. */
 typedef void (*PolyProc)(void);
 typedef PolyProc (*PolyProcResolver)(const char *name);
 PolyProc poly_get_proc_address(const char *name);
@@ -45,6 +50,10 @@ PolyUOp *poly_uop_variable_by_id(
     int64_t multiple_of,
     bool param
 );
+/* Static extent at a nonnegative axis, or -1 for an invalid axis/shape or a
+ * varying symbolic extent. Scalar return values cross independent Wasm heaps;
+ * no borrowed shape-storage pointer escapes. This does not realize the Tensor. */
+int64_t poly_tensor_static_dim(PolyCtx *ctx, PolyTensor *tensor, int axis);
 PolyTensor *poly_tensor_empty_by_id(
     PolyCtx *ctx,
     int dtype_id,

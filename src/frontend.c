@@ -12,8 +12,15 @@
 #include "ctx.h"
 #include "engine/realize.h"
 #include "nn/nn.h"
+#include "model.h"
 #include "tensor.h"
 #include <string.h>
+
+/* Like the optional context cleanup hooks, product exports do not force Model
+ * into core-only links. Full builds resolve these to the linked definitions. */
+#define POLY_EXTENSION_DECLARE_OPTIONAL
+#include "frontend_exports.h"
+#undef POLY_EXTENSION_DECLARE_OPTIONAL
 
 int poly_extension_abi_version(void) {
   return POLYGRAD_EXTENSION_ABI_VERSION;
@@ -99,6 +106,17 @@ PolyUOp *poly_uop_variable_by_id(
       !poly_dtype_by_id(dtype_id, &dtype))
     return NULL;
   return poly_uop_variable(ctx, name, min_val->arg, max_val->arg, dtype, multiple_of, param);
+}
+
+int64_t poly_tensor_static_dim(PolyCtx *ctx, PolyTensor *tensor, int axis) {
+  if (!ctx || !tensor || axis < 0) return -1;
+  PolyUOp *u = poly_tensor_uop_physical(tensor);
+  if (!u || axis >= poly_uop_ndim(ctx, u)) return -1;
+  PolyUOp *dim = poly_uop_shape_dim(ctx, u, axis);
+  if (!dim) return -1;
+  int64_t lo, hi;
+  poly_uop_minmax(ctx, dim, &lo, &hi);
+  return lo >= 0 && lo == hi ? lo : -1;
 }
 
 PolyTensor *poly_tensor_empty_by_id(

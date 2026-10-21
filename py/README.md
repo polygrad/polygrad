@@ -825,7 +825,7 @@ cc -std=c11 -O2 -shared -fPIC -I"$(python -m polygrad.sdk --include)" author.c b
 ```
 
 Clang reads the packaged public declarations; unsupported pointer signatures
-reject. New authors use a construction-only ABI and declare required imports:
+reject. New authors use an extension ABI and declare required imports:
 additive core changes do not invalidate them. Legacy authors still use the
 original exact core-ABI check. An incompatible contract or missing import fails
 at load time. Ordinary package installation does not require SDK build tools.
@@ -837,10 +837,26 @@ The installed `_sdk/examples/` directory contains a complete example. Compile ge
 Call `author.methods.<name>(...)`; context arguments are supplied automatically.
 Returned consumer objects expose `dispose()`, not pointer integers. Borrowed
 strings last only for the call; returned strings are copied. Authors retain any
-Tensor they keep and roll back partial changes on failure. Methods build graphs,
-never execute them. Method authors require construction contract 2; stateless
+Tensor they keep and roll back partial changes on failure. Method authors require
+construction contract 2; stateless
 authors retain contract 1. Extension disposal closes objects in reverse creation
 order, and runtime disposal closes extensions before Models and Tensors.
+
+A `PolyModel *` method argument annotated `{"model": "borrowed"}` accepts a live
+Model from this runtime. It lasts only for that synchronous call: authors must
+not retain or free it. Native authors can import public Model call/read and
+signature queries through the same resolver, keeping evaluation loops in C.
+These native-only pointer/record imports reject on Wasm before instantiation;
+this does not add asynchronous browser execution. Callers serialize the context.
+Public record layouts, signatures and ownership remain extension ABI contracts.
+Graph authors can query `poly_tensor_static_dim(ctx, tensor, axis)` without
+realizing data. It returns an int64 extent (including zero), or -1 for an invalid
+axis/shape or a varying symbolic extent. Axes are nonnegative. Unlike a borrowed
+shape pointer, this result is safe across independent Wasm heaps. The reviewed
+Tensor `stack` import accepts an array of borrowed Tensor handles and returns
+one owned Tensor; its array transport follows the existing `cat` contract.
+`poly_uop_dtype_id` is also available to authors as a scalar query. Dtype IDs
+remain part of the extension ABI; the string-name query is native-only.
 
 `model.set_metadata('owner', value)` and `model.get_metadata('owner')` store and
 read detached application JSON; `None` removes the key. `transformer`, `polygrad`

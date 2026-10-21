@@ -515,3 +515,32 @@ def test_native_thunks_are_hidden_without_consumer_flags(tmp_path):
     symbols = subprocess.check_output(['nm', '-D', '--defined-only', str(library)], text=True)
     assert 'poly_extension_build' in symbols
     assert 'poly_tensor_' not in symbols
+
+
+def test_native_model_import_contract(generator):
+    decls = generator.declarations('#include "model.h"\n')
+    rules = {name: {'exclude': 'test'} for name, d in decls.items() if name.startswith('poly_') and d.get('storageClass') != 'static'}
+    rules['poly_model_call'] = {'extension': {
+        'native': True, 'failure': -1, 'ownership': 'value', 'cleanup': False}}
+    generator.validate_rules(decls, rules)
+    rules['poly_model_call']['extension']['native'] = 'yes'
+    with pytest.raises(ValueError, match='extension contract'):
+        generator.validate_rules(decls, rules)
+
+
+def test_model_exports_do_not_force_core_link_dependencies(generator, tmp_path):
+    generator.core(output=tmp_path)
+    header = (tmp_path / 'src/frontend_exports.h').read_text()
+    assert '#pragma weak poly_model_call\n' in header
+    assert '#pragma weak poly_tensor_abs\n' not in header
+    assert 'POLY_EXTENSION_SYMBOL(poly_model_call)\n' in header
+    assert 'POLY_EXTENSION_SYMBOL(poly_tensor_abs)\n' in header
+
+
+def test_borrowed_model_method(generator):
+    spec = importlib.util.spec_from_file_location('extension_methods', ROOT / 'scripts/extension_methods.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    decls = generator.declarations('#include "model.h"\nint inspect(PolyModel *model);')
+    methods, _ = module.describe({'inspect': {'args': {'model': {'model': 'borrowed'}},
+                                            'return': 'value'}}, decls, generator.signature)
+    assert methods[0]['args'][0]['kind'] == 'model'

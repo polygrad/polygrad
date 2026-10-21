@@ -7,6 +7,20 @@
     "ownership": "value",
     "cleanup": false
   },
+  "poly_dtype_id_by_name": {
+    "return": "int",
+    "args": [
+      [
+        "const char *",
+        "name"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
   "poly_extension_abi_version": {
     "return": "int",
     "args": [],
@@ -27,6 +41,278 @@
     "failure": 0,
     "ownership": "value",
     "cleanup": false
+  },
+  "poly_model_buf_count": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
+  "poly_model_buf_dtype_id": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "int",
+        "i"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_buf_nbytes": {
+    "return": "size_t",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "int",
+        "i"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_buf_shape": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "int",
+        "i"
+      ],
+      [
+        "int64_t *",
+        "shape_out"
+      ],
+      [
+        "int",
+        "max_dims"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_buf_shape_bounds": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "int",
+        "i"
+      ],
+      [
+        "int64_t *",
+        "lower"
+      ],
+      [
+        "int64_t *",
+        "upper"
+      ],
+      [
+        "int",
+        "max_dims"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_call": {
+    "return": "int",
+    "args": [
+      [
+        "PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "entrypoint"
+      ],
+      [
+        "PolyIOBinding *",
+        "io"
+      ],
+      [
+        "int",
+        "n_io"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_ctx": {
+    "return": "PolyCtx *",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false
+  },
+  "poly_model_entrypoint_input_count": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "entrypoint"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_entrypoint_input_name": {
+    "return": "const char *",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "entrypoint"
+      ],
+      [
+        "int",
+        "input_index"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_entrypoint_output_count": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "entrypoint"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_entrypoint_output_name": {
+    "return": "const char *",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "entrypoint"
+      ],
+      [
+        "int",
+        "output_index"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "borrowed",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_find_buf": {
+    "return": "int",
+    "args": [
+      [
+        "const PolyModel *",
+        "inst"
+      ],
+      [
+        "const char *",
+        "name"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
+  },
+  "poly_model_read_bufs": {
+    "return": "int",
+    "args": [
+      [
+        "PolyModel *",
+        "inst"
+      ],
+      [
+        "const int *",
+        "indices"
+      ],
+      [
+        "void **",
+        "dsts"
+      ],
+      [
+        "const size_t *",
+        "sizes"
+      ],
+      [
+        "int",
+        "n"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false,
+    "native": true
   },
   "poly_tensor_abs": {
     "return": "PolyTensor *",
@@ -1920,6 +2206,40 @@
     "failure": 0,
     "ownership": "owned",
     "cleanup": false
+  },
+  "poly_tensor_from_host_by_id": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "void *",
+        "ptr"
+      ],
+      [
+        "size_t",
+        "nbytes"
+      ],
+      [
+        "int",
+        "dtype_id"
+      ],
+      [
+        "const int64_t *",
+        "dims"
+      ],
+      [
+        "int",
+        "ndim"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false,
+    "native": true
   },
   "poly_tensor_gather_dim": {
     "return": "PolyTensor *",
@@ -3913,6 +4233,59 @@
     "ownership": "owned",
     "cleanup": false
   },
+  "poly_tensor_stack": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor **",
+        "inputs"
+      ],
+      [
+        "int",
+        "n_inputs"
+      ],
+      [
+        "int",
+        "dim"
+      ]
+    ],
+    "arrays": [
+      [
+        1,
+        2,
+        4,
+        "in"
+      ]
+    ],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_tensor_static_dim": {
+    "return": "int64_t",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "tensor"
+      ],
+      [
+        "int",
+        "axis"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
+    "cleanup": false
+  },
   "poly_tensor_sum": {
     "return": "PolyTensor *",
     "args": [
@@ -4241,6 +4614,23 @@
     ],
     "failure": 0,
     "ownership": "owned",
+    "cleanup": false
+  },
+  "poly_uop_dtype_id": {
+    "return": "int",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyUOp *",
+        "u"
+      ]
+    ],
+    "arrays": [],
+    "failure": -1,
+    "ownership": "value",
     "cleanup": false
   },
   "poly_uop_ndim": {
