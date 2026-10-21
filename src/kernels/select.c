@@ -11,7 +11,7 @@ typedef struct {
 static PolyUOp *select_node(PolyCtx *ctx, PolyUOp *u, KernelSelection *s) {
   if (s->failed) return NULL;
   PolySegmentDesc segment;
-  if (poly_kernel_match_segment(ctx, u, &segment)) {
+  if (ctx->kernel_policy == 1 && poly_kernel_match_segment(ctx, u, &segment)) {
     const char *dev = segment.device;
     bool supported = !strcmp(dev, "CPU") || !strncmp(dev, "CPU:", 4) || !strcmp(dev, "X86") ||
                      !strcmp(dev, "INTERP") || !strcmp(dev, "WASM") || !strcmp(dev, "CUDA") ||
@@ -30,6 +30,7 @@ static PolyUOp *select_node(PolyCtx *ctx, PolyUOp *u, KernelSelection *s) {
   }
   PolyGemmDesc d;
   if (!poly_kernel_match_gemm(ctx, u, &d)) return NULL;
+  if (ctx->kernel_policy != 1 && strcmp(d.device, "WASM")) return NULL;
   int count = 0;
   const PolyKernelImpl *impls = poly_portable_kernel_impls(d.device, &count);
   if (!count) impls = poly_cpu_kernel_impls(&count);
@@ -56,7 +57,7 @@ static PolyUOp *select_match(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindi
 
 PolyUOp *poly_kernel_select_node(PolyCtx *ctx, PolyUOp *u) {
   ctx->kernel_policy_locked = true;
-  if (!ctx->kernel_policy) return u;
+  if (ctx->kernel_policy == 0) return u;
   KernelSelection s = {.debug = poly_getenv_int("POLY_DEBUG_KERNELS", 0) != 0};
   PolyUOp *result = select_node(ctx, u, &s);
   return s.failed ? NULL : result ? result : u;

@@ -908,6 +908,11 @@ raise `ValueError`; `strict=False` permits skipping NFC only, with `UserWarning`
 Use Hugging Face tokenizers for other pipelines. No Unicode dependency is added.
 
 `create(device='cpu', kernels=True)` accepts the same kernel option as `Runtime`.
+Native CPU and WebGPU kernel providers remain opt-in. The Wasm execution backend
+selects supported strict no-pack FP32 matmuls by default; `kernels=False` or
+`POLY_KERNELS=0` disables selection. Other operations use shared optimization and
+ordinary rendering. The Wasm striped sum order changes rounding under cancellation;
+it does not use relaxed multiply-add.
 
 | Area | Main APIs |
 |---|---|

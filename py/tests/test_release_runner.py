@@ -82,6 +82,7 @@ def test_c_gate_has_no_browser_build_and_browser_snapshot_runs_serially(ctype_lo
     # A recipe, not a sibling prerequisite: both browser steps write js/dist.
     assert 'test-browser: test-js-browser\n\t$(MAKE) test-wasm-performance-structure\n' in makefile
     assert 'test-wasm-performance-structure update-wasm-performance-structure: test-bench-wasm wasm-pkg' in makefile
+    assert '--no-kernels --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_generic.json' in makefile
 
 
 def test_onnx_encoder_uses_its_browser_fixture_without_unrelated_performance_gate():

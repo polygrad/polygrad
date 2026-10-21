@@ -97,7 +97,7 @@ struct PolyCtx {
   int64_t next_unique_id;
   PolyDevice preferred_device;
   PolyLogicalPolicy logical_policy;
-  int kernel_policy; /* 0 off, 1 auto; environment sampled at context creation */
+  int kernel_policy; /* -1 Wasm GEMM only, 0 off, 1 all; environment sampled at creation */
   bool kernel_policy_locked;
   PolyFrontendBufferReleaseFn frontend_buffer_release;
 };

@@ -49,7 +49,8 @@ function observeBoundaries() {
 }
 
 async function checkReplayBoundaries(polygrad, state, policy) {
-  // Check the default and explicitly disabled provider policy separately.
+  // Exercise the actual default too: late provider selection formerly added
+  // two output-copy launches to Qwen that the disabled-provider counts missed.
   if (!policy) return [...await checkReplayBoundaries(polygrad, state, 'disabled'),
     ...await checkReplayBoundaries(polygrad, state, 'default')]
   const assert = (ok, message) => { if (!ok) throw new Error(message) }
@@ -60,8 +61,8 @@ async function checkReplayBoundaries(polygrad, state, policy) {
   // Ordinary row-major weights, default compiler, no private provider or workers.
   // Expected tuple: JS->core exports, core->JS imports, generated-kernel calls.
   const cases = [
-    { name: 'mlp_token', d: 768, h: 3072, expected: [94, 14, 2] },
-    { name: 'qwen_ffn_token', d: 1024, h: 2816, expected: [131, 28, 4] }
+    { name: 'mlp_token', d: 768, h: 3072, expected: disabled ? [94, 14, 2] : [94, 18, 4] },
+    { name: 'qwen_ffn_token', d: 1024, h: 2816, expected: disabled ? [131, 28, 4] : [131, 30, 5] }
   ]
   function data(n, seed) {
     return Float32Array.from({ length: n }, () => {

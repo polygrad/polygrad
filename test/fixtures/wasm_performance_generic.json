@@ -1,0 +1,401 @@
+{
+  "schema": 1,
+  "device": "wasm",
+  "pipeline": "whole",
+  "kernels": false,
+  "phases": {
+    "cold": "generated modules, in compilation order",
+    "warm": "one validated replay, excluding output disposal",
+    "allocationScope": "exported malloc/calloc/realloc calls only; internal C allocations covered by C tests"
+  },
+  "workloads": [
+    {
+      "name": "mlp_small",
+      "schedules": 1,
+      "cold": {
+        "modules": [
+          {
+            "sha256": "19956c1b50a185a635d243b5dafee51f3a8404eea5a30875556f18df59458a68",
+            "bytes": 1750,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.const": 1,
+              "f32x4.add": 20,
+              "f32x4.extract_lane": 16,
+              "f32x4.lt": 4,
+              "f32x4.mul": 16,
+              "f32x4.splat": 12,
+              "i32.add": 33,
+              "i32.const": 53,
+              "i32.ge_u": 3,
+              "i32.mul": 24,
+              "i32.shl": 3,
+              "i8x16.shuffle": 24,
+              "local.get": 211,
+              "local.set": 123,
+              "local.tee": 12,
+              "loop": 3,
+              "v128.bitselect": 4,
+              "v128.const": 4,
+              "v128.load": 9,
+              "v128.store": 4
+            }
+          },
+          {
+            "sha256": "ac41bd03b4e9088bfdf80ca7d384a489ab0620f59247e608897a811ba860ae4b",
+            "bytes": 1668,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.const": 1,
+              "f32x4.add": 20,
+              "f32x4.extract_lane": 16,
+              "f32x4.mul": 16,
+              "f32x4.splat": 4,
+              "i32.add": 33,
+              "i32.const": 52,
+              "i32.ge_u": 3,
+              "i32.mul": 24,
+              "i32.shl": 3,
+              "i8x16.shuffle": 24,
+              "local.get": 199,
+              "local.set": 122,
+              "local.tee": 8,
+              "loop": 3,
+              "v128.const": 4,
+              "v128.load": 9,
+              "v128.store": 4
+            }
+          }
+        ]
+      },
+      "warm": {
+        "coreExports": 73,
+        "coreImports": 9,
+        "dispatches": 2,
+        "allocationExports": 2
+      }
+    },
+    {
+      "name": "mlp_token",
+      "schedules": 1,
+      "cold": {
+        "modules": [
+          {
+            "sha256": "bd7df2d8d240c7c97097c8b726ee385b76041e993496fe875a1c6de206baaa90",
+            "bytes": 848,
+            "opcodes": {
+              "block": 2,
+              "br": 2,
+              "br_if": 2,
+              "f32.add": 15,
+              "f32.const": 4,
+              "f32.load": 1,
+              "f32.lt": 3,
+              "f32.store": 1,
+              "f32x4.extract_lane": 30,
+              "f32x4.mul": 3,
+              "f32x4.replace_lane": 2,
+              "i32.add": 18,
+              "i32.const": 29,
+              "i32.ge_u": 2,
+              "i32.mul": 18,
+              "i32.shl": 1,
+              "local.get": 135,
+              "local.set": 95,
+              "loop": 2,
+              "select": 3,
+              "v128.const": 1,
+              "v128.load": 4,
+              "v128.load64_zero": 1,
+              "v128.store64_lane": 1
+            }
+          },
+          {
+            "sha256": "5ec0dd62d9b4852f99cd4277060ac1aeb048bf41fe75e514dc52b91c5b1e0720",
+            "bytes": 421,
+            "opcodes": {
+              "block": 2,
+              "br": 2,
+              "br_if": 2,
+              "f32.add": 5,
+              "f32.const": 2,
+              "f32.load": 1,
+              "f32.store": 1,
+              "f32x4.extract_lane": 12,
+              "f32x4.mul": 1,
+              "i32.add": 11,
+              "i32.const": 21,
+              "i32.ge_u": 2,
+              "i32.mul": 11,
+              "i32.shl": 1,
+              "local.get": 55,
+              "local.set": 43,
+              "loop": 2,
+              "v128.load": 2
+            }
+          }
+        ]
+      },
+      "warm": {
+        "coreExports": 73,
+        "coreImports": 9,
+        "dispatches": 2,
+        "allocationExports": 2
+      }
+    },
+    {
+      "name": "mlp_batch",
+      "schedules": 1,
+      "cold": {
+        "modules": [
+          {
+            "sha256": "d51d90e2b829f448a9682ada9102e08fbbf1dff035131cb64bda5538f795c0ba",
+            "bytes": 2193,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.add": 12,
+              "f32.const": 1,
+              "f32.load": 1,
+              "f32.lt": 12,
+              "f32.store": 4,
+              "f32x4.add": 12,
+              "f32x4.extract_lane": 26,
+              "f32x4.mul": 12,
+              "f32x4.replace_lane": 8,
+              "f32x4.splat": 3,
+              "i32.add": 41,
+              "i32.const": 55,
+              "i32.ge_u": 3,
+              "i32.mul": 30,
+              "i32.shl": 1,
+              "i8x16.shuffle": 20,
+              "local.get": 299,
+              "local.set": 168,
+              "local.tee": 8,
+              "loop": 3,
+              "select": 12,
+              "v128.const": 7,
+              "v128.load": 7,
+              "v128.load64_zero": 1,
+              "v128.store64_lane": 4
+            }
+          },
+          {
+            "sha256": "a86fdec06501a2a1558a5df0ec37bec51452e90aae91d5e6762da0dab684b34f",
+            "bytes": 1929,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.add": 12,
+              "f32.const": 1,
+              "f32.load": 1,
+              "f32.store": 4,
+              "f32x4.add": 12,
+              "f32x4.extract_lane": 26,
+              "f32x4.mul": 12,
+              "f32x4.replace_lane": 8,
+              "f32x4.splat": 3,
+              "i32.add": 41,
+              "i32.const": 54,
+              "i32.ge_u": 3,
+              "i32.mul": 30,
+              "i32.shl": 1,
+              "i8x16.shuffle": 20,
+              "local.get": 239,
+              "local.set": 143,
+              "local.tee": 8,
+              "loop": 3,
+              "v128.const": 7,
+              "v128.load": 7,
+              "v128.load64_zero": 1,
+              "v128.store64_lane": 4
+            }
+          }
+        ]
+      },
+      "warm": {
+        "coreExports": 73,
+        "coreImports": 9,
+        "dispatches": 2,
+        "allocationExports": 2
+      }
+    },
+    {
+      "name": "qwen_ffn_token",
+      "schedules": 1,
+      "cold": {
+        "modules": [
+          {
+            "sha256": "80d6473ef925f3a17282a970fd3992e792d2880e8abc5b466360acec9f93df72",
+            "bytes": 1417,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.const": 16,
+              "f32.load": 5,
+              "f32x4.add": 13,
+              "f32x4.convert_i32x4_s": 1,
+              "f32x4.div": 1,
+              "f32x4.extract_lane": 4,
+              "f32x4.lt": 3,
+              "f32x4.mul": 15,
+              "f32x4.ne": 3,
+              "f32x4.replace_lane": 4,
+              "f32x4.splat": 25,
+              "f32x4.sub": 1,
+              "i32.add": 28,
+              "i32.const": 41,
+              "i32.eqz": 1,
+              "i32.ge_u": 3,
+              "i32.mul": 21,
+              "i32.shl": 3,
+              "i32.sub": 1,
+              "i32x4.add": 2,
+              "i32x4.ne": 1,
+              "i32x4.shl": 2,
+              "i32x4.shr_s": 1,
+              "i32x4.splat": 3,
+              "i32x4.sub": 1,
+              "i32x4.trunc_sat_f32x4_s": 1,
+              "i8x16.shuffle": 12,
+              "local.get": 168,
+              "local.set": 94,
+              "local.tee": 15,
+              "loop": 3,
+              "v128.bitselect": 7,
+              "v128.const": 3,
+              "v128.load": 5,
+              "v128.store": 1
+            }
+          },
+          {
+            "sha256": "4390a4e43f732117f5a906dbb89134e1c3b6b6d2d8d281a2c331471285a9ddcb",
+            "bytes": 751,
+            "opcodes": {
+              "block": 2,
+              "br": 2,
+              "br_if": 2,
+              "f32.const": 1,
+              "f32x4.add": 4,
+              "f32x4.extract_lane": 4,
+              "f32x4.mul": 4,
+              "f32x4.splat": 1,
+              "i32.add": 15,
+              "i32.const": 27,
+              "i32.ge_u": 2,
+              "i32.mul": 12,
+              "i32.shl": 2,
+              "i8x16.shuffle": 12,
+              "local.get": 75,
+              "local.set": 49,
+              "local.tee": 8,
+              "loop": 2,
+              "v128.const": 1,
+              "v128.load": 5,
+              "v128.store": 1
+            }
+          }
+        ]
+      },
+      "warm": {
+        "coreExports": 60,
+        "coreImports": 9,
+        "dispatches": 2,
+        "allocationExports": 2
+      }
+    },
+    {
+      "name": "qwen_ffn_batch",
+      "schedules": 1,
+      "cold": {
+        "modules": [
+          {
+            "sha256": "39228535d9c995082a3a5320edaa805cbce753e16070d124a5e71ea3704bc5e5",
+            "bytes": 3683,
+            "opcodes": {
+              "block": 4,
+              "br": 4,
+              "br_if": 4,
+              "f32.const": 16,
+              "f32.load": 8,
+              "f32x4.add": 52,
+              "f32x4.convert_i32x4_s": 4,
+              "f32x4.div": 4,
+              "f32x4.extract_lane": 16,
+              "f32x4.lt": 12,
+              "f32x4.mul": 60,
+              "f32x4.ne": 12,
+              "f32x4.replace_lane": 4,
+              "f32x4.splat": 100,
+              "f32x4.sub": 4,
+              "i32.add": 52,
+              "i32.const": 71,
+              "i32.eqz": 4,
+              "i32.ge_u": 4,
+              "i32.mul": 35,
+              "i32.shl": 3,
+              "i32.sub": 4,
+              "i32x4.add": 8,
+              "i32x4.ne": 4,
+              "i32x4.shl": 8,
+              "i32x4.shr_s": 4,
+              "i32x4.splat": 12,
+              "i32x4.sub": 4,
+              "i32x4.trunc_sat_f32x4_s": 4,
+              "i8x16.shuffle": 24,
+              "local.get": 466,
+              "local.set": 196,
+              "local.tee": 33,
+              "loop": 4,
+              "v128.bitselect": 28,
+              "v128.const": 9,
+              "v128.load": 8,
+              "v128.store": 4
+            }
+          },
+          {
+            "sha256": "95de1266cba8e9df5b35858d3ae3e8218bcb791812df22a68e6347f9a814c195",
+            "bytes": 1627,
+            "opcodes": {
+              "block": 3,
+              "br": 3,
+              "br_if": 3,
+              "f32.const": 1,
+              "f32x4.add": 16,
+              "f32x4.extract_lane": 16,
+              "f32x4.mul": 16,
+              "f32x4.splat": 4,
+              "i32.add": 31,
+              "i32.const": 52,
+              "i32.ge_u": 3,
+              "i32.mul": 21,
+              "i32.shl": 2,
+              "i8x16.shuffle": 24,
+              "local.get": 188,
+              "local.set": 121,
+              "local.tee": 8,
+              "loop": 3,
+              "v128.const": 4,
+              "v128.load": 8,
+              "v128.store": 4
+            }
+          }
+        ]
+      },
+      "warm": {
+        "coreExports": 60,
+        "coreImports": 9,
+        "dispatches": 2,
+        "allocationExports": 2
+      }
+    }
+  ]
+}

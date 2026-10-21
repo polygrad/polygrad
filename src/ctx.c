@@ -70,7 +70,7 @@ PolyCtx *poly_ctx_new(void) {
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
-  ctx->kernel_policy = poly_getenv_int("POLY_KERNELS", 0) == 1;
+  ctx->kernel_policy = getenv("POLY_KERNELS") ? poly_getenv_int("POLY_KERNELS", 0) == 1 : -1;
   ctx->kernel_policy_locked = false;
   ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);

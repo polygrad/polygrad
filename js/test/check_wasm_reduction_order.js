@@ -1,15 +1,15 @@
 'use strict'
 
-// Characterize PG-PARITY-039, not an allowance for numerical parity failures.
-// Repeated constants cannot distinguish these two accumulation orders.
-async function checkReductionOrder(specialBytes, genericBytes, width) {
+// Production and direct generic lowering must keep the pinned accumulation
+// order. Varying/cancellation inputs expose a hidden striped replacement.
+async function checkReductionOrder(productionBytes, genericBytes, width) {
   const assert = (ok, message) => { if (!ok) throw new Error(message) }
   const f = Math.fround, rows = 2, outputOffset = rows * width * 4
   const memory = new WebAssembly.Memory({ initial: Math.ceil((outputOffset + rows * 4) / 65536) })
   const x = new Float32Array(memory.buffer, 0, rows * width)
   const output = new Float32Array(memory.buffer, outputOffset, rows)
   const functions = []
-  for (const bytes of [specialBytes, genericBytes]) {
+  for (const bytes of [productionBytes, genericBytes]) {
     const { instance } = await WebAssembly.instantiate(bytes, { env: { memory }, math: {} })
     functions.push(instance.exports.kernel)
   }
@@ -43,8 +43,8 @@ async function checkReductionOrder(specialBytes, genericBytes, width) {
     for (let mode = 0; mode < functions.length; mode++) {
       output.fill(NaN)
       functions[mode](outputOffset, 0)
-      assert(output.every((value, row) => Object.is(value, expected[mode][row])),
-        `${pattern}/${width}/${mode}: ${Array.from(output)} != ${expected[mode]}`)
+      assert(output.every((value, row) => Object.is(value, expected[1][row])),
+        `${pattern}/${width}/${mode}: ${Array.from(output)} != ${expected[1]}`)
     }
   }
 }

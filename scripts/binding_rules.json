@@ -438,8 +438,6 @@
   "poly_render_cuda": {"exclude":"C-only"},
   "poly_render_hip": {"exclude":"C-only"},
   "poly_render_wasm": {"exclude":"C-only"},
-  "poly_render_wasm_matmul": {"exclude":"C-only"},
-  "poly_render_wasm_reduce": {"exclude":"C-only"},
   "poly_render_wgsl": {"exclude":"C-only"},
   "poly_rewrite_cuda": {"exclude":"C-only"},
   "poly_rewrite_hip": {"exclude":"C-only"},
@@ -1135,7 +1133,5 @@
   "poly_upat_or_casted": {"exclude":"C-only"},
   "poly_upat_repeat_src": {"exclude":"C-only"},
   "poly_upat_set_dtype": {"exclude":"C-only"},
-  "poly_upat_set_early_reject": {"exclude":"C-only"},
-  "poly_wasm_can_render_matmul": {"exclude":"C-only"},
-  "poly_wasm_can_render_reduce": {"exclude":"C-only"}
+  "poly_upat_set_early_reject": {"exclude":"C-only"}
 }

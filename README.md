@@ -437,20 +437,23 @@ Search compares its winner with the default schedule at full size and caches
 the selection. Python `Context(BEAM_COMPARE=0)` or JS `runtime.beamCompare = 0`
 disables this comparison to use the pinned tinygrad search policy.
 
+Wasm uses a no-pack SIMD128 UOp matmul kernel for supported fixed FP32 shapes.
+It uses strict multiply/add. Contiguous K rows use four partial sums per output,
+combined as `(s0+s2)+(s1+s3)`; contiguous output columns use serial K accumulation.
+The striped order changes rounding, especially under cancellation; it is not
+guaranteed to be more accurate than serial accumulation. Relaxed multiply-add
+is not used. Unsupported shapes retain the existing fallback path.
+`create({ kernels: false })` or `POLY_KERNELS=0` disables kernel selection.
+Fallbacks and disabled kernels use shared optimization and ordinary Wasm rendering;
+the renderer does not replace matmuls or row reductions with specialized kernels.
+
 `Runtime(kernels=True)` in Python or `create({ kernels: true })` in JavaScript
-enables experimental physical kernels for that runtime: AVX2/FMA on CPU,
-SIMD128 on Wasm and tiled FP32 GEMM on WebGPU. Unsupported shapes use the default
-path. Policy is fixed at first compilation; portable bundles keep the original operations.
-These kernels are opt-in experiments, not guaranteed speedups.
+additionally enables experimental AVX2/FMA CPU and tiled FP32 WebGPU kernels.
+These remain opt-in and are not guaranteed speedups. `POLY_KERNELS=1` enables
+all providers. Policy is fixed at first compilation; portable bundles keep
+the original operations.
 
-The Wasm FP32 GEMM provider consumes ordinary weights without a packing copy.
-For K-contiguous weights it accumulates four K-strided partial sums and combines
-them as `(s0+s2)+(s1+s3)`; column-contiguous weights retain serial K order.
-Both paths use strict multiply and add, not relaxed multiply-add. Changing the
-sum order can improve or worsen cancellation error; it is not bitwise parity
-with the generic reduction. Scalar tails follow the same documented order.
-
-The same policy optimizes FP32 interval sums expressed as
+The explicit opt-in policy also optimizes FP32 interval sums expressed as
 `((arange(N) >= lo) & (arange(N) < hi)).where(values, 0).sum(1)`, with
 int32 bounds `[S,1,1]` and values `[1,N,W]`. CPU, X86, interpreter, Wasm,
 CUDA and WebGPU execute direct interval loops instead of scanning all N values

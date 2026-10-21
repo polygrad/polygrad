@@ -855,6 +855,7 @@ test-wasm-performance-structure update-wasm-performance-structure: test-bench-wa
 	cd js && bash scripts/build-browser.sh
 	WASM_DIS=$(WASM_DIS) $(NODE) bench/bench_jax_js_browser_model_wasm.mjs --structure --pipeline whole --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_default.json $(if $(filter update-%,$@),--update-snapshot)
 	WASM_DIS=$(WASM_DIS) $(NODE) bench/bench_jax_js_browser_model_wasm.mjs --structure --pipeline whole --kernels --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_kernels.json $(if $(filter update-%,$@),--update-snapshot)
+	WASM_DIS=$(WASM_DIS) $(NODE) bench/bench_jax_js_browser_model_wasm.mjs --structure --pipeline whole --no-kernels --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_generic.json $(if $(filter update-%,$@),--update-snapshot)
 
 .PHONY: bench-jax-js-browser-model-webgpu
 bench-jax-js-browser-model-webgpu: wasm-pkg

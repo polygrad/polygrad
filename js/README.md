@@ -637,6 +637,13 @@ workers. Concurrent GPU startup has not been validated. The Linux native
 addon remains loaded until process exit so
 worker teardown cannot unload code still needed by compiler thread-local cleanup.
 
+Wasm matmuls use strict no-pack UOp kernels by default for supported fixed FP32
+shapes. `create({ kernels: false })` disables selection; generic optimization and
+rendering handle all other operations. CPU and WebGPU providers remain opt-in
+with `kernels: true`. `POLY_KERNELS=0` disables selection through the environment.
+The Wasm striped sum order can change rounding under cancellation; it uses
+strict multiply/add, not host-dependent relaxed multiply-add.
+
 The default JavaScript API is sync-first. `polygrad.create(...)` returns a
 `PolyRuntime` immediately or throws; tensor construction and graph construction
 are synchronous too.

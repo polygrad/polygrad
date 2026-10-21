@@ -48,23 +48,31 @@
     },
     {
       "id": "PG-PARITY-039",
-      "status": "open_debt",
-      "stages": ["codegen", "execution"],
+      "status": "resolved",
+      "stages": [
+        "codegen",
+        "execution"
+      ],
       "area": "Default Wasm specialized matmul and row-reduction numerical order",
       "tinygrad": "Shared reduce_ranges_to_acc and expand_horizontal_reduce define the optimized accumulator graph; divisible generic Wasm probes add four-term groups into one scalar accumulator.",
-      "polygrad": "Default Wasm specialization bypasses shared optimization for eligible scheduled SINKs. Row reduction keeps four striped accumulators and combines (lane0+lane2)+(lane1+lane3), followed by scalar tails. Transposed-right matmul first tries relaxed SIMD multiply-add, whose fused versus unfused rounding is host-dependent; strict fallback still uses specialized tiling. These paths are separate from opt-in PG-DIV-012 kernels.",
-      "rationale": "Varying and cancellation inputs distinguish special and generic orders; repeated constants do not. Current isolated browser matmuls benefit materially from specialization, but speed does not authorize a numerical mismatch. Independent-lane SIMD policy does not cover reassociated reductions.",
+      "polygrad": "Both scheduled-SINK renderer specializers and the relaxed matmul compile retry are removed. Every Wasm program now crosses shared optimization and generic rendering. Custom matmuls are selected before lowering under PG-DIV-012, not rediscovered in the renderer.",
+      "rationale": "The previous matmul and striped row-reduction paths bypassed shared optimization. Their deletion removes this hidden policy; production row reductions retain the pinned grouped/scalar orders, tested with varying and cancellation inputs. Target-level SIMD packing remains separate.",
       "approval": null,
       "evidence": [
         "src/renderer/wasm.c:poly_rewrite_wasm",
         "src/runtime_wasm.c:poly_wasm_lower_item",
-        "test/test_wasm.c:specialized_and_generic_reduction_orders",
+        "test/test_wasm.c:production_and_generic_reduction_orders_match",
         "js/test/check_wasm_reduction_order.js",
         "references/tinygrad_latest/tinygrad/codegen/__init__.py:reduce_ranges_to_acc",
         "references/tinygrad_latest/tinygrad/codegen/__init__.py:expand_horizontal_reduce",
-        "temp/complexity-audit-20261015/report.txt"
+        "temp/complexity-audit-20261015/report.txt",
+        "temp/wasm-policy-20261021/reduction-red.log",
+        "temp/wasm-policy-20261021/report.txt"
       ],
-      "close_when": "Either preserve the shared optimized arithmetic order, or obtain an explicit stage-scoped numerical policy after representative performance and accuracy measurements. Retain varying-input tests; this debt row permits no mismatch."
+      "resolution": {
+        "evidence": "Specialized emitters, detectors and declarations removed; public lowering matches generic reduction topology and exact varying/cancellation outputs. C Wasm suite: 105 passed, zero failures. This historical row grants no numeric allowance.",
+        "closed_on": "2026-10-21"
+      }
     },
     {
       "id": "PG-DIV-034",
@@ -288,23 +296,24 @@
       "status": "approved",
       "stages": [
         "rangeify",
+        "realize",
         "codegen",
         "renderer-source",
         "execution",
         "value"
       ],
-      "area": "Opt-in physical UOp GEMM providers",
+      "area": "Physical UOp GEMM providers; Wasm default, other backends opt-in",
       "tinygrad": "Pinned llm/kernels/amd.py selects UOp-authored custom kernels for supported AMD quantized Linear inputs; it has no equivalent FP32 AVX2 matmul kernel.",
       "polygrad": "POLY_KERNELS=1 selects fixed-shape FP32 broadcast matmuls and rank-three autograd contractions on native AVX2/FMA CPUs before decomposition, including resolved ordinary FUNCTION bodies. A 4x24 UOp kernel consumes scheduled panel packing; unsupported cases fall back. Existing CPU workers receive even output-tile-axis slices, using the pin's thread-count candidates and work floor; each output retains serial K accumulation. On the same opt-in path, a last-axis normalized exponential feeding matmul is materialized once when its fixed FP32 table is at most 32 MiB and reused across output columns. Authoring and portable logical graphs remain unchanged. Serial FMA accumulation and physical materialization can round differently from generic reductions.",
-      "rationale": "The opt-in Wasm path replaces the packed 4x8 provider with one no-pack UOp provider, selected before fusion. Fixed FP32 M<=512 and K,N<=4096 with a shared right operand are supported. Contiguous K rows use four K%4 accumulators, combined (s0+s2)+(s1+s3); contiguous output columns use serial K accumulation through the shared GEMM builder. Both use separate strict multiply/add. Fixed tails preserve those orders, and output-column prefix/tail CALLs write disjoint views of one buffer without packing. The striped order can improve or worsen cancellation error: [2^25,-2^25,1,0,...] gives0 versus serial1; swapping the middle terms reverses which order loses1. Tests pin the orders, repeated results and binary64 errors; no promise of being no worse than serial is made. All providers remain opt-in through kernels=true or POLY_KERNELS=1. The default renderer specializer remains separate open debt under PG-PARITY-039. WebGPU uses32x64 workgroup tiles and serial K, with no packing dispatch. Unsupported cases fall back. Authoring, gradients and portable bundles retain generic operations. Policy locks at first lowering. No persistent packed-state cache, host-dependent relaxed arithmetic or new executor is introduced.",
-      "approval": "User 2026-09-25: proceed with guarded physical custom-kernel integration and attention materialization. User 2026-09-26: proceed to Wasm and WebGPU kernels. User approved the strict four-partial-sum opt-in replacement and subsequent explicit cancellation tradeoff qualification; default enablement remains a separate decision.",
+      "rationale": "The Wasm path replaces the packed 4x8 provider with one no-pack UOp provider, selected before fusion. Fixed FP32 M<=512 and K,N<=4096 with a shared right operand are supported. Contiguous K rows use four K%4 accumulators, combined (s0+s2)+(s1+s3); contiguous output columns use serial K accumulation through the shared GEMM builder. Both use separate strict multiply/add. Fixed tails preserve those orders, and output-column prefix/tail CALLs write disjoint views of one buffer without packing. The striped order can improve or worsen cancellation error: [2^25,-2^25,1,0,...] gives0 versus serial1; swapping the middle terms reverses which order loses1. Tests pin the orders, repeated results and binary64 errors; no promise of being no worse than serial is made. With POLY_KERNELS unset, only Wasm GEMM selection is enabled by default. kernels=false or POLY_KERNELS=0 disables selection; kernels=true or POLY_KERNELS=1 enables all supported providers. CPU, WebGPU and interval-sum providers retain explicit opt-in. Matmul outputs are materialized before epilogues, so realize-stage dispatch counts can differ. Both renderer specializers and the relaxed multiply-add retry are removed; disabled/unsupported operations use shared optimization and generic rendering. WebGPU uses32x64 workgroup tiles and serial K, with no packing dispatch. Unsupported cases fall back. Authoring, gradients and portable bundles retain generic operations. Policy locks at first lowering. No persistent packed-state cache, host-dependent relaxed arithmetic or new executor is introduced.",
+      "approval": "User 2026-09-25: proceed with guarded physical custom-kernel integration and attention materialization. User 2026-09-26: proceed to Wasm and WebGPU kernels. User approved the strict four-partial-sum opt-in replacement and subsequent explicit cancellation tradeoff qualification; default enablement remains a separate decision. User 2026-10-21 explicitly superseded default-off: enable Wasm UOp matmuls by default and remove both renderer specializers; all other operations use plain rendering plus optimizer options. This approves physical selection, realize-stage materialization and the documented strict reduction order, not a universal speedup.",
       "evidence": [
         "references/tinygrad_latest/tinygrad/llm/kernels/amd.py",
         "src/kernels/cpu.c",
         "src/kernels/gemm.c",
         "src/kernels/webgpu.c",
         "src/kernels/portable.c",
-        "test/test_codegen.c:gemm_selection_is_opt_in_and_preserves_weight_layout",
+        "test/test_codegen.c:wasm_gemm_default_is_device_scoped_and_optional",
         "test/test_wasm.c:uop_matmul_uses_strict_simd_and_executes",
         "js/test/test_model_runtime.js:checkWasmGemmNumerics",
         "test/test_codegen.c:cpu_packed_gemm_selection",
@@ -316,9 +325,10 @@
         "temp/avx2-uop-20260925/ablation/results.json",
         "temp/attention-20260925/report.md",
         "temp/webgpu-tiled-20260926.md",
-        "temp/wasm-opt-in-landing-20261020/report.txt"
+        "temp/wasm-opt-in-landing-20261020/report.txt",
+        "temp/wasm-policy-20261021/report.txt"
       ],
-      "close_when": "Re-evaluate selection, numerical error and matched performance before default enablement or expanding supported shapes. This opt-in allowance covers the documented physical matmul order, not authoring, differentiation or portable-export mismatches."
+      "close_when": "Re-evaluate numerical error, selection and matched performance before expanding supported shapes or enabling other providers by default. This allowance covers physical matmul selection/materialization and documented accumulation order, not authoring, differentiation or portable-export mismatches."
     },
     {
       "id": "PG-DIV-013",

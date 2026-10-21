@@ -265,42 +265,26 @@ int poly_wasm_lower_item(PolyCtx *ctx, PolyUOp *program, const char *fn_name, Po
   PolyUOp *linear = poly_program_linear(program);
   PolyUOp **lin = NULL;
 
+  if (linear) {
+    n_lin = linear->n_src;
+    lin = linear->src;
+  } else {
+    lin = poly_do_linearize(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
+  if (!lin) return -1;
   int wasm_len = 0;
-  int kernel_id = -1;
-  uint8_t *wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, true);
-  if (wasm_bytes && wasm_len > 0) {
-    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
-    if (kernel_id >= 0 && out->capture_binary)
-      out->compiled_binary =
-          poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(wasm_bytes, wasm_len));
+  uint8_t *wasm_bytes = poly_render_wasm(ctx, lin, n_lin, &wasm_len, true);
+  if (lin_owned) free(lin);
+  if (!wasm_bytes || wasm_len <= 0) {
     free(wasm_bytes);
-    wasm_bytes = NULL;
-    wasm_len = 0;
-    if (kernel_id < 0) wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, false);
+    return -1;
   }
-  if (kernel_id < 0 && !wasm_bytes) {
-    wasm_bytes = poly_render_wasm_reduce(scheduled_root, &wasm_len);
-  }
-  if (kernel_id < 0 && !wasm_bytes) {
-    if (linear) {
-      n_lin = linear->n_src;
-      lin = linear->src;
-    } else {
-      lin = poly_do_linearize(ctx, scheduled_root, &n_lin);
-      lin_owned = true;
-    }
-    if (!lin) return -1;
-    wasm_bytes = poly_render_wasm(ctx, lin, n_lin, &wasm_len, true);
-    if (lin_owned) free(lin);
-  }
-  if (kernel_id < 0 && (!wasm_bytes || wasm_len <= 0)) return -1;
 
-  if (kernel_id < 0) {
-    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
-    if (kernel_id >= 0 && out->capture_binary)
-      out->compiled_binary =
-          poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(wasm_bytes, wasm_len));
-  }
+  int kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+  if (kernel_id >= 0 && out->capture_binary)
+    out->compiled_binary =
+        poly_uop0(ctx, POLY_OP_BINARY, POLY_UINT8, poly_arg_bytes(wasm_bytes, wasm_len));
   free(wasm_bytes);
   if (kernel_id < 0) return -1;
   if (out->capture_binary && !out->compiled_binary) {
