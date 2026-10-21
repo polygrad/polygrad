@@ -68,8 +68,16 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert policy['variables']['UPSTREAM_COMPAT_DIR'] == '{output}/upstream-policy'
 
 
-def test_c_gate_has_no_browser_build_and_browser_snapshot_runs_serially():
-    makefile = (ROOT / 'Makefile').read_text()
+@pytest.mark.parametrize('ctype_locale', [None, 'C'])
+def test_c_gate_has_no_browser_build_and_browser_snapshot_runs_serially(ctype_locale):
+    import locale
+    previous = locale.setlocale(locale.LC_CTYPE)
+    try:
+        if ctype_locale is not None:
+            locale.setlocale(locale.LC_CTYPE, ctype_locale)
+        makefile = (ROOT / 'Makefile').read_text(encoding='utf-8')
+    finally:
+        locale.setlocale(locale.LC_CTYPE, previous)
     assert re.search(r'^test: (.*)$', makefile, re.M).group(1).split() == ['build/polygrad_test']
     # A recipe, not a sibling prerequisite: both browser steps write js/dist.
     assert 'test-browser: test-js-browser\n\t$(MAKE) test-wasm-performance-structure\n' in makefile
