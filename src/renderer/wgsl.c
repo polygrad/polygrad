@@ -1049,6 +1049,41 @@ static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings 
 
 static _Thread_local PolyPatternMatcher *g_pm_wgsl_extra = NULL;
 
+/* Pinned wgsl.py:is_nan: WGSL permits finite-math optimization of x != x.
+ * Both self-comparison forms must inspect bits after dtype decomposition. */
+static PolyUOp *rule_wgsl_self_compare(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (u->n_src != 2 || u->src[0] != u->src[1]) return NULL;
+  PolyUOp *x = u->src[0];
+  PolyDType uint;
+  int64_t mask, infinity;
+  if (poly_dtype_eq(x->dtype, POLY_FLOAT16)) {
+    uint = POLY_UINT16;
+    mask = 0x7fff;
+    infinity = 0x7c00;
+  } else if (poly_dtype_eq(x->dtype, POLY_FLOAT32)) {
+    uint = POLY_UINT32;
+    mask = 0x7fffffff;
+    infinity = 0x7f800000;
+  } else {
+    return NULL;
+  }
+  PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, uint, x, poly_arg_none());
+  PolyUOp *signless = poly_uop2(
+      ctx, POLY_OP_AND, uint, bits, poly_uop0(ctx, POLY_OP_CONST, uint, poly_arg_int(mask)),
+      poly_arg_none()
+  );
+  PolyUOp *isnan = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, poly_uop0(ctx, POLY_OP_CONST, uint, poly_arg_int(infinity)),
+      signless, poly_arg_none()
+  );
+  if (u->op == POLY_OP_CMPNE) return isnan;
+  return poly_uop2(
+      ctx, POLY_OP_CMPNE, POLY_BOOL, isnan,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true)), poly_arg_none()
+  );
+}
+
 PolyPatternMatcher *poly_pm_wgsl_extra(void) {
   if (g_pm_wgsl_extra) return g_pm_wgsl_extra;
 
@@ -1062,7 +1097,12 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
   bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_CMPNE);
   bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_XOR);
 
+  PolyOpSet self_compare_set = {{0, 0}};
+  self_compare_set = poly_opset_add(self_compare_set, POLY_OP_CMPEQ);
+  self_compare_set = poly_opset_add(self_compare_set, POLY_OP_CMPNE);
+
   PolyRule rules[] = {
+      {poly_upat_ops(self_compare_set, NULL, 0, NULL), rule_wgsl_self_compare},
       /* WGSL shift amounts must be u32 (tinygrad wgsl.py:49-50) */
       {poly_upat_ops(shift_set, NULL, 0, NULL), rule_wgsl_shift_u32},
       /* WGSL bool ALU normalization: tinygrad wgsl.py:41-42 plus mixed equality guard. */
@@ -1084,7 +1124,7 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
  * WebGPU constraints (matching tinygrad WGSLRenderer):
  *   - No MULACC/THREEFRY hardware support
  *   - No tensor cores
- *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR */
+ *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR, NaN self-comparison */
 PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = poly_kernel_optimize_enabled(sink),

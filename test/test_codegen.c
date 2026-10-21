@@ -4948,6 +4948,34 @@ TEST(codegen, e2e_vecsub) {
 
 /* WGSL renderer tests */
 
+TEST(codegen, wgsl_self_compare_uses_nan_bits_like_pinned) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType floats[] = {POLY_FLOAT16, POLY_FLOAT32};
+  PolyDType uints[] = {POLY_UINT16, POLY_UINT32};
+  int64_t masks[] = {0x7fff, 0x7fffffff}, infinities[] = {0x7c00, 0x7f800000};
+  bool matches = true;
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *x = poly_uop0(ctx, POLY_OP_PARAM, floats[i], poly_arg_int(i));
+    PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, uints[i], x, poly_arg_none());
+    PolyUOp *mask = poly_uop0(ctx, POLY_OP_CONST, uints[i], poly_arg_int(masks[i]));
+    PolyUOp *inf = poly_uop0(ctx, POLY_OP_CONST, uints[i], poly_arg_int(infinities[i]));
+    PolyUOp *absbits = poly_uop2(ctx, POLY_OP_AND, uints[i], bits, mask, poly_arg_none());
+    PolyUOp *isnan = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, inf, absbits, poly_arg_none());
+    PolyUOp *truth = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+    PolyUOp *notnan = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, isnan, truth, poly_arg_none());
+    PolyUOp *ne = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, x, poly_arg_none());
+    PolyUOp *eq = poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, x, x, poly_arg_none());
+    matches &= poly_graph_rewrite(ctx, ne, poly_pm_wgsl_extra()) == isnan;
+    matches &= poly_graph_rewrite(ctx, eq, poly_pm_wgsl_extra()) == notnan;
+    PolyUOp *y = poly_uop0(ctx, POLY_OP_PARAM, floats[i], poly_arg_int(i + 2));
+    PolyUOp *other = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, y, poly_arg_none());
+    matches &= poly_graph_rewrite(ctx, other, poly_pm_wgsl_extra()) == other;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(matches);
+  PASS();
+}
+
 TEST(codegen, render_wgsl_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
   int n;

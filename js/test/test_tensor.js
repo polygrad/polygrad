@@ -99,6 +99,22 @@ async function runTensorTests(pg, createRuntime) {
     }
   }
 
+  await test('nonfinite classification survives backend self-comparison lowering', isolatedRuntime(async runtime => {
+    for (const dtype of supportsF16 ? ['float32', 'float16'] : ['float32']) {
+      const owned = [], own = x => (owned.push(x), x)
+      try {
+        const x = own(new runtime.Tensor([NaN, Infinity, -Infinity, -1, -0, 0, 1], {dtype}))
+        await x.realizeAsync()
+        const finite = own(x.isfinite()), nan = own(x.isnan()), selfEqual = own(x.eq(x))
+        const masked = own(finite.where(x, 0))
+        assertClose(await finite.toArray(), [0, 0, 0, 1, 1, 1, 1], 0)
+        assertClose(await nan.toArray(), [1, 0, 0, 0, 0, 0, 0], 0)
+        assertClose(await selfEqual.toArray(), [0, 1, 1, 1, 1, 1, 1], 0)
+        assertClose(await masked.toArray(), [0, 0, 0, -1, 0, 0, 1], 0)
+      } finally { owned.reverse().forEach(x => x.dispose()) }
+    }
+  }))
+
   await test('upstream backports: infinities and padded constants', isolatedRuntime(async runtime => {
     const Tensor = runtime.Tensor
     const x = new Tensor([-Infinity, -Infinity, 0])
