@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import signal
 import subprocess
@@ -24,7 +25,8 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert targets[0] == 'test-release-preflight'
     assert len(targets) == len(set(targets))
     assert {'test', 'test-x86', 'test-interp', 'test-cuda', 'test-py',
-            'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-browser', 'test-browser-env',
+            'test-py-x86', 'test-hf-e2e', 'test-qwen3', 'test-js-browser', 'test-browser-env',
+            'test-wasm-performance-structure',
             'test-js-native-cpu', 'test-js-native-x86', 'test-js-native-interp',
             'test-js-native-cuda', 'test-js-native-gc', 'test-js-wasm',
             'test-py-sdist-install', 'test-py-min-install', 'test-js-package-install',
@@ -36,7 +38,8 @@ def test_release_manifest_covers_required_lanes_once(runner):
             'bench-hlb-cuda-semantic', 'bench-hlb-cuda-timing'} <= set(targets)
     assert not {'test-all', 'verify', 'test-parity-opt', 'test-release-packages',
                 'reference-migration-check', 'test-parity-op-census', 'analyze',
-                'test-hip', 'publish-py', 'publish-js'} & set(targets)
+                'test-hip', 'test-browser', 'publish-py', 'publish-js'} & set(targets)
+    assert targets.index('test-js-browser') < targets.index('test-wasm-performance-structure')
     assert targets.index('test-analyze-reviewed') < targets.index('bench-hlb-cuda-semantic')
     assert 'test-symbolic-z3-supported' in targets
     assert 'test-release-py-performance' in targets
@@ -63,6 +66,14 @@ def test_release_manifest_covers_required_lanes_once(runner):
     assert policy['variables']['UPSTREAM_POLICY_TESTS'].split() == [
         'test/backend/test_setitem.py', 'test/backend/test_tensor.py', 'test/null/test_indexing.py']
     assert policy['variables']['UPSTREAM_COMPAT_DIR'] == '{output}/upstream-policy'
+
+
+def test_c_gate_has_no_browser_build_and_browser_snapshot_runs_serially():
+    makefile = (ROOT / 'Makefile').read_text()
+    assert re.search(r'^test: (.*)$', makefile, re.M).group(1).split() == ['build/polygrad_test']
+    # A recipe, not a sibling prerequisite: both browser steps write js/dist.
+    assert 'test-browser: test-js-browser\n\t$(MAKE) test-wasm-performance-structure\n' in makefile
+    assert 'test-wasm-performance-structure update-wasm-performance-structure: test-bench-wasm wasm-pkg' in makefile
 
 
 @pytest.mark.parametrize('mismatch', [False, True])

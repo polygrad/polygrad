@@ -825,13 +825,15 @@ a separate checkout, using the same toolchain:
 make bench-wasm-regression BENCH_WASM_BASELINE=temp/old-checkout/js/dist/polygrad.sync.js
 ```
 
-This runs correctness-checked model workloads against the pinned jax-js reference,
-with baseline/candidate/candidate/baseline pages in one browser. Reports under
-`temp/performance/` retain samples, bundle/kernel hashes and browser identity;
-the baseline is never overwritten. The default slowdown budget is 10%, adjustable
-with `BENCH_WASM_MAX_SLOWDOWN`. A completed comparison exits 1 on regression or 2
-when inconclusive; setup and correctness failures also fail the command. Rerun
-noisy comparisons. Compare
+This first qualifies the measuring method on identical copies of the frozen
+baseline, then compares correctness-checked Polygrad workloads in balanced
+fresh-page pairs. It does not run jax-js. Reports under `temp/performance/`
+retain samples, bundle/kernel hashes and browser identity; the baseline is never
+overwritten. The default slowdown budget is 10%, adjustable with
+`BENCH_WASM_MAX_SLOWDOWN`. A completed comparison exits 1 on regression or 2
+when inconclusive; failed qualification prevents comparison. Setup and
+correctness failures also fail the command. Do not repeat runs until one passes.
+Compare
 both the previous release and a known-fast historical baseline when investigating
 a regression; passing against the immediate parent alone is not recovery.
 
@@ -964,6 +966,64 @@ requires source-wave audits and source-bound execution evidence. Open debts are
 not approvals. Durable reviews live in `test/fixtures/migration/`.
 
 ### Performance
+
+`make test` runs only the C suite. `make test-browser` runs deterministic Wasm
+performance snapshots after its browser tests; the serial release runner lists
+the snapshot as a separate gate. Node-only `make test-js-wasm` needs no browser.
+Snapshots cover five MLP/FFN workloads, using default and opt-in kernels.
+They require Emscripten, the JS
+dependencies, Playwright Chromium and Binaryen's `wasm-dis` (`WASM_DIS` overrides
+its path). Kernel hashes, decoded instruction counts, dispatches and frontend
+crossings must match. Allocation counts cover exported allocation calls only;
+the C suite separately checks internal LINEAR scratch allocation.
+
+```bash
+make test-wasm-performance-structure
+make update-wasm-performance-structure  # review the fixture diff; not a timing approval
+make bench-wasm-qualify BENCH_WASM_BASELINE=evidence/baseline/polygrad.sync.js
+make bench-wasm-regression BENCH_WASM_BASELINE=evidence/baseline/polygrad.sync.js
+make bench-jax-js-browser-model-wasm BENCH_JAX_JS_EXTRA='--kernel-qualify --pipeline whole --kernels'
+```
+
+Use a separately built, frozen baseline inside the checkout (a symlink is fine).
+Qualification requires same-build equivalence within 5% and detection of actual
+kernel/host work added by the harness. Ten balanced fresh-page pairs per control
+are fixed before running; a failed control exits 2. `bench-wasm-regression`
+runs qualification first and stops if it fails, before comparing the candidate.
+Reports retain individual samples, bundle/harness hashes and machine conditions.
+Schema 2 uses the mean timed-call duration per page; compare builds in the same
+run rather than comparing these numbers with older median-based reports.
+Timing qualification has not passed on the shared development machine. With
+ten pairs and the correction across fifteen control/workload comparisons, the
+interval uses the smallest and largest ratio: one outlier can prevent a pass.
+Do not use this unqualified whole-call gate to approve default-on or replace a
+failed qualification with an uncorrected comparison.
+`--kernel-qualify` checks the measuring method on one bundle, not a candidate
+against a baseline. Twenty fresh pages each contain alternating identical-code
+and real extra-work controls. It measures captured dispatches individually on
+hot buffers and the complete dispatch sequence in order. Raw arguments remain
+valid because inputs, output and JIT stay alive without intervening runtime
+allocation. This mode is restricted to the maintained stateless FFN workloads.
+Kernel hashes and output bits must remain unchanged. Reports keep every block,
+execution counts and one aggregate ratio per page; an unresolved control exits 2.
+Passing these controls does not qualify whole-call overhead or default-on.
+Runtime, frontend and build changes still need timing even if kernels are identical.
+These commands do not change defaults or refresh baselines automatically.
+
+Use these owners rather than introducing another performance gate:
+
+| Check | Role |
+| --- | --- |
+| `test-wasm-performance-structure` | Deterministic browser/Wasm regression check; fixture changes require review. |
+| `bench-wasm-regression` | Frozen-build browser comparison, blocked until its timing controls qualify. |
+| `test-release-c-performance`, `test-release-py-performance` | Existing paired native release checks. |
+| `bench-smoke-regression`, `bench-ratios`, `bench-compare` | Local diagnostics; historical numbers are not browser release evidence. |
+| `test-bench-wasm` | Tests the measurement code, not product speed. |
+
+Browser model, stage and WebGPU profiles share the existing model benchmark.
+One-off scripts under `temp/` are historical evidence, not additional gates.
+Use separate build checkouts for concurrent sessions: serial Make recipes do
+not prevent another process from overwriting shared bundles.
 
 ```bash
 make bench-local-baseline

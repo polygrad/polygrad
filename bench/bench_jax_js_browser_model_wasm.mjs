@@ -2,11 +2,12 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { chromium } from "../js/node_modules/playwright/index.mjs";
-import { assessABBA } from "./wasm_checks.mjs";
+import { assessABBA, assessPagePairs, assessKernelPages, pagePairOrder, decodedWatOpcodes, structuralSnapshot } from "./wasm_checks.mjs";
 const { launchOptionsFor } = createRequire(import.meta.url)("../js/test/browser/run.js");
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,6 +40,13 @@ function parseArgs(argv) {
     pipeline: "staged",
     baselinePipeline: null,
     profileTimestamps: true,
+    pagePairs: null,
+    polygradOnly: false,
+    structure: false,
+    snapshot: null,
+    updateSnapshot: false,
+    qualify: false,
+    kernelQualify: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -51,6 +59,13 @@ function parseArgs(argv) {
     else if (a === "--pipeline") args.pipeline = next();
     else if (a === "--baseline-pipeline") args.baselinePipeline = next();
     else if (a === "--no-profile-timestamps") args.profileTimestamps = false;
+    else if (a === "--page-pairs") args.pagePairs = Number(next());
+    else if (a === "--polygrad-only") args.polygradOnly = true;
+    else if (a === "--structure") args.structure = true;
+    else if (a === "--snapshot") { args.snapshot = path.resolve(root, next()); args.structure = true; }
+    else if (a === "--update-snapshot") args.updateSnapshot = true;
+    else if (a === "--qualify") args.qualify = true;
+    else if (a === "--kernel-qualify") args.kernelQualify = true;
     else if (a === "--iters") args.iters = Number(next());
     else if (a === "--warmup") args.warmup = Number(next());
     else if (a === "--bundle") args.bundle = next();
@@ -62,7 +77,8 @@ function parseArgs(argv) {
     else if (a === "--no-kernels") args.kernels = false;
     else if (a === "--stage-breakdown") args.stageBreakdown = true;
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--device wasm|webgpu] [--pipeline staged|whole|captured-stages] [--baseline-pipeline staged|whole|captured-stages] [--no-profile-timestamps] [--cases a,b] [--iters N] [--warmup N] [--paired] [--rounds N] [--bundle repo/path.js] [--baseline repo/old.js] [--async] [--kernels|--no-kernels] [--stage-breakdown] [--output report.json] [--max-slowdown 0.10]");
+      console.log('Kernel controls: --kernel-qualify --pipeline whole (twenty fresh pages, no baseline; not a whole-call approval)');
+      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--device wasm|webgpu] [--pipeline staged|whole|captured-stages] [--baseline-pipeline staged|whole|captured-stages] [--no-profile-timestamps] [--cases a,b] [--iters N] [--warmup N] [--paired] [--rounds N] [--bundle repo/path.js] [--baseline repo/old.js] [--async] [--kernels|--no-kernels] [--stage-breakdown] [--output report.json] [--max-slowdown 0.10] [--page-pairs 10] [--polygrad-only] [--qualify] [--structure] [--snapshot file.json [--update-snapshot]]");
       process.exit(0);
     } else if (a === "--paired") {
       args.paired = true;
@@ -80,9 +96,31 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.iters) || args.iters <= 0) throw new Error("--iters must be positive");
   if (!Number.isFinite(args.warmup) || args.warmup < 0) throw new Error("--warmup must be nonnegative");
   if (!Number.isInteger(args.rounds) || args.rounds <= 0) throw new Error("--rounds must be a positive integer");
+  if (args.pagePairs !== null) {
+    pagePairOrder(args.pagePairs);
+    if (args.pagePairs < 10 || !args.baseline) throw new Error('--page-pairs requires a baseline and at least ten pairs');
+  }
+  if (args.structure && (args.device !== 'wasm' || args.baseline || args.pagePairs))
+    throw new Error('structure requires one Wasm candidate; never mix instrumentation with comparative timing');
+  if (args.structure) args.polygradOnly = true;
+  if (args.kernelQualify) {
+    if (args.device !== 'wasm' || args.pipeline !== 'whole' || args.baseline || args.baselinePipeline || args.pagePairs
+      || args.qualify || args.structure || args.stageBreakdown || args.maxSlowdown !== null || args.rounds !== 1)
+      throw new Error('--kernel-qualify requires one Wasm whole pipeline, no baseline or other measurement mode');
+    args.polygradOnly = true;
+  }
+  if (args.qualify) {
+    if (args.device !== 'wasm' || args.structure || args.pagePairs === null || args.iters < 20 || args.iters % 10)
+      throw new Error('qualification requires Wasm, at least ten page pairs, and iterations divisible by ten (at least twenty)');
+    args.polygradOnly = true;
+    if (args.baselinePipeline) throw new Error('qualification requires one pipeline');
+  }
+  if (args.updateSnapshot && !args.snapshot) throw new Error('--update-snapshot requires --snapshot');
   if (args.maxSlowdown !== null && (!(args.baseline || args.baselinePipeline) || !Number.isFinite(args.maxSlowdown) || args.maxSlowdown < 0)) {
     throw new Error("--max-slowdown requires --baseline or --baseline-pipeline and a nonnegative fraction");
   }
+  if (args.maxSlowdown !== null && args.pagePairs === null)
+    throw new Error('--max-slowdown requires --page-pairs; four-page ABBA is diagnostic only');
   if (!["wasm", "webgpu"].includes(args.device)) throw new Error("--device must be wasm or webgpu");
   for (const mode of [args.pipeline, args.baselinePipeline].filter(Boolean)) {
     if (!["staged", "whole", "captured-stages"].includes(mode)) throw new Error("pipeline must be staged, whole or captured-stages");
@@ -122,21 +160,17 @@ function makePage() {
 <title>polygrad vs jax-js browser wasm model</title>
 <pre id="log"></pre>
 <script src="/${args.bundle}"></script>
+${args.structure || args.qualify || args.kernelQualify ? '<script src="/js/test/test_jit_boundaries.js"></script>' : ''}
 <script type="module">
-import { checkWorkload, modelReference } from "/bench/wasm_checks.mjs";
+import { checkWorkload, modelReference, timeWorkload, measureKernelBlocks, assertClose } from "/bench/wasm_checks.mjs";
 import { observeWebGPU } from "/bench/webgpu_profile.mjs";
-import {
-  blockUntilReady,
-  defaultDevice,
-  init,
-  jit,
-  nn,
-  numpy as np,
-} from "/references/jax-js/dist/index.js";
-
 const args = ${JSON.stringify(args)};
 const CASES = ${JSON.stringify(CASES)};
+let blockUntilReady, defaultDevice, init, jit, nn, np;
+if (!args.polygradOnly) ({ blockUntilReady, defaultDevice, init, jit, nn, numpy: np } = await import("/references/jax-js/dist/index.js"));
 const gpu = args.device === "webgpu" ? observeWebGPU() : null;
+const boundaries = args.structure || args.kernelQualify || (args.qualify && args.control === 'kernel') ? observeBoundaries() : null;
+const kernelHashes = new WeakMap();
 const polyJit = (pg, fn) => gpu ? pg.jit.async(fn) : pg.jit(fn);
 const realizeTensor = (tensor, ...others) => gpu ? tensor.realizeAsync(...others) : tensor.realize(...others);
 
@@ -203,23 +237,7 @@ function caseInputs(c) {
 }
 
 async function timeAsync(call, ready, dispose) {
-  let y = await call();
-  await ready(y);
-  dispose?.(y);
-  for (let i = 0; i < args.warmup; i++) {
-    y = await call();
-    await ready(y);
-    dispose?.(y);
-  }
-  const times = [];
-  for (let i = 0; i < args.iters; i++) {
-    const t0 = performance.now();
-    y = await call();
-    await ready(y);
-    times.push((performance.now() - t0) / 1000);
-    dispose?.(y);
-  }
-  return times;
+  return (await timeWorkload(call, ready, dispose, args)).samples;
 }
 
 function createJaxInputs(c, inputData) {
@@ -457,10 +475,12 @@ async function fingerprintCompilation(call) {
   }
   const Original = WebAssembly.Module;
   const kernels = [];
+  const modules = [];
   // Observe only Polygrad compilation, outside timing; jax-js also exports "kernel".
   WebAssembly.Module = new Proxy(Original, { construct(target, args) {
     const module = Reflect.construct(target, args);
     if (Original.exports(module).some(e => e.name === "kernel")) {
+      modules.push(module);
       const bytes = args[0];
       kernels.push(new Uint8Array(bytes instanceof ArrayBuffer ? bytes :
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)).slice());
@@ -469,25 +489,108 @@ async function fingerprintCompilation(call) {
   } });
   try { await call(); }
   finally { WebAssembly.Module = Original; }
-  return Promise.all(kernels.map(async bytes => {
+  const hashes = await Promise.all(kernels.map(async (bytes, i) => {
     const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-    return Array.from(hash, x => x.toString(16).padStart(2, "0")).join("");
+    const hex = Array.from(hash, x => x.toString(16).padStart(2, "0")).join("");
+    kernelHashes.set(modules[i], hex);
+    return hex;
   }));
+  return args.structure ? { hashes, modules: kernels.map(bytes => Array.from(bytes)) } : hashes;
 }
 
 async function runPolyCase(pg, name, c, inputData) {
   const inputs = await createPolyInputs(pg, c, inputData);
   const pipeline = createPolyPipeline(pg, c);
   let validation;
-  const compiledKernelHashes = await fingerprintCompilation(async () => {
+  const compiled = await fingerprintCompilation(async () => {
     await primePipeline(pipeline, inputs);
     validation = await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
   });
+  let structure;
+  if (args.structure) {
+    const samples = [];
+    for (let i = 0; i < 3; i++) {
+      boundaries.exports = boundaries.imports = boundaries.kernels = boundaries.allocationExports = 0;
+      boundaries.active = true;
+      let y;
+      try { y = await pipeline.call(inputs); await pipeline.ready(y); }
+      finally { boundaries.active = false; if (y) pipeline.disposeOutput(y); }
+      samples.push({ coreExports: boundaries.exports, coreImports: boundaries.imports,
+        dispatches: boundaries.kernels, allocationExports: boundaries.allocationExports });
+    }
+    if (samples.some(s => JSON.stringify(s) !== JSON.stringify(samples[0])))
+      throw new Error(name + ': warm structural counts are not stable');
+    structure = { cold: { modules: compiled.modules }, warm: samples[0] };
+  }
+  // Qualification injects executed work, never scaled reported durations.
+  // The five FFN fixtures are stateless: repeating their captured kernels with
+  // the current call's arguments leaves outputs unchanged. Do not use this
+  // injection for training/RNG/aliasing workloads.
+  let burnIterations = 0, checksum = 1;
+  const burn = n => { let x = checksum; for (let i = 0; i < n; i++) x = Math.imul(x ^ i, 16777619); checksum = x; };
+  if (args.qualify && args.control === 'host') {
+    for (let i = 0; i < 5; i++) burn(100000);
+    const start = performance.now();
+    for (let i = 0; i < 10; i++) burn(100000);
+    const perIteration = (performance.now() - start) / 1000000;
+    const pilot = await timeAsync(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y));
+    burnIterations = Math.max(1, Math.round(median(pilot) * 1000 * .1 / perIteration));
+    if (!Number.isFinite(burnIterations) || burnIterations > 100000000) throw new Error('invalid host injection calibration');
+  }
+  const qualification = args.qualify ? { burnIterations, targetFraction: .1, kernelExtraEvery: 10,
+    extraKernelCalls: 0, hostBurnCalls: 0 } : undefined;
   return {
-    measure: () => timeAsync(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y)),
+    measure: async () => {
+      if (!args.qualify) return timeAsync(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y));
+      // Both lanes collect the same trace; only the candidate injects work.
+      const measured = await timeWorkload(() => pipeline.call(inputs), y => pipeline.ready(y), y => pipeline.disposeOutput(y), {
+        warmup: args.warmup, iters: args.iters, observer: boundaries,
+        inject: args.lane === 'candidate' && args.control !== 'identity' ? args.control : null,
+        burn: () => burn(burnIterations),
+      });
+      qualification.extraKernelCalls += measured.extraKernelCalls;
+      qualification.hostBurnCalls += measured.hostBurnCalls;
+      // Check that injected work preserved the public output contract.
+      await checkWorkload({ name, call: () => pipeline.call(inputs), ready: y => pipeline.ready(y), dispose: y => pipeline.disposeOutput(y) }, modelReference(c,inputData), {atol:c.kind==='mlp'?1e-7:1e-10,rtol:2e-4});
+      qualification.checksum = checksum;
+      return measured.samples;
+    },
     schedules: pipeline.scheduleCount,
     validation,
-    compiledKernelHashes,
+    compiledKernelHashes: compiled.hashes ?? compiled,
+    structure,
+    qualification,
+    kernelProfile: async () => {
+      const referenceOutput = await pipeline.call(inputs);
+      let before;
+      try { await pipeline.ready(referenceOutput); before = Float32Array.from(await referenceOutput.value.toArray()); }
+      finally { pipeline.disposeOutput(referenceOutput); }
+      let output;
+      boundaries.trace = [];
+      try {
+        output = await pipeline.call(inputs);
+        await pipeline.ready(output);
+        const trace = boundaries.trace;
+        boundaries.trace = null;
+        for (const t of trace) {
+          t.hash = kernelHashes.get(t.module);
+          if (!t.hash) throw new Error('captured kernel has no compilation fingerprint');
+        }
+        // No runtime call or disposal while raw pointers are replayed. These
+        // fixed FFNs have no state/RNG and overwrite outputs on every dispatch.
+        const measurements = measureKernelBlocks(trace, { page: args.kernelPage });
+        const actual = await output.value.toArray();
+        const beforeBits = new Uint32Array(before.buffer), afterBits = new Uint32Array(Float32Array.from(actual).buffer);
+        if (beforeBits.length !== afterBits.length || beforeBits.some((v, i) => v !== afterBits[i]))
+          throw new Error(name + ': raw replay changed output bits');
+        assertClose(actual, modelReference(c, inputData), name + ' raw replay',
+          {atol:c.kind==='mlp'?1e-7:1e-10, rtol:2e-4});
+        return measurements;
+      } finally {
+        boundaries.trace = null;
+        if (output) pipeline.disposeOutput(output);
+      }
+    },
     profile: async () => gpu.profile(async () => {
       const out = await pipeline.call(inputs);
       try { await pipeline.ready(out); } finally { pipeline.disposeOutput(out); }
@@ -519,10 +622,10 @@ async function runPairedCase(pg, name, c, inputData) {
   const order = [];
   try {
     lanes.push(await runPolyCase(pg, name, c, inputData));
-    lanes.push(await runJaxCase(name, c, inputData));
+    if (!args.polygradOnly) lanes.push(await runJaxCase(name, c, inputData));
     for (let round = 0; round < args.rounds; round++) {
       // Keep compiled pipelines alive; alternate timing order, not compilation.
-      const indices = args.paired && round % 2 ? [1, 0] : [0, 1];
+      const indices = args.polygradOnly ? [0] : args.paired && round % 2 ? [1, 0] : [0, 1];
       for (const i of indices) {
         order.push(i === 0 ? "polygrad" : "jax-js");
         samples[i].push(...await lanes[i].measure());
@@ -531,15 +634,19 @@ async function runPairedCase(pg, name, c, inputData) {
     console.log(JSON.stringify({ case: name, timingOrder: order }));
     // Separate diagnostics so query work never enters the latency samples.
     const profiles = [[], []];
-    if (gpu) for (let round = 0; round < 4; round++) {
+    if (gpu && !args.polygradOnly) for (let round = 0; round < 4; round++) {
       for (const i of round % 2 ? [1, 0] : [0, 1]) profiles[i].push(await lanes[i].profile());
     }
+    const kernelMeasurements = args.kernelQualify ? await lanes[0].kernelProfile() : undefined;
     return lanes.map((lane, i) => {
-      const s = median(samples[i]);
+      // The injected extra kernel runs every tenth call; a per-call median
+      // would discard that real cost. A page contributes exactly one mean.
+      const s = samples[i].reduce((a, b) => a + b, 0) / samples[i].length;
       return { name, label: caseLabel(c), seconds: s, us: s * 1e6,
         tokens_per_s: c.tokens / s, gflops: modelFlops(c) / s / 1e9,
         schedules: lane.schedules, samples: samples[i], validation: lane.validation,
-        compiledKernelHashes: lane.compiledKernelHashes, profiles: profiles[i] };
+        compiledKernelHashes: lane.compiledKernelHashes, structure: lane.structure,
+        qualification: lane.qualification, profiles: profiles[i], kernelMeasurements };
     });
   } finally {
     for (const lane of lanes) lane.dispose();
@@ -679,9 +786,11 @@ async function main() {
     core: "wasm", device: gpu ? "webgpu" : "auto", kernels: args.kernels,
     env: args.kernels ? { POLY_DEBUG_KERNELS: "1" } : {},
   });
-  const devices = await init(args.device);
-  if (!devices.includes(args.device)) throw new Error("jax-js requested device unavailable: " + args.device);
-  defaultDevice(args.device);
+  if (!args.polygradOnly) {
+    const devices = await init(args.device);
+    if (!devices.includes(args.device)) throw new Error("jax-js requested device unavailable: " + args.device);
+    defaultDevice(args.device);
+  }
 
   const inputsByCase = new Map();
   for (const name of args.cases) inputsByCase.set(name, caseInputs(CASES[name]));
@@ -692,11 +801,11 @@ async function main() {
   for (const name of args.cases) {
     const [p, j] = await runPairedCase(pg, name, CASES[name], inputsByCase.get(name));
     pgResults.push(p);
-    jaxResults.push(j);
+    if (j) jaxResults.push(j);
   }
   const workerCreatesDuringJax = workerCreates - workerCreatesBeforeJax;
 
-  printSummary(pgResults, jaxResults);
+  if (!args.polygradOnly) printSummary(pgResults, jaxResults);
   console.log(JSON.stringify({ jaxWorkerCreates: workerCreatesDuringJax }));
 
   let pgStageResults = [];
@@ -707,7 +816,7 @@ async function main() {
       pgStageResults.push(...await runPolyQwenStages(pg, name, CASES[name], inputsByCase.get(name)));
     }
     const stageWorkerCreatesBeforeJax = workerCreates;
-    for (const name of args.cases) {
+    if (!args.polygradOnly) for (const name of args.cases) {
       jaxStageResults.push(...await runJaxQwenStages(name, CASES[name], inputsByCase.get(name)));
     }
     stageWorkerCreatesDuringJax = workerCreates - stageWorkerCreatesBeforeJax;
@@ -720,6 +829,7 @@ async function main() {
     pgResults, jaxResults, pgStageResults, jaxStageResults,
   };
   await pg.dispose?.();
+  boundaries?.restore();
   window.__benchResults = results;
 }
 
@@ -770,11 +880,15 @@ const server = http.createServer((req, res) => {
 async function main() {
   const fingerprint = file => ({ path: file, sha256: createHash("sha256").update(fs.readFileSync(file)).digest("hex") });
   const report = {
-    schema: 1, createdAt: new Date().toISOString(), args: { ...args },
+    schema: 2, createdAt: new Date().toISOString(), args: { ...args },
+    statistic: args.kernelQualify
+      ? 'kernel controls aggregate paired blocks per fresh page; whole-call means are secondary observations'
+      : 'mean timed call duration per fresh page; confidence intervals use page pairs only',
     machine: { platform: process.platform, arch: process.arch, cpu: os.cpus()[0]?.model, node: process.version, loadBefore: os.loadavg() },
     artifacts: [...new Set([args.bundle, args.baseline].filter(Boolean))].map(p => fingerprint(path.resolve(root, decodeURIComponent(p)))),
-    reference: fingerprint(path.join(root, "references/jax-js/dist/index.js")),
-    harness: [__filename, path.join(__dirname, "wasm_checks.mjs"), path.join(__dirname, "webgpu_profile.mjs")].map(fingerprint),
+    reference: args.polygradOnly ? null : fingerprint(path.join(root, "references/jax-js/dist/index.js")),
+    harness: [__filename, path.join(__dirname, "wasm_checks.mjs"), path.join(__dirname, "webgpu_profile.mjs"),
+      path.join(root, "js/test/test_jit_boundaries.js")].map(fingerprint),
     pages: [],
   };
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -787,7 +901,13 @@ async function main() {
     // ABBA pages in one browser isolate bundle identity from browser restarts.
     const candidate = { bundle: args.bundle, pipeline: args.pipeline };
     const baseline = { bundle: args.baseline ?? args.bundle, pipeline: args.baselinePipeline ?? args.pipeline };
-    const lanes = args.baseline || args.baselinePipeline ? [baseline, candidate, candidate, baseline] : [candidate];
+    const lanes = args.kernelQualify ? Array.from({ length: 20 }, (_, kernelPage) => ({ ...candidate, kernelPage }))
+      : args.qualify ? Array.from({ length: args.pagePairs }, (_, pair) =>
+      ['identity', 'kernel', 'host'].map((_, i, controls) => controls[(i + pair) % controls.length]).flatMap(control =>
+        pagePairOrder(args.pagePairs).slice(pair * 2, pair * 2 + 2).map(p => ({ ...baseline, ...p, control })))).flat()
+      : args.pagePairs !== null ? pagePairOrder(args.pagePairs).map(p => ({
+      ...(p.lane === 'baseline' ? baseline : candidate), ...p,
+    })) : args.baseline || args.baselinePipeline ? [baseline, candidate, candidate, baseline] : [candidate];
     for (const lane of lanes) {
       Object.assign(args, lane);
       const page = await browser.newPage();
@@ -798,18 +918,62 @@ async function main() {
         const timeout = Math.max(180000, (args.iters + args.warmup) * args.rounds * args.cases.length * 30000);
         const results = await page.waitForFunction(() => window.__benchResults, undefined, { timeout });
         const value = await results.jsonValue();
+        if (args.kernelQualify) value.kernelPage = lane.kernelPage;
+        if (args.pagePairs !== null) { value.lane = lane.lane; value.pair = lane.pair; value.control = lane.control; }
         report.pages.push(value);
         if (value?.error) throw new Error(value.error + "\\n" + (value.stack || ""));
       } finally {
         await page.close();
       }
     }
-    if (args.baseline || args.baselinePipeline) {
-      report.comparison = assessABBA(report.pages, args.maxSlowdown ?? 0.10);
+    if (args.kernelQualify) {
+      report.kernelQualification = assessKernelPages(report.pages);
+      report.kernelQualification.protocol = { pages: 20, blocks: 8, targetBlockMs: 5,
+        identityMargin: .05, injectionFraction: .1, detectionMargin: .03,
+        unitScope: 'dispatches repeated hot, plus complete trace in original order; actual retained buffers',
+        wholeCallTiming: 'secondary observations only; not qualified by kernel controls' };
+      process.exitCode = report.kernelQualification.qualified ? 0 : 2;
+      console.log(JSON.stringify({ kernelQualified: report.kernelQualification.qualified,
+        results: report.kernelQualification.results }));
+    } else if (args.qualify) {
+      report.qualification = Object.fromEntries(['identity', 'kernel', 'host'].map(control => [control,
+        assessPagePairs(report.pages.filter(p => p.control === control), control === 'identity' ? .05 : .03, .05 / 3)]));
+      report.qualified = Object.entries(report.qualification).every(([control, results]) =>
+        results.every(r => r.status === (control === 'identity' ? 'equivalent' : 'regression')));
+      process.exitCode = report.qualified ? 0 : 2;
+      console.log(JSON.stringify({ qualified: report.qualified, qualification: report.qualification }));
+    } else if (args.baseline || args.baselinePipeline) {
+      report.comparison = args.pagePairs !== null
+        ? assessPagePairs(report.pages, args.maxSlowdown ?? 0.10) : assessABBA(report.pages, args.maxSlowdown ?? 0.10);
       console.log(JSON.stringify({ comparison: report.comparison }));
       if (args.maxSlowdown !== null) {
         process.exitCode = report.comparison.some(r => r.status === "regression") ? 1
           : report.comparison.some(r => r.status === "inconclusive") ? 2 : 0;
+      }
+    }
+    if (args.structure) {
+      const disassembler = process.env.WASM_DIS ?? 'wasm-dis';
+      report.disassembler = execFileSync(disassembler, ['--version'], { encoding: 'utf8' }).trim();
+      for (const p of report.pages) for (const r of p.pgResults) {
+        r.structure.cold.modules = r.structure.cold.modules.map(data => {
+          const bytes = Buffer.from(data);
+          const wat = execFileSync(disassembler, ['-', '--all-features'], { input: bytes, maxBuffer: 32 * 1024 * 1024 }).toString();
+          return { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length,
+            opcodes: decodedWatOpcodes(wat) };
+        });
+      }
+      report.snapshot = structuralSnapshot(report);
+      if (args.snapshot) {
+        if (args.updateSnapshot) {
+          fs.writeFileSync(args.snapshot, JSON.stringify(report.snapshot, null, 2) + '\n');
+          report.snapshotStatus = 'updated-unreviewed';
+          console.log('Snapshot updated; review its diff and run timing qualification before accepting it.');
+        } else {
+          const expected = JSON.parse(fs.readFileSync(args.snapshot, 'utf8'));
+          report.snapshotStatus = JSON.stringify(expected) === JSON.stringify(report.snapshot) ? 'match' : 'changed-review-required';
+          if (report.snapshotStatus !== 'match') process.exitCode = 1;
+          console.log('Structural snapshot: ' + report.snapshotStatus);
+        }
       }
     }
   } catch (error) {

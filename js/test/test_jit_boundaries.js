@@ -6,18 +6,24 @@
 function observeBoundaries() {
   const Module = WebAssembly.Module, Instance = WebAssembly.Instance
   const instantiate = WebAssembly.instantiate
-  const state = { active: false, cores: 0, exports: 0, imports: 0, kernels: 0 }
+  const state = { active: false, cores: 0, exports: 0, imports: 0, kernels: 0,
+    allocationExports: 0, trace: null, executeKernels: true }
   const isCore = m => Module.exports(m).filter(x => x.kind === 'function').length > 100
   function importsFor(input) {
     return Object.fromEntries(Object.entries(input || {}).map(([ns, entries]) => [ns,
       Object.fromEntries(Object.entries(entries).map(([key, fn]) => [key, typeof fn !== 'function' ? fn :
         function (...args) { if (state.active) state.imports++; return fn(...args) }]))]))
   }
-  function wrapped(instance, core) {
+  function wrapped(instance, core, module) {
     const exports = Object.fromEntries(Object.entries(instance.exports).map(([key, fn]) => {
       if (typeof fn !== 'function' || (!core && key !== 'kernel')) return [key, fn]
       const wrapper = function (...args) {
         if (state.active) state[core ? 'exports' : 'kernels']++
+        if (state.active && core && /^_?(malloc|calloc|realloc)$/.test(key)) state.allocationExports++
+        if (!core) {
+          if (state.trace) state.trace.push({ fn, args: [...args], module })
+          if (!state.executeKernels) return
+        }
         return fn(...args)
       }
       Object.defineProperty(wrapper, 'length', { value: fn.length })
@@ -29,13 +35,13 @@ function observeBoundaries() {
     const core = isCore(args[0])
     if (core) state.cores++
     const instance = Reflect.construct(target, core ? [args[0], importsFor(args[1])] : args)
-    return core || typeof instance.exports.kernel === 'function' ? wrapped(instance, core) : instance
+    return core || typeof instance.exports.kernel === 'function' ? wrapped(instance, core, args[0]) : instance
   } })
   WebAssembly.instantiate = async function (input, imports) {
     const isModule = input instanceof Module, module = isModule ? input : new Module(input)
     if (!isCore(module)) return instantiate.call(WebAssembly, input, imports)
     state.cores++
-    const instance = wrapped(await instantiate.call(WebAssembly, module, importsFor(imports)), true)
+    const instance = wrapped(await instantiate.call(WebAssembly, module, importsFor(imports)), true, module)
     return isModule ? instance : { module, instance }
   }
   state.restore = () => { WebAssembly.Instance = Instance; WebAssembly.instantiate = instantiate }
@@ -166,4 +172,7 @@ async function main() {
     console.log(JSON.stringify(await page.evaluate(`(${checkReplayBoundaries.toString()})(polygrad, boundaryState)`)))
   } finally { await browser?.close(); server.close() }
 }
-if (require.main === module) main().catch(e => { console.error(e); process.exitCode = 1 })
+if (typeof module !== 'undefined') {
+  module.exports = { observeBoundaries, checkReplayBoundaries }
+  if (require.main === module) main().catch(e => { console.error(e); process.exitCode = 1 })
+}

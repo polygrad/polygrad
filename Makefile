@@ -833,10 +833,27 @@ bench-jax-js-browser-model-wasm: wasm-pkg
 # Frozen bundle from a separately built checkout; never replace it automatically.
 BENCH_WASM_BASELINE ?=
 BENCH_WASM_MAX_SLOWDOWN ?= 0.10
-.PHONY: bench-wasm-regression
+BENCH_WASM_PAGE_PAIRS ?= 10
+BENCH_WASM_QUALIFY_OUTPUT ?= temp/performance/qualification-$(shell date -u +%Y%m%dT%H%M%S).json
+.PHONY: bench-wasm-regression bench-wasm-qualify
 bench-wasm-regression:
 	@test -n "$(BENCH_WASM_BASELINE)" || { echo 'Set BENCH_WASM_BASELINE to a separately built browser bundle'; exit 2; }
-	$(MAKE) bench-jax-js-browser-model-wasm BENCH_JAX_JS_EXTRA='--paired --rounds 4 --baseline $(BENCH_WASM_BASELINE) --max-slowdown $(BENCH_WASM_MAX_SLOWDOWN) $(BENCH_JAX_JS_EXTRA)'
+	$(MAKE) bench-wasm-qualify
+	$(MAKE) bench-jax-js-browser-model-wasm BENCH_JAX_JS_ITERS=40 BENCH_JAX_JS_WARMUP=5 BENCH_JAX_JS_EXTRA='--polygrad-only --page-pairs $(BENCH_WASM_PAGE_PAIRS) --baseline $(BENCH_WASM_BASELINE) --max-slowdown $(BENCH_WASM_MAX_SLOWDOWN) $(BENCH_JAX_JS_EXTRA)'
+
+# Qualification never promotes a baseline. Exit 2 means the measurement is not
+# precise enough, including failed A/A equivalence or missed planted slowdowns.
+bench-wasm-qualify:
+	@test -n "$(BENCH_WASM_BASELINE)" || { echo 'Set BENCH_WASM_BASELINE to a frozen browser bundle'; exit 2; }
+	$(MAKE) bench-jax-js-browser-model-wasm BENCH_JAX_JS_ITERS=40 BENCH_JAX_JS_WARMUP=5 BENCH_JAX_JS_EXTRA='--qualify --page-pairs $(BENCH_WASM_PAGE_PAIRS) --baseline $(BENCH_WASM_BASELINE) $(BENCH_JAX_JS_EXTRA) --output $(BENCH_WASM_QUALIFY_OUTPUT)'
+
+# Binaryen's disassembler (bundled beside Emscripten); override for other layouts.
+WASM_DIS ?= $(dir $(shell command -v $(EMCC)))../bin/wasm-dis
+.PHONY: test-wasm-performance-structure update-wasm-performance-structure
+test-wasm-performance-structure update-wasm-performance-structure: test-bench-wasm wasm-pkg
+	cd js && bash scripts/build-browser.sh
+	WASM_DIS=$(WASM_DIS) $(NODE) bench/bench_jax_js_browser_model_wasm.mjs --structure --pipeline whole --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_default.json $(if $(filter update-%,$@),--update-snapshot)
+	WASM_DIS=$(WASM_DIS) $(NODE) bench/bench_jax_js_browser_model_wasm.mjs --structure --pipeline whole --kernels --warmup 0 --iters 1 --snapshot test/fixtures/wasm_performance_kernels.json $(if $(filter update-%,$@),--update-snapshot)
 
 .PHONY: bench-jax-js-browser-model-webgpu
 bench-jax-js-browser-model-webgpu: wasm-pkg
@@ -1103,6 +1120,7 @@ endif
 # Browser/Playwright coverage should be invoked through Make so the wasm
 # package and browser bundle are rebuilt in the right order.
 test-browser: test-js-browser
+	$(MAKE) test-wasm-performance-structure
 
 .PHONY: test-browser-runner
 test-browser-runner:
@@ -1169,7 +1187,7 @@ RELEASE_MAKE := $(MAKE)
 # user choices remain authoritative and are checked before the matrix starts.
 RELEASE_CC = $(if $(filter default,$(origin CC)),clang,$(CC))
 RELEASE_PYTHON = $(if $(filter file default undefined,$(origin PYTHON)),$(PARITY_PY),$(PYTHON))
-RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON SPECIAL_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
+RELEASE_MAKE_VARS = AR EMCC EMSDK_PYTHON WASM_DIS NODE NPM PARITY_PY PYTHON_MIN HF_PYTHON SPECIAL_PYTHON CFLAGS_DEBUG LDFLAGS_DEBUG CLANG_FORMAT ANALYZER_CC \
                    QWEN3_GGUF LLAMA_CHECKPOINT ONNX_ENCODER_DIR BENCH_BASELINE MIGRATION_EVIDENCE PY_PERF_BASELINE_SDIST BROWSER_TMPDIR
 .PHONY: test-release test-release-list test-release-runner test-release-preflight
 test-release:
