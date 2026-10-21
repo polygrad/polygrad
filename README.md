@@ -816,7 +816,7 @@ BROWSER_MATRIX_DEVICES="auto,interp" make test-browser-matrix
 Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
 `label=engine@/absolute/path`.
 
-### Wasm performance comparisons
+### Browser performance comparisons
 
 For Wasm performance changes, compare against a frozen browser bundle built in
 a separate checkout, using the same toolchain:
@@ -836,6 +836,24 @@ correctness failures also fail the command. Do not repeat runs until one passes.
 Compare
 both the previous release and a known-fast historical baseline when investigating
 a regression; passing against the immediate parent alone is not recovery.
+
+The same workloads can compare WebGPU, including completed output readback:
+
+```bash
+make bench-jax-js-browser-model-webgpu BENCH_JAX_JS_EXTRA='--paired --rounds 4 --baseline temp/old-checkout/js/dist/polygrad.async.js'
+```
+
+WebGPU reports also retain shader sources, dispatch/submission counts and GPU
+pass timestamps from separate diagnostic calls. Those timestamp sums exclude
+host work and inter-pass gaps; they are not whole-call latency. The runner uses
+the browser test launcher and fails if the requested backend cannot initialize.
+Use `--pipeline whole --baseline-pipeline staged` to compare one whole-function
+JIT with separate stage JITs in ABBA order. `--pipeline captured-stages` is a
+WebGPU diagnostic: Polygrad captures the original materialization boundaries
+in one JIT; jax-js stays staged as a control. Check saved shader/grid identities
+before attributing differences to batching. `--no-profile-timestamps` records
+host events without adding GPU queries; neither profile mode instruments the
+ordinary latency samples.
 
 ### Release acceptance
 
