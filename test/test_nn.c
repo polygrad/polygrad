@@ -327,12 +327,14 @@ TEST(nn, rmsnorm_half_numeric) {
   int rc = poly_test_realize_buffer_views(
       ctx, poly_uop_sink1(ctx, poly_test_store_to_buffer(ctx, output, result)), views, 2
   );
+  bool emulated_half = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(rc, 0);
   /* PG-DIV-029 preserves the half rounding boundary, matching the current
-   * reference; the pinned simplification elides this cast pair. */
-  ASSERT_FLOAT_EQ(out[0], 0.63232421875f, 1e-6f);
-  ASSERT_FLOAT_EQ(out[1], 1.2646484375f, 1e-6f);
+   * reference on native-half backends. INTERP, like pinned Python 3.11,
+   * emulates half and rounds the mantissa only at storage. */
+  ASSERT_FLOAT_EQ(out[0], emulated_half ? 0.632455587387085f : 0.63232421875f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], emulated_half ? 1.26491117477417f : 1.2646484375f, 1e-6f);
   PASS();
 }
 

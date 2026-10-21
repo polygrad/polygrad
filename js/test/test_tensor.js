@@ -231,7 +231,9 @@ async function runTensorTests(pg, createRuntime) {
     const rounded = Array.from(await new Tensor([70000, 1.0001, -70000]).cast('float16').cast('float32').toArray())
     // WASM and INTERP emulate half (like pinned Python 3.11). Mantissa rounding
     // happens at storage; the approved upstream cast backport preserves overflow.
-    const emulated = ['wasm', 'interp'].includes(runtime.device.toLowerCase())
+    const device = runtime.device.toLowerCase()
+    // Node's Wasm CPU fallback reports device="cpu", not "wasm".
+    const emulated = ['wasm', 'interp'].includes(device) || (runtime.core === 'wasm' && device === 'cpu')
     const middle = emulated ? Math.fround(1.0001) : 1
     assert(rounded[0] === Infinity && rounded[1] === middle && rounded[2] === -Infinity, `half roundtrip: ${rounded}`)
     const stored = await new Tensor([1.0001]).cast('float16').contiguous().cast('float32').toArray()

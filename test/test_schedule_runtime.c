@@ -75,6 +75,7 @@ static PolyUOp *cache_clear_schedule(PolyCtx *ctx, int size) {
 TEST(schedule_runtime, selected_gemm_materializes_once) {
   for (int mode = 0; mode < 9; mode++) {
     PolyCtx *ctx = poly_ctx_new();
+    /* This tests selected kernels, independently of the process default. */
     poly_ctx_set_kernel_policy(ctx, 1);
     int cols = mode == 6 ? 32 : mode == 7 ? 5 : 4;
     PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 32, POLY_DEVICE_WASM);
@@ -2103,15 +2104,17 @@ TEST(schedule_runtime, linear_scratch_growth_failure_preserves_untouched_outputs
       ASSERT_INT_EQ(poly_buffer_write(ctx, out[i], &old, sizeof(old)), 0);
     }
     PolyUOp *program = poly_compile_linear(
-        ctx, poly_test_create_linear(
-                 ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out[1], poly_uop_add(ctx, out[0], a)))
-             ), 0
+        ctx,
+        poly_test_create_linear(
+            ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out[1], poly_uop_add(ctx, out[0], a)))
+        ),
+        0
     );
     ASSERT_NOT_NULL(program);
     ASSERT_INT_EQ(poly_test_linear_call_n_buffers(program, 0), 3);
     PolyUOp *calls[] = {
-        scratch_copy_call(ctx, out[0], a), program->src[0],
-        scratch_copy_call(ctx, out[2], out[1]), program->src[0]};
+        scratch_copy_call(ctx, out[0], a), program->src[0], scratch_copy_call(ctx, out[2], out[1]),
+        program->src[0]};
     PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, calls, 4, poly_arg_none());
     poly_test_linear_scratch_allocations(true);
     poly_test_linear_scratch_fail_after(failure);
@@ -2122,8 +2125,7 @@ TEST(schedule_runtime, linear_scratch_growth_failure_preserves_untouched_outputs
     ok &= poly_buffer_failed(poly_buffer_get(ctx, out[0])) == (failure >= 3);
     for (int i = 1; i < 3; i++)
       ok &= !poly_buffer_failed(poly_buffer_get(ctx, out[i])) &&
-            poly_buffer_read(ctx, out[i], &got, sizeof(got)) == 0 &&
-            got == (failure < 0 ? 4 : old);
+            poly_buffer_read(ctx, out[i], &got, sizeof(got)) == 0 && got == (failure < 0 ? 4 : old);
     ok &= !poly_buffer_failed(poly_buffer_get(ctx, a));
     poly_ctx_destroy(ctx);
     ASSERT_TRUE(ok);
