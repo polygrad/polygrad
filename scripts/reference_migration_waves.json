@@ -413,20 +413,22 @@
     },
     {
       "id": "codegen_simplify_add_image",
+      "divergence_id": "PG-DIV-029",
+      "stage": "codegen",
       "tinygrad": {"path": "tinygrad/codegen/late/coalesce.py", "matcher": "pm_simplify_add_image", "rule_count": 4},
       "polygrad": {
         "path": "src/codegen/late/coalesce.c",
         "matcher": "poly_pm_simplify_add_image",
         "callbacks": [
           "poly_transform_to_image", "poly_image_load_to_float",
-          "poly_image_store_to_float", "poly_remove_image_cast_roundtrip"
+          "poly_image_store_to_float"
         ]
       },
       "mapping": [
         {"tinygrad_rule": 0, "polygrad_symbols": ["poly_transform_to_image"]},
         {"tinygrad_rule": 1, "polygrad_symbols": ["poly_image_load_to_float"]},
         {"tinygrad_rule": 2, "polygrad_symbols": ["poly_image_store_to_float"]},
-        {"tinygrad_rule": 3, "polygrad_symbols": ["poly_remove_image_cast_roundtrip"]}
+        {"tinygrad_rule": 3, "polygrad_symbols": ["poly_image_store_to_float", "image_store_value"]}
       ],
       "tests": ["test/test_codegen.c"]
     },

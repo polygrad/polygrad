@@ -235,7 +235,7 @@ def c_matcher_callbacks(block: str) -> list[str]:
     return callbacks
 
 
-def validate_rule_group(group: dict, target_root: Path) -> dict:
+def validate_rule_group(group: dict, target_root: Path, register: dict | None = None) -> dict:
     errors: list[str] = []
     tinygrad = group["tinygrad"]
     polygrad = group["polygrad"]
@@ -260,7 +260,14 @@ def validate_rule_group(group: dict, target_root: Path) -> dict:
         return {**group, "status": "fail", "errors": [str(exc)], "tinygrad_rules": rules}
     if callbacks != polygrad["callbacks"]:
         errors.append(f"Polygrad callbacks {callbacks} != {polygrad['callbacks']}")
-    if len(callbacks) != len(rules):
+    entry = next((row for row in (register or {}).get('entries', [])
+                  if row['id'] == group.get('divergence_id')), {})
+    approved = entry.get('status') == 'approved' and group.get('stage') in entry.get('stages', [])
+    if group.get('divergence_id') and not approved:
+        errors.append('matcher difference lacks stage-scoped approval')
+    # Backports can merge/remove matcher rows. Keep the pin's row inventory and
+    # explicit counterparts; only the approved stage may differ in row count.
+    if len(callbacks) != len(rules) and not approved:
         errors.append(f"one-to-one row count {len(callbacks)} != {len(rules)}")
 
     mapping = group.get("mapping")
@@ -471,6 +478,8 @@ def release_errors(ledger: dict, report: dict, evidence: dict, register: dict, r
     for row in ledger.get("rule_groups", []) + ledger.get("matcher_aggregates", []):
         if row.get("status") != "pass":
             errors.append(f"{row['id']}: matcher validation failed")
+        if row.get('divergence_id') and not approved(row):
+            errors.append(f"{row['id']}: matcher difference lacks stage-scoped approval")
 
     summary = {"pass": 0, "fail": 0, "allowed": 0, "unregistered": 0}
     cases = report.get("cases", {})
@@ -887,7 +896,8 @@ def main() -> int:
             "graph_status": graph_status(report, wave["case_patterns"]),
         })
 
-    rule_groups = [validate_rule_group(group, new_root) for group in config.get("rule_groups", [])]
+    register = json.loads((ROOT / "test/fixtures/parity_divergences.json").read_text())
+    rule_groups = [validate_rule_group(group, new_root, register) for group in config.get("rule_groups", [])]
     matcher_aggregates = [
         validate_matcher_aggregate(aggregate, rule_groups)
         for aggregate in config.get("matcher_aggregates", [])
@@ -916,7 +926,6 @@ def main() -> int:
     }
     evidence_path = ROOT / args.evidence
     evidence = json.loads(evidence_path.read_text()) if evidence_path.is_file() else {}
-    register = json.loads((ROOT / "test/fixtures/parity_divergences.json").read_text())
     reference_errors = []
     for reference_root in {old_root, new_root, ROOT / register["reference"]["root"]}:
         if run("git", "status", "--porcelain", "--untracked-files=all", cwd=reference_root):

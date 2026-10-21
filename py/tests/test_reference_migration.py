@@ -48,6 +48,32 @@ def put_catalogue(root, declarations):
                "\nimport json\nprint(json.dumps({k: v[0] for k, v in CASES.items()}))\n")
 
 
+@pytest.mark.parametrize('status,stage,expected', [
+    ('approved', 'codegen', 'pass'), ('open_debt', 'codegen', 'fail'),
+    ('approved', 'tensor', 'fail'),
+])
+def test_matcher_backport_requires_stage_scoped_approval(tmp_path, monkeypatch, status, stage, expected):
+    monkeypatch.setattr(migration, 'ROOT', tmp_path)
+    put(tmp_path, 'reference/matcher.py', 'pm = PatternMatcher([(UPat(), first), (UPat(), second)])\n')
+    put(tmp_path, 'matcher.c', '''void combined(void) {}
+PolyPatternMatcher *matcher(void) {
+  PolyNamedRule rules[] = {POLY_RULE(pattern(), combined)};
+  return make(rules);
+}
+''')
+    group = {
+        'tinygrad': {'path': 'matcher.py', 'matcher': 'pm', 'rule_count': 2},
+        'polygrad': {'path': 'matcher.c', 'matcher': 'matcher', 'callbacks': ['combined']},
+        'mapping': [{'tinygrad_rule': i, 'polygrad_symbols': ['combined']} for i in range(2)],
+        'divergence_id': 'test-backport', 'stage': 'codegen',
+    }
+    register = {'entries': [{'id': 'test-backport', 'status': status, 'stages': [stage]}]}
+    result = migration.validate_rule_group(group, tmp_path / 'reference', register)
+    assert result['status'] == expected, result['errors']
+    group['polygrad']['callbacks'] = ['absent']
+    assert migration.validate_rule_group(group, tmp_path / 'reference', register)['status'] == 'fail'
+
+
 def test_graph_corpus_includes_generated_registrations_without_running_cases(tmp_path):
     put_catalogue(tmp_path, """
 def construct():
@@ -235,6 +261,16 @@ def update_audit(gate):
 
 def test_strict_accepts_complete_synthetic_evidence(gate):
     assert errors(gate) == []
+
+
+def test_saved_matcher_ledger_cannot_reuse_revoked_approval(gate):
+    group = gate[1]['rule_groups'][0]
+    group.update(divergence_id='backport', stage='codegen')
+    entry = {'id': 'backport', 'status': 'approved', 'stages': ['codegen']}
+    gate[4]['entries'] = [entry]
+    assert errors(gate) == []
+    entry['status'] = 'open_debt'
+    assert any('matcher difference lacks stage-scoped approval' in error for error in errors(gate))
 
 
 def test_supported_parity_does_not_claim_full_certification(gate):
