@@ -60,15 +60,24 @@ def test_python_docs_build_wasm(target):
     assert 'wasm-pkg' in rule.split()
 
 
-def test_browser_targets_use_short_temporary_directory():
-    result = subprocess.run(['make', '-n', 'test-browser', 'test-browser-env', 'test-browser-qwen3', 'test-release-preflight'],
+@pytest.mark.parametrize('browser_tmpdir', [None, '/tmp/polygrad-browser'])
+def test_browser_targets_use_short_temporary_directory(browser_tmpdir):
+    # Exercise the Makefile default and explicit override independently of the
+    # outer release invocation's command-line assignments and jobserver.
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES', 'BROWSER_TMPDIR')}
+    env['TMPDIR'] = '/deep/' + 'nested/' * 30
+    command = ['make', '-n', 'test-browser', 'test-browser-env', 'test-browser-qwen3', 'test-release-preflight']
+    if browser_tmpdir is not None:
+        command.append(f'BROWSER_TMPDIR={browser_tmpdir}')
+    result = subprocess.run(command,
                             cwd=ROOT, capture_output=True, text=True,
-                            env={**os.environ, 'TMPDIR': '/deep/' + 'nested/' * 30})
+                            env=env)
     assert result.returncode == 0, result.stderr
     assert 'js/test/browser/run.js --preflight' in result.stdout
     for line in result.stdout.splitlines():
         if 'test/browser/run.js' in line or 'js/test/browser/qwen_webgpu.js' in line or 'test_wasm_env.js --browser' in line:
-            assert 'TMPDIR=/tmp ' in line
+            assert f'TMPDIR={browser_tmpdir or "/tmp"} ' in line
 
 
 @pytest.mark.parametrize('path', ['js/node_modules', 'references'])

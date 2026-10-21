@@ -448,7 +448,9 @@ def test_clean_sdist_regenerates_missing_bindings(tmp_path):
         (tmp_path / directory).mkdir()
     for name in ('extension_methods_fixture.c', 'extension_methods_fixture.json'):
         shutil.copyfile(ROOT / 'test' / name, tmp_path / 'test' / name)
-    subprocess.run([sys.executable, 'setup.py', 'sdist'], cwd=tmp_path / 'py',
+    # Honor pyproject.toml's build requirements even when the test interpreter
+    # has an older setuptools than the isolated package builder requires.
+    subprocess.run([sys.executable, '-m', 'build', '--sdist'], cwd=tmp_path / 'py',
                    capture_output=True, text=True, encoding='utf-8', check=True)
     artifact, = (tmp_path / 'py/dist').glob('*.tar.gz')
     with tarfile.open(artifact) as archive:
