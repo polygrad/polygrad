@@ -1019,7 +1019,7 @@ test-onnx-encoder-python: verify-source-mirrors build/libpolygrad.so
 test-onnx-encoder: test-onnx-encoder-python js/build/Release/polygrad_napi.node wasm-pkg
 	$(NODE) js/test/test_onnx_encoder.js native '$(ONNX_ENCODER_DIR)'
 	$(NODE) js/test/test_onnx_encoder.js wasm '$(ONNX_ENCODER_DIR)'
-	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-browser
+	POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))' POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-js-browser
 
 test-py: verify-source-mirrors check-extension-bindings build/libpolygrad.so build/extension/author.so build/extension-methods/author.so build/extension/native.node js/build/Release/polygrad_napi.node wasm-pkg
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_LIB=build/libpolygrad.so PYTHONPATH=py $(PYTHON) -m pytest py/tests/ -v

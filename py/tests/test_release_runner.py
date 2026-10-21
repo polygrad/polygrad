@@ -84,6 +84,14 @@ def test_c_gate_has_no_browser_build_and_browser_snapshot_runs_serially(ctype_lo
     assert 'test-wasm-performance-structure update-wasm-performance-structure: test-bench-wasm wasm-pkg' in makefile
 
 
+def test_onnx_encoder_uses_its_browser_fixture_without_unrelated_performance_gate():
+    makefile = (ROOT / 'Makefile').read_text(encoding='utf-8')
+    recipe = re.search(r'^test-onnx-encoder:.*\n((?:\t.*\n)+)', makefile, re.M).group(1)
+    assert "POLY_ONNX_ENCODER_DIR='$(abspath $(ONNX_ENCODER_DIR))'" in recipe
+    assert 'POLY_BROWSER_DEVICES=auto,webgpu $(MAKE) test-js-browser' in recipe
+    assert '$(MAKE) test-browser\n' not in recipe
+
+
 @pytest.mark.parametrize('mismatch', [False, True])
 def test_candidate_versions_must_agree(runner, tmp_path, mismatch):
     (tmp_path / 'py').mkdir()
