@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/bigint.h"
+#include "../src/ctx.h"
 #include "../src/codegen/codegen.h"
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/engine/realize.h"
@@ -4175,8 +4176,18 @@ TEST(wasm, structural_mixed_float_int_lanes) {
   ops[n++] = packed;
   ops[n++] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, packed, poly_arg_none());
   int size = 0;
+  size_t nodes_before = poly_map_len(ctx->uop_storage);
   uint8_t *wasm = poly_render_wasm(ctx, ops, n, &size, true);
+  size_t render_nodes = poly_map_len(ctx->uop_storage) - nodes_before;
   int converts = wasm ? wasm_count_simd_opcode(wasm, size, WASM_SIMD_I32X4_TRUNC_SAT_F32X4_S) : -1;
+  /* The one new node is the load's canonical address, not a cache key. */
+  poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, in, idx[0], poly_arg_none());
+  bool only_address = poly_map_len(ctx->uop_storage) == nodes_before + 1;
+  int again_size = 0;
+  uint8_t *again = poly_render_wasm(ctx, ops, n, &again_size, true);
+  bool same_bytes = wasm && again && size == again_size && memcmp(wasm, again, size) == 0;
+  size_t repeated_nodes = poly_map_len(ctx->uop_storage) - nodes_before;
+  free(again);
   free(wasm);
   int rc = wasm_check_memory_module(
       ctx, ops, n, true, "Float32Array", "[0.25,0.5,1,4]",
@@ -4185,6 +4196,11 @@ TEST(wasm, structural_mixed_float_int_lanes) {
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_INT_EQ(converts, 1);
+  /* Matching and gather reuse must not create graph nodes just for keys. */
+  ASSERT_INT_EQ(render_nodes, 1);
+  ASSERT_INT_EQ(repeated_nodes, 1);
+  ASSERT_TRUE(only_address);
+  ASSERT_TRUE(same_bytes);
   PASS();
 }
 

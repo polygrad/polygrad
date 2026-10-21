@@ -1699,12 +1699,75 @@ static bool wasm_stack_native_vec(PolyUOp *u, PolyDType *dtype_out, int *lanes_o
 static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_out);
 static bool wasm_identity_indices(PolyUOp **lanes, int n);
 
+/* Render-local tuple keys borrow immutable SSA nodes. Component keys also
+ * describe synthetic transpose interleaves without constructing INDEX/STACK
+ * UOps. Only the exact INDEX form used by those interleaves is normalized. */
+typedef struct {
+  PolyUOp *nodes[4];
+  unsigned char components[4]; /* 0: whole node; 1..4: float32 vector lane. */
+  int n;
+} WasmLaneKey;
+
+typedef struct {
+  WasmLaneKey key;
+  int matches, gather, block;
+} WasmLaneEntry;
+
 typedef struct {
   LocalMap buffers, snapshots;
   int *snapshot_locals;
-  LocalMap gathers, gather_blocks, structural_matches;
+  PolyMap *lanes;
+  PolyArena *lane_arena;
   int n_gathers, gather_base, block;
 } WasmRegVectors;
+
+static bool wasm_lane_key_eq(const void *a, const void *b) {
+  const WasmLaneKey *x = a, *y = b;
+  if (x->n != y->n) return false;
+  for (int i = 0; i < x->n; i++)
+    if (x->nodes[i] != y->nodes[i] || x->components[i] != y->components[i]) return false;
+  return true;
+}
+
+static WasmLaneEntry *wasm_lane_entry(WasmRegVectors *v, const WasmLaneKey *key) {
+  uint32_t hash = (uint32_t)key->n;
+  for (int i = 0; i < key->n; i++) {
+    hash = (hash ^ lm_hash(key->nodes[i])) * UINT32_C(16777619);
+    hash = (hash ^ key->components[i]) * UINT32_C(16777619);
+  }
+  WasmLaneEntry *entry = poly_map_get(v->lanes, hash, key, wasm_lane_key_eq);
+  if (entry) return entry;
+  /* Stable addresses survive recursive matching and map growth. The arena
+   * belongs to this render, not to the context or the source graph. */
+  entry = poly_arena_alloc(v->lane_arena, sizeof(*entry), _Alignof(WasmLaneEntry));
+  if (!entry) {
+    fprintf(stderr, "polygrad: Wasm lane cache allocation failed\n");
+    abort(); /* Same allocation-failure policy as PolyMap. */
+  }
+  *entry = (WasmLaneEntry){.key = *key, .matches = -1, .gather = -1, .block = -1};
+  poly_map_set(v->lanes, hash, &entry->key, entry, wasm_lane_key_eq);
+  return entry;
+}
+
+static WasmLaneEntry *wasm_lane_tuple(WasmRegVectors *v, PolyUOp **lanes, int n) {
+  WasmLaneKey key = {.n = n};
+  assert(n > 1 && n <= 4);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = lanes[i];
+    key.nodes[i] = u;
+    if (!u || u->op != POLY_OP_INDEX || u->n_src != 2 || u->arg.kind != POLY_ARG_NONE ||
+        u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE || !poly_dtype_eq(u->dtype, POLY_FLOAT32))
+      continue;
+    PolyUOp *index = u->src[1];
+    if (index->op == POLY_OP_CONST && index->n_src == 0 && index->tag == 0 &&
+        index->tag_arg.kind == POLY_ARG_NONE && poly_dtype_eq(index->dtype, POLY_WEAKINT) &&
+        index->arg.kind == POLY_ARG_INT && index->arg.i >= 0 && index->arg.i < 4) {
+      key.nodes[i] = u->src[0];
+      key.components[i] = (unsigned char)(index->arg.i + 1);
+    }
+  }
+  return wasm_lane_entry(v, &key);
+}
 
 static int wasm_reg_packed_lane(WasmRegVectors *v, PolyUOp *reg, int lane) {
   int width = lm_get(&v->buffers, reg);
@@ -2066,16 +2129,15 @@ static bool wasm_structural_vec_expr(
     PolyCtx *ctx, PolyUOp **lanes, int n_lanes, WasmRegVectors *v
 ) {
   if (!ctx || !lanes || n_lanes <= 1 || n_lanes > 4) return false;
-  if (!v || !v->structural_matches.cap)
+  if (!v || !v->lanes)
     return wasm_structural_vec_expr_uncached(ctx, lanes, n_lanes, v);
   /* Feasibility is invariant during this rendering. Match each lane tuple
    * once, not once per path through a shared expression DAG. */
-  PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-  if (!key) return false;
-  int cached = lm_get(&v->structural_matches, key);
+  WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+  int cached = entry->matches;
   if (cached >= 0) return cached != 0;
   bool matches = wasm_structural_vec_expr_uncached(ctx, lanes, n_lanes, v);
-  lm_set(&v->structural_matches, key, matches);
+  entry->matches = matches;
   return matches;
 }
 
@@ -2092,20 +2154,19 @@ static bool wasm_identity_indices(PolyUOp **lanes, int n) {
 /* Adjacent transpose columns share pair interleaves: [a0,b0,a1,b1]
  * and [c0,d0,c1,d1] supply both columns 0 and 1. Keys describe immutable
  * SSA components, so the existing block-local gather cache owns their reuse. */
-static PolyUOp *wasm_transpose_pair(PolyCtx *ctx, PolyUOp **lanes, int n, int pair) {
+static WasmLaneEntry *wasm_transpose_pair(WasmRegVectors *v, PolyUOp **lanes, int n, int pair) {
   int column;
   if (n != 4 || !wasm_const_index_checked(lanes[0]->src[1], &column)) return NULL;
   for (int i = 1; i < n; i++) {
     int index;
     if (!wasm_const_index_checked(lanes[i]->src[1], &index) || index != column) return NULL;
   }
-  PolyUOp *components[4];
-  for (int i = 0; i < 4; i++)
-    components[i] = poly_uop2(
-        ctx, POLY_OP_INDEX, POLY_FLOAT32, lanes[2 * pair + i % 2]->src[0],
-        poly_uop_const_int(ctx, (column & ~1) + i / 2), poly_arg_none()
-    );
-  return poly_uop_stack(ctx, components, 4);
+  WasmLaneKey key = {.n = 4};
+  for (int i = 0; i < 4; i++) {
+    key.nodes[i] = lanes[2 * pair + i % 2]->src[0];
+    key.components[i] = (unsigned char)((column & ~1) + i / 2 + 1);
+  }
+  return wasm_lane_entry(v, &key);
 }
 
 static void wasm_mark_structural_vec_expr(
@@ -2129,15 +2190,15 @@ static void wasm_mark_structural_vec_expr(
     return;
   }
   if (lanes[0]->op != POLY_OP_INDEX && lanes[0]->op != POLY_OP_LOAD) {
-    PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-    int cached = lm_get(&v->gathers, key);
+    WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+    int cached = entry->gather;
     if (cached != -1) {
-      if (cached == -2) lm_set(&v->gathers, key, v->n_gathers++);
+      if (cached == -2) entry->gather = v->n_gathers++;
       return;
     }
     /* Only repeated expressions need a temporary. Visiting their children
      * once also prevents exponential planning of shared expression DAGs. */
-    lm_set(&v->gathers, key, -2);
+    entry->gather = -2;
   }
   /* Keep memory reads at their scheduled positions. Odd strides can prevent
    * core load vectorization without preventing lane-wise SIMD arithmetic. */
@@ -2145,8 +2206,8 @@ static void wasm_mark_structural_vec_expr(
     for (int lane = 0; lane < n_lanes; lane++)
       for (int i = 0; i < n; i++)
         if (uops[i] == lanes[lane]) required[i] = true;
-    PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-    if (lm_get(&v->gathers, key) < 0) lm_set(&v->gathers, key, v->n_gathers++);
+    WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+    if (entry->gather < 0) entry->gather = v->n_gathers++;
     return;
   }
 
@@ -2156,12 +2217,11 @@ static void wasm_mark_structural_vec_expr(
 
   if (lanes[0]->op == POLY_OP_INDEX) {
     if (!wasm_identity_indices(lanes, n_lanes)) {
-      PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-      if (lm_get(&v->gathers, key) < 0) lm_set(&v->gathers, key, v->n_gathers++);
+      WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+      if (entry->gather < 0) entry->gather = v->n_gathers++;
       for (int pair = 0; pair < 2; pair++) {
-        PolyUOp *interleave = wasm_transpose_pair(ctx, lanes, n_lanes, pair);
-        if (interleave && lm_get(&v->gathers, interleave) < 0)
-          lm_set(&v->gathers, interleave, v->n_gathers++);
+        WasmLaneEntry *interleave = wasm_transpose_pair(v, lanes, n_lanes, pair);
+        if (interleave && interleave->gather < 0) interleave->gather = v->n_gathers++;
       }
     }
     return;
@@ -2351,9 +2411,9 @@ static bool wasm_emit_structural_vec_expr_uncached(
     return true;
   }
   if (wasm_scalar_load_lanes(ctx, lanes, n_lanes)) {
-    PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-    int gather = lm_get(&v->gathers, key);
-    if (gather >= 0 && lm_get(&v->gather_blocks, key) == v->block) {
+    WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+    int gather = entry->gather;
+    if (gather >= 0 && entry->block == v->block) {
       wb_byte(body, WASM_OP_LOCAL_GET);
       wb_uleb128(body, v->gather_base + gather);
       return true;
@@ -2369,7 +2429,7 @@ static bool wasm_emit_structural_vec_expr_uncached(
     if (gather >= 0) {
       wb_byte(body, WASM_OP_LOCAL_TEE);
       wb_uleb128(body, v->gather_base + gather);
-      lm_set(&v->gather_blocks, key, v->block);
+      entry->block = v->block;
     }
     return true;
   }
@@ -2413,25 +2473,24 @@ static bool wasm_emit_structural_vec_expr_uncached(
     for (int k = 0; k < n_lanes; k++)
       wasm_const_index_checked(lanes[k]->src[1], &indices[k]);
     if (!wasm_identity_indices(lanes, n_lanes)) {
-      PolyUOp *key = poly_uop_stack(ctx, lanes, n_lanes);
-      int gather = lm_get(&v->gathers, key);
-      if (gather >= 0 && lm_get(&v->gather_blocks, key) == v->block) {
+      WasmLaneEntry *entry = wasm_lane_tuple(v, lanes, n_lanes);
+      int gather = entry->gather;
+      if (gather >= 0 && entry->block == v->block) {
         wb_byte(body, WASM_OP_LOCAL_GET);
         wb_uleb128(body, v->gather_base + gather);
         return true;
       }
       /* Transpose/gather vector components, not reduction terms. Recursing
        * through the unchanged ALU tree preserves each output's add order. */
-      PolyUOp *pairs[2] = {
-          wasm_transpose_pair(ctx, lanes, n_lanes, 0), wasm_transpose_pair(ctx, lanes, n_lanes, 1)};
+      WasmLaneEntry *pairs[2] = {
+          wasm_transpose_pair(v, lanes, n_lanes, 0), wasm_transpose_pair(v, lanes, n_lanes, 1)};
       int pair_locals[2] = {
-          pairs[0] ? lm_get(&v->gathers, pairs[0]) : -1,
-          pairs[1] ? lm_get(&v->gathers, pairs[1]) : -1};
+          pairs[0] ? pairs[0]->gather : -1, pairs[1] ? pairs[1]->gather : -1};
       bool interleaved = pair_locals[0] >= 0 && pair_locals[1] >= 0;
       for (int pair = 0; pair < 2; pair++) {
-        PolyUOp *interleave = pairs[pair];
+        WasmLaneEntry *interleave = pairs[pair];
         int cached = pair_locals[pair];
-        if (interleaved && lm_get(&v->gather_blocks, interleave) == v->block) {
+        if (interleaved && interleave->block == v->block) {
           wb_byte(body, WASM_OP_LOCAL_GET);
           wb_uleb128(body, v->gather_base + cached);
           continue;
@@ -2452,7 +2511,7 @@ static bool wasm_emit_structural_vec_expr_uncached(
         if (interleaved) {
           wb_byte(body, WASM_OP_LOCAL_TEE);
           wb_uleb128(body, v->gather_base + cached);
-          lm_set(&v->gather_blocks, interleave, v->block);
+          interleave->block = v->block;
         }
       }
       uint8_t join[16];
@@ -2463,7 +2522,7 @@ static bool wasm_emit_structural_vec_expr_uncached(
       if (gather >= 0) {
         wb_byte(body, WASM_OP_LOCAL_TEE);
         wb_uleb128(body, v->gather_base + gather);
-        lm_set(&v->gather_blocks, key, v->block);
+        entry->block = v->block;
       }
       return true;
     }
@@ -2527,15 +2586,15 @@ static bool wasm_emit_structural_vec_expr(
     int n_lanes,
     WasmRegVectors *v
 ) {
-  PolyUOp *key = NULL;
+  WasmLaneEntry *entry = NULL;
   int cached = -1;
   if (lanes[0]->op != POLY_OP_INDEX && lanes[0]->op != POLY_OP_LOAD) {
-    key = poly_uop_stack(ctx, lanes, n_lanes);
-    cached = lm_get(&v->gathers, key);
+    entry = wasm_lane_tuple(v, lanes, n_lanes);
+    cached = entry->gather;
   }
   /* Reuse only within the current control-flow block. The original LOAD
    * snapshots and ordered operations remain the sources of these values. */
-  if (cached >= 0 && lm_get(&v->gather_blocks, key) == v->block) {
+  if (cached >= 0 && entry->block == v->block) {
     wb_byte(body, WASM_OP_LOCAL_GET);
     wb_uleb128(body, v->gather_base + cached);
     return true;
@@ -2544,7 +2603,7 @@ static bool wasm_emit_structural_vec_expr(
   if (cached >= 0) {
     wb_byte(body, WASM_OP_LOCAL_TEE);
     wb_uleb128(body, v->gather_base + cached);
-    lm_set(&v->gather_blocks, key, v->block);
+    entry->block = v->block;
   }
   return true;
 }
@@ -2972,9 +3031,8 @@ static void build_code_scalar(
     int n_imported_funcs
 ) {
   WasmRegVectors reg_vectors = {0};
-  lm_init(&reg_vectors.gathers, n * 4);
-  lm_init(&reg_vectors.gather_blocks, n * 4);
-  lm_init(&reg_vectors.structural_matches, n * 4);
+  reg_vectors.lanes = poly_map_new((size_t)n);
+  reg_vectors.lane_arena = poly_arena_new(4096);
   PolyUOp **packed_uops = wasm_pack_reg_stores(ctx, uops, &n, &reg_vectors);
   if (packed_uops) uops = packed_uops;
   bool *fused_stack = calloc((size_t)n, sizeof(*fused_stack));
@@ -3792,9 +3850,8 @@ static void build_code_scalar(
   free(reg_vectors.snapshot_locals);
   lm_destroy(&reg_vectors.buffers);
   lm_destroy(&reg_vectors.snapshots);
-  lm_destroy(&reg_vectors.gathers);
-  lm_destroy(&reg_vectors.gather_blocks);
-  lm_destroy(&reg_vectors.structural_matches);
+  poly_map_destroy(reg_vectors.lanes);
+  if (reg_vectors.lane_arena) poly_arena_destroy(reg_vectors.lane_arena);
 }
 
 /* Build code section (SIMD) */
