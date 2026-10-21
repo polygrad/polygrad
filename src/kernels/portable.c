@@ -8,9 +8,15 @@ static const char *wasm_supported(PolyCtx *ctx, const PolyGemmDesc *d) {
   return poly_kernel_gemm_supported(ctx, d, 1, 1);
 }
 
-static PolyUOp *ci(PolyCtx *c, int n) { return poly_uop_const_int(c, n); }
-static PolyUOp *add(PolyCtx *c, PolyUOp *a, PolyUOp *b) { return poly_uop_add(c, a, b); }
-static PolyUOp *mul(PolyCtx *c, PolyUOp *a, int n) { return poly_uop_mul(c, a, ci(c, n)); }
+static PolyUOp *ci(PolyCtx *c, int n) {
+  return poly_uop_const_int(c, n);
+}
+static PolyUOp *add(PolyCtx *c, PolyUOp *a, PolyUOp *b) {
+  return poly_uop_add(c, a, b);
+}
+static PolyUOp *mul(PolyCtx *c, PolyUOp *a, int n) {
+  return poly_uop_mul(c, a, ci(c, n));
+}
 static PolyUOp *load(PolyCtx *c, PolyUOp *p, PolyUOp *i) {
   return poly_uop_load(c, poly_uop_index(c, p, &i, 1));
 }
@@ -19,7 +25,8 @@ static PolyUOp *buffer(PolyCtx *c, int size, int slot, PolyAddrSpace space) {
 }
 static PolyUOp *vector(PolyCtx *c, PolyUOp *p, PolyUOp *i) {
   PolyUOp *lanes[4];
-  for (int l = 0; l < 4; l++) lanes[l] = load(c, p, add(c, i, ci(c, l)));
+  for (int l = 0; l < 4; l++)
+    lanes[l] = load(c, p, add(c, i, ci(c, l)));
   return poly_uop_stack(c, lanes, 4);
 }
 
@@ -37,7 +44,8 @@ static PolyUOp *wasm_kernel(PolyCtx *c, int M, int K, int N, PolyUOp *a, PolyUOp
   for (int i = 0; i < regs; i++) {
     PolyUOp *reg = buffer(c, 4, i, POLY_ADDR_REG), *zeros[4];
     reg = poly_uop_after(c, poly_uop_after(c, reg, m), n);
-    for (int l = 0; l < 4; l++) zeros[l] = poly_uop_const_float(c, 0);
+    for (int l = 0; l < 4; l++)
+      zeros[l] = poly_uop_const_float(c, 0);
     acc[i] = poly_uop_after(c, reg, poly_uop_store_val(c, reg, poly_uop_stack(c, zeros, 4)));
   }
   for (int u = 0; K >= 16 && u < 4; u++) {
@@ -48,28 +56,32 @@ static PolyUOp *wasm_kernel(PolyCtx *c, int M, int K, int N, PolyUOp *a, PolyUOp
       bv[j] = vector(c, b, add(c, mul(c, add(c, mul(c, n, cols), ci(c, j)), K), ki));
     for (int i = 0; i < regs; i++) {
       PolyUOp *prev = vector(c, poly_uop_after(c, acc[i], k), ci(c, 0));
-      updates[i] = poly_uop_store_val(c, acc[i], add(c, prev, poly_uop_mul(c, av[i / cols], bv[i % cols])));
+      updates[i] =
+          poly_uop_store_val(c, acc[i], add(c, prev, poly_uop_mul(c, av[i / cols], bv[i % cols])));
       acc[i] = poly_uop_after(c, acc[i], updates[i]);
     }
   }
   PolyUOp *done = K >= 16 ? poly_uop_end(c, poly_uop_group(c, updates, regs), &k, 1) : NULL;
   if (done)
-    for (int i = 0; i < regs; i++) acc[i] = poly_uop_after(c, acc[i], done);
+    for (int i = 0; i < regs; i++)
+      acc[i] = poly_uop_after(c, acc[i], done);
   for (int i = 0; i < regs; i++) {
     PolyUOp *v[4];
-    for (int l = 0; l < 4; l++) v[l] = load(c, acc[i], ci(c, l));
+    for (int l = 0; l < 4; l++)
+      v[l] = load(c, acc[i], ci(c, l));
     /* Finish fixed tails as expressions: partial register writes would prevent
      * SIMD promotion of the entire loop. No speculative reads or extra +0. */
     for (int t = K / 16 * 16; t < K; t += 4) {
       for (int l = 0; l < 4 && t + l < K; l++) {
-        PolyUOp *ai = add(c, mul(c, add(c, mul(c, m, rows), ci(c, i / cols)), K), ci(c, t+l));
-        PolyUOp *bi = add(c, mul(c, add(c, mul(c, n, cols), ci(c, i % cols)), K), ci(c, t+l));
+        PolyUOp *ai = add(c, mul(c, add(c, mul(c, m, rows), ci(c, i / cols)), K), ci(c, t + l));
+        PolyUOp *bi = add(c, mul(c, add(c, mul(c, n, cols), ci(c, i % cols)), K), ci(c, t + l));
         v[l] = add(c, v[l], poly_uop_mul(c, load(c, a, ai), load(c, b, bi)));
       }
     }
     PolyUOp *sum = add(c, add(c, v[0], v[2]), add(c, v[1], v[3]));
-    PolyUOp *idx = add(c, mul(c, add(c, mul(c, m, rows), ci(c, i / cols)), N),
-        add(c, mul(c, n, cols), ci(c, i % cols)));
+    PolyUOp *idx =
+        add(c, mul(c, add(c, mul(c, m, rows), ci(c, i / cols)), N),
+            add(c, mul(c, n, cols), ci(c, i % cols)));
     stores[i] = poly_uop_store(c, poly_uop_index(c, out, &idx, 1), sum);
   }
   PolyUOp *ranges[] = {m, n};
@@ -83,11 +95,16 @@ static PolyUOp *wasm_kernel(PolyCtx *c, int M, int K, int N, PolyUOp *a, PolyUOp
  * serial K order and uses the same no-pack operand views and CALL ABI. */
 static PolyUOp *wasm_column_kernel(PolyCtx *c, int M, int K, int N, PolyUOp *a, PolyUOp *b) {
   const int cols = N % 16 == 0 ? 16 : N % 4 == 0 ? 4 : 1;
-  PolyGemmTile tile = {.name = "wasm_gemm", .rows = M % 4 == 0 ? 4 : M % 2 ? 1 : 2,
-      .lanes = cols == 1 ? 1 : 4, .vectors = cols > 4 ? cols / 4 : 1};
+  PolyGemmTile tile = {
+      .name = "wasm_gemm",
+      .rows = M % 4 == 0 ? 4
+              : M % 2    ? 1
+                         : 2,
+      .lanes = cols == 1 ? 1 : 4,
+      .vectors = cols > 4 ? cols / 4 : 1};
   /* Only the parameter's indexing changes; the input buffer is never packed. */
   PolyUOp *view = poly_uop_reshape(c, b, (int64_t[]){N / cols, cols, K}, 3);
-  view = poly_uop_permute(c, view, (int64_t[]){0,2,1}, 3);
+  view = poly_uop_permute(c, view, (int64_t[]){0, 2, 1}, 3);
   view = poly_uop_reshape(c, view, (int64_t[]){N * K}, 1);
   return poly_kernel_gemm_program(c, M, K, N, a, view, &tile, 1, 0);
 }
@@ -98,7 +115,8 @@ static PolyUOp *wasm_lower(PolyCtx *ctx, const PolyGemmDesc *d) {
   PolyUOp *b = poly_kernel_gemm_operand(ctx, d->b, d->N * d->K, 2, &right);
   if (!a || !b || !left || !right) return NULL;
   PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_str(d->device));
-  PolyUOp *out = poly_uop_new_buffer(ctx, dev, d->M * d->N, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
+  PolyUOp *out =
+      poly_uop_new_buffer(ctx, dev, d->M * d->N, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
   PolyUOp *nk = poly_uop_reshape(ctx, b, (int64_t[]){d->N, d->K}, 2);
   PolyUOp *kn = poly_uop_permute(ctx, nk, (int64_t[]){1, 0}, 2);
   int64_t offset;
@@ -107,16 +125,17 @@ static PolyUOp *wasm_lower(PolyCtx *ctx, const PolyGemmDesc *d) {
   int tile = columns ? 16 : 4, full = d->N / tile * tile;
   for (int start = 0; start < d->N;) {
     int width = start == 0 && full ? full : d->N - start;
-    PolyUOp *part = poly_uop_shrink(ctx, nk, (int64_t[][2]){{start, start+width}, {0, d->K}}, 2);
-    part = poly_uop_reshape(ctx, part, (int64_t[]){width*d->K}, 1);
+    PolyUOp *part = poly_uop_shrink(ctx, nk, (int64_t[][2]){{start, start + width}, {0, d->K}}, 2);
+    part = poly_uop_reshape(ctx, part, (int64_t[]){width * d->K}, 1);
     PolyUOp *body = columns ? wasm_column_kernel(ctx, d->M, d->K, width, a, part)
-                           : wasm_kernel(ctx, d->M, d->K, width, a, part);
+                            : wasm_kernel(ctx, d->M, d->K, width, a, part);
     if (!body) return NULL;
     if (width != d->N) {
       PolyUOp *slot = buffer(ctx, d->M * width, 0, POLY_ADDR_GLOBAL);
-      PolyUOp *view = poly_uop_reshape(ctx, buffer(ctx, d->M * d->N, 0, POLY_ADDR_GLOBAL),
-          (int64_t[]){d->M, d->N}, 2);
-      view = poly_uop_shrink(ctx, view, (int64_t[][2]){{0, d->M}, {start, start+width}}, 2);
+      PolyUOp *view = poly_uop_reshape(
+          ctx, buffer(ctx, d->M * d->N, 0, POLY_ADDR_GLOBAL), (int64_t[]){d->M, d->N}, 2
+      );
+      view = poly_uop_shrink(ctx, view, (int64_t[][2]){{0, d->M}, {start, start + width}}, 2);
       view = poly_uop_reshape(ctx, view, (int64_t[]){d->M * width}, 1);
       body = poly_uop_substitute(ctx, body, &slot, &view, 1);
     }

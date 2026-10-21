@@ -1330,8 +1330,7 @@ PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
   /* Pinned UOp.buffer checks buffers before contiguous_view (ops.py:926).
    * Geometry is immutable; context borrower records protect the cached base.
    * Allocation/validity still refresh at use time, not at this lookup. */
-  if ((u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u))
-    return u;
+  if ((u->op == POLY_OP_SHRINK || u->op == POLY_OP_BITCAST) && poly_buffer_get(ctx, u)) return u;
   /* Pinned UOp.buffer creates a typed Buffer.view for BITCAST after resolving
    * the source Buffer/view (uop/ops.py:838-856). This is what makes an
    * unequal-width DISK BITCAST a zero-copy typed file view instead of a

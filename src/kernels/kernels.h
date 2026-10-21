@@ -21,8 +21,17 @@ typedef struct {
 
 /* Ordinary UOp body; b indexes [N/cols,K,cols]. It may be a parameter view,
  * not packed storage. Caller owns input materialization and CALL construction. */
-PolyUOp *poly_kernel_gemm_program(PolyCtx *, int M, int K, int N, PolyUOp *a, PolyUOp *b,
-    const PolyGemmTile *, int workers, int thread_axis);
+PolyUOp *poly_kernel_gemm_program(
+    PolyCtx *,
+    int M,
+    int K,
+    int N,
+    PolyUOp *a,
+    PolyUOp *b,
+    const PolyGemmTile *,
+    int workers,
+    int thread_axis
+);
 
 typedef struct {
   const char *name;

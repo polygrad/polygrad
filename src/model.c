@@ -5496,7 +5496,8 @@ static int model_call_collect(
     poly_model_set_error(
         inst, POLY_STATUS_INVALID, __func__,
         executed ? "entrypoint '%s' output read failed after successful execution"
-                 : "entrypoint '%s' execution failed", entrypoint
+                 : "entrypoint '%s' execution failed",
+        entrypoint
     );
   return rc;
 }

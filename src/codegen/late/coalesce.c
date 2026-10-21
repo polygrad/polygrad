@@ -236,7 +236,8 @@ PolyUOp *poly_memory_coalescing(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps ca
         for (int c = 0; c < n_candidates; c++) {
           if (candidates[c] <= remaining) {
             PolyUOp *test_offset = memory_coalescing_offset(ctx, r, offsets[pos]);
-            if (!must_divide || candidates[c] == 1 || poly_uop_divides(ctx, test_offset, candidates[c])) {
+            if (!must_divide || candidates[c] == 1 ||
+                poly_uop_divides(ctx, test_offset, candidates[c])) {
               length = candidates[c];
               break;
             }
