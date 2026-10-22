@@ -1403,7 +1403,15 @@ static PolyUOp *poly_uop_internal(
     int32_t tag,
     PolyArg tag_arg
 ) {
-  if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
+  if (!ctx || n_src < 0) return NULL;
+  if (n_src > UINT16_MAX) {
+    fprintf(
+        stderr, "polygrad: %s requires %d sources; limit is %u\n", poly_op_name(op), n_src,
+        (unsigned)UINT16_MAX
+    );
+    return NULL;
+  }
+  if (n_src > 0 && !src) return NULL;
   for (int i = 0; i < n_src; i++)
     if (!src[i]) return NULL;
   /* Python ints have one value identity regardless of construction history.

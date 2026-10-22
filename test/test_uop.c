@@ -22,6 +22,52 @@
 #include "../src/codegen/decomp/dtype.h"
 #include "../src/codegen/codegen.h"
 #include "../src/mixin/elementwise.h"
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
+TEST(uop, source_count_limit_accepts_boundary) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp **sources = malloc(UINT16_MAX * sizeof(*sources));
+  ASSERT_NOT_NULL(sources);
+  PolyUOp *value = poly_uop_const_int(ctx, 1);
+  for (int i = 0; i < UINT16_MAX; i++)
+    sources[i] = value;
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, sources, UINT16_MAX, poly_arg_none());
+  free(sources);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(linear->n_src, UINT16_MAX);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+#ifndef _WIN32
+TEST(uop, source_count_limit_reports_requested_count) {
+  PolyCtx *ctx = poly_ctx_new();
+  FILE *capture = tmpfile();
+  ASSERT_NOT_NULL(capture);
+  fflush(stderr);
+  int original = dup(fileno(stderr));
+  ASSERT_TRUE(original >= 0);
+  ASSERT_TRUE(dup2(fileno(capture), fileno(stderr)) >= 0);
+  /* Oversize nodes must fail before inspecting the source array. */
+  PolyUOp *boundary = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 65536, poly_arg_none());
+  PolyUOp *large = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, NULL, 72000, poly_arg_none());
+  fflush(stderr);
+  dup2(original, fileno(stderr));
+  close(original);
+  rewind(capture);
+  char diagnostic[512] = {0};
+  fread(diagnostic, 1, sizeof(diagnostic) - 1, capture);
+  fclose(capture);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(boundary == NULL);
+  ASSERT_TRUE(large == NULL);
+  ASSERT_TRUE(strstr(diagnostic, "LINEAR requires 65536 sources; limit is 65535"));
+  ASSERT_TRUE(strstr(diagnostic, "LINEAR requires 72000 sources; limit is 65535"));
+  PASS();
+}
+#endif
 
 TEST(uop, fp8_bounds_are_shared_by_constants_and_symbolic_queries) {
   PolyCtx *ctx = poly_ctx_new();

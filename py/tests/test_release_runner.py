@@ -176,9 +176,16 @@ def test_release_preflight_rejects_unreviewed_tools(runner, tmp_path, tool, vers
 
 def test_release_subprocesses_use_utf8(runner, tmp_path, monkeypatch):
     assert runner['release_environment'](tmp_path)['PYTHONUTF8'] == '1'
-    assert runner['release_environment'](tmp_path)['POLY_KERNELS'] == '0'
     monkeypatch.setenv('EMULATED_DTYPES', 'bfloat16')
     assert runner['release_environment'](tmp_path)['EMULATED_DTYPES'] == ''
+
+
+@pytest.mark.parametrize('inherited', [None, '0', '1'])
+def test_release_uses_device_default_kernel_policy(runner, tmp_path, monkeypatch, inherited):
+    monkeypatch.delenv('POLY_KERNELS', raising=False)
+    if inherited is not None:
+        monkeypatch.setenv('POLY_KERNELS', inherited)
+    assert 'POLY_KERNELS' not in runner['release_environment'](tmp_path)
 
 
 def test_release_fixture_preflight_checks_missing_and_changed_bytes(runner, tmp_path):

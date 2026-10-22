@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.7.2 (2026-10-10)
+## 0.7.2 (Unreleased)
+
+- Add managed C extension methods with strings, owned objects and ordered
+  cleanup. The installed SDK supports borrowed Model arguments and optional
+  native Model execution imports without frontend evaluator callbacks.
+- Add `Model.set_metadata` / `get_metadata` with owner keys, protected core
+  namespaces and exact finite binary64 bundle round trips. Reject duplicate
+  metadata keys and embedded NUL; raw IR omits application metadata.
+- Fix computed-state shapes during composition, integer dot output dtype,
+  CPU BF16 rounding, and interpreter floating-point rounding and scalar bindings.
+  Diagnose malformed integer environment settings before using defaults.
+  Report requested UOp source counts when the 65,535 limit is exceeded.
+- Reduce repeated metadata queries, buffer-view resolution and LINEAR temporary
+  allocations. Batch output reads, cache recursive UOp digests, and release
+  temporary gradient traversal storage.
+- Fix HIP initialization, FP16 intrinsic selection, transfers and launch limits;
+  HIP remains excluded from this release's acceptance matrix.
+
+Known limit: large FP32 reductions can have position-dependent rounding error.
+Qualify energy differences for probabilistic inference; use FP64 where supported
+when the FP32 error budget is insufficient.
 
 - Package headers and `python -m polygrad.sdk` for building C graph authors
   without a checkout. Separate construction compatibility from the core ABI,

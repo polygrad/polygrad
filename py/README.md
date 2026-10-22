@@ -259,6 +259,12 @@ supports fixed-shape state and explicit entrypoint writes; see the
 - `params` defaults to named Tensor attributes of the supplied object;
   functions require explicit closure state. `model.summary()` inspects metadata without executing or
   reading weights.
+- Two independently named lazy constants, such as `a = Tensor(2.0)` and
+  `r = Tensor(2.0)`, can merge into one logical node and cause
+  `ambiguous state occurrence` during capture. Reuse one Tensor if the names
+  should share state. For independent state, construct one from host data, e.g.
+  `a = Tensor(np.array(2.0, dtype=np.float32))`. Calling `.realize()` on the
+  scalar constant alone is not sufficient.
 - With `loss`, construction captures evaluation and training forwards against
   the same state. The callable runs twice during construction, never during
   execution. Without a loss, capture uses the current `TRAINING` value;

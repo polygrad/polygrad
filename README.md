@@ -1065,10 +1065,10 @@ candidate/baseline pairs retain all samples without retries. Every workload must
 meet its 1.02 median ratio limit; numerical results and library origins are checked.
 The report is `temp/python-eager-performance.json`.
 
-Release acceptance creates its own isolated, hash-pinned 0.5.1 baseline install,
+Release acceptance creates its own isolated, hash-pinned 0.7.1 baseline install,
 requiring PyPI access for dependencies. `PY_PERF_BASELINE_SDIST` can supply that
 exact source archive locally. Evidence is under `python-performance/`.
-The C gate separately builds the pinned 0.5.1 Git checkpoint and current source
+The C gate separately builds the pinned 0.7.1 release tag and current source
 with matching flags and nine alternating pairs. That checkpoint must exist locally.
 Load averages and affinity are recorded; high load is flagged, not used to discard
 samples. These guards do not certify large-model or Model API performance.

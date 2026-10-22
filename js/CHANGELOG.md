@@ -1,6 +1,38 @@
 # Changelog
 
-## 0.7.2 (2026-10-10)
+## 0.7.2 (Unreleased)
+
+- Enable custom UOp FP32 matmul kernels by default on Wasm only; opt out with
+  `create({kernels: false})` or `POLY_KERNELS=0`. Matmul kernels with contiguous
+  K rows use four partial sums with strict multiply/add and may round differently;
+  bias/activation may execute separately.
+  Remove renderer matmul/reduction shortcuts and relaxed multiply-add fallback.
+  Generic lowering retains target-level SIMD packing and unaligned coalescing.
+- Reduce Wasm renderer allocations and vectorize mixed float/integer expressions.
+  Add structural guards for generated kernels, dispatches, frontend crossings and
+  exported allocations, independently of timing qualification.
+- Add managed extension methods with strings, owned objects and ordered cleanup.
+  The SDK supports borrowed Models and optional native execution imports; Wasm
+  rejects native-only imports and keeps asynchronous frontend execution.
+- Add `Model.setMetadata` / `getMetadata` with protected owner namespaces and
+  exact finite binary64 bundle round trips. Reject duplicate metadata keys and
+  embedded NUL; raw IR omits application metadata.
+- Fix computed-state shapes during composition, integer dot output dtype,
+  native CPU BF16 rounding, and interpreter floating-point rounding and scalar
+  bindings. Diagnose malformed integer environment settings before using defaults.
+  Report requested UOp source counts when the 65,535 limit is exceeded.
+- Fix WebGPU NaN self-comparisons through bit classification. Batch Model output
+  readbacks and overlap checked execution with mapping while preserving failure
+  handling. Reuse bounded staging storage.
+- Reduce JIT/frontend metadata queries, buffer-view resolution and LINEAR scratch
+  allocations. Cache recursive UOp digests and release gradient traversal storage.
+- Fix HIP initialization, FP16 intrinsic selection, transfers and launch limits;
+  HIP remains excluded from this release's acceptance matrix.
+
+Known limits: large FP32 reductions remain sensitive to accumulation order,
+including on WebGPU. Explicit `kernels: false` Qwen batch was about 23% slower
+in a matched diagnostic against the previous renderer-shortcut build; this is
+not a universal timing estimate. Token-call timing remains inconclusive.
 
 - Forward Node's environment to the Wasm core and accept compiler settings through
   `create({env})` and `createAsync({env})` in browsers and Node Wasm. Synchronous

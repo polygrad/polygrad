@@ -282,6 +282,12 @@ entrypoint writes through the shared
 - Set the seed before construction. BatchNorm/RNG updates belong to Model-owned
   state. Authoring Tensor roots and `Tensor.training` are restored even on
   failure, but arbitrary JavaScript side effects are not rolled back.
+- Two independently named lazy constants, such as `a = new Tensor(2)` and
+  `r = new Tensor(2)`, can merge into one logical node and cause
+  `ambiguous state occurrence` during capture. Reuse one Tensor if the names
+  should share state. For independent state, construct one from host data, e.g.
+  `a = new Tensor(new Float32Array([2])).reshape([])`. Calling `.realize()` on
+  the scalar constant alone is not sufficient.
 - Authored assignments require auxiliary state (`is_param_(false)`); the
   optimizer updates parameters. Without a loss, capture uses the current
   `Tensor.training`; changing it later does not recapture the graph.

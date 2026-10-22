@@ -1,6 +1,44 @@
 # Changelog
 
-## 0.7.2 (2026-10-10)
+## 0.7.2 (Unreleased)
+
+- Enable custom UOp FP32 matmul kernels by default on Wasm only. Use
+  `kernels: false` or `POLY_KERNELS=0` for generic lowering. Matmul kernels with
+  contiguous K rows use four partial sums with strict multiply/add; rounding may differ from
+  previous versions. Bias/activation may execute separately. Remove the legacy
+  renderer matmul/reduction replacements and relaxed multiply-add fallback;
+  other operations use shared optimization and target-level SIMD rendering.
+- Reduce Wasm render-time allocations and vectorize mixed float/integer
+  expressions. Add structural performance guards for kernel bytes, dispatches,
+  frontend crossings and exported allocations; timing qualification remains separate.
+- Add managed extension methods with C-derived signatures, strings and owned
+  objects. Enforce runtime-scoped handles and ordered disposal. Add borrowed
+  Model arguments and optional native execution imports to the installed SDK;
+  Wasm rejects native-only imports and retains frontend-managed execution.
+- Expose namespaced Model metadata in Python and JavaScript. Preserve reserved
+  core keys and exact finite binary64 round trips in bundles; reject duplicate
+  keys and embedded NUL. Raw IR does not carry application metadata.
+- Fix computed-state shapes during Model composition, integer dot output dtype,
+  CPU BF16 operation rounding, and interpreter floating-point rounding and scalar
+  bindings. Diagnose malformed integer environment settings before using defaults.
+  Report requested UOp source counts when the 65,535 limit is exceeded.
+- Fix WebGPU NaN self-comparisons through bit classification. Batch Model output
+  reads and overlap checked execution with readback without publishing failed
+  outputs. Reuse bounded staging storage.
+- Reduce shared runtime overhead through cached immutable replay metadata,
+  early buffer-view lookup and invocation-local LINEAR scratch reuse. Cache
+  recursive UOp digests instead of retaining schedule-cache source graphs.
+  Release temporary gradient traversal storage.
+- Fix HIP initialization, FP16 intrinsic selection, transfers and launch limits.
+  HIP remains outside this release's acceptance matrix; these fixes do not
+  establish complete backend qualification.
+
+Known limits: large FP32 reductions remain sensitive to accumulation order;
+validate energy differences for probabilistic inference or use FP64 where
+supported. Disabling Wasm kernels can reduce performance: a matched Qwen batch
+diagnostic was about 23% slower after removing the old renderer shortcut.
+That comparison used the previous shortcut-enabled build, not a universal
+cross-machine speed guarantee. Token-call timing remains inconclusive.
 
 - Forward Node's environment to the Wasm core and expose browser compiler
   settings through JavaScript `create({env})` and `createAsync({env})`.
