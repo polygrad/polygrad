@@ -2472,3 +2472,23 @@ TEST(f64, value_and_grad) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+TEST(nn, special_math_atan_accuracy_and_derivatives) {
+  ASSERT_TRUE(signbit(eval_scalar_f32(poly_uop_atan, -0.0f)));
+  ASSERT_TRUE(signbit(eval_scalar_f64(poly_uop_atan, -0.0)));
+  ASSERT_TRUE(!signbit(eval_scalar_f64(poly_uop_atan, 0.0)));
+  ASSERT_TRUE(eval_derivative_f64(poly_uop_atan, -0.0, 1) == 1.0);
+  const double xs[]={-1e200,-100,-1,-.4142135623730951,-1e-12,0,1e-12,.4142135623730951,1,100,1e200};
+  for(size_t i=0;i<sizeof(xs)/sizeof(*xs);i++) {
+    double x=xs[i],actual=eval_scalar_f64(poly_uop_atan,x);
+    ASSERT_TRUE(isfinite(actual));ASSERT_TRUE(fabs(actual-atan(x))<=3e-16);
+    if(fabs(x)<101) {
+      double g=1/(1+x*x);
+      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan,x,1)-g)<1e-13);
+      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan,x,2)+2*x*g*g)<1e-12);
+    }
+  }
+  ASSERT_TRUE(fabs(eval_scalar_f32(poly_uop_atan,1e20f)-(float)1.57079632679489661923)<2e-7);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_atan,NAN)));
+  PASS();
+}

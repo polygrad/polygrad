@@ -637,10 +637,41 @@ PolyUOp *poly_uop_acos(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_uop_atan(PolyCtx *ctx, PolyUOp *x) {
-  PolyUOp *a = poly_uop_elementwise_scalar_binop(
-      ctx, POLY_OP_ADD, poly_uop_mul(ctx, x, x), POLY_INT32, 1, true
+  PolyDType result;
+  x = special_float(ctx, x, &result);
+  if (!x) return NULL;
+  PolyDType dt = x->dtype;
+  PolyUOp *zero = cdt(ctx, dt, 0), *one = cdt(ctx, dt, 1);
+  PolyUOp *finite = poly_uop_isfinite(ctx, x);
+  PolyUOp *safe = poly_uop_where(ctx, finite, x, zero);
+  PolyUOp *negative = poly_uop_alu2(ctx, POLY_OP_CMPLT, x, zero);
+  PolyUOp *sign = poly_uop_where(ctx, negative, cdt(ctx, dt, -1), one);
+  PolyUOp *large = poly_uop_alu2(ctx, POLY_OP_CMPLT, one, poly_uop_abs(ctx, safe));
+  /* Reciprocal reduction never squares the original argument. Mask before
+   * division; the inactive x=0 branch must not poison first/second derivatives. */
+  PolyUOp *denom = poly_uop_where(ctx, large, safe, one);
+  PolyUOp *r = poly_uop_where(ctx, large, poly_uop_div(ctx, one, denom), safe);
+  PolyUOp *shift = poly_uop_alu2(ctx, POLY_OP_CMPLT, cdt(ctx, dt, 0.41421356237309504880), poly_uop_abs(ctx, r));
+  PolyUOp *reduced = poly_uop_div(
+      ctx, poly_uop_sub(ctx, r, sign), poly_uop_add(ctx, one, poly_uop_abs(ctx, r))
   );
-  return poly_uop_asin(ctx, poly_uop_div(ctx, x, poly_uop_alu1(ctx, POLY_OP_SQRT, a)));
+  r = poly_uop_where(ctx, shift, reduced, r);
+  /* The alternating series is uniformly convergent on |r|<=tan(pi/8).
+   * Remainder <= |r|^(2*n+3)/(2*n+3); derivatives differentiate this same graph. */
+  int n = poly_dtype_eq(dt, POLY_FLOAT64) ? 22 : 9;
+  PolyUOp *r2 = poly_uop_mul(ctx, r, r);
+  PolyUOp *p = cdt(ctx, dt, (n % 2 ? -1.0 : 1.0) / (2*n+1));
+  for (int k = n-1; k >= 0; k--)
+    p = poly_uop_add(ctx, cdt(ctx, dt, (k % 2 ? -1.0 : 1.0) / (2*k+1)), poly_uop_mul(ctx, r2, p));
+  PolyUOp *value = poly_uop_mul(ctx, r, p);
+  PolyUOp *quarter = poly_uop_mul(ctx, sign, cdt(ctx, dt, M_PI/4));
+  /* Adding +0 would erase the sign of an unshifted -0 input. */
+  value = poly_uop_where(ctx, shift, poly_uop_add(ctx, value, quarter), value);
+  PolyUOp *half = poly_uop_mul(ctx, sign, cdt(ctx, dt, M_PI/2));
+  value = poly_uop_where(ctx, large, poly_uop_sub(ctx, half, value), value);
+  PolyUOp *isnan = poly_uop_alu2(ctx, POLY_OP_CMPNE, x, x);
+  PolyUOp *endpoint = poly_uop_where(ctx, isnan, x, half);
+  return poly_uop_cast(ctx, poly_uop_where(ctx, finite, value, endpoint), result);
 }
 
 PolyUOp *poly_uop_celu(PolyCtx *ctx, PolyUOp *x, PolyUOp *alpha) {

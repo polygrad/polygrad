@@ -48,6 +48,55 @@
       "close_when": "The pin preserves Boolean repeated products, including symbolic zero and multiple removed ranges with an empty range. Rerun graph/type, value and frontend regressions before removing this narrow codegen divergence; no Tensor/autograd graph mismatch is allowed."
     },
     {
+      "id": "PG-DIV-036",
+      "status": "approved",
+      "stages": [
+        "tensor",
+        "autograd"
+      ],
+      "area": "Accurate arctangent range reduction",
+      "tinygrad": "Pinned atan uses asin(x/sqrt(1+x*x)); x*x overflows and the asin approximation limits value and derivative accuracy.",
+      "polygrad": "Uses masked reciprocal and pi/4 reductions followed by dtype-specific alternating polynomials; preserves signed zero and differentiates the same graph.",
+      "rationale": "Probability tails require accurate values and gradients. This approved departure changes only atan, not asin or acos; exact graph pairs bound the allowance.",
+      "approval": "User approved the scoped atan accuracy departure on 2026-10-22, conditional on signed-zero preservation, dtype-specific boundary neighbors and completed C sanitizer validation.",
+      "evidence": [
+        "src/mixin/elementwise.c:poly_uop_atan",
+        "test/test_nn.c:special_math_atan_accuracy_and_derivatives",
+        "py/tests/test_atan_accuracy.py",
+        "js/test/test_tensor.js",
+        "/media/anton/eve/projects/polygrad/polyprob-milestone2-20261022/atan-before.json",
+        "/media/anton/eve/projects/polygrad/polyprob-milestone2-20261022/atan-tinygrad.json",
+        "/media/anton/eve/projects/polygrad/polyprob-milestone2-20261022/atan-graphs/"
+      ],
+      "graph_pairs": {
+        "grad_atan_float32": {
+          "tinygrad": "8954286f78acabb26f8860b299205510138e8f60c6bd7808aa6ecd0075239073",
+          "polygrad": "c11ba8ea59b3da26e2f8637569e1de2448b640e3e49036fb37465ac8523532f5"
+        },
+        "grad_atan_float64": {
+          "tinygrad": "5f9b70867108e888d79a83a6f580f977850febec4d932333f7a0e14c38eec02b",
+          "polygrad": "5dc2800439fed08547a24b31f52307202ca805b1c3f64369a823fdc37448c87e"
+        },
+        "pointwise_owner_atan_float16": {
+          "tinygrad": "171c08d9b949c6a4ab647cb330d4e7eb641cd51faf441a7f2dfafba1684304ec",
+          "polygrad": "19bb89d12ed1ba7df873f3794fefd28d5c4217fd424e59941b8262fea35e6c66"
+        },
+        "pointwise_owner_atan_float32": {
+          "tinygrad": "3b3d67562d40f48f9aa4f3356da63995676d90e662bb1e54dd5b8214966897c8",
+          "polygrad": "e6d01ab75fc36fa32aa90bf3c821169b83ac6e79ceb5129bf04da0b330fe63f1"
+        },
+        "pointwise_owner_atan_float64": {
+          "tinygrad": "263b3c0c5af62f83125a262199fb1e623a4a921d3649110d94279851a4a18b70",
+          "polygrad": "94a84f800aa28c642cb888d29f324e209eee1aefe9232ecd65a32d5c9f95ced8"
+        },
+        "pointwise_owner_atan_int32": {
+          "tinygrad": "6a275c19384339e232ad058d9e592c7116a0a557cefa04d471c748b439b65d44",
+          "polygrad": "5fe20e7b28088a4e1181bdff58cb01e4dad43beca5828901d110e82d0ec49f4d"
+        }
+      },
+      "close_when": "Recheck against a future reference with accurate atan; retain signed-zero, value, derivative and reload regressions."
+    },
+    {
       "id": "PG-DIV-035",
       "status": "approved",
       "stages": ["codegen"],
@@ -689,9 +738,6 @@
         "pointwise_owner_asinh_float16": {"tinygrad": "2584ba310c3d5a8483c0a56af5805242df288efc7a31382c0bad56b798e346e9", "polygrad": "4c17cd782fcb4a58a890dde64095e5b43d1a4df960d36720d4847fe4747d7b78"},
         "pointwise_owner_asinh_float32": {"tinygrad": "ac1500d6d8ce88356bc2e4d711350c7d8878c606a1ff6f3e3dc5cc501144ba43", "polygrad": "ee14f4f5fb52d062cfc5f3bf98b16bc488871d26af372b762970915a7b8cb81e"},
         "pointwise_owner_asinh_int32": {"tinygrad": "5f95a855af40516f7972dcfb843a6f220b6f28086d386c7bd41f81b954c63138", "polygrad": "043301b613a7261a41cdce9e18af4e2858941df8634ec92a8658629a9325bfb1"},
-        "pointwise_owner_atan_float16": {"tinygrad": "171c08d9b949c6a4ab647cb330d4e7eb641cd51faf441a7f2dfafba1684304ec", "polygrad": "9ad03ab83f5ed389646e1da57e7d8df1dc316bdb7de70bbfc5449d9371dbfed8"},
-        "pointwise_owner_atan_float32": {"tinygrad": "3b3d67562d40f48f9aa4f3356da63995676d90e662bb1e54dd5b8214966897c8", "polygrad": "e82e9abf4ed330c42ff0b0e319d98aa1b6d0eb659dd37eb20a2e75453c6023f9"},
-        "pointwise_owner_atan_int32": {"tinygrad": "6a275c19384339e232ad058d9e592c7116a0a557cefa04d471c748b439b65d44", "polygrad": "0f17b81ced6b6002778346c3465807437d5d4af2b7b73ed95bf93fbce77de53e"},
         "pointwise_owner_celu_float16": {"tinygrad": "ba64807d493acaf2a8bf2877cb5ee688c3df7b7303d164052dc18e3e390a3432", "polygrad": "211a8995b621cc9d09c5fc20df71befa390482d59b3550b47322ed553890c6b7"},
         "pointwise_owner_celu_float32": {"tinygrad": "0415b74e27cd6a4e19eff59413773901333f9f1abcca5b12a62c04f3425724eb", "polygrad": "58e56d2edd5c9bdc1269eaef32589b7cd3b64d8e2f78fbc00126d03c94bba6df"},
         "pointwise_owner_celu_int32": {"tinygrad": "cae3baf3c4c6fa88d247f900fefdd5b736c28398cb7f8da9c7cca1d8f5a1a5a4", "polygrad": "087b7f041b51cbf94481a65000310cd940869b1cddedfa1fe2c54211181d3302"},

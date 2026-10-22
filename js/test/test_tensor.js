@@ -6541,6 +6541,28 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
 
+  await test('atan accuracy: values and gradients at reduction boundaries', async () => {
+    const cut = Math.fround(Math.SQRT2 - 1)
+    const bits = new Uint32Array(new Float32Array([cut]).buffer)[0]
+    const neighbors = Array.from(new Float32Array(new Uint32Array([bits - 1, bits, bits + 1]).buffer))
+    const values = [-1e20, -1, ...neighbors.map(x => -x), -0, 0, ...neighbors, 1, 1e20]
+    const data = new Float32Array(values)
+    const x = new Tensor(data), y = x.atan(), total = y.sum()
+    try {
+      const actual = await y.toArray()
+      assertClose(actual, Array.from(data, Math.atan), 2e-7)
+      await total.backward()
+      const gradient = await x.grad.toArray()
+      assertClose(gradient, Array.from(data, v => 1 / (1 + v * v)), 3e-6)
+      for (const i of [5, 6]) assert(gradient[i] === 1, `atan zero derivative ${gradient[i]}`)
+      if (pg.device !== 'webgpu') {
+        // WGSL does not promise preservation of signed zero.
+        assert(Object.is(actual[5], -0), 'atan(-0) lost its sign')
+        assert(Object.is(actual[6], 0), 'atan(+0) changed its sign')
+      }
+    } finally { total.dispose(); y.dispose(); x.dispose() }
+  })
+
   const pointwiseReferences = {
     log10: Math.log10, atanh: Math.atanh, asinh: Math.asinh, acosh: Math.acosh,
     asin: Math.asin, acos: Math.acos, atan: Math.atan,

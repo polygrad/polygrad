@@ -2312,6 +2312,19 @@ for _op in ("sign", "erf", "softplus", "isinf"):
         CASES[f"pointwise_raw_{_op}_{_dtype}"] = ("tensor", lambda op=_op, dt=_dtype: pointwise_owner_graph(op, dt, True))
 
 
+CASES["pointwise_owner_atan_float64"] = ("tensor", lambda: pointwise_owner_graph("atan", "float64"))
+
+
+def atan_gradient_graph(dtype):
+    x = Tensor.empty(2, 3, dtype=dtype).realize()
+    out = x.atan().sum().gradient(x)[0]
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+for _dtype in ("float32", "float64"):
+    CASES[f"grad_atan_{_dtype}"] = ("autograd", lambda dt=_dtype: atan_gradient_graph(dt))
+
+
 def pointwise_pair_graph(op, scalar=False):
     x = Tensor.empty(2, 3, dtype="uint8" if op == "lerp" else "float32").realize()
     y = Tensor.empty(3, dtype=x.dtype).realize()
