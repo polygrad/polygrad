@@ -273,6 +273,8 @@ PolyTensor *poly_tensor_erfc(PolyCtx *ctx, PolyTensor *x);
 PolyTensor *poly_tensor_erfinv(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_ndtri(PolyCtx *ctx, PolyTensor *x);
+/* Inverse log Normal CDF. */
+PolyTensor *poly_tensor_ndtri_exp(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_log_ndtr(PolyCtx *ctx, PolyTensor *x);
 

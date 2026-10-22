@@ -2492,3 +2492,17 @@ TEST(nn, special_math_atan_accuracy_and_derivatives) {
   ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_atan,NAN)));
   PASS();
 }
+
+TEST(nn, special_math_inverse_log_normal_cdf) {
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_ndtri_exp, -800) + 39.88469483825668) < 3e-13);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_ndtri_exp, -1e-20) - 9.262340089798409) < 2e-13);
+  ASSERT_TRUE(fabsf(eval_scalar_f32(poly_uop_ndtri_exp, -1000) + 44.6157487319694f) < 1e-5f);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_ndtri_exp, -INFINITY) == -INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_ndtri_exp, 0) == INFINITY);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri_exp, 0.1)));
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri_exp, NAN)));
+  /* At log(.5), q=0 and dq/dlogp = .5*sqrt(2*pi); d2q=dq. */
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 1) - 1.2533141373155003) < 3e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 2) - 1.2533141373155003) < 3e-13);
+  PASS();
+}

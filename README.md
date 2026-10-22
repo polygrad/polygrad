@@ -63,6 +63,12 @@ const y = new Tensor([1, 2, 3]).mul(2).add(1)
 console.log(y.toArray())
 ```
 
+Probability graphs can use `Tensor.log_ndtr()` for the log standard Normal CDF
+and `Tensor.ndtri_exp()` for its inverse. The inverse accepts log probabilities
+up to zero, preserving tails that would underflow if exponentiated first.
+JavaScript provides `logNdtr()` and `ndtriExp()` (with snake-case aliases); C
+provides `poly_tensor_log_ndtr` and `poly_tensor_ndtri_exp`.
+
 Polygrad follows tinygrad's graph-based execution model:
 
 - **Build a graph:** Tensor operations create UOps describing the computation,

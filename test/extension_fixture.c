@@ -43,6 +43,9 @@ int extension_density(PolyCtx *ctx, PolyTensor **inputs, int kind, PolyTensor **
     case 10:
       OWN(poly_tensor_log_ndtr(ctx, inputs[0]));
       break;
+    case 11:
+      OWN(poly_tensor_ndtri_exp(ctx, inputs[0]));
+      break;
     default:
       goto done;
     }

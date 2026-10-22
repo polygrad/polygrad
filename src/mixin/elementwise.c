@@ -761,7 +761,7 @@ PolyUOp *poly_uop_log_ndtr(PolyCtx *ctx, PolyUOp *x) {
 
 /* Keep centered q and tail probability separate. Forming 2*p-1 loses small
  * ndtri probabilities; forming (1+x)/2 loses small erfinv arguments. */
-static PolyUOp *normal_inverse(PolyCtx *ctx, PolyUOp *q, PolyUOp *tail) {
+static PolyUOp *normal_inverse(PolyCtx *ctx, PolyUOp *q, PolyUOp *tail, PolyUOp *log_tail) {
   const double p0[] = {
       -5.99633501014107895267E1, 9.80010754185999661536E1, -5.66762857469070293439E1,
       1.39312609387279679503E1, -1.23916583867381258016E0};
@@ -813,8 +813,18 @@ static PolyUOp *normal_inverse(PolyCtx *ctx, PolyUOp *q, PolyUOp *tail) {
   );
   PolyUOp *p = poly_uop_where(ctx, central, cdt(ctx, dt, 0.1), tail);
   p = poly_uop_where(ctx, endpoint, cdt(ctx, dt, 0.1), p);
-  PolyUOp *z =
-      poly_uop_alu1(ctx, POLY_OP_SQRT, poly_uop_mul(ctx, cdt(ctx, dt, -2), poly_uop_log(ctx, p)));
+  PolyUOp *z;
+  if (log_tail) {
+    PolyUOp *safe_log = poly_uop_where(ctx, central, cdt(ctx, dt, -2), log_tail);
+    PolyUOp *finite_log = poly_uop_isfinite(ctx, safe_log);
+    safe_log = poly_uop_where(ctx, finite_log, safe_log, cdt(ctx, dt, -2));
+    /* sqrt(-2*log(p)) without overflowing the product for finite log(p). */
+    z = poly_uop_mul(ctx, cdt(ctx, dt, 1.41421356237309504880),
+                    poly_uop_alu1(ctx, POLY_OP_SQRT, poly_uop_elementwise_neg(ctx, safe_log)));
+  } else {
+    z = poly_uop_alu1(ctx, POLY_OP_SQRT,
+                     poly_uop_mul(ctx, cdt(ctx, dt, -2), poly_uop_log(ctx, p)));
+  }
   PolyUOp *r = poly_uop_div(ctx, cdt(ctx, dt, 1), z);
   PolyUOp *correction = poly_uop_where(
       ctx, poly_uop_alu2(ctx, POLY_OP_CMPLT, z, cdt(ctx, dt, 8)),
@@ -829,7 +839,8 @@ static PolyUOp *normal_inverse(PolyCtx *ctx, PolyUOp *q, PolyUOp *tail) {
       ctx, z, poly_uop_mul(ctx, r, poly_uop_add(ctx, poly_uop_log(ctx, z), correction))
   );
   value =
-      poly_uop_where(ctx, poly_uop_eq(ctx, tail, cdt(ctx, dt, 0)), cdt(ctx, dt, INFINITY), value);
+      poly_uop_where(ctx, poly_uop_eq(ctx, log_tail ? log_tail : tail,
+                       cdt(ctx, dt, log_tail ? -INFINITY : 0)), cdt(ctx, dt, INFINITY), value);
   value = poly_uop_where(
       ctx, poly_uop_alu2(ctx, POLY_OP_CMPLT, q, cdt(ctx, dt, 0)),
       poly_uop_elementwise_neg(ctx, value), value
@@ -850,7 +861,7 @@ PolyUOp *poly_uop_erfinv(PolyCtx *ctx, PolyUOp *x) {
   );
   return poly_uop_cast(
       ctx,
-      poly_uop_mul(ctx, cdt(ctx, x->dtype, 0.70710678118654752440), normal_inverse(ctx, q, tail)),
+      poly_uop_mul(ctx, cdt(ctx, x->dtype, 0.70710678118654752440), normal_inverse(ctx, q, tail, NULL)),
       result
   );
 }
@@ -864,7 +875,32 @@ PolyUOp *poly_uop_ndtri(PolyCtx *ctx, PolyUOp *x) {
       ctx, poly_uop_gt(ctx, x, cdt(ctx, x->dtype, 0.5)),
       poly_uop_sub(ctx, cdt(ctx, x->dtype, 1), x), x
   );
-  return poly_uop_cast(ctx, normal_inverse(ctx, q, tail), result);
+  return poly_uop_cast(ctx, normal_inverse(ctx, q, tail, NULL), result);
+}
+
+/* Invert log(Phi(x)) directly. The existing rational inverse already uses
+ * sqrt(-2*log(tail)); accepting that log avoids probability underflow. Near
+ * log(p)=0, expm1 retains the upper tail instead of subtracting exp(log(p)). */
+PolyUOp *poly_uop_ndtri_exp(PolyCtx *ctx, PolyUOp *x) {
+  PolyDType result;
+  x = special_float(ctx, x, &result);
+  if (!x) return NULL;
+  PolyDType dt = x->dtype;
+  PolyUOp *lower = poly_uop_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, -0.69314718055994530942));
+  PolyUOp *lo = poly_uop_where(ctx, lower, x, cdt(ctx, dt, -1));
+  PolyUOp *hi = poly_uop_where(ctx, lower, cdt(ctx, dt, -0.5), x);
+  PolyUOp *lower_tail = poly_uop_exp(ctx, lo);
+  PolyUOp *upper_tail = poly_uop_elementwise_neg(ctx, poly_uop_expm1(ctx, hi));
+  PolyUOp *tail = poly_uop_where(ctx, lower, lower_tail, upper_tail);
+  PolyUOp *log_tail = poly_uop_where(ctx, lower, lo, poly_uop_log(ctx, upper_tail));
+  PolyUOp *q = poly_uop_where(ctx, lower,
+      poly_uop_sub(ctx, lower_tail, cdt(ctx, dt, 0.5)),
+      poly_uop_sub(ctx, cdt(ctx, dt, 0.5), upper_tail));
+  PolyUOp *value = normal_inverse(ctx, q, tail, log_tail);
+  PolyUOp *valid = poly_uop_alu2(ctx, POLY_OP_OR,
+      poly_uop_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, 0)),
+      poly_uop_eq(ctx, x, cdt(ctx, dt, 0)));
+  return poly_uop_cast(ctx, poly_uop_where(ctx, valid, value, cdt(ctx, dt, NAN)), result);
 }
 
 PolyUOp *poly_uop_digamma(PolyCtx *ctx, PolyUOp *x) {

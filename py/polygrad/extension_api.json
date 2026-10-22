@@ -3234,6 +3234,23 @@
     "ownership": "owned",
     "cleanup": false
   },
+  "poly_tensor_ndtri_exp": {
+    "return": "PolyTensor *",
+    "args": [
+      [
+        "PolyCtx *",
+        "ctx"
+      ],
+      [
+        "PolyTensor *",
+        "x"
+      ]
+    ],
+    "arrays": [],
+    "failure": 0,
+    "ownership": "owned",
+    "cleanup": false
+  },
   "poly_tensor_neg": {
     "return": "PolyTensor *",
     "args": [

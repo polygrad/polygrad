@@ -7254,6 +7254,7 @@ async function runTensorTests(pg, createRuntime) {
       erfc: [[0, 3, 8], [1, 2.209049699858544e-5, 1.1224297172982928e-29]],
       erfinv: [[0, 1e-8, -0.5, 0.99], [0, 8.86226925452758e-9, -0.4769362762044699, 1.8213863677184495]],
       ndtri: [[0.5, 1e-8, 1e-4], [0, -5.612001244174789, -3.7190164854556804]],
+      ndtri_exp: [[-1000, -800, -2, -1e-20], [-44.6157477319694, -39.88469483825668, -1.10151962849875, 9.262340089798409]],
       digamma: [[-6.5, 1, 6], [1.9467574842460869, -0.5772156649015329, 1.7061176684318005]],
       lgamma: [[-6.5, 0.5, 3.2], [-6.389634350909334, 0.5723649429247001, 0.8854048271549091]],
       log_ndtr: [[-100, -40, -2, 0, 8, 10], [-5005.524208694205, -804.6084420137539,
@@ -7280,6 +7281,7 @@ async function runTensorTests(pg, createRuntime) {
       ['lgamma', -6.5, 1.9467574842460869, 9.726988504392654],
       ['erfinv', 0, 0.8862269254527580, 0],
       ['ndtri', 0.5, 2.5066282746310005, 0],
+      ['ndtri_exp', -Math.LN2, 1.2533141373155003, 1.2533141373155003],
       ['log_ndtr', 0, 0.7978845608028654, -0.6366197723675813]
     ]) {
       const x = new Tensor([value], { dtype: 'float32' })
@@ -7313,6 +7315,27 @@ async function runTensorTests(pg, createRuntime) {
       if (restored) await restored.dispose()
       await model.dispose()
       x.dispose()
+    }
+  })
+  await test('core probability inverse log Normal CDF Model roundtrip', async () => {
+    for (const dtype of supportsF64 ? ['float32', 'float64'] : ['float32']) {
+      const data = dtype === 'float64' ? new Float64Array([-1000, -800, -2, -1e-20]) : new Float32Array([-1000, -800, -2, -1e-20])
+      const x = new Tensor(data, {dtype})
+      await x.realize()
+      const expected = [-44.6157477319694, -39.88469483825668, -1.10151962849875, 9.262340089798409]
+      const net = {forward({x}) { return {y: x.ndtriExp()} }}
+      const model = await pg.Model.fromCallableAsync(net, {inputs: {x}})
+      let restored
+      try {
+        restored = pg.Model.load(await model.saveAsync())
+        for (const current of [model, restored]) {
+          const actual = await current.forwardAsync({x: data})
+          assertClose(actual.y, expected, dtype === 'float64' ? 2e-12 : 1e-5)
+        }
+      } finally {
+        if (restored) await restored.dispose()
+        await model.dispose(); x.dispose()
+      }
     }
   })
   await test('raw UOp sub matches C composed helper', async () => {

@@ -81,6 +81,8 @@ PolyUOp *poly_uop_log_ndtr(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_uop_erfinv(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_ndtri(PolyCtx *ctx, PolyUOp *x);
+/* Inverse log Normal CDF; x<=0, including -inf and zero endpoints. */
+PolyUOp *poly_uop_ndtri_exp(PolyCtx *ctx, PolyUOp *x);
 
 /* Real digamma and log|Gamma|, with reflection for negative nonintegers.
  * lgamma poles return +inf; digamma negative-integer poles return NaN.

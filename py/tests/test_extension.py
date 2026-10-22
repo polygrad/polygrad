@@ -111,6 +111,7 @@ def test_extension_methods_ownership_and_runtime_teardown():
     (8, 6., 1.7061176684318005, .1813229557371153),
     (9, 3.2, .8854048271549091, .9988388912865996),
     (10, -12., -75.4106730015688, 12.0822141752545),
+    (11, -800., -39.88469483825668, 0.025056542789192948),
 ])
 def test_extension_probability_model(kind, x, value, gradient, dtype):
     with create(device='CPU', logical='always') as rt:

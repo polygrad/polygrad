@@ -260,6 +260,8 @@ def bind(lib):
     lib.poly_tensor_mse_loss.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_ndtri.restype = ctypes.c_void_p
     lib.poly_tensor_ndtri.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_ndtri_exp.restype = ctypes.c_void_p
+    lib.poly_tensor_ndtri_exp.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_neg.restype = ctypes.c_void_p
     lib.poly_tensor_neg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_nll_loss.restype = ctypes.c_void_p
@@ -622,6 +624,8 @@ def bind(lib):
     lib.poly_uop_mul.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_ndtri.restype = ctypes.c_void_p
     lib.poly_uop_ndtri.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_uop_ndtri_exp.restype = ctypes.c_void_p
+    lib.poly_uop_ndtri_exp.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_ne.restype = ctypes.c_void_p
     lib.poly_uop_ne.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_nll_loss.restype = ctypes.c_void_p
