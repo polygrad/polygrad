@@ -496,6 +496,56 @@ TEST(reduce_simplify, bundle_unparented_many_ranges) {
   PASS();
 }
 
+/* Repeated Boolean multiplication is idempotent; an empty product is true.
+ * A weak integer repeat count must never change the result's Boolean dtype. */
+TEST(reduce_simplify, bool_unparented_product) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop_variable(ctx, "gate", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true);
+  for (int n = 0; n < 4; n++) {
+    PolyUOp *range = poly_uop_range(ctx, n, 0, POLY_AXIS_REDUCE);
+    PolyUOp *src[] = {value, range};
+    PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_BOOL, src, 2, poly_arg_reduce(POLY_OP_MUL, 0));
+    PolyUOp *out = poly_graph_rewrite(ctx, red, poly_pm_reduce_unparented());
+    bool typed = poly_dtype_eq(out->dtype, POLY_BOOL);
+    for (int b = 0; b < 2; b++) {
+      PolyUOp *constant = poly_uop_const(ctx, poly_arg_bool(b != 0), POLY_BOOL);
+      PolyUOp *bound = poly_uop_substitute(ctx, out, &value, &constant, 1);
+      bound = poly_graph_rewrite(ctx, bound, poly_symbolic());
+      bool correct = bound->op == POLY_OP_CONST && bound->arg.kind == POLY_ARG_BOOL &&
+                     bound->arg.b == (n == 0 || b);
+      if (!typed || !correct) { poly_ctx_destroy(ctx); ASSERT_TRUE(typed && correct); }
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(reduce_simplify, bool_unparented_symbolic_and_empty_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop_variable(ctx, "gate", poly_arg_int(0), poly_arg_int(1), POLY_BOOL, 1, true);
+  PolyUOp *count = poly_uop_variable(ctx, "count", poly_arg_int(0), poly_arg_int(9), POLY_WEAKINT, 1, true);
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, count, poly_arg_range(0, POLY_AXIS_REDUCE));
+  for (int other = 0; other < 3; other++) {
+    PolyUOp *src[] = {value, range, poly_uop_range(ctx, other, 1, POLY_AXIS_REDUCE), poly_uop_range(ctx, 3, 2, POLY_AXIS_REDUCE)};
+    for (int ranges = 1; ranges <= 3; ranges++) {
+      PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_BOOL, src, 1 + ranges, poly_arg_reduce(POLY_OP_MUL, 0));
+      PolyUOp *out = poly_graph_rewrite(ctx, red, poly_pm_reduce_unparented());
+      bool typed = poly_dtype_eq(out->dtype, POLY_BOOL);
+      for (int n = 0; n <= 9; n++) for (int b = 0; b < 2; b++) {
+        PolyUOp *keys[] = {value, count};
+        PolyUOp *values[] = {poly_uop_const(ctx, poly_arg_bool(b != 0), POLY_BOOL), poly_uop_const_like_int(ctx, count, n)};
+        PolyUOp *bound = poly_uop_substitute(ctx, out, keys, values, 2);
+        bound = poly_graph_rewrite(ctx, bound, poly_symbolic());
+        bool expected = n == 0 || (ranges > 1 && other == 0) || b;
+        bool correct = bound->op == POLY_OP_CONST && bound->arg.kind == POLY_ARG_BOOL && bound->arg.b == expected;
+        if (!typed || !correct) { poly_ctx_destroy(ctx); ASSERT_TRUE(typed && correct); }
+      }
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(reduce_simplify, bundle_unparented_exact_count) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *value = poly_uop_const(ctx, poly_arg_int(1), POLY_INT64);

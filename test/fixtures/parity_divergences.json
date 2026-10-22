@@ -25,6 +25,29 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-037",
+      "status": "approved",
+      "stages": [
+        "codegen"
+      ],
+      "area": "Boolean repeated-product reduction preserves result dtype",
+      "tinygrad": "Pinned reduce_unparented replaces unparented MUL ranges with POW(value, weakint_count), promoting a Boolean reduction result to weakint and failing downstream Boolean UOp verification.",
+      "polygrad": "Only for REDUCE MUL with Boolean result dtype, each removed range becomes WHERE(count == 0, bool true, value). Nonempty Boolean products are idempotent; any empty removed range returns the Boolean multiplicative identity. Parent-dependent ranges stay in the retained reduction. Other reduction operators and numeric result dtypes keep the pinned rule and original exact count.",
+      "rationale": "Preserve Boolean all() semantics for broadcast values, symbolic nonnegative counts and empty products without frontend workarounds or changes to numeric accumulation.",
+      "approval": "User approved the narrowly scoped fix on 2026-10-22, requiring symbolic-zero/multiple-empty-range coverage, applicable unfiltered gates and a commit separate from atan.",
+      "evidence": [
+        "src/codegen/simplify.c:reduce_unparented",
+        "references/tinygrad_latest/tinygrad/codegen/simplify.py:reduce_unparented",
+        "test/test_reduce_simplify.c:bool_unparented_product",
+        "test/test_reduce_simplify.c:bool_unparented_symbolic_and_empty_ranges",
+        "test/test_reduce_simplify.c:bundle_unparented_exact_count",
+        "py/tests/test_bool_reduction.py",
+        "js/test/test_tensor.js:Boolean broadcast reduction preserves dtype",
+        "/media/anton/eve/projects/polygrad/polyprob-composition-20261022/bool-review.txt"
+      ],
+      "close_when": "The pin preserves Boolean repeated products, including symbolic zero and multiple removed ranges with an empty range. Rerun graph/type, value and frontend regressions before removing this narrow codegen divergence; no Tensor/autograd graph mismatch is allowed."
+    },
+    {
       "id": "PG-DIV-035",
       "status": "approved",
       "stages": ["codegen"],

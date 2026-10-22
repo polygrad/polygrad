@@ -6521,6 +6521,26 @@ async function runTensorTests(pg, createRuntime) {
   })
 
 
+  await test('Boolean broadcast reduction preserves dtype', async () => {
+    for (const repeat of [2, 3, 7]) {
+      const owned = []
+      const own = x => { owned.push(x); return x }
+      try {
+        const x = own(new Tensor([1, -1, 1, -1]))
+        const shaped = own(x.reshape(2, 2, 1))
+        const expanded = own(shaped.expand(2, 2, repeat))
+        const mask = own(expanded.gt(0))
+        const other = own(new Tensor([[1, 0], [1, 1]]))
+        const otherMask = own(other.gt(0))
+        for (const method of ['all', 'any']) {
+          const reduced = own(mask[method](2))
+          const out = own(reduced.bitwiseAnd(otherMask))
+          assertClose(await out.toArray(), [1, 0, 1, 0], 0)
+        }
+      } finally { for (let i = owned.length - 1; i >= 0; i--) owned[i].dispose() }
+    }
+  })
+
   const pointwiseReferences = {
     log10: Math.log10, atanh: Math.atanh, asinh: Math.asinh, acosh: Math.acosh,
     asin: Math.asin, acos: Math.acos, atan: Math.atan,

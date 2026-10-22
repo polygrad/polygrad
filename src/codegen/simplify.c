@@ -648,7 +648,14 @@ static PolyUOp *reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings
       PolyUOp *count = unparented[i]->src[0];
       /* Pinned reduce_unparented multiplies by the original weak count.
        * Converting it through double loses integers above 2^53. */
-      ret = poly_uop_binop(ctx, comb, ret, count);
+      if (rop == POLY_OP_MUL && poly_dtype_eq(red->dtype, POLY_BOOL)) {
+        /* Boolean products are idempotent for nonempty ranges. Do not promote
+         * the result through POW(bool, weakint); keep the empty identity true. */
+        PolyUOp *empty = poly_uop_eq(ctx, count, poly_uop_const_like_int(ctx, count, 0));
+        ret = poly_uop_where(ctx, empty, poly_uop_const(ctx, poly_arg_bool(true), POLY_BOOL), ret);
+      } else {
+        ret = poly_uop_binop(ctx, comb, ret, count);
+      }
     }
   }
   /* MAX: drop unparented ranges with no multiplier */
