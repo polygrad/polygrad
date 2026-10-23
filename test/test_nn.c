@@ -2478,18 +2478,20 @@ TEST(nn, special_math_atan_accuracy_and_derivatives) {
   ASSERT_TRUE(signbit(eval_scalar_f64(poly_uop_atan, -0.0)));
   ASSERT_TRUE(!signbit(eval_scalar_f64(poly_uop_atan, 0.0)));
   ASSERT_TRUE(eval_derivative_f64(poly_uop_atan, -0.0, 1) == 1.0);
-  const double xs[]={-1e200,-100,-1,-.4142135623730951,-1e-12,0,1e-12,.4142135623730951,1,100,1e200};
-  for(size_t i=0;i<sizeof(xs)/sizeof(*xs);i++) {
-    double x=xs[i],actual=eval_scalar_f64(poly_uop_atan,x);
-    ASSERT_TRUE(isfinite(actual));ASSERT_TRUE(fabs(actual-atan(x))<=3e-16);
-    if(fabs(x)<101) {
-      double g=1/(1+x*x);
-      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan,x,1)-g)<1e-13);
-      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan,x,2)+2*x*g*g)<1e-12);
+  const double xs[] = {-1e200, -100, -1,   -.4142135623730951, -1e-12, 0, 1e-12, .4142135623730951,
+                       1,      100,  1e200};
+  for (size_t i = 0; i < sizeof(xs) / sizeof(*xs); i++) {
+    double x = xs[i], actual = eval_scalar_f64(poly_uop_atan, x);
+    ASSERT_TRUE(isfinite(actual));
+    ASSERT_TRUE(fabs(actual - atan(x)) <= 3e-16);
+    if (fabs(x) < 101) {
+      double g = 1 / (1 + x * x);
+      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan, x, 1) - g) < 1e-13);
+      ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_atan, x, 2) + 2 * x * g * g) < 1e-12);
     }
   }
-  ASSERT_TRUE(fabs(eval_scalar_f32(poly_uop_atan,1e20f)-(float)1.57079632679489661923)<2e-7);
-  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_atan,NAN)));
+  ASSERT_TRUE(fabs(eval_scalar_f32(poly_uop_atan, 1e20f) - (float)1.57079632679489661923) < 2e-7);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_atan, NAN)));
   PASS();
 }
 
@@ -2502,8 +2504,16 @@ TEST(nn, special_math_inverse_log_normal_cdf) {
   ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri_exp, 0.1)));
   ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_ndtri_exp, NAN)));
   /* At log(.5), q=0 and dq/dlogp = .5*sqrt(2*pi); d2q=dq. */
-  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 1) - 1.2533141373155003) < 3e-13);
-  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 2) - 1.2533141373155003) < 3e-13);
+  ASSERT_TRUE(
+      fabs(
+          eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 1) - 1.2533141373155003
+      ) < 3e-13
+  );
+  ASSERT_TRUE(
+      fabs(
+          eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 2) - 1.2533141373155003
+      ) < 3e-13
+  );
   PASS();
 }
 
@@ -2516,5 +2526,23 @@ TEST(nn, special_math_log_erfcx) {
   ASSERT_TRUE(eval_scalar_f64(poly_uop_log_erfcx, -INFINITY) == INFINITY);
   ASSERT_TRUE(eval_scalar_f64(poly_uop_log_erfcx, INFINITY) == -INFINITY);
   ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_log_erfcx, NAN)));
+  PASS();
+}
+
+TEST(nn, special_math_small_changes) {
+  double values[] = {-0.999, -0.5, -1e-4,        -0.0001953125, -1e-12, 0,
+                     1e-12,  1e-4, 0.0001953125, 0.5,           1};
+  for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+    double x = values[i];
+    ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_log1p, x) - log1p(x)) <= 3e-14 * fabs(log1p(x)));
+    ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_expm1, x) - expm1(x)) <= 3e-14 * fabs(expm1(x)));
+    float y = (float)x;
+    ASSERT_TRUE(fabs(eval_scalar_f32(poly_uop_log1p, y) - log1p(y)) <= 2e-6 * fabs(log1p(y)));
+    ASSERT_TRUE(fabs(eval_scalar_f32(poly_uop_expm1, y) - expm1(y)) <= 2e-6 * fabs(expm1(y)));
+  }
+  ASSERT_TRUE(signbit(eval_scalar_f64(poly_uop_log1p, -0.0)));
+  ASSERT_TRUE(signbit(eval_scalar_f64(poly_uop_expm1, -0.0)));
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_log1p, 0, 2) + 1) < 1e-14);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_expm1, 0, 2) - 1) < 1e-14);
   PASS();
 }

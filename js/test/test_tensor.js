@@ -7249,7 +7249,10 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await pg.function(a => a.add(1))(x).toArray(), [4])
   })
   await test('core probability special functions and higher derivatives', async () => {
+    const changes = [-.5, -0.0001953125, -0.0001, -1e-12, 0, 1e-12, .0001, .0001953125, .5, 1].map(Math.fround)
     const cases = {
+      log1p: [changes, changes.map(Math.log1p)],
+      expm1: [changes, changes.map(Math.expm1)],
       erf: [[0, 0.1, -1, 3], [0, 0.1124629160182849, -0.8427007929497149, 0.9999779095030014]],
       erfc: [[0, 3, 8], [1, 2.209049699858544e-5, 1.1224297172982928e-29]],
       erfinv: [[0, 1e-8, -0.5, 0.99], [0, 8.86226925452758e-9, -0.4769362762044699, 1.8213863677184495]],
@@ -7283,6 +7286,8 @@ async function runTensorTests(pg, createRuntime) {
       ['erfinv', 0, 0.8862269254527580, 0],
       ['ndtri', 0.5, 2.5066282746310005, 0],
       ['ndtri_exp', -Math.LN2, 1.2533141373155003, 1.2533141373155003],
+      ['log1p', 0, 1, -1],
+      ['expm1', 0, 1, 1],
       ['log_erfcx', 0, -1.1283791670955126, .7267604552648372],
       ['log_ndtr', 0, 0.7978845608028654, -0.6366197723675813]
     ]) {
@@ -7296,7 +7301,7 @@ async function runTensorTests(pg, createRuntime) {
     }
   })
   await test('core probability Model capture and roundtrip', async () => {
-    const names = ['erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma', 'log_ndtr', 'log_erfcx']
+    const names = ['erfc', 'erfinv', 'ndtri', 'digamma', 'lgamma', 'log_ndtr', 'log_erfcx', 'log1p', 'expm1']
     const data = new Float32Array([0.1, 0.5, 0.9]), x = new Tensor(data), expected = {}
     for (const name of names) {
       const y = x[name]()
