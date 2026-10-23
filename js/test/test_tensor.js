@@ -7249,7 +7249,7 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await pg.function(a => a.add(1))(x).toArray(), [4])
   })
   await test('core probability special functions and higher derivatives', async () => {
-    const changes = [-.5, -0.0001953125, -0.0001, -1e-12, 0, 1e-12, .0001, .0001953125, .5, 1].map(Math.fround)
+    const changes = [-.5, -0.0001953125, -0.0001, -1e-12, -0, 0, 1e-12, .0001, .0001953125, .5, 1].map(Math.fround)
     const cases = {
       log1p: [changes, changes.map(Math.log1p)],
       expm1: [changes, changes.map(Math.expm1)],
@@ -7277,6 +7277,7 @@ async function runTensorTests(pg, createRuntime) {
       for (let i = 0; i < expected.length; i++) {
         assert(Number.isFinite(got[i]) && Math.abs(got[i] - expected[i]) <= 5e-6 * Math.abs(expected[i]),
           `${name}[${i}]: ${got[i]} != ${expected[i]}`)
+        if(Object.is(expected[i],-0))assert(Object.is(got[i],-0),`${name}: lost negative zero`)
       }
       y.dispose(); x.dispose()
     }
