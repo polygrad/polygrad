@@ -56,21 +56,22 @@ static void lm_set(LocalMap *m, PolyUOp *key, int val) {
   }
 }
 
-static int lm_get(LocalMap *m, PolyUOp *key) {
+/* Membership probes and caches expect misses. Keep them silent: querying
+ * DEBUG itself crosses into JavaScript in the browser. Required operands use
+ * lm_get so missing definitions still produce diagnostics. */
+static int lm_find(LocalMap *m, PolyUOp *key) {
   uint32_t idx = lm_hash(key) % (uint32_t)m->cap;
   for (int i = 0; i < m->cap; i++) {
     uint32_t slot = (idx + i) % (uint32_t)m->cap;
     if (m->keys[slot] == key) return m->vals[slot];
-    if (m->keys[slot] == NULL) {
-      if (poly_debug_at_least(4) && key) {
-        fprintf(
-            stderr, "[polygrad:wasm] missing local for %s(%p) dt=%s n_src=%d\n",
-            poly_op_name(key->op), (void *)key, key->dtype.name ? key->dtype.name : "?", key->n_src
-        );
-      }
-      return -1;
-    }
+    if (m->keys[slot] == NULL) return -1;
   }
+  return -1;
+}
+
+static int lm_get(LocalMap *m, PolyUOp *key) {
+  int local = lm_find(m, key);
+  if (local >= 0) return local;
   if (poly_debug_at_least(4) && key) {
     fprintf(
         stderr, "[polygrad:wasm] missing local for %s(%p) dt=%s n_src=%d\n", poly_op_name(key->op),
@@ -1892,7 +1893,7 @@ static PolyUOp **wasm_pack_reg_stores(PolyCtx *ctx, PolyUOp **uops, int *count, 
     PolyUOp *u = uops[i], *base = NULL;
     int lane = -1;
     if (u->op == POLY_OP_STORE && wasm_reg_addr_index(u->src[0], &base, &lane) &&
-        lm_get(&v->buffers, base) > 0) {
+        lm_find(&v->buffers, base) > 0) {
       int width = lm_get(&v->buffers, base);
       int stores = width > 1 ? width : 4;
       for (int bank = 0; bank < stores / 4; bank++) {
@@ -1917,7 +1918,7 @@ static PolyUOp **wasm_pack_reg_stores(PolyCtx *ctx, PolyUOp **uops, int *count, 
   rlm_init(&latest, len);
   for (int i = 0; i < n; i++) {
     PolyUOp *r = uops[i];
-    if (r->op != POLY_OP_BUFFER || lm_get(&v->buffers, r) < 1) continue;
+    if (r->op != POLY_OP_BUFFER || lm_find(&v->buffers, r) < 1) continue;
     int banks = wasm_reg_storage_size(uops, n, r) / 4;
     int *owners = malloc((size_t)banks * sizeof(*owners));
     if (!owners) continue;
@@ -1933,7 +1934,7 @@ static PolyUOp **wasm_pack_reg_stores(PolyCtx *ctx, PolyUOp **uops, int *count, 
       boundary = i;
     int lane = -1;
     if (u->op != POLY_OP_LOAD || !wasm_reg_addr_index(u->src[0], &base, &lane) ||
-        lm_get(&v->buffers, base) < 1)
+        lm_find(&v->buffers, base) < 1)
       continue;
     lane = wasm_reg_packed_lane(v, base, lane);
     int owner = rlm_get(&latest, base, lane / 4);
@@ -1950,12 +1951,12 @@ static PolyUOp **wasm_pack_reg_stores(PolyCtx *ctx, PolyUOp **uops, int *count, 
 
 static bool wasm_reg_vector_lanes(WasmRegVectors *v, PolyUOp **lanes, int n) {
   if (!v || n != 4 || lanes[0]->op != POLY_OP_LOAD) return false;
-  int owner = lm_get(&v->snapshots, lanes[0]);
+  int owner = lm_find(&v->snapshots, lanes[0]);
   if (owner < 0) return false;
   for (int l = 0; l < 4; l++) {
     int index;
     PolyUOp *base = NULL;
-    if (lanes[l]->op != POLY_OP_LOAD || lm_get(&v->snapshots, lanes[l]) != owner ||
+    if (lanes[l]->op != POLY_OP_LOAD || lm_find(&v->snapshots, lanes[l]) != owner ||
         !wasm_reg_addr_index(lanes[l]->src[0], &base, &index) ||
         wasm_reg_packed_lane(v, base, index) % 4 != l)
       return false;
@@ -2356,7 +2357,7 @@ static WasmScalarPack *wasm_plan_scalar_packs(
       if (value->op == POLY_OP_INDEX && value->n_src >= 2 &&
           wasm_uop_value_is_v128(ctx, value->src[0]))
         value = value->src[0];
-      int pos = lm_get(&positions, value);
+      int pos = lm_find(&positions, value);
       if (pos < 0 || pos >= i || (skip && skip[pos])) ready = false;
     }
     if (!ready) continue;
@@ -2426,7 +2427,7 @@ static bool wasm_emit_structural_vec_expr_uncached(
         poly_dtype_eq(first->src[0]->dtype, POLY_FLOAT32) &&
         poly_uop_max_numel(ctx, first->src[0]) == 4 && wasm_uop_value_is_v128(ctx, first->src[0]) &&
         wasm_const_index_checked(first->src[1], &lane) && lane >= 0 && lane < 4 &&
-        (source = lm_get(locals, first->src[0])) >= 0) {
+        (source = lm_find(locals, first->src[0])) >= 0) {
       /* Broadcast the existing SSA vector lane, without a scalar round trip
        * or a memory reload that could cross an intervening mutation. */
       for (int i = 0; i < 2; i++) {
@@ -2946,7 +2947,7 @@ static WasmLoadAddress wasm_plan_load_address(PolyCtx *ctx, PolyUOp *load) {
 }
 
 static void wasm_emit_address_index(WasmBuf *body, LocalMap *locals, PolyUOp *index) {
-  int local = lm_get(locals, index);
+  int local = lm_find(locals, index);
   if (local >= 0) {
     emit_local_get_as_i32(body, local, index->dtype);
     return;
@@ -2983,7 +2984,7 @@ static uint32_t wasm_emit_load_address(
     wb_uleb128(body, lm_get(locals, original));
     return 0;
   }
-  int local = lm_get(addresses, plan.address);
+  int local = lm_find(addresses, plan.address);
   if (local < 0 || lm_get(blocks, plan.address) != block) {
     local = (*next_i32)++;
     wb_byte(body, WASM_OP_LOCAL_GET);
@@ -3047,7 +3048,7 @@ static void build_code_scalar(
 
   /* First pass: count locals */
   for (int i = 0; i < n; i++) {
-    if (uops[i]->op == POLY_OP_LOAD && lm_get(&reg_vectors.snapshots, uops[i]) == i)
+    if (uops[i]->op == POLY_OP_LOAD && lm_find(&reg_vectors.snapshots, uops[i]) == i)
       n_locals_v128++;
     if (skip && skip[i]) continue;
     if (load_addresses && load_addresses[i].address) n_locals_i32++;
@@ -3066,7 +3067,7 @@ static void build_code_scalar(
             shrink_dtype, true, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
             &n_locals_v128
         );
-      } else if (lm_get(&reg_vectors.snapshots, u) >= 0 || !wasm_load_aliases_reg(u, &child_count)) {
+      } else if (lm_find(&reg_vectors.snapshots, u) >= 0 || !wasm_load_aliases_reg(u, &child_count)) {
         count_local(
             u->dtype, wasm_uop_value_is_v128(ctx, u), &n_locals_i32, &n_locals_i64, &n_locals_f32,
             &n_locals_f64, &n_locals_v128
@@ -3088,7 +3089,7 @@ static void build_code_scalar(
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
-      bool vector = lm_get(&reg_vectors.buffers, u) > 0;
+      bool vector = lm_find(&reg_vectors.buffers, u) > 0;
       if (vector) reg_size /= 4;
       for (int r = 0; r < reg_size; r++)
         count_local(
@@ -3181,7 +3182,7 @@ static void build_code_scalar(
       reg_vectors.block++;
     /* Snapshot at the original LOAD, never at its later vector consumer.
      * Otherwise an intervening register STORE would change SSA semantics. */
-    if (uops[i]->op == POLY_OP_LOAD && lm_get(&reg_vectors.snapshots, uops[i]) == i) {
+    if (uops[i]->op == POLY_OP_LOAD && lm_find(&reg_vectors.snapshots, uops[i]) == i) {
       PolyUOp *base = NULL;
       int lane = 0;
       wasm_reg_addr_index(uops[i]->src[0], &base, &lane);
@@ -3238,7 +3239,7 @@ static void build_code_scalar(
     if (u->op == POLY_OP_BUFFER && poly_program_memory_is(u, POLY_ADDR_REG)) {
       PolyDType base = poly_program_buffer_dtype(u);
       int reg_size = wasm_reg_storage_size(uops, n, u);
-      bool vector = lm_get(&reg_vectors.buffers, u) > 0;
+      bool vector = lm_find(&reg_vectors.buffers, u) > 0;
       int *reg_slots = malloc((size_t)reg_size * sizeof(int));
       if (!reg_slots) reg_size = 0;
       for (int r = 0; r < reg_size; r++) {
@@ -3478,7 +3479,7 @@ static void build_code_scalar(
       int lanes = 1;
       bool shrink_vec = wasm_load_shrink_native_vec(u, &load_dtype, &lanes);
       bool v128 = shrink_vec || wasm_uop_value_is_v128(ctx, u);
-      int snapshot = lm_get(&reg_vectors.snapshots, u);
+      int snapshot = lm_find(&reg_vectors.snapshots, u);
       if (snapshot < 0 && wasm_load_aliases_reg(u, &child_count)) {
         lm_set(&locals, u, rlm_get(&reg_locals, reg_base, reg_lane));
         continue;

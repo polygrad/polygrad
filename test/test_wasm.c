@@ -15,6 +15,9 @@
 #include "../src/tensor.h"
 #include "../src/uop/spec.h"
 #include "../src/wasm_builder.h"
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 static int wasm_run_c_i32(
     PolyCtx *ctx,
@@ -1140,6 +1143,86 @@ TEST(wasm, render_vecadd) {
   poly_ctx_destroy(k.ctx);
   PASS();
 }
+
+#ifndef _WIN32
+/* Capture only rendering: a cache miss is normal, a missing required operand
+ * is not. Exercise DEBUG changes in one process without caching its value. */
+static uint8_t *wasm_render_diagnostics(
+    PolyCtx *ctx,
+    PolyUOp **linear,
+    int n,
+    bool simd,
+    int *size,
+    int *missing
+) {
+  *missing = -1;
+  FILE *capture = tmpfile();
+  if (!capture) return NULL;
+  fflush(stderr);
+  int saved = dup(STDERR_FILENO);
+  if (saved < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) {
+    if (saved >= 0) close(saved);
+    fclose(capture);
+    return NULL;
+  }
+  uint8_t *bytes = poly_render_wasm(ctx, linear, n, size, simd);
+  fflush(stderr);
+  dup2(saved, STDERR_FILENO);
+  close(saved);
+  rewind(capture);
+  *missing = 0;
+  char line[512];
+  while (fgets(line, sizeof(line), capture))
+    if (strstr(line, "[polygrad:wasm] missing local")) (*missing)++;
+  fclose(capture);
+  return bytes;
+}
+
+TEST(wasm, optional_lookups_do_not_report_missing_operands) {
+  char *old_debug = getenv("POLY_DEBUG") ? strdup(getenv("POLY_DEBUG")) : NULL;
+  bool correct = true;
+  for (int vector = 0; vector <= 1; vector++) {
+    WasmVecKernel k =
+        vector ? wasm_make_direct_vec_binop(POLY_OP_ADD) : wasm_make_vec_binop(POLY_OP_ADD, 17);
+    int n = 0;
+    PolyUOp **linear = vector ? poly_uop_toposort_alloc(k.ctx, k.sink, &n)
+                              : poly_linearize_wasm(k.ctx, k.sink, &n);
+    uint8_t *reference = NULL;
+    int reference_size = 0;
+    for (int pass = 0; pass < 3; pass++) {
+      setenv("POLY_DEBUG", pass == 1 ? "0" : "4", 1);
+      int size = 0, missing = -1;
+      uint8_t *bytes = wasm_render_diagnostics(k.ctx, linear, n, true, &size, &missing);
+      correct &= bytes && missing == 0;
+      if (pass == 0) {
+        reference = bytes;
+        reference_size = size;
+      } else {
+        correct &= bytes && reference && size == reference_size &&
+                   memcmp(bytes, reference, (size_t)size) == 0;
+        free(bytes);
+      }
+      /* Deliberately omit the operand's definition from this invalid LINEAR.
+       * Required lookups must still diagnose it when DEBUG is enabled. */
+      PolyUOp *value = poly_uop_const(k.ctx, poly_arg_float(1.0), POLY_FLOAT32);
+      PolyUOp *neg = poly_uop1(k.ctx, POLY_OP_NEG, POLY_FLOAT32, value, poly_arg_none());
+      bytes = wasm_render_diagnostics(k.ctx, &neg, 1, false, &size, &missing);
+      correct &= pass == 1 ? missing == 0 : missing > 0;
+      free(bytes);
+    }
+    free(reference);
+    free(linear);
+    poly_ctx_destroy(k.ctx);
+  }
+  if (old_debug)
+    setenv("POLY_DEBUG", old_debug, 1);
+  else
+    unsetenv("POLY_DEBUG");
+  free(old_debug);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+#endif
 
 TEST(wasm, narrow_integer_casts_execute) {
   /* PythonProgram CAST truncates to dtype width, and CStyle emits a typed
