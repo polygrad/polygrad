@@ -577,6 +577,8 @@
   "poly_tensor_erf": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},
   "poly_extension_abi_version": {"extension":{"cleanup":false,"failure":-1,"ownership":"value"},"frontend":"status"},
   "poly_extension_supports_abi": {"extension":{"cleanup":false,"failure":0,"ownership":"value"},"frontend":"status"},
+  "poly_tensor_log_erfcx": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},
+  "poly_uop_log_erfcx": {"frontend":"direct"},
   "poly_tensor_log_ndtr": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},
   "poly_uop_log_ndtr": {"frontend":"direct"},
   "poly_tensor_erfc": {"extension":{"cleanup":false,"failure":0,"ownership":"owned"},"frontend":"direct"},

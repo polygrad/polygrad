@@ -226,6 +226,8 @@ def bind(lib):
     lib.poly_tensor_log10.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_log1p.restype = ctypes.c_void_p
     lib.poly_tensor_log1p.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_tensor_log_erfcx.restype = ctypes.c_void_p
+    lib.poly_tensor_log_erfcx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_log_ndtr.restype = ctypes.c_void_p
     lib.poly_tensor_log_ndtr.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_tensor_log_softmax.restype = ctypes.c_void_p
@@ -592,6 +594,8 @@ def bind(lib):
     lib.poly_uop_log10.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_log1p.restype = ctypes.c_void_p
     lib.poly_uop_log1p.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.poly_uop_log_erfcx.restype = ctypes.c_void_p
+    lib.poly_uop_log_erfcx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_log_ndtr.restype = ctypes.c_void_p
     lib.poly_uop_log_ndtr.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.poly_uop_log_softmax.restype = ctypes.c_void_p

@@ -75,6 +75,9 @@ PolyUOp *poly_uop_erf(PolyCtx *ctx, PolyUOp *x);
 
 PolyUOp *poly_uop_erfc(PolyCtx *ctx, PolyUOp *x);
 
+/* log(exp(x*x)*erfc(x)), evaluated without forming the exponential. */
+PolyUOp *poly_uop_log_erfcx(PolyCtx *ctx, PolyUOp *x);
+
 /* Log standard Normal CDF; log survival at x is log_ndtr(-x). */
 PolyUOp *poly_uop_log_ndtr(PolyCtx *ctx, PolyUOp *x);
 

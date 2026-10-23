@@ -8171,6 +8171,15 @@ PolyTensor *poly_tensor_ndtri_exp(PolyCtx *ctx, PolyTensor *x) {
   return tensor_composite_result(ctx, logical, physical, inputs, 1);
 }
 
+PolyTensor *poly_tensor_log_erfcx(PolyCtx *ctx, PolyTensor *x) {
+  PolyTensor *inputs[] = {x};
+  int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);
+  if (build_logical < 0) return NULL;
+  PolyUOp *physical = poly_uop_log_erfcx(ctx, x->uop_physical);
+  PolyUOp *logical = build_logical ? poly_uop_log_erfcx(ctx, x->uop_logical) : NULL;
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
 PolyTensor *poly_tensor_log_ndtr(PolyCtx *ctx, PolyTensor *x) {
   PolyTensor *inputs[] = {x};
   int build_logical = poly_tensor_result_builds_logical(ctx, inputs, 1);

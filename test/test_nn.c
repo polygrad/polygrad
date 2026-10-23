@@ -2506,3 +2506,15 @@ TEST(nn, special_math_inverse_log_normal_cdf) {
   ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_ndtri_exp, -0.69314718055994530942, 2) - 1.2533141373155003) < 3e-13);
   PASS();
 }
+
+TEST(nn, special_math_log_erfcx) {
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_log_erfcx, 100) + 5.177585122664333) < 3e-14);
+  ASSERT_TRUE(fabs(eval_scalar_f64(poly_uop_log_erfcx, -100) - 10000.69314718056) < 2e-11);
+  ASSERT_TRUE(fabsf(eval_scalar_f32(poly_uop_log_erfcx, 1e20f) + 46.6240668f) < 1e-5f);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_log_erfcx, 0, 1) + 1.1283791670955126) < 3e-13);
+  ASSERT_TRUE(fabs(eval_derivative_f64(poly_uop_log_erfcx, 0, 2) - .7267604552648372) < 3e-13);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_log_erfcx, -INFINITY) == INFINITY);
+  ASSERT_TRUE(eval_scalar_f64(poly_uop_log_erfcx, INFINITY) == -INFINITY);
+  ASSERT_TRUE(isnan(eval_scalar_f64(poly_uop_log_erfcx, NAN)));
+  PASS();
+}

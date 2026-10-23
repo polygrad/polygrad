@@ -736,6 +736,44 @@ PolyUOp *poly_uop_erfc(PolyCtx *ctx, PolyUOp *x) {
   );
 }
 
+PolyUOp *poly_uop_log_erfcx(PolyCtx *ctx, PolyUOp *x) {
+  PolyDType result;
+  x = special_float(ctx, x, &result);
+  if (!x) return NULL;
+  PolyDType dt = x->dtype;
+  PolyUOp *zero = cdt(ctx, dt, 0), *one = cdt(ctx, dt, 1);
+  PolyUOp *finite = poly_uop_isfinite(ctx, x);
+  PolyUOp *safe = poly_uop_where(ctx, finite, x, zero);
+  PolyUOp *a = poly_uop_abs(ctx, safe);
+  PolyUOp *small = poly_uop_alu2(ctx, POLY_OP_CMPLT, a, one);
+  PolyUOp *center_x = poly_uop_where(ctx, small, safe, zero);
+  PolyUOp *center = poly_uop_add(
+      ctx, poly_uop_mul(ctx, center_x, center_x),
+      poly_uop_log1p(ctx, poly_uop_elementwise_neg(ctx, erf_center(ctx, center_x)))
+  );
+  PolyUOp *tail_x = poly_uop_where(ctx, small, one, a);
+  PolyUOp *positive = erfc_tail_factor(ctx, tail_x, true);
+  PolyUOp *negative = poly_uop_alu2(ctx, POLY_OP_CMPLT, safe, zero);
+  /* Reflection keeps the exponentially growing term logarithmic. Mask the
+   * square for positive x; its inactive derivative must not overflow. */
+  PolyUOp *left_x = poly_uop_where(ctx, negative, safe, zero);
+  PolyUOp *correction = poly_uop_log1p(
+      ctx, poly_uop_mul(ctx, cdt(ctx, dt, -.5), erfc_tail(ctx, tail_x))
+  );
+  PolyUOp *left = poly_uop_add(
+      ctx, poly_uop_mul(ctx, left_x, left_x),
+      poly_uop_add(ctx, cdt(ctx, dt, 0.69314718055994530942), correction)
+  );
+  PolyUOp *tail = poly_uop_where(ctx, negative, left, positive);
+  PolyUOp *value = poly_uop_where(ctx, small, center, tail);
+  PolyUOp *isnan = poly_uop_alu2(ctx, POLY_OP_CMPNE, x, x);
+  PolyUOp *endpoint = poly_uop_where(
+      ctx, poly_uop_alu2(ctx, POLY_OP_CMPLT, x, zero), cdt(ctx, dt, INFINITY), cdt(ctx, dt, -INFINITY)
+  );
+  endpoint = poly_uop_where(ctx, isnan, x, endpoint);
+  return poly_uop_cast(ctx, poly_uop_where(ctx, finite, value, endpoint), result);
+}
+
 PolyUOp *poly_uop_log_ndtr(PolyCtx *ctx, PolyUOp *x) {
   PolyDType result;
   x = special_float(ctx, x, &result);

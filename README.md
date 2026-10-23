@@ -68,6 +68,9 @@ and `Tensor.ndtri_exp()` for its inverse. The inverse accepts log probabilities
 up to zero, preserving tails that would underflow if exponentiated first.
 JavaScript provides `logNdtr()` and `ndtriExp()` (with snake-case aliases); C
 provides `poly_tensor_log_ndtr` and `poly_tensor_ndtri_exp`.
+`Tensor.log_erfcx()` (`logErfcx()` in JavaScript, `poly_tensor_log_erfcx` in C)
+computes the log scaled complementary error function without forming its
+exponential factor. This supports stable differences between Normal tail logs.
 
 Polygrad follows tinygrad's graph-based execution model:
 

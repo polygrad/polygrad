@@ -2120,6 +2120,10 @@ class Tensor:
         core = _ffi._lib.poly_tensor_ndtri_exp(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)
 
+    def log_erfcx(self):
+        core = _ffi._lib.poly_tensor_log_erfcx(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape)
+
     def log_ndtr(self):
         core = _ffi._lib.poly_tensor_log_ndtr(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape)

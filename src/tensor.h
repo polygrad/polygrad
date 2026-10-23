@@ -276,6 +276,8 @@ PolyTensor *poly_tensor_ndtri(PolyCtx *ctx, PolyTensor *x);
 /* Inverse log Normal CDF. */
 PolyTensor *poly_tensor_ndtri_exp(PolyCtx *ctx, PolyTensor *x);
 
+/* Log scaled complementary error function. */
+PolyTensor *poly_tensor_log_erfcx(PolyCtx *ctx, PolyTensor *x);
 PolyTensor *poly_tensor_log_ndtr(PolyCtx *ctx, PolyTensor *x);
 
 PolyTensor *poly_tensor_digamma(PolyCtx *ctx, PolyTensor *x);

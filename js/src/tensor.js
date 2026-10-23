@@ -1967,6 +1967,13 @@ function createBoundTensorClass(runtime) {
 
     ndtri_exp() { return this.ndtriExp() }
 
+    logErfcx() {
+      const core = this._rt._core.ffi.poly_tensor_log_erfcx(this._ctx, this._tensor)
+      return this._makeResultFromCore(core)
+    }
+
+    log_erfcx() { return this.logErfcx() }
+
     logNdtr() {
       const core = this._rt._core.ffi.poly_tensor_log_ndtr(this._ctx, this._tensor)
       return this._makeResultFromCore(core)

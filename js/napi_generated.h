@@ -1990,6 +1990,18 @@ static napi_value napi_poly_tensor_log1p(napi_env env, napi_callback_info info) 
   PolyTensor *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_tensor_log1p(a0, a1));
 }
+static napi_value napi_poly_tensor_log_erfcx(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_tensor_log_erfcx: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyTensor *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_tensor_log_erfcx(a0, a1));
+}
 static napi_value napi_poly_tensor_log_ndtr(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -5077,6 +5089,18 @@ static napi_value napi_poly_uop_log1p(napi_env env, napi_callback_info info) {
   PolyCtx *a0 = get_external_nullable(env, argv[0]);
   PolyUOp *a1 = get_external_nullable(env, argv[1]);
   return make_external(env, poly_uop_log1p(a0, a1));
+}
+static napi_value napi_poly_uop_log_erfcx(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  if (argc != 2) {
+    napi_throw_type_error(env, NULL, "poly_uop_log_erfcx: wrong argument count");
+    return NULL;
+  }
+  PolyCtx *a0 = get_external_nullable(env, argv[0]);
+  PolyUOp *a1 = get_external_nullable(env, argv[1]);
+  return make_external(env, poly_uop_log_erfcx(a0, a1));
 }
 static napi_value napi_poly_uop_log_ndtr(napi_env env, napi_callback_info info) {
   napi_value argv[2];
