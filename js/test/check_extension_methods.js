@@ -6,6 +6,32 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
   const m = author.methods
   let x, y, model, restored, a, b
   try {
+    assert(m.example_dtype('int32')===pg._core.dtypeIds.int32,'imported dtype string')
+    assert(m.example_dtype('int64')===pg._core.dtypeIds.int64,'imported int64 string')
+    assert(m.example_dtype('')===-1&&m.example_dtype('invalid')===-1,'unknown dtype string')
+    assert(m.example_dtype_pointer(0)===-1,'nullable dtype string')
+    if(pg.core==='wasm') {
+      reject(()=>m.example_dtype_pointer(1),/invalid string argument/)
+      reject(()=>m.example_dtype_pointer(2),/unterminated string argument/)
+      assert(m.example_dtype('float32')===pg._core.dtypeIds.float32,'string failure recovery')
+      const M=pg._core.Module,original=M._poly_dtype_id_by_name
+      let failing
+      try {
+        M._poly_dtype_id_by_name=()=>{throw Error('dtype provider failure')}
+        failing=await pg.loadExtension(source)
+        reject(()=>failing.methods.example_dtype('int32'),/dtype provider failure/)
+      }finally{M._poly_dtype_id_by_name=original;if(failing)await failing.dispose()}
+      const malloc=M._malloc,free=M._free,owned=new Set()
+      try {
+        M._malloc=n=>{const p=malloc(n);if(p)owned.add(p);return p}
+        M._free=p=>{owned.delete(p);return free(p)}
+        assert(m.example_dtype('x'.repeat(20*1024*1024))===-1,'string after author heap growth')
+        assert(m.example_dtype('int32')===pg._core.dtypeIds.int32,'string after heap growth')
+        assert(owned.size===0,'temporary string copies released')
+        M._malloc=()=>0
+        reject(()=>m.example_dtype('int32'),/marshalling allocation failed/)
+      }finally{M._malloc=malloc;M._free=free}
+    }
     const shaped = pg.Tensor.empty([2, 3]), scalar = new pg.Tensor(1)
     assert(Number(m.example_static_dim(shaped, 0)) === 2, 'static first extent')
     assert(Number(m.example_static_dim(shaped, 1)) === 3, 'static second extent')
@@ -111,7 +137,7 @@ module.exports = async function checkExtensionMethods(pg, source, create) {
         if (rt._core) { rt._disposePromise=null; await rt.dispose() }
       }
     }
-    return {methods:11, ownership:true, metadata:true}
+    return {methods:13, ownership:true, metadata:true}
   } finally {
     await author.dispose(); await second.dispose()
     if(restored)await restored.dispose();if(model)await model.dispose()

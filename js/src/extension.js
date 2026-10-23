@@ -65,6 +65,21 @@ async function loadExtension(rt,source) {
         if(error&&!d.cleanup)return failure
         const allocations=[]
         try {
+          // Borrowed C strings cross separate author/core heaps. Copy bytes
+          // through the terminator; never pass an author address to the core.
+          for(const i of d.strings||[]) {
+            const ptr=args[i]>>>0
+            if(!ptr)continue
+            const heap=new Uint8Array(instance.exports.memory.buffer)
+            if(ptr>=heap.length)throw Error(`invalid string argument: ${name}`)
+            const end=heap.indexOf(0,ptr)
+            if(end<0)throw Error(`unterminated string argument: ${name}`)
+            const len=end-ptr+1,target=M._malloc(len)>>>0
+            if(!target)throw Error('extension marshalling allocation failed')
+            allocations.push({target,direction:'string'})
+            M.HEAPU8.set(heap.subarray(ptr,end+1),target)
+            args[i]=target
+          }
           for(const [i,ci,width,direction] of d.arrays) {
             const count=ci<0?-ci:args[ci],ptr=args[i]>>>0,len=count*width,heap=instance.exports.memory.buffer
             if(!Number.isSafeInteger(count)||count<0||!Number.isSafeInteger(len)||ptr+len>heap.byteLength||(!ptr&&len))

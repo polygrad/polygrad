@@ -92,3 +92,14 @@ int example_model_buffers(PolyCtx *ctx, PolyModel *model) {
 double example_static_dim(PolyCtx *ctx, PolyTensor *value, int axis) {
   return (double)poly_tensor_static_dim(ctx, value, axis);
 }
+int example_dtype(const char *name) { return poly_dtype_id_by_name(name); }
+int example_dtype_pointer(int mode) {
+#ifdef __EMSCRIPTEN__
+  if(mode==1)return poly_dtype_id_by_name((const char *)(uintptr_t)UINT32_MAX);
+  if(mode==2) {
+    char *end=(char *)(__builtin_wasm_memory_size(0)*65536-2);
+    end[0]='x';end[1]='x';return poly_dtype_id_by_name(end);
+  }
+#endif
+  return poly_dtype_id_by_name(NULL);
+}

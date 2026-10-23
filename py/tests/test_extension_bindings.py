@@ -80,6 +80,19 @@ def test_binding_rules_require_explicit_exposure(generator):
         generator.validate_rules(decls, {})
 
 
+def test_extension_borrowed_string_contract(generator):
+    decls = generator.declarations('int poly_probe(const char *name);')
+    extension = {'failure': -1, 'ownership': 'value', 'cleanup': False, 'strings': ['name']}
+    generator.validate_rules(decls, {'poly_probe': {'extension': extension}})
+    for strings in (['absent'], ['name', 'name'], 'name', [0]):
+        with pytest.raises(ValueError, match='string contract'):
+            generator.validate_rules(decls, {'poly_probe': {'extension': {**extension, 'strings': strings}}})
+    with pytest.raises(ValueError, match='string contract'):
+        generator.validate_rules(decls, {'poly_probe': {'extension': {**extension, 'native': True}}})
+    with pytest.raises(ValueError, match='unsupported extension argument'):
+        generator.validate_rules(decls, {'poly_probe': {'extension': {k:v for k,v in extension.items() if k!='strings'}}})
+
+
 def test_binding_rules_reject_stale_declarations(generator):
     with pytest.raises(ValueError, match='poly_removed.*declaration'):
         generator.validate_rules({}, {'poly_removed': {'exclude': 'C-only'}})

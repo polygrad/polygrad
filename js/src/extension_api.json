@@ -19,7 +19,9 @@
     "failure": -1,
     "ownership": "value",
     "cleanup": false,
-    "native": true
+    "strings": [
+      0
+    ]
   },
   "poly_extension_abi_version": {
     "return": "int",

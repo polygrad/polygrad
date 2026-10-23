@@ -9,5 +9,7 @@
   "example_order": {"return": "value"},
   "example_reset": {"return": "status"},
   "example_model_buffers": {"args": {"model": {"model": "borrowed"}}, "return": "value"},
-  "example_static_dim": {"args": {"value": {"tensor": "borrowed"}}, "return": "value"}
+  "example_static_dim": {"args": {"value": {"tensor": "borrowed"}}, "return": "value"},
+  "example_dtype": {"args": {"name": {"string": "borrowed"}}, "return": "value"},
+  "example_dtype_pointer": {"return": "value"}
 }

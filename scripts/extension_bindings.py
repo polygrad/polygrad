@@ -503,13 +503,19 @@ def validate_rules(decls, rules):
                 raise ValueError(f'{name}: unsupported frontend argument {n}: {t}')
         if 'extension' in rule:
             ext = rule['extension']
-            if (not isinstance(ext, dict) or set(ext) - {'failure', 'ownership', 'cleanup', 'native'}
+            if (not isinstance(ext, dict) or set(ext) - {'failure', 'ownership', 'cleanup', 'native', 'strings'}
                     or not {'failure', 'ownership', 'cleanup'} <= set(ext)
                     or ('native' in ext and ext['native'] is not True)
                     or type(ext['failure']) is not int
                     or ext['ownership'] not in {'owned', 'borrowed', 'value'}
                     or type(ext['cleanup']) is not bool):
                 raise ValueError(f'{name}: invalid extension contract')
+            strings = ext.get('strings', [])
+            if (not isinstance(strings, list) or any(not isinstance(s, str) for s in strings)
+                    or len(set(strings)) != len(strings)
+                    or any(params.get(s) != 'const char *' or s in arrays for s in strings)
+                    or (strings and ext.get('native'))):
+                raise ValueError(f'{name}: invalid extension string contract')
             if ext.get('native'):
                 # Same-address-space calls use C records directly. Never marshal
                 # these pointers across the separate author/core Wasm heaps.
@@ -517,7 +523,7 @@ def validate_rules(decls, rules):
             if ret not in OPAQUE | SCALARS | {'void'}:
                 raise ValueError(f'{name}: unsupported extension return {ret}')
             for arg in args:
-                if arg['type']['qualType'].removeprefix('const ') not in OPAQUE | SCALARS and arg['name'] not in arrays:
+                if arg['type']['qualType'].removeprefix('const ') not in OPAQUE | SCALARS and arg['name'] not in arrays and arg['name'] not in strings:
                     raise ValueError(f'{name}: unsupported extension argument {arg["name"]}')
 
 
@@ -557,7 +563,7 @@ def core(check=False, output=None):
         names = [v["name"] for v in args]
         for i, v in enumerate(args if not rule['extension'].get('native') else []):
             t = v["type"]["qualType"]
-            if t.removeprefix("const ") in OPAQUE or t in SCALARS:
+            if t.removeprefix("const ") in OPAQUE or t in SCALARS or v['name'] in rule['extension'].get('strings', []):
                 continue
             annotation = rule['arrays'][v['name']]
             count, width, direction = (annotation[k] for k in ('length', 'width', 'direction'))
@@ -568,6 +574,8 @@ def core(check=False, output=None):
             "arrays": arrays,
             **{key: rule['extension'][key] for key in ('failure', 'ownership', 'cleanup')},
             **({'native': True} if rule['extension'].get('native') else {}),
+            **({'strings': [names.index(s) for s in rule['extension']['strings']]}
+               if rule['extension'].get('strings') else {}),
         }
     text = json.dumps(result, indent=2) + "\n"
     files = {

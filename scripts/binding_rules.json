@@ -143,7 +143,7 @@
   "poly_dtype_eq": {"exclude":"C-only"},
   "poly_dtype_float_max": {"exclude":"C-only"},
   "poly_dtype_from_uop": {"exclude":"C-only"},
-  "poly_dtype_id_by_name": {"manual":["python","native"],"extension":{"failure":-1,"ownership":"value","cleanup":false,"native":true}},
+  "poly_dtype_id_by_name": {"manual":["python","native"],"extension":{"failure":-1,"ownership":"value","cleanup":false,"strings":["name"]}},
   "poly_dtype_is_bool": {"exclude":"C-only"},
   "poly_dtype_is_float": {"exclude":"C-only"},
   "poly_dtype_is_fp8": {"exclude":"C-only"},
