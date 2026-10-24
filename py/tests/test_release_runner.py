@@ -292,8 +292,15 @@ def test_release_missing_executable_is_a_failure(runner, tmp_path):
     assert row['exit_code'] == 127
 
 
-def test_release_rejects_source_changes_during_execution(runner, tmp_path):
-    (tmp_path / 'Makefile').write_text('first:\n\t@mkdir -p src\n\t@echo changed > src/new.c\n')
+@pytest.mark.parametrize('path', [
+    'src/new.c', 'vendor/cjson/cJSON.c', 'vendor/cjson/cJSON.h',
+    'scripts/binding_rules.json', 'js/src/extension_api.json',
+    'py/polygrad/extension_api.json', 'test/extension_methods_fixture.json', 'js/package-lock.json',
+])
+def test_release_rejects_source_changes_during_execution(runner, tmp_path, path):
+    from pathlib import PurePosixPath
+    parent = PurePosixPath(path).parent
+    (tmp_path / 'Makefile').write_text(f'first:\n\t@mkdir -p {parent}\n\t@echo changed > {path}\n')
     output = tmp_path / 'results'
     assert runner['run_release'](tmp_path, output, ['make'],
                                  [dict(target='first', variables={})], {}) == 1

@@ -377,18 +377,21 @@ def source_inventory(old_root: Path, new_root: Path, paths: list[str]) -> list[d
 
 
 def source_manifest(root: Path) -> dict[str, str]:
-    """Conservative execution-input boundary; excludes generated mirrors/artifacts.
+    """Execution inputs, including vendored code and packaged ABI manifests.
 
     Each run records its built artifacts separately. Capture this manifest before
     execution and verify it again afterwards, never backfill it onto an old log.
     """
     paths = set()
-    for directory in ("src", "bench", "py/polygrad", "js/src", "test", "py/tests", "js/test",
+    # JSON here includes binding rules and runtime/fixture manifests. These are
+    # inputs even when a generator produces them; built bundles are excluded.
+    for directory in ("src", "vendor", "bench", "py/polygrad", "js/src", "test", "py/tests", "js/test",
                       "scripts", "js/scripts", "references/tinygrad_latest/tinygrad"):
         paths.update(p for p in (root / directory).rglob("*")
-                     if p.suffix in {".c", ".h", ".py", ".js", ".mjs", ".ts", ".sh"} and p.is_file())
+                     if p.suffix in {".c", ".h", ".py", ".js", ".mjs", ".ts", ".sh", ".json"} and p.is_file())
     paths.update(root / p for p in (
-        "Makefile", "CMakeLists.txt", "py/setup.py", "py/pyproject.toml", "js/package.json", "js/binding.gyp",
+        "Makefile", "CMakeLists.txt", "py/setup.py", "py/pyproject.toml", "js/package.json",
+        "js/package-lock.json", "js/binding.gyp",
         "scripts/reference_migration_waves.json", "test/fixtures/parity_divergences.json",
     ) if (root / p).is_file())
     paths.update(p for p in (root / "js").glob("*") if p.suffix in {".c", ".h"} and p.is_file())
