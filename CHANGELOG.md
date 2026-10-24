@@ -2,6 +2,13 @@
 
 ## 0.7.2 (Unreleased)
 
+- Fix large-input `atan`, near-zero `log1p`/`expm1`, and broadcast Boolean
+  reductions. Add `log_erfcx` and `ndtri_exp` with gradients for tail computations.
+- Marshal borrowed C strings between Wasm extension and core heaps.
+- Keep JavaScript runtimes alive until asynchronous import cleanup completes,
+  including CPU checkpoint reads. Reject malformed or lossy metadata consistently
+  when setting values and restoring bundles.
+
 - Enable custom UOp FP32 matmul kernels by default on Wasm only. Use
   `kernels: false` or `POLY_KERNELS=0` for generic lowering. Matmul kernels with
   contiguous K rows use four partial sums with strict multiply/add; rounding may differ from

@@ -2,6 +2,11 @@
 
 ## 0.7.2 (Unreleased)
 
+- Fix large-input `atan`, near-zero `log1p`/`expm1`, and broadcast Boolean
+  reductions. Add Tensor `log_erfcx` and `ndtri_exp` and their gradients.
+- Apply the same metadata validation to C setters and bundle restoration,
+  rejecting duplicate keys, embedded NUL, nonfinite numbers and trailing text.
+
 - Add managed C extension methods with strings, owned objects and ordered
   cleanup. The installed SDK supports borrowed Model arguments and optional
   native Model execution imports without frontend evaluator callbacks.

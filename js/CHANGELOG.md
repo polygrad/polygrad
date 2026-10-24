@@ -2,6 +2,14 @@
 
 ## 0.7.2 (Unreleased)
 
+- Fix large-input `atan`, near-zero `log1p`/`expm1`, and broadcast Boolean
+  reductions. Add Tensor `log_erfcx` and `ndtri_exp` and their gradients.
+- Marshal borrowed C strings between Wasm extension and core heaps.
+- Make runtime disposal wait for pending checkpoint reads on CPU as well as
+  WebGPU; imports reject if the runtime closes before completion.
+- Apply the same metadata validation to C setters and bundle restoration,
+  rejecting duplicate keys, embedded NUL, nonfinite numbers and trailing text.
+
 - Enable custom UOp FP32 matmul kernels by default on Wasm only; opt out with
   `create({kernels: false})` or `POLY_KERNELS=0`. Matmul kernels with contiguous
   K rows use four partial sums with strict multiply/add and may round differently;
