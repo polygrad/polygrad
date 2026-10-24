@@ -2,6 +2,9 @@
  * test_uop.c — Tests for UOp creation, CSE, and toposort
  */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L /* fileno/dup2 in the diagnostic capture test. */
+#endif
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"

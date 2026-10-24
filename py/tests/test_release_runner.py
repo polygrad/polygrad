@@ -164,6 +164,24 @@ def test_release_preflight_decodes_diagnostics_under_ascii_locale(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize('missing', ['scipy', 'mpmath'])
+def test_release_preflight_requires_python_numerical_references(runner, monkeypatch, missing):
+    monkeypatch.setitem(runner['preflight'].__globals__, 'fixture_errors', lambda _: [])
+    review = json.loads((ROOT / 'test/fixtures/analyzer_reviews.json').read_text())
+
+    def run(command, **kwargs):
+        output = 'clang-format version 14.0.6\n'
+        if command[0] == 'analyzer':
+            output = review['context']['clang']
+        failed = command[0] == 'test-python' and missing in command[-1]
+        return subprocess.CompletedProcess(command, int(failed), output,
+                                           f'No module named {missing}' if failed else '')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert runner['preflight'](dict(PYTHON='test-python', SPECIAL_PYTHON='special-python',
+                                    ANALYZER_CC='analyzer')) == 1
+
+
 @pytest.mark.parametrize('tool,version', [('CLANG_FORMAT', 'clang-format version 18.0.0'),
                                          ('ANALYZER_CC', 'unreviewed clang')])
 def test_release_preflight_rejects_unreviewed_tools(runner, tmp_path, tool, version):
@@ -293,7 +311,8 @@ def test_release_missing_executable_is_a_failure(runner, tmp_path):
 
 
 @pytest.mark.parametrize('path', [
-    'src/new.c', 'vendor/cjson/cJSON.c', 'vendor/cjson/cJSON.h',
+    'src/new.c', 'src/model_metadata.h', 'scripts/extension_bindings.py',
+    'vendor/cjson/cJSON.c', 'vendor/cjson/cJSON.h',
     'scripts/binding_rules.json', 'js/src/extension_api.json',
     'py/polygrad/extension_api.json', 'test/extension_methods_fixture.json', 'js/package-lock.json',
 ])
@@ -310,14 +329,19 @@ def test_release_rejects_source_changes_during_execution(runner, tmp_path, path)
     assert report['gates'][0]['log_sha256']
 
 
-def test_generated_browser_bundle_does_not_invalidate_source_evidence(runner, tmp_path):
-    (tmp_path / 'Makefile').write_text('first:\n\t@mkdir -p js/test/browser\n\t@echo generated > js/test/browser/tests.js\n')
+@pytest.mark.parametrize('path', [
+    'js/test/browser/tests.js', 'py/polygrad/_sdk/include/model_metadata.h',
+    'py/polygrad/_sdk/extension_bindings.py', 'py/polygrad/_sdk/extension_api.json',
+])
+def test_generated_outputs_do_not_invalidate_source_evidence(runner, tmp_path, path):
+    parent = Path(path).parent
+    (tmp_path / 'Makefile').write_text(f'first:\n\t@mkdir -p {parent}\n\t@echo generated > {path}\n')
     output = tmp_path / 'results'
     assert runner['run_release'](tmp_path, output, ['make'],
                                  [dict(target='first', variables={})], {}) == 0
     report = json.loads((output / 'summary.json').read_text())
     assert report['source_unchanged'] is True
-    assert 'js/test/browser/tests.js' not in report['source_inputs']
+    assert path not in report['source_inputs']
     assert 'Makefile' in report['source_inputs']
 
 

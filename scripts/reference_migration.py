@@ -399,6 +399,10 @@ def source_manifest(root: Path) -> dict[str, str]:
     # The maintained browser runner regenerates this bundle from handwritten
     # tests during acceptance; it is an output, not an authoring-source edit.
     paths.discard(root / 'js/test/browser/tests.js')
+    # setup.py regenerates this SDK from src/, vendor/, scripts/ and test/;
+    # fingerprint those owners, not the packaging copies created during a gate.
+    sdk = root / 'py/polygrad/_sdk'
+    paths = {p for p in paths if sdk not in p.parents}
     return {str(p.relative_to(root)): file_hash(p) for p in sorted(paths)}
 
 

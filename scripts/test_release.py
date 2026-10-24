@@ -126,6 +126,8 @@ def preflight(variables):
     # Fail before the matrix when isolated-package/proof tooling is missing.
     checks.append(('PYTHON build', shlex.split(variables.get('PYTHON', sys.executable)) +
                    ['-c', 'import build'], None))
+    checks.append(('PYTHON test references', shlex.split(variables.get('PYTHON', sys.executable)) +
+                   ['-c', 'import pytest, numpy, mpmath; from scipy.special import erfcx, ndtri_exp'], None))
     checks.append(('PARITY_PY z3', shlex.split(variables.get('PARITY_PY', sys.executable)) +
                    ['-c', 'import z3'], None))
     checks.append(('HF_PYTHON', shlex.split(variables.get('HF_PYTHON', sys.executable)) +

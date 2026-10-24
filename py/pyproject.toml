@@ -26,6 +26,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+[project.optional-dependencies]
+test = ["pytest", "scipy>=1.11", "mpmath"]
+
 [project.urls]
 Homepage = "https://polygrad.org"
 Documentation = "https://polygrad.org"
