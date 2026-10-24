@@ -2914,6 +2914,11 @@ static bool beam_cache_key(
   const char *envs[] = {"CC", "POLY_OPT", "POLY_CPU_ARCH"};
   for (size_t i = 0; i < sizeof(envs) / sizeof(envs[0]); i++)
     if (!beam_key_string(key, getenv(envs[i]))) goto failed;
+  /* Search timings depend on native compiler policy. Keep the default key
+   * unchanged and separate ordered-reduction winners from ordinary builds. */
+  if (opts.device == POLY_DEVICE_CPU && poly_getenv_flag("POLY_CPU_ORDERED_REDUCTIONS") &&
+      !beam_key_string(key, "ordered-reductions-v1"))
+    goto failed;
   /* Cache hits skip comparison. A winner measured against the old WebGPU
    * heuristic (or different explicit knobs) is not a comparison against this
    * policy. Leave pinned-search and other-backend cache identities unchanged. */

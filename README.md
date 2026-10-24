@@ -436,6 +436,17 @@ explicit BEAM search. The setting participates in program-cache keys and does
 not change already compiled JIT captures. It is shared by native contexts;
 each Wasm module has its own setting. Restore it after a scoped experiment.
 
+Native CPU execution can opt into LLVM's ordered reduction vectorization with
+`POLY_CPU_ORDERED_REDUCTIONS=1`. It requires Clang accepting
+`-mllvm -force-ordered-reductions`; unsupported compilers fail compilation.
+The default is off. This preserves each compiled reduction's addition order
+and does not enable fast-math. It can help `BEAM=2` find faster CPU schedules;
+measure both tuning cost and repeated execution on your models. BEAM can still
+select a different reduction schedule with different rounding. Set the option
+before compiling or tuning targets. Changing it does not rerun BEAM on an
+already scheduled graph. Runtime, binary and BEAM caches distinguish the option.
+It does not change the Wasm or WebGPU compiler.
+
 Python `Context(BEAM=2)` and JS `runtime.beam = 2` select kernel beam-search
 width through the same C policy. Zero disables search. Search compiles and
 times candidates on the selected backend; WebGPU timing requires the adapter's

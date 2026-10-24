@@ -2207,6 +2207,49 @@ TEST(schedule_runtime, replay_reads_compiler_policy_once_per_invocation) {
   PASS();
 }
 
+extern uint64_t poly_test_beam_cache_key(PolyCtx *, PolyUOp *, int, PolyDevice);
+
+TEST(schedule_runtime, cpu_ordered_reductions_separate_runtime_and_beam_caches) {
+  const char *value = getenv("POLY_CPU_ORDERED_REDUCTIONS");
+  char *saved = value ? strdup(value) : NULL;
+  setenv("POLY_CPU_ORDERED_REDUCTIONS", "0", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *out = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, poly_uop_add(ctx, a, a)));
+  ASSERT_INT_EQ(poly_uop_retain(ctx, sink), 0);
+  PolyUOp *linear = poly_compile_linear(ctx, poly_test_create_linear(ctx, sink), 0);
+  bool ok = linear && poly_uop_retain(ctx, linear) == 0;
+  uint64_t keys[3] = {0}, interp_keys[3] = {0};
+  for (int i = 0; ok && i < 3; i++) {
+    setenv("POLY_CPU_ORDERED_REDUCTIONS", i == 1 ? "1" : "0", 1);
+    keys[i] = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_CPU);
+    interp_keys[i] = poly_test_beam_cache_key(ctx, sink, 2, POLY_DEVICE_INTERP);
+    ok &= poly_ctx_collect(ctx) == 0;
+    float input[] = {i, 2, 3, 4}, got[4] = {0};
+    ok &= poly_buffer_write(ctx, a, input, sizeof(input)) == 0;
+    ok &= poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false) == 0;
+    ok &= poly_runtime_cache_len(ctx) == (i == 0 ? 1u : 2u);
+    ok &= poly_buffer_read(ctx, out, got, sizeof(got)) == 0;
+    for (int j = 0; j < 4; j++)
+      ok &= got[j] == 2 * input[j];
+  }
+  if (saved)
+    setenv("POLY_CPU_ORDERED_REDUCTIONS", saved, 1);
+  else
+    unsetenv("POLY_CPU_ORDERED_REDUCTIONS");
+  free(saved);
+  if (linear) poly_uop_release(ctx, linear);
+  poly_uop_release(ctx, sink);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(keys[0] && keys[1] && keys[0] != keys[1] && keys[0] == keys[2]);
+  ASSERT_TRUE(
+      interp_keys[0] && interp_keys[0] == interp_keys[1] && interp_keys[0] == interp_keys[2]
+  );
+  PASS();
+}
+
 TEST(schedule_runtime, noopt_separates_program_cache) {
   int old = poly_get_noopt();
   PolyCtx *ctx = poly_ctx_new();

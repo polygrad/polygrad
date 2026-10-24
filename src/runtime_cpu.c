@@ -10,6 +10,7 @@
  *   POLY_OPT=0      use -O0 (fast compile, ~5x faster than -O2)
  *   POLY_OPT=1      use -O1
  *   POLY_OPT=2      use -O2 (default, matches tinygrad)
+ *   POLY_CPU_ORDERED_REDUCTIONS=1 enable Clang in-order FP reduction vectorization
  *   POLY_CPU_ARCH=0 disable host CPU targeting
  *   POLY_CPU_ARCH=x compile with -march=x (default: native)
  */
@@ -231,6 +232,7 @@ static int compile_to_so_with_flag(
 ) {
   if (poly_compile_timed_out()) return -1;
   bool timed = poly_compile_deadline_ms > 0;
+  bool ordered = poly_getenv_flag("POLY_CPU_ORDERED_REDUCTIONS");
   FILE *f = fopen(c_path, "w");
   if (!f) {
     fprintf(stderr, "polygrad: cannot write %s\n", c_path);
@@ -261,6 +263,12 @@ static int compile_to_so_with_flag(
     args[n++] = "-shared";
     args[n++] = "-fPIC";
     args[n++] = "-fno-math-errno";
+    if (ordered) {
+      /* LLVM retains each reduction's addition order; do not enable fast-math
+       * or ordinary vectorization hints that permit reassociation. */
+      args[n++] = "-mllvm";
+      args[n++] = "-force-ordered-reductions";
+    }
     args[n++] = "-o";
     args[n++] = (char *)so_path;
     args[n++] = "-x";
@@ -270,7 +278,7 @@ static int compile_to_so_with_flag(
     args[n] = NULL;
     execvp(cc, args);
     /* clang not found — try gcc as fallback */
-    if (!getenv("CC")) {
+    if (!getenv("CC") && !ordered) {
       n = 0;
       args[n++] = "gcc";
       args[n++] = (char *)opt_flag();
@@ -313,6 +321,11 @@ static int compile_to_so_with_flag(
   }
   int ret = !failed && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   remove(c_path);
+  if (ret != 0 && ordered)
+    fprintf(
+        stderr, "polygrad: POLY_CPU_ORDERED_REDUCTIONS requires a compiler accepting "
+                "-mllvm -force-ordered-reductions; compilation failed\n"
+    );
   return ret;
 }
 
@@ -346,6 +359,14 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
     const char *cc_env = getenv("CC");
     if (cc_env) {
       for (const char *p = cc_env; *p; p++) {
+        h ^= (uint64_t)(unsigned char)*p;
+        h *= 0x100000001b3ULL;
+      }
+    }
+    /* Preserve existing default cache keys; opt-in binaries must never reuse
+     * a source-identical kernel built under the ordinary compiler policy. */
+    if (poly_getenv_flag("POLY_CPU_ORDERED_REDUCTIONS")) {
+      for (const char *p = "ordered-reductions-v1"; *p; p++) {
         h ^= (uint64_t)(unsigned char)*p;
         h *= 0x100000001b3ULL;
       }

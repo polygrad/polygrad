@@ -3486,6 +3486,7 @@ static uint32_t poly_runtime_cache_env_stamp(void) {
       (uint32_t)poly_getenv_int("NUM_CPU_THREADS", 0),
       (uint32_t)poly_getenv_flag_default("THREADS", true),
       (uint32_t)(poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA")),
+      (uint32_t)poly_getenv_flag("POLY_CPU_ORDERED_REDUCTIONS"),
       wasm_features,
       x86_features,
   };
