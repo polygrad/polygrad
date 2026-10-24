@@ -3911,8 +3911,15 @@ static PolyBuffer *poly_ensure_linear_arg_buffer(PolyCtx *ctx, PolyUOp *uop, boo
    * immutable-UOp device binding before exposing the runtime handle. */
   if (identity && device_uop && device_uop->arg.kind != POLY_ARG_STRING_TUPLE &&
       device != POLY_DEVICE_AUTO) {
-    if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0) return NULL;
-    buffer = poly_uop_buffer_handle(ctx, uop);
+    /* Residency is looked up afresh above. An initialized scalar already on
+     * the exact graph device needs no migration or second lookup. Views and
+     * stale/mismatched residencies still use the restoration path; allocation
+     * and live failure checks remain in handle_ensure_allocated below. */
+    if (!buffer || buffer->base || !buffer->valid || buffer->device != device ||
+        buffer->device_uop != device_uop) {
+      if (poly_buffer_ensure_allocated(ctx, (PolyUOp *)identity, device) != 0) return NULL;
+      buffer = poly_uop_buffer_handle(ctx, uop);
+    }
   }
   if (buffer && !poly_buffer_is_multi(buffer)) {
     int rc = poly_buffer_handle_ensure_allocated(ctx, buffer);

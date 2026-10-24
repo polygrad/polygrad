@@ -1073,6 +1073,46 @@ TEST(schedule_runtime, beam_time_call_reads_scalar_values) {
   PASS();
 }
 
+TEST(schedule_runtime, replay_resolves_live_exact_device_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *device = poly_device_uop_from_name(ctx, "CPU:1");
+  PolyUOp *a = poly_uop_new_buffer(ctx, device, 1, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
+  PolyUOp *out = poly_uop_new_buffer(ctx, device, 1, POLY_FLOAT32, poly_ctx_next_unique_id(ctx));
+  PolyUOp *linear = poly_compile_linear(
+      ctx, poly_test_create_linear(ctx, poly_uop_sink1(ctx, poly_uop_store_val(ctx, out, a))), 0
+  );
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(poly_uop_retain(ctx, linear), 0);
+  float values[] = {2, 5, 9, 13};
+  for (int i = 0; i < 4; i++) {
+    /* Replace the live handle between calls, including a host residency and
+     * a stale exact device identity with the same backend class. */
+    PolyBuffer replacement = poly_buffer_make_host_view(&values[i], sizeof(float));
+    if (i != 1) replacement.device = POLY_DEVICE_CPU;
+    ASSERT_INT_EQ(poly_buffer_attach(ctx, a, &replacement), 0);
+    if (i == 2) poly_buffer_get(ctx, a)->device_uop = poly_device_uop(ctx, POLY_DEVICE_CPU);
+    ASSERT_INT_EQ(poly_ctx_collect(ctx), 0);
+    for (int repeat = 0; repeat < 2; repeat++) {
+      ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false), 0);
+      float got = 0;
+      ASSERT_INT_EQ(poly_buffer_read(ctx, out, &got, sizeof(got)), 0);
+      ASSERT_FLOAT_EQ(got, values[i], 0);
+      ASSERT_PTR_EQ(poly_buffer_get(ctx, a)->device_uop, device);
+    }
+  }
+  /* A successful replay must not hide a subsequent live failure or poison an
+   * output when execution never started. */
+  poly_buffer_fail(poly_buffer_get(ctx, a));
+  ASSERT_INT_EQ(poly_run_linear(ctx, linear, NULL, 0, NULL, 0, true, true, false), -1);
+  ASSERT_TRUE(!poly_buffer_failed(poly_buffer_get(ctx, out)));
+  float got = 0;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, &got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got, values[3], 0);
+  poly_uop_release(ctx, linear);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, allocation_free_linear_does_not_collect_residency) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
