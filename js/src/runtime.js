@@ -42,6 +42,7 @@ class PolyRuntime {
     this._closing = false
     this._disposePromise = null
     this._activeAsync = 0
+    this._pendingAsync = 0
     this._asyncDrain = []
     this.supportsModel = Boolean(binding.model)
     this.uop = createBoundUopNamespace(this)
@@ -267,14 +268,18 @@ class PolyRuntime {
       this._modelCapture.failed = true
       throw new Error('Asynchronous execution is not allowed during Model capture')
     }
-    if (!this._usesAsyncHostBridge()) return () => {}
-    this._activeAsync++
+    // Context lifetime also spans host I/O on synchronous devices. Keep this
+    // separate from Asyncify admission: CPU calls do not suspend the C stack.
+    const asyncHost = this._usesAsyncHostBridge()
+    this._pendingAsync++
+    if (asyncHost) this._activeAsync++
     let released = false
     return () => {
       if (released) return
       released = true
-      this._activeAsync--
-      if (this._activeAsync === 0) {
+      if (asyncHost) this._activeAsync--
+      this._pendingAsync--
+      if (this._pendingAsync === 0) {
         const waiters = this._asyncDrain.splice(0)
         for (const resolve of waiters) resolve()
       }
@@ -293,7 +298,7 @@ class PolyRuntime {
   }
 
   _waitForAsync() {
-    if (this._activeAsync === 0) return Promise.resolve()
+    if (this._pendingAsync === 0) return Promise.resolve()
     return new Promise(resolve => this._asyncDrain.push(resolve))
   }
 
@@ -316,7 +321,7 @@ class PolyRuntime {
       ()=>core.destroy && core.destroy()
     ]
 
-    if (!asyncHost) {
+    if (!asyncHost && this._pendingAsync === 0) {
       let error
       for (const release of releases) { try { release() } catch(e) { error ||= e } }
       this._core = null

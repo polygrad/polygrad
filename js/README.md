@@ -542,6 +542,8 @@ This uploads one tensor at a time instead of allocating the entire checkpoint.
 URLs must support HTTP ranges with a CORS-exposed `Content-Range`; use a pinned
 revision. Sources may also be `Blob`s or immutable `{size, read(offset, length)}`
 readers returning bytes. Pass an `AbortSignal` as `signal` to cancel an import.
+If the runtime is disposed during a read, disposal waits for import cleanup and
+the import rejects. Abort the read first if you need to cancel pending I/O.
 Staging is bounded by the largest tensor, with additional scratch for conversion
 or tied-weight checks; it does not remove device-memory limits.
 For PyTorch ZIP files, fetch the selected files and pass their bytes to `fromHF`.
@@ -750,8 +752,9 @@ Integer settings read by the shared C environment helper diagnose malformed or
 out-of-range values and use their defaults; they do not throw. Existing Node
 validation for `BEAM`, `NOOPT` and `BEAM_COMPARE` still rejects invalid values.
 
-Call `pg.dispose()` when an application or long-running script is done with an
-explicit runtime.
+Call `await pg.dispose()` when an application or long-running script is done with
+an explicit runtime. Disposal waits for pending asynchronous work, including
+checkpoint reads on CPU; an idle CPU runtime still disposes synchronously.
 
 Native `model.place('CPU:1')` and `setDeviceMap(...)` accept the same exact CPU
 identities. Wasm maps plain `CPU` to `WASM`, but rejects CPU

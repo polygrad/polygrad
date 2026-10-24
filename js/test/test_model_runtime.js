@@ -81,6 +81,45 @@ async function checkIncrementalHF(pg) {
   await checkTorchCheckpoint(pg)
 }
 
+async function checkIncrementalHFDisposal(createRuntime) {
+  const f = qwen35ImageFixture, bytes = Uint8Array.from(atob(f.weights), v => v.charCodeAt(0))
+  const headerEnd = 8 + Number(new DataView(bytes.buffer).getBigUint64(0, true))
+  for (const phase of ['header', 'weights']) for (const mode of ['success', 'throw', 'abort']) {
+    const rt = await createRuntime(), core = rt._core, events = []
+    const controller = new AbortController()
+    let resume, entered, destroyed = false, paused = false
+    const waiting = new Promise(resolve => { entered = resolve })
+    const unblock = new Promise(resolve => { resume = resolve })
+    const destroy = core.destroy.bind(core), free = core.model.hfImportFree.bind(core.model)
+    core.destroy = () => { destroyed = true; events.push('destroy'); return destroy() }
+    core.model.hfImportFree = handle => { events.push('free'); return free(handle) }
+    const source = {size:bytes.length, async read(offset, length) {
+      if (!paused && (phase === 'header' ? offset === 0 : offset >= headerEnd)) {
+        paused = true; entered(); await unblock
+        // Stop the old implementation before calling C with the freed context.
+        if (destroyed) throw Error('context destroyed before source read completed')
+        if (mode === 'throw') throw Error('source failed')
+        if (mode === 'abort') controller.abort()
+      }
+      return bytes.subarray(offset, offset + length)
+    }}
+    const load = rt.Model.fromHFAsync(JSON.stringify(f.config), [source], {maxSeqLen:7, signal:controller.signal})
+      .then(model => ({model}), error => ({error}))
+    await waiting
+    const disposal = rt.dispose(), repeated = rt.dispose()
+    const premature = destroyed
+    resume()
+    const result = await load
+    await disposal
+    if (result.model) await result.model.dispose()
+    assert(!premature, `${phase}/${mode}: destroyed context during suspended input`)
+    assert(disposal === repeated, 'pending disposal must be idempotent')
+    assert(result.error && /disposed|source failed|abort/i.test(result.error.message), 'closing import published a Model')
+    assert(events.join(',') === 'free,destroy', `import cleanup order: ${events}`)
+    assert(rt._pendingAsync === 0 && rt._activeAsync === 0 && !rt._core, 'import lease or runtime leaked')
+  }
+}
+
 async function checkApplicationMetadata(pg) {
   const x = new pg.Tensor([2]), y = x.add(1)
   const model = await pg.Model.fromTensors({params:{x}, outputs:{y}})
@@ -3264,6 +3303,7 @@ async function runModelRuntimeTests(pg, createRuntime) {
   console.log('\n== Model ==')
 
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model incremental HF disposal during source reads', () => checkIncrementalHFDisposal(createRuntime))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))
@@ -4077,6 +4117,7 @@ async function runModelSmokeTests(pg, createRuntime) {
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))
+  await test('Model incremental HF disposal during source reads', () => checkIncrementalHFDisposal(createRuntime))
   await test('Model portable GEMM selection', () => checkPortableGemmModel(createRuntime))
   await test('Model opt-in Wasm GEMM numerical policy and opt-out', () => checkWasmGemmNumerics(createRuntime))
   await test('Model interval sum selection and portable gradients', () => checkIntervalSum(createRuntime))

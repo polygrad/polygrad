@@ -771,7 +771,16 @@ function createBoundModelClass(runtime) {
       for (const value of [opts.maxBatch ?? 1, opts.maxSeqLen ?? 0])
         if (!Number.isInteger(value) || value < 0 || value > 2147483647) throw new TypeError('HF dimensions must fit a nonnegative int32')
       const core = _runtime._core
-      const run = async () => Model._fromHandle(await importSources(core.model, config, weightSources, opts))
+      const run = async () => {
+        const handle = await importSources(core.model, config, weightSources, opts)
+        // Disposal drains our context lease, but no new owner may escape after
+        // closing. Release the unpublished model before that lease is dropped.
+        if (_runtime._closing) {
+          await core.model.free(handle)
+          throw new Error('polygrad runtime has been disposed')
+        }
+        return Model._fromHandle(handle)
+      }
       return _runtime._withAsync(() => core.enqueueAsync ? core.enqueueAsync(run) : run())
     }
 
