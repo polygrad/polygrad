@@ -2261,8 +2261,12 @@ class TestModelDefinition:
         b'{"application":{"a":1},"application":{"a":2}}',
         b'{"application":{"a":1,"a":2}}',
         b'{"application":{"a":[{"b":1,"\\u0062":2}]}}',
+        b'{"application":{"s":"abc\\u0000def"}}',
+        b'{"application":{"n":1e400}}',
+        b'{"application":{}} trailing',
+        b'{"application":{}}\x00hidden',
     ])
-    def test_bundle_rejects_duplicate_metadata(self, metadata):
+    def test_bundle_rejects_invalid_metadata(self, metadata):
         import struct
         weight = Tensor([2.0])
         model = Model.from_tensors(params={'weight':weight}, outputs={'y':weight+1})

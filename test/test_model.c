@@ -30,6 +30,26 @@
 
 static int test_find_model_buf(PolyModel *inst, const char *name);
 
+TEST(model, metadata_rejects_lossy_and_ambiguous_json) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyModel *m = poly_model_new(ctx, NULL);
+  const char *invalid[] = {
+      "{\"n\":1,\"n\":2}", "{\"a\":[{\"n\":1,\"\\u006e\":2}]}", "{\"s\":\"abc\\u0000def\"}",
+      "{\"n\":1e400}", "{} trailing"};
+  ASSERT_INT_EQ(poly_model_set_metadata(m, "{\"kept\":1}"), 0);
+  for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+    ASSERT_INT_EQ(poly_model_set_metadata_key(m, "consumer", invalid[i]), -1);
+    ASSERT_INT_EQ(poly_model_set_metadata(m, invalid[i]), -1);
+    ASSERT_STR_EQ(poly_model_metadata(m), "{\"kept\":1}");
+  }
+  ASSERT_INT_EQ(
+      poly_model_set_metadata_key(m, "consumer", " {\"s\":\"\\\\u0000\",\"a\":1,\"b\":1} \n"), 0
+  );
+  poly_model_free(m);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(model, application_metadata_preserves_reserved_keys_and_state) {
   PolyCtx *ctx = poly_ctx_new();
   PolyModel *m = poly_model_new(ctx, NULL);

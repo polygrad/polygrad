@@ -101,10 +101,33 @@ async function checkApplicationMetadata(pg) {
     const numbers = [0.1+0.2, 1.0000000000000002, 2**53, -(2**53), Number.MAX_VALUE, Number.MIN_VALUE]
     model.setMetadata('numbers', numbers)
     assert(model.getMetadata('numbers').every((v,i)=>v===numbers[i]), 'metadata numbers changed')
-    restored = await pg.Model.load(await model.saveAsync())
+    const bundle = await model.saveAsync()
+    restored = await pg.Model.load(bundle)
     assert(restored.getMetadata('numbers').every((v,i)=>v===numbers[i]), 'saved metadata numbers changed')
     assert(JSON.stringify(restored.getMetadata('polyprob')) === JSON.stringify(model.getMetadata('polyprob')), 'metadata roundtrip')
     assert(restored.getMetadata('other').text === '\\u0000', 'literal escape changed')
+    for (const json of ['{"application":{"s":"a\\u0000b"}}', '{"application":{"n":1e400}}',
+      '{"application":{}} trailing', '{"application":{}}\0hidden',
+      '{"application":{"a":[{"n":1,"\\u006e":2}]}}']) {
+      const meta = new TextEncoder().encode(json)
+      const view = new DataView(bundle.buffer, bundle.byteOffset, bundle.byteLength)
+      const chunks = [bundle.slice(0, 20)]
+      let pos = 20
+      for (let i = 0; i < view.getUint32(16, true); i++) {
+        const kind = view.getUint32(pos, true), size = view.getUint32(pos+4, true)
+        const payload = kind === 3 ? meta : bundle.slice(pos+8, pos+8+size)
+        const header = new Uint8Array(8), hv = new DataView(header.buffer)
+        hv.setUint32(0, kind, true); hv.setUint32(4, payload.length, true)
+        chunks.push(header, payload); pos += 8 + size
+      }
+      const bytes = new Uint8Array(chunks.reduce((n, c) => n+c.length, 0))
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+      let error, invalid
+      try { invalid = await pg.Model.load(bytes) } catch (e) { error = e }
+      finally { if (invalid) await invalid.dispose() }
+      assert(error, 'bundle admitted lossy or ambiguous metadata')
+    }
     model.setMetadata('polyprob', null)
     assert(model.getMetadata('polyprob') === null, 'metadata not cleared')
     assert(model.getMetadata('other').text === '\\u0000', 'another owner changed')
@@ -4050,6 +4073,7 @@ async function runModelSmokeTests(pg, createRuntime) {
 
   console.log('\n== Model ==')
 
+  await test('Model application metadata namespaces', () => checkApplicationMetadata(pg))
   await test('Model contract errors and canonical round trip', () => checkModelContractErrors(pg))
   await test('Model ONNX reference graphs and bundle round trips', () => checkOnnxImport(pg))
   await test('Model packed GEMM mutation and portable bundle', () => checkPackedGemmModel(pg))

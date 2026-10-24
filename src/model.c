@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "model.h"
+#include "model_metadata.h"
 #include "../vendor/cjson/cJSON.h"
 #include "ctx.h"
 #include "uop/ops.h"
@@ -5806,7 +5807,7 @@ int poly_model_control_bounds(
 }
 int poly_model_set_metadata(PolyModel *inst, const char *json) {
   if (!inst || (inst->stage != POLY_MODEL_BUILDING && poly_model_is_busy(inst))) return -1;
-  cJSON *object = json ? cJSON_Parse(json) : NULL;
+  cJSON *object = json ? model_parse_metadata_json(json, strlen(json)) : NULL;
   if (json && !cJSON_IsObject(object)) {
     cJSON_Delete(object);
     return -1;
@@ -5825,33 +5826,50 @@ const char *poly_model_metadata(const PolyModel *inst) {
 
 /* cJSON stores strings as C strings: reject escaped NUL before decoding, but
  * allow a literal escaped backslash followed by u0000. */
-static bool metadata_json_valid(const char *json) {
-  for (const char *p = json; *p; p++) {
+static bool metadata_json_valid(const char *json, size_t length) {
+  if (memchr(json, '\0', length)) return false;
+  const char *end = json + length;
+  for (const char *p = json; p < end; p++) {
     if (*p != '\\') continue;
     p++;
-    if (!*p) return false;
-    if (*p == 'u' && strncmp(p + 1, "0000", 4) == 0) return false;
+    if (p == end) return false;
+    if (*p == 'u' && end - p >= 5 && memcmp(p + 1, "0000", 4) == 0) return false;
   }
   return true;
 }
 
-static bool metadata_finite(const cJSON *value) {
+static bool metadata_tree_valid(const cJSON *value) {
   if (cJSON_IsNumber(value) && !isfinite(value->valuedouble)) return false;
-  for (const cJSON *child = value->child; child; child = child->next)
-    if (!metadata_finite(child)) return false;
+  for (const cJSON *child = value->child; child; child = child->next) {
+    /* cJSON takes the first duplicate; Python/JS take the last. Compare decoded
+     * keys so escaped spellings cannot change an artifact's meaning. */
+    if (cJSON_IsObject(value))
+      for (const cJSON *other = child->next; other; other = other->next)
+        if (!strcmp(child->string, other->string)) return false;
+    if (!metadata_tree_valid(child)) return false;
+  }
   return true;
+}
+
+cJSON *model_parse_metadata_json(const char *json, size_t length) {
+  if (!json || !length || !metadata_json_valid(json, length)) return NULL;
+  const char *end = NULL;
+  cJSON *value = cJSON_ParseWithLengthOpts(json, length, &end, false);
+  if (value) {
+    while (end < json + length && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r'))
+      end++;
+    if (end == json + length && metadata_tree_valid(value)) return value;
+  }
+  cJSON_Delete(value);
+  return NULL;
 }
 
 int poly_model_set_metadata_key(PolyModel *inst, const char *key, const char *json) {
   if (!inst || !key || !*key || (inst->stage != POLY_MODEL_BUILDING && poly_model_is_busy(inst)) ||
       !strcmp(key, "transformer") || !strcmp(key, "polygrad") || !strncmp(key, "polygrad.", 9))
     return -1;
-  if (json && !metadata_json_valid(json)) return -1;
-  cJSON *value = json ? cJSON_ParseWithOpts(json, NULL, true) : NULL;
-  if (json && (!value || !metadata_finite(value))) {
-    cJSON_Delete(value);
-    return -1;
-  }
+  cJSON *value = json ? model_parse_metadata_json(json, strlen(json)) : NULL;
+  if (json && !value) return -1;
   cJSON *object = inst->metadata ? cJSON_Parse(inst->metadata) : cJSON_CreateObject();
   if (!object) {
     cJSON_Delete(value);
