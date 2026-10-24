@@ -702,7 +702,8 @@ void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf) {
 
 bool poly_buffer_failed(const PolyBuffer *buffer) {
   if (!buffer) return false;
-  if (buffer->failed || poly_buffer_failed(buffer->base) || poly_buffer_failed(buffer->src))
+  if (buffer->failed || (buffer->base && poly_buffer_failed(buffer->base)) ||
+      (buffer->src && poly_buffer_failed(buffer->src)))
     return true;
   for (int i = 0; i < buffer->n_bufs; i++)
     if (poly_buffer_failed(buffer->bufs[i])) return true;

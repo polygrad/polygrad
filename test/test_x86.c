@@ -18,7 +18,9 @@
 #include "../src/renderer/isa/x86.h"
 #include "../src/tensor.h"
 
+#include <cpuid.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +28,38 @@
 #include <unistd.h>
 
 int poly_test_x86_program_call_entry(void *entry, void **args, int n_args);
+
+extern int poly_test_x86_feature_probe_count(void);
+
+static void *read_x86_features(void *arg) {
+  uint32_t *result = arg;
+  uint32_t first = poly_x86_feature_stamp();
+  for (int i = 0; i < 1000; i++)
+    if (poly_x86_feature_stamp() != first) return NULL;
+  *result = first;
+  return NULL;
+}
+
+TEST_BACKEND(x86, hardware_features_are_probed_once_across_threads) {
+  pthread_t threads[8];
+  uint32_t results[8] = {0};
+  int started = 0;
+  for (; started < 8; started++)
+    if (pthread_create(&threads[started], NULL, read_x86_features, &results[started]) != 0) break;
+  bool joined = true;
+  for (int i = 0; i < started; i++)
+    joined &= pthread_join(threads[i], NULL) == 0;
+  ASSERT_INT_EQ(started, 8);
+  ASSERT_TRUE(joined);
+  ASSERT_TRUE(results[0] & 1u);
+  for (int i = 1; i < 8; i++)
+    ASSERT_TRUE(results[i] == results[0]);
+  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+  bool f16c = __get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & bit_F16C);
+  ASSERT_TRUE(!!(results[0] & (1u << 6)) == f16c);
+  ASSERT_INT_EQ(poly_test_x86_feature_probe_count(), 1);
+  PASS();
+}
 
 TEST_BACKEND(x86, upstream_narrow_index_and_float_selections) {
   PolyCtx *ctx = poly_ctx_new();

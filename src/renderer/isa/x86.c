@@ -27,6 +27,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -5329,7 +5330,20 @@ static PolyRendererCaps poly_x86_caps(void) {
   };
 }
 
-uint32_t poly_x86_feature_stamp(void) {
+#ifdef POLY_TESTING
+static atomic_int x86_feature_probe_count;
+int poly_test_x86_feature_probe_count(void) {
+  return atomic_load_explicit(&x86_feature_probe_count, memory_order_relaxed);
+}
+#endif
+
+static pthread_once_t g_x86_features_once = PTHREAD_ONCE_INIT;
+static uint32_t g_x86_features;
+
+static void poly_x86_detect_features(void) {
+#ifdef POLY_TESTING
+  atomic_fetch_add_explicit(&x86_feature_probe_count, 1, memory_order_relaxed);
+#endif
   uint32_t stamp = 1u; /* x86 backend stamp version */
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
   __builtin_cpu_init();
@@ -5347,7 +5361,14 @@ uint32_t poly_x86_feature_stamp(void) {
 #endif
   if (__builtin_cpu_supports("bmi2")) stamp |= 1u << 7;
 #endif
-  return stamp;
+  g_x86_features = stamp;
+}
+
+uint32_t poly_x86_feature_stamp(void) {
+  /* Like the compiler's CPU-feature builtins, hardware capabilities are
+   * process-wide. Keep dynamic compiler settings in the per-replay key. */
+  pthread_once(&g_x86_features_once, poly_x86_detect_features);
+  return g_x86_features;
 }
 
 PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink) {

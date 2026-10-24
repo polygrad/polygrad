@@ -8676,6 +8676,28 @@ TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
   PASS();
 }
 
+TEST(realize, buffer_failure_follows_live_views_mirrors_and_multi_children) {
+  PolyBuffer base = {0}, mirror = {0}, other = {0};
+  PolyBuffer view = {.base = &base};
+  PolyBuffer residency = {.src = &mirror};
+  PolyBuffer *children[] = {&view, &residency, &other};
+  PolyBuffer multi = {.bufs = children, .n_bufs = 3};
+  ASSERT_FALSE(poly_buffer_failed(NULL));
+  ASSERT_FALSE(poly_buffer_failed(&multi));
+  /* Failure is live state, including dependencies behind a previously checked
+   * parent. An unrelated child must stay usable. */
+  PolyBuffer *dependencies[] = {&base, &mirror, &other, &multi};
+  for (int i = 0; i < 4; i++) {
+    dependencies[i]->failed = true;
+    ASSERT_TRUE(poly_buffer_failed(&multi));
+    ASSERT_TRUE(poly_buffer_failed(&view) == (i == 0));
+    ASSERT_TRUE(poly_buffer_failed(&residency) == (i == 1));
+    dependencies[i]->failed = false;
+    ASSERT_FALSE(poly_buffer_failed(&multi));
+  }
+  PASS();
+}
+
 TEST(realize, cached_typed_view_preserves_storage_lifetime_and_failures) {
   PolyCtx *ctx = poly_ctx_new();
   uint8_t data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
