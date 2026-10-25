@@ -2631,69 +2631,75 @@ TEST(codegen, beam_binary_identity_is_independent_of_temporary_path) {
 }
 
 TEST(codegen, beam_cache_replays_long_history_and_rejects_truncation) {
-  char directory[] = "temp/beam-cache-test.XXXXXX";
-  ASSERT_NOT_NULL(mkdtemp(directory));
-  const char *previous = getenv("XDG_CACHE_HOME");
-  char *saved = previous ? strdup(previous) : NULL;
-  ASSERT_TRUE(!previous || saved);
-  setenv("XDG_CACHE_HOME", directory, 1);
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 128), *result = sink;
-  PolyOpt opt = {
-      .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 2};
-  for (int i = 0; result && i < 7; i++)
-    result = poly_test_apply_opt(ctx, result, (PolyRendererCaps){.device = "CPU"}, opt);
-  char path[600] = {0};
-  bool correct = result && result->arg.kernel_info->n_applied_opts == 7 &&
-                 poly_test_beam_cache_write(ctx, sink, result, 17, path, sizeof(path)) == 0;
-  correct &= poly_test_beam_cache_read(ctx, sink, 17) == result;
-  PolyCtx *other = poly_ctx_new();
-  PolyUOp *other_sink = beam_action_sink(other, POLY_AXIS_GLOBAL, 128);
-  other_sink = poly_uop_tagged_arg(
-      other, other_sink->op, other_sink->dtype, other_sink->src, other_sink->n_src, other_sink->arg,
-      99, poly_arg_str("diagnostic")
-  );
-  PolyUOp *replayed = poly_test_beam_cache_read(other, other_sink, 17);
-  correct &= replayed && replayed->arg.kernel_info->n_applied_opts == 7;
-  size_t original_size = 0, replayed_size = 0;
-  uint8_t *original_key = poly_uop_key(ctx, result, &original_size);
-  uint8_t *replayed_key = poly_uop_key(other, replayed, &replayed_size);
-  correct &= original_key && replayed_key && original_size == replayed_size &&
-             !memcmp(original_key, replayed_key, original_size);
-  free(original_key);
-  free(replayed_key);
-  poly_ctx_destroy(other);
-  /* A colliding filename must not bypass the stored full-key comparison. */
-  FILE *collision = path[0] ? fopen(path, "r+b") : NULL;
-  if (collision) {
-    correct &= fseek(collision, 5 * sizeof(uint32_t), SEEK_SET) == 0;
-    int byte = fgetc(collision);
-    correct &= byte != EOF && fseek(collision, -1, SEEK_CUR) == 0;
-    correct &= fputc(byte ^ 1, collision) != EOF;
-    fclose(collision);
+  const PolyDevice devices[] = {
+      POLY_DEVICE_CPU, POLY_DEVICE_CUDA, POLY_DEVICE_HIP, POLY_DEVICE_WEBGPU};
+  for (int d = 0; d < 4; d++) {
+    PolyDevice device = devices[d];
+    char directory[] = "temp/beam-cache-test.XXXXXX";
+    ASSERT_NOT_NULL(mkdtemp(directory));
+    const char *previous = getenv("XDG_CACHE_HOME");
+    char *saved = previous ? strdup(previous) : NULL;
+    ASSERT_TRUE(!previous || saved);
+    setenv("XDG_CACHE_HOME", directory, 1);
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *sink = beam_action_sink(ctx, POLY_AXIS_GLOBAL, 128), *result = sink;
+    PolyOpt opt = {
+        .op = POLY_OPT_UPCAST, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 2};
+    for (int i = 0; result && i < 7; i++)
+      result = poly_test_apply_opt(ctx, result, (PolyRendererCaps){.device = "CPU"}, opt);
+    char path[600] = {0};
+    bool correct =
+        result && result->arg.kernel_info->n_applied_opts == 7 &&
+        poly_test_beam_cache_write(ctx, sink, result, 17, device, path, sizeof(path)) == 0;
+    correct &= poly_test_beam_cache_read(ctx, sink, 17, device) == result;
+    PolyCtx *other = poly_ctx_new();
+    PolyUOp *other_sink = beam_action_sink(other, POLY_AXIS_GLOBAL, 128);
+    other_sink = poly_uop_tagged_arg(
+        other, other_sink->op, other_sink->dtype, other_sink->src, other_sink->n_src,
+        other_sink->arg, 99, poly_arg_str("diagnostic")
+    );
+    PolyUOp *replayed = poly_test_beam_cache_read(other, other_sink, 17, device);
+    correct &= replayed && replayed->arg.kernel_info->n_applied_opts == 7;
+    size_t original_size = 0, replayed_size = 0;
+    uint8_t *original_key = poly_uop_key(ctx, result, &original_size);
+    uint8_t *replayed_key = poly_uop_key(other, replayed, &replayed_size);
+    correct &= original_key && replayed_key && original_size == replayed_size &&
+               !memcmp(original_key, replayed_key, original_size);
+    free(original_key);
+    free(replayed_key);
+    poly_ctx_destroy(other);
+    /* A colliding filename must not bypass the stored full-key comparison. */
+    FILE *collision = path[0] ? fopen(path, "r+b") : NULL;
+    if (collision) {
+      correct &= fseek(collision, 5 * sizeof(uint32_t), SEEK_SET) == 0;
+      int byte = fgetc(collision);
+      correct &= byte != EOF && fseek(collision, -1, SEEK_CUR) == 0;
+      correct &= fputc(byte ^ 1, collision) != EOF;
+      fclose(collision);
+    }
+    correct &= collision != NULL && poly_test_beam_cache_read(ctx, sink, 17, device) == NULL;
+    FILE *file = path[0] ? fopen(path, "wb") : NULL;
+    if (file) {
+      fputc(0, file);
+      fclose(file);
+    }
+    correct &= file != NULL && poly_test_beam_cache_read(ctx, sink, 17, device) == NULL;
+    correct &= sink->arg.kernel_info->n_applied_opts == 0;
+    poly_ctx_destroy(ctx);
+    if (path[0]) remove(path);
+    char subdir[600];
+    snprintf(subdir, sizeof(subdir), "%s/polygrad/beam", directory);
+    rmdir(subdir);
+    snprintf(subdir, sizeof(subdir), "%s/polygrad", directory);
+    rmdir(subdir);
+    rmdir(directory);
+    if (saved)
+      setenv("XDG_CACHE_HOME", saved, 1);
+    else
+      unsetenv("XDG_CACHE_HOME");
+    free(saved);
+    ASSERT_TRUE(correct);
   }
-  correct &= collision != NULL && poly_test_beam_cache_read(ctx, sink, 17) == NULL;
-  FILE *file = path[0] ? fopen(path, "wb") : NULL;
-  if (file) {
-    fputc(0, file);
-    fclose(file);
-  }
-  correct &= file != NULL && poly_test_beam_cache_read(ctx, sink, 17) == NULL;
-  correct &= sink->arg.kernel_info->n_applied_opts == 0;
-  poly_ctx_destroy(ctx);
-  if (path[0]) remove(path);
-  char subdir[600];
-  snprintf(subdir, sizeof(subdir), "%s/polygrad/beam", directory);
-  rmdir(subdir);
-  snprintf(subdir, sizeof(subdir), "%s/polygrad", directory);
-  rmdir(subdir);
-  rmdir(directory);
-  if (saved)
-    setenv("XDG_CACHE_HOME", saved, 1);
-  else
-    unsetenv("XDG_CACHE_HOME");
-  free(saved);
-  ASSERT_TRUE(correct);
   PASS();
 }
 
@@ -11073,5 +11079,103 @@ TEST(codegen, gpudims_amd_combined_grid_limit) {
     poly_ctx_destroy(ctx);
     ASSERT_TRUE(ok);
   }
+  PASS();
+}
+
+TEST(codegen, shared_store_rejects_missing_local_writers) {
+  const PolyAxisType kinds[] = {POLY_AXIS_LOCAL, POLY_AXIS_GROUP_REDUCE, POLY_AXIS_WARP};
+  for (int k = 0; k < 4; k++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *x = poly_uop_range(ctx, 4, 0, POLY_AXIS_GROUP_REDUCE);
+    PolyUOp *bound =
+        k == 3 ? poly_uop_variable(
+                     ctx, "lanes", poly_arg_int(1), poly_arg_int(3), POLY_WEAKINT, 1, false
+                 )
+               : poly_uop_const_int(ctx, 3);
+    PolyUOp *y =
+        poly_uop1(ctx, POLY_OP_RANGE, POLY_WEAKINT, bound, poly_arg_range(1, kinds[k % 3]));
+    PolyUOp *buf = poly_test_uop_param(ctx, POLY_FLOAT32, 4, 0, POLY_ADDR_LOCAL);
+    PolyUOp *idx = poly_uop_index(ctx, buf, &x, 1);
+    PolyUOp *store = poly_uop_store(ctx, idx, poly_uop_cast(ctx, x, POLY_FLOAT32));
+    PolyUOp *roots[] = {store, y};
+    PolyUOp *sink = poly_test_kernel_sink(ctx, roots, 2, "duplicate_shared_writers");
+    bool rejected = poly_add_gpudims(ctx, sink) == NULL;
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(rejected);
+  }
+  PASS();
+}
+
+TEST(codegen, shared_store_admission_preserves_existing_domains) {
+  for (int mode = 0; mode < 4; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *x = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOCAL);
+    PolyUOp *y = poly_uop_range(ctx, mode == 0 ? 1 : 3, 1, POLY_AXIS_LOCAL);
+    PolyUOp *buf =
+        poly_test_uop_param(ctx, POLY_FLOAT32, 12, 0, mode == 3 ? POLY_ADDR_REG : POLY_ADDR_LOCAL);
+    PolyUOp *coord = x;
+    if (mode == 1)
+      coord = poly_uop_alu2(
+          ctx, POLY_OP_ADD, poly_uop_alu2(ctx, POLY_OP_MUL, x, poly_uop_const_int(ctx, 3)), y
+      );
+    PolyUOp *idx = poly_uop_index(ctx, buf, &coord, 1);
+    PolyUOp *value = poly_uop_cast(ctx, x, POLY_FLOAT32);
+    PolyUOp *store = poly_uop_store(ctx, idx, value);
+    if (mode == 2)
+      store = poly_uop3(
+          ctx, POLY_OP_STORE, POLY_VOID, idx, value,
+          poly_uop_eq(ctx, y, poly_uop_const_int(ctx, 0)), poly_arg_none()
+      );
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
+    PolyUOp *roots[] = {store, load, y};
+    PolyUOp *out = poly_add_gpudims(ctx, poly_test_kernel_sink(ctx, roots, 3, "admitted_store"));
+    /* This is only gpudims admission. Existing predicated STORE handling in
+     * later passes is unchanged; this does not newly admit gated coalescing. */
+    bool ok = out && out->src[0]->n_src == (mode == 2 ? 3 : 2) &&
+              out->src[0]->src[0] == out->src[1]->src[0];
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(ok);
+  }
+  PASS();
+}
+
+TEST(codegen, explicit_independent_groups_rejected_before_emission) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = make_shaped_f32_buf(ctx, (int64_t[]){4, 64}, 2);
+  PolyUOp *b = make_shaped_f32_buf(ctx, (int64_t[]){4, 96}, 2);
+  PolyUOp *value =
+      poly_uop_add(ctx, poly_uop_sum_reduce(ctx, a, 1, 0), poly_uop_sum_reduce(ctx, b, 1, 0));
+  PolyUOp *output = NULL;
+  PolyVarBinding *vars = NULL;
+  int nvars = 0;
+  PolyUOp *linear = poly_linear_with_vars(ctx, &value, 1, &output, &vars, &nvars);
+  free(vars);
+  bool ok = linear && linear->n_src == 1 && nvars == 0;
+  if (ok) {
+    PolyUOp *body = poly_test_linear_call_body(linear, 0);
+    PolyOpt opts[] = {
+        {.op = POLY_OPT_GROUP, .has_axis = true, .axis = 0, .arg_kind = POLY_OPT_ARG_INT, .arg = 8},
+        {.op = POLY_OPT_GROUP,
+         .has_axis = true,
+         .axis = 1,
+         .arg_kind = POLY_OPT_ARG_INT,
+         .arg = 8}};
+    PolyKernelInfo info = *body->arg.kernel_info;
+    info.has_opts_to_apply = true;
+    info.opts_to_apply = opts;
+    info.n_opts_to_apply = 2;
+    body =
+        poly_uop(ctx, body->op, body->dtype, body->src, body->n_src, poly_arg_kernel_info(&info));
+    PolyUOp *result = poly_full_rewrite_to_sink_ex(
+        ctx, body,
+        (PolyRewriteOpts
+        ){.optimize = true,
+          .device = POLY_DEVICE_WEBGPU,
+          .caps = {.device = "WEBGPU", .has_local = true, .shared_max = 32768}}
+    );
+    ok = result == NULL;
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
   PASS();
 }

@@ -170,10 +170,11 @@ int poly_test_beam_cache_write(
     PolyUOp *sink,
     PolyUOp *result,
     int width,
+    PolyDevice device,
     char *path,
     size_t capacity
 );
-PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width);
+PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device);
 PolyUOp *poly_test_apply_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps, PolyOpt opt);
 bool poly_test_scheduler_copy_rollback(PolyCtx *ctx, PolyUOp *sink, PolyOpt opt);
 bool poly_test_scheduler_copy_lifetime(PolyCtx *ctx, PolyUOp *sink);

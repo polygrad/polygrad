@@ -442,6 +442,23 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     /* Preserve admitted CAST wrappers through the shared substitution owner. */
     while (idx->op == POLY_OP_CAST && idx->n_src == 1)
       idx = idx->src[0];
+    /* Independent local axes can duplicate a reduction's shared writes.
+     * Reject those generated schedules instead of changing STORE/coalescing
+     * semantics. Existing predicated stores retain their later-stage checks;
+     * a singleton axis cannot introduce another writer. This is not a general
+     * injectivity proof for addresses that do reference every local axis. */
+    if (u->n_src == 2 && idx->op == POLY_OP_INDEX && idx->n_src == 2 &&
+        poly_program_memory_is(idx->src[0], POLY_ADDR_LOCAL)) {
+      for (int g = 0; g < n_local; g++) {
+        if (local_dims[g].max <= 1 || poly_uop_in_ranges(ctx, idx, local_ranges[g])) continue;
+        fprintf(
+            stderr,
+            "polygrad: shared store omits local axis %lld (extent %lld); multiple writers\n",
+            (long long)poly_range_axis_id(local_ranges[g]->arg), (long long)local_dims[g].max
+        );
+        goto done;
+      }
+    }
     if (idx->op != POLY_OP_INDEX || idx->n_src != 2 ||
         !poly_program_memory_is(idx->src[0], POLY_ADDR_GLOBAL))
       continue;

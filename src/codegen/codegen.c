@@ -2919,6 +2919,13 @@ static bool beam_cache_key(
   if (opts.device == POLY_DEVICE_CPU && poly_getenv_flag("POLY_CPU_ORDERED_REDUCTIONS") &&
       !beam_key_string(key, "ordered-reductions-v1"))
     goto failed;
+  /* Cached Opts bypass candidate compilation. Old GPU winners may contain
+   * duplicate shared writers that the new admission rejects only after search.
+   * Separate them without invalidating CPU tuning or changing the public ABI. */
+  PolyDevice device = beam_device(opts);
+  if ((device == POLY_DEVICE_CUDA || device == POLY_DEVICE_HIP || device == POLY_DEVICE_WEBGPU) &&
+      !beam_key_string(key, "shared-store-admission-v1"))
+    goto failed;
   /* Cache hits skip comparison. A winner measured against the old WebGPU
    * heuristic (or different explicit knobs) is not a comparison against this
    * policy. Leave pinned-search and other-backend cache identities unchanged. */
@@ -3112,11 +3119,12 @@ int poly_test_beam_cache_write(
     PolyUOp *sink,
     PolyUOp *result,
     int width,
+    PolyDevice device,
     char *path,
     size_t capacity
 ) {
   BeamCacheKey key;
-  PolyRewriteOpts opts = {.device = POLY_DEVICE_CPU, .caps = {.device = "CPU"}};
+  PolyRewriteOpts opts = {.device = device, .caps = {.device = poly_device_name(device)}};
   if (!beam_cache_key(ctx, sink, width, opts, &key)) return -1;
   beam_cache_save(&key, result);
   int rc = beam_cache_path(&key, path, capacity);
@@ -3124,9 +3132,9 @@ int poly_test_beam_cache_write(
   return rc;
 }
 
-PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width) {
+PolyUOp *poly_test_beam_cache_read(PolyCtx *ctx, PolyUOp *sink, int width, PolyDevice device) {
   BeamCacheKey key;
-  PolyRewriteOpts opts = {.device = POLY_DEVICE_CPU, .caps = {.device = "CPU"}};
+  PolyRewriteOpts opts = {.device = device, .caps = {.device = poly_device_name(device)}};
   if (!beam_cache_key(ctx, sink, width, opts, &key)) return NULL;
   OptScheduler s;
   sched_init(&s, ctx, sink);

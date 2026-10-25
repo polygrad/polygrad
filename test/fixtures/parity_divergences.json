@@ -25,6 +25,30 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-038",
+      "status": "approved",
+      "stages": [
+        "codegen"
+      ],
+      "area": "Reject ungated shared stores with omitted nontrivial local axes",
+      "tinygrad": "Pinned 6f87158d and inspected upstream d16046fb guard missing local axes only on GLOBAL stores. Explicit options or BEAM can give independent reductions separate local axes and emit ungated LOCAL stores with duplicate concurrent writers.",
+      "polygrad": "At GPU-dimension lowering, reject an ungated LOCAL store when a local axis with maximum extent greater than one is absent from its INDEX ranges. Report the axis and extent before shader emission. Singleton axes, fully addressed stores, GLOBAL/private storage and pre-existing STORE predicates retain their existing handling. The coalescer is unchanged. A GPU-only BEAM cache-key revision excludes pre-policy winners; CPU cache identity and public ABI are unchanged.",
+      "rationale": "Fail closed on the reproduced duplicate-writer schedules instead of changing store predicates, reduction order or coalescer admission. Fresh BEAM search skips rejected compilations before timing. Explicit options fail with an error. This is a narrow admission check, not a general proof of address injectivity or predicate correctness. It adds no lane sharing, heuristic changes, automatic schedule fallback, or numeric mismatch allowance.",
+      "approval": "User instructed \"investigate further and fix\" on 2026-10-25 after review recommending scoped schedule rejection with cache handling. This replaces the unapproved writer-election/coalescing proposal; no approval for lane sharing or default heuristic changes is inferred.",
+      "evidence": [
+        "src/codegen/gpudims.c:poly_add_gpudims_ex",
+        "src/codegen/codegen.c:beam_cache_key",
+        "references/tinygrad_latest/tinygrad/codegen/gpudims.py:add_gpudims",
+        "test/test_codegen.c:shared_store_rejects_missing_local_writers",
+        "test/test_codegen.c:shared_store_admission_preserves_existing_domains",
+        "test/test_codegen.c:explicit_independent_groups_rejected_before_emission",
+        "test/test_codegen.c:beam_cache_replays_long_history_and_rejects_truncation",
+        "/home/anton/projects/polygrad/polygrad/temp/webgpu-rejection-fix-20261025/report.txt",
+        "/home/anton/projects/polygrad/polygrad/temp/webgpu-feedback-review-20261025/report.txt"
+      ],
+      "close_when": "The reference rejects these duplicate shared-writer schedules or emits race-free equivalents. Revalidate explicit options, BEAM cache migration, accepted shader identity and affected backend/frontend gates before closing. No scheduling or arithmetic divergence beyond rejection is permitted."
+    },
+    {
       "id": "PG-DIV-037",
       "status": "approved",
       "stages": [

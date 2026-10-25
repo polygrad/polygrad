@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-10-24",
-  "basis": "Fresh full scan of 101 translation units: 89 diagnostics, no new or absent diagnostic kinds. Eleven locations shifted; ten surrounding 21-line source windows are unchanged from e713ca7. The remaining Wasm owner report only changes the admission lookup from lm_get to lm_find; identical return values preserve its width/ownership invariant. Rechecked count/fill, argument resolution and shape-extraction guards. New metadata validation emits no diagnostics. Source hashes include the pending CPU replay/compiler changes. Evidence: temp/review-fixes-20261024/analyzer/raw.log, moved-diagnostics.json and verified.json. No warning or checker is suppressed; HIP execution is not covered.",
+  "reviewed_on": "2026-10-25",
+  "basis": "Fresh Clang 14 scan of all 101 translation units: 89 diagnostics unchanged except two codegen.c warnings moving from lines 3788/3791 to 3796/3799. The complete merge_reduce_ends helper and all following code are byte-identical. Existing count/fill and ownership rationales remain applicable. Evidence: temp/webgpu-rejection-fix-20261025/analyzer-before-review and complete-analyzer-review.py.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -126,11 +126,11 @@
       "src/bigint.h": "1eaf520fbafdbe147cbffef1cf10153e5add242fbdf001556809fcd2ca7b10da",
       "src/bundle.c": "4f26e594c71409edccd8999c961f891bf8d32514697945b567a557b4b27a2ca4",
       "src/bundle.h": "bf107c034b859853f306baf28d59c6bcfeff77841a9b8420b7f37c0242f7822a",
-      "src/codegen/codegen.c": "d3228a80dabd6596204c5e9e758ee07032c042381a1889b65b6f1e9dd1a6ff37",
-      "src/codegen/codegen.h": "f6c7e53af8ad19f4af8f347df065ee9115c9cdc9e6b94706fdf6237bb6758f23",
+      "src/codegen/codegen.c": "f88cb0e9b355cda269d2eb9856eb2c6443ce2812ce34bc306167e25e218a1188",
+      "src/codegen/codegen.h": "321b76b37fd4c54a2cc6683da5cfd649f9a35a0e274f9240ac2cfccfdbb33a86",
       "src/codegen/decomp/dtype.c": "43d3d46d2965f6ea5a23b87cf333165782e09e08ac6a57c8e649e529d0999bbe",
       "src/codegen/decomp/dtype.h": "8af2dbab4872edc2864b1ba3826c7832337fabe1e1d11f39d1bf954c9de78c78",
-      "src/codegen/gpudims.c": "e838d0d4c1f6814cd1c72de549c2ca799dc49c1665bf8cf33603159df73ed081",
+      "src/codegen/gpudims.c": "22f1bb2f68c0a756ae2fc14808fa19ee931cde9f565c321fde8369ff62e0a6c2",
       "src/codegen/late/coalesce.c": "27d51e186b146dad7e075f881f0849d706bc33b0ed40fd3fba05e4e1cc4d4ed1",
       "src/codegen/late/coalesce.h": "c63ce3dea1003e7d277635fbf9dcfc7c4478d88a612e5280ca04718622d9e1ba",
       "src/codegen/late/gater.c": "024066b3e745b611eae7ecafedf09f379cbcdf612a856df5107cfabb45f2d98b",
@@ -367,7 +367,7 @@
     },
     {
       "path": "src/codegen/codegen.c",
-      "line": 3788,
+      "line": 3796,
       "column": 19,
       "message": "Access to field 'src' results in a dereference of a null pointer (loaded from variable 'first')",
       "checker": "core.NullDereference",
@@ -376,7 +376,7 @@
     },
     {
       "path": "src/codegen/codegen.c",
-      "line": 3791,
+      "line": 3799,
       "column": 35,
       "message": "Access to field 'src' results in a dereference of a null pointer (loaded from field 'end')",
       "checker": "core.NullDereference",
