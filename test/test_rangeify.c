@@ -5945,6 +5945,40 @@ TEST(rangeify, schedule_param_slot_does_not_truncate) {
 
 extern PolyUOp *poly_test_limit_bufs(PolyCtx *ctx, PolyUOp *sink, int fail_after);
 
+TEST(rangeify, indexed_store_hazard_stages_only_aliasing_reads) {
+  for (int mode = 0; mode < 5; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *buf = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+    PolyUOp *other = poly_test_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+    PolyUOp *r = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+    PolyUOp *reverse = poly_uop_alu2(ctx, POLY_OP_SUB, poly_uop_const_int(ctx, 3), r);
+    PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, buf, r, poly_arg_none());
+    PolyUOp *read = poly_uop2(
+        ctx, POLY_OP_INDEX, POLY_FLOAT32, mode == 2 ? other : buf, mode == 1 ? r : reverse,
+        poly_arg_none()
+    );
+    if (mode == 3) {
+      PolyUOp *done = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+      read = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, read, done, poly_arg_none());
+    }
+    if (mode == 4) {
+      /* A callee's internal reads are outside this store's kernel. */
+      read = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, read, other, poly_arg_none());
+    }
+    PolyUOp *store = poly_uop_store_val(ctx, dst, read);
+    PolyUOp *fixed = poly_test_limit_bufs(ctx, store, -1);
+    ASSERT_NOT_NULL(fixed);
+    bool staged = count_ops(ctx, fixed, POLY_OP_STAGE) == 1;
+    bool unchanged = fixed == store;
+    poly_ctx_destroy(ctx);
+    if (mode == 0)
+      ASSERT_TRUE(staged);
+    else
+      ASSERT_TRUE(unchanged);
+  }
+  PASS();
+}
+
 TEST(rangeify, limit_bufs_scratch_failure_is_not_success) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

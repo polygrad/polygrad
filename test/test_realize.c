@@ -1889,19 +1889,21 @@ TEST(realize, nested_shrink_assignment_materializes_before_live_store) {
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
 
-  /* Pinned fix_store_hazard preserves this exact three-CALL topology:
-   * first in-place update, temporary second value, temporary-to-counter
-   * STORE. The temporary is a schedule-owned buffer shared by CALLs 1/2. */
-  ASSERT_INT_EQ(schedule->n_src, 3);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 0), 1);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 1), 2);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 2), 2);
-  PolyUOp *counter_buffer = poly_test_linear_call_buffer(schedule, 0, 0);
-  PolyUOp *temporary_buffer = poly_test_linear_call_buffer(schedule, 1, 0);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 1, 1), counter_buffer);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 2, 0), counter_buffer);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 2, 1), temporary_buffer);
+  /* f0abe5fa7 stages both indexed updates. The existing memory planner
+   * reuses one temporary once the preceding copy-back has consumed it. */
+  ASSERT_INT_EQ(schedule->n_src, 4);
+  PolyUOp *temporary_buffer = poly_test_linear_call_buffer(schedule, 0, 0);
+  PolyUOp *counter_buffer = poly_test_linear_call_buffer(schedule, 0, 1);
   ASSERT_PTR_NEQ(counter_buffer, temporary_buffer);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, i), 2);
+    ASSERT_PTR_EQ(
+        poly_test_linear_call_buffer(schedule, i, 0), i % 2 ? counter_buffer : temporary_buffer
+    );
+    ASSERT_PTR_EQ(
+        poly_test_linear_call_buffer(schedule, i, 1), i % 2 ? temporary_buffer : counter_buffer
+    );
+  }
 
   ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
   float result[2] = {0.0f, 0.0f};
@@ -1963,26 +1965,24 @@ TEST(realize, creation_copy_nested_shrink_assignment_preserves_version_topology)
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
 
-  /* Pinned callify keeps the materialized AFTER in the executable graph while
-   * its buffer_map points live tensors at the stripped buffer. Exact order:
-   * creation COPY, first in-place update, temporary second value, final STORE. */
-  ASSERT_INT_EQ(schedule->n_src, 4);
+  /* Preserve the pin's creation COPY and version ownership. Backported
+   * f0abe5fa7 then stages each update before its copy-back, as above. */
+  ASSERT_INT_EQ(schedule->n_src, 5);
   ASSERT_TRUE(poly_test_linear_call_is_copy(schedule, 0));
-  ASSERT_FALSE(poly_test_linear_call_is_copy(schedule, 1));
-  ASSERT_FALSE(poly_test_linear_call_is_copy(schedule, 2));
-  ASSERT_FALSE(poly_test_linear_call_is_copy(schedule, 3));
   ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 0), 2);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 1), 1);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 2), 2);
-  ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, 3), 2);
-
   PolyUOp *counter_buffer = poly_test_linear_call_buffer(schedule, 0, 0);
-  PolyUOp *temporary_buffer = poly_test_linear_call_buffer(schedule, 2, 0);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 1, 0), counter_buffer);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 2, 1), counter_buffer);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 3, 0), counter_buffer);
-  ASSERT_PTR_EQ(poly_test_linear_call_buffer(schedule, 3, 1), temporary_buffer);
+  PolyUOp *temporary_buffer = poly_test_linear_call_buffer(schedule, 1, 0);
   ASSERT_PTR_NEQ(counter_buffer, temporary_buffer);
+  for (int i = 1; i < 5; i++) {
+    ASSERT_FALSE(poly_test_linear_call_is_copy(schedule, i));
+    ASSERT_INT_EQ(poly_test_linear_call_n_buffers(schedule, i), 2);
+    ASSERT_PTR_EQ(
+        poly_test_linear_call_buffer(schedule, i, 0), i % 2 ? temporary_buffer : counter_buffer
+    );
+    ASSERT_PTR_EQ(
+        poly_test_linear_call_buffer(schedule, i, 1), i % 2 ? counter_buffer : temporary_buffer
+    );
+  }
 
   ASSERT_INT_EQ(poly_run_linear(ctx, schedule, NULL, 0, NULL, 0, true, false, false), 0);
   float result[2] = {0.0f, 0.0f};

@@ -4283,6 +4283,54 @@ TEST(codegen, render_half_single_consumer_chain_matches_pinned_c_expression) {
   PASS();
 }
 
+TEST(codegen, vector_memory_scalar_alignment) {
+  /* fbdf00b6c: a precompiled vector kernel may receive a scalar-aligned view.
+   * Test each pointer independently and keep sentinels around the write. */
+  PolyDType types[] = {POLY_FLOAT32, POLY_FLOAT64, POLY_INT32, POLY_INT16};
+  for (int d = 0; d < 4; d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyDType dt = types[d];
+    int bytes = poly_dtype_itemsize(dt);
+    PolyUOp *out = program_param(ctx, dt, 4, 0);
+    PolyUOp *in = program_param(ctx, dt, 4, 1);
+    PolyUOp *zero = poly_uop_const_int(ctx, 0), *four = poly_uop_const_int(ctx, 4);
+    PolyUOp *dst = poly_uop3(ctx, POLY_OP_SHRINK, dt, out, zero, four, poly_arg_none());
+    PolyUOp *src = poly_uop3(ctx, POLY_OP_SHRINK, dt, in, zero, four, poly_arg_none());
+    PolyUOp *sink = poly_uop_sink1(ctx, poly_uop_store(ctx, dst, poly_uop_load(ctx, src)));
+    int n = 0;
+    PolyUOp **lin = poly_uop_toposort_alloc(ctx, sink, &n);
+    char *code = poly_render_c(ctx, lin, n, "unaligned_copy");
+    ASSERT_NOT_NULL(code);
+    char alignment[32];
+    snprintf(alignment, sizeof(alignment), "aligned(%d)", bytes);
+    bool annotated = strstr(code, alignment) != NULL;
+    PolyProgram *prog = poly_compile_c(code, "unaligned_copy");
+    ASSERT_NOT_NULL(prog);
+    /* Check the contract before calling miscompiled code on the red build. */
+    if (annotated) {
+      _Alignas(64) unsigned char input[64], output[64], expected[64];
+      for (int i = 0; i < 64; i++)
+        input[i] = (unsigned char)(i + 1);
+      for (int si = 0; si <= 1; si++) {
+        for (int di = 0; di <= 1; di++) {
+          memset(output, 0x55, sizeof(output));
+          memcpy(expected, output, sizeof(output));
+          memcpy(expected + di * bytes, input + si * bytes, 4 * bytes);
+          void *args[] = {output + di * bytes, input + si * bytes};
+          poly_program_call(prog, args, 2);
+          ASSERT_TRUE(memcmp(output, expected, sizeof(output)) == 0);
+        }
+      }
+    }
+    poly_program_destroy(prog);
+    free(code);
+    poly_uop_toposort_free(lin);
+    poly_ctx_destroy(ctx);
+    ASSERT_TRUE(annotated);
+  }
+  PASS();
+}
+
 TEST(codegen, render_vecmul) {
   VecKernel k = make_vec_binop(POLY_OP_MUL, 8);
   int n;

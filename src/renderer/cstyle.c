@@ -718,6 +718,24 @@ static void render_ctype(PolyDType dt, int lanes, char *buf, int cap) {
   render_ctype_nonptr(dt, lanes, buf, cap);
 }
 
+static void render_memory_ctype(
+    StrBuf *decls,
+    PolyDType dt,
+    int lanes,
+    int id,
+    char *buf,
+    int cap
+) {
+  render_ctype(dt, lanes, buf, cap);
+  if (lanes <= 1) return;
+  /* fbdf00b6c: CPU views promise scalar alignment, not vector alignment.
+   * Clang ignores aligned on an inline cast type; it must qualify a typedef.
+   * Register values keep their existing vector type and arithmetic. */
+  int alignment = poly_dtype_itemsize(dt);
+  sb_printf(decls, "  typedef %s mem%d __attribute__((aligned(%d)));\n", buf, id, alignment);
+  snprintf(buf, cap, "mem%d", id);
+}
+
 /* Tinygrad 2026-08-22/a9069c177a9d renderer/cstyle.py:187 render_type uses
  * UOp.max_numel(); DType never carries lanes. */
 static int render_uop_lanes(PolyCtx *ctx, const PolyUOp *u) {
@@ -1306,6 +1324,8 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
       PolyUOp *idx_uop = poly_as_index(u->src[0]);
       bool is_lane_load =
           idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
+      if (!is_lane_load && lanes > 1)
+        render_memory_ctype(&decls, u->dtype, lanes, i, dtype_s, sizeof(dtype_s));
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype)) ? u->src[2] : NULL;
       if (gate_uop && u->n_src >= 2) {
@@ -1377,7 +1397,7 @@ char *poly_render_c(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
                (lanes > 1 || (u->src[0]->n_src > 0 &&
                               !poly_dtype_eq(u->src[0]->dtype, u->src[0]->src[0]->dtype)))) {
         char dtype_s[128];
-        render_ctype(u->src[0]->dtype, lanes, dtype_s, sizeof(dtype_s));
+        render_memory_ctype(&decls, u->src[0]->dtype, lanes, i, dtype_s, sizeof(dtype_s));
         sb_printf(&body, "*((%s*)(%s)) = %s;\n", dtype_s, target, val);
       } else
         sb_printf(&body, "*%s = %s;\n", target, val);

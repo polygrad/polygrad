@@ -846,48 +846,6 @@ static PolyPatternMatcher *poly_pm_no_indexing_calls(void) {
   return pm;
 }
 
-static bool fix_store_hazard_gate(PolyUOp *u) {
-  return u->op != POLY_OP_CONTIGUOUS;
-}
-
-/* Exact port of tinygrad schedule/rangeify.py:fix_store_hazard. */
-static PolyUOp *fix_store_hazard(PolyCtx *ctx, PolyUOp *target, PolyUOp *src) {
-  bool target_has_shrink = poly_uop_op_in_backward_slice_with_self(ctx, target, POLY_OP_SHRINK);
-  PolyUOp *base = poly_uop_unsharded_base(target);
-
-  int n_topo = 0;
-  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, src, &n_topo, fix_store_hazard_gate, true);
-  PolyMap *reaches_base = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
-  if (!topo || !reaches_base) {
-    poly_uop_toposort_free(topo);
-    if (reaches_base) poly_map_destroy(reaches_base);
-    return NULL;
-  }
-
-  bool hazard = false;
-  for (int i = 0; i < n_topo && !hazard; i++) {
-    PolyUOp *u = topo[i];
-    bool reaches = u == base;
-    for (int j = 0; j < u->n_src && !reaches; j++) {
-      reaches =
-          poly_map_get(reaches_base, poly_ptr_hash(u->src[j]), u->src[j], poly_ptr_eq) != NULL;
-    }
-    if (reaches) poly_map_set(reaches_base, poly_ptr_hash(u), u, (void *)(uintptr_t)1, poly_ptr_eq);
-
-    bool unsafe = u->op == POLY_OP_PERMUTE || u->op == POLY_OP_FLIP ||
-                  (target_has_shrink && u->op == POLY_OP_SHRINK);
-    if (reaches && unsafe && !(u == target && u->op == POLY_OP_SHRINK)) hazard = true;
-  }
-
-  poly_map_destroy(reaches_base);
-  poly_uop_toposort_free(topo);
-  if (!hazard) return NULL;
-  PolyUOp *contiguous = (src->op == POLY_OP_CONTIGUOUS || poly_uop_has_buffer_identity(src))
-                            ? src
-                            : poly_uop1(ctx, POLY_OP_CONTIGUOUS, src->dtype, src, poly_arg_none());
-  return poly_uop_store_val(ctx, target, contiguous);
-}
-
 static PolyUOp *rangeify_clone_preserving_metadata(
     PolyCtx *ctx,
     PolyUOp *u,
@@ -1582,15 +1540,6 @@ static PolyUOp *earliest_remove_nested_store(
              : NULL;
 }
 
-static PolyUOp *earliest_fix_store_hazard(
-    PolyCtx *ctx,
-    PolyUOp *store,
-    const PolyBindings *bindings
-) {
-  (void)bindings;
-  return store && store->n_src == 2 ? fix_store_hazard(ctx, store->src[0], store->src[1]) : NULL;
-}
-
 static PolyUOp *earliest_store_bitcast(PolyCtx *ctx, PolyUOp *store, const PolyBindings *bindings) {
   (void)bindings;
   if (!store || store->op != POLY_OP_STORE || store->n_src != 2 ||
@@ -1662,7 +1611,6 @@ static PolyPatternMatcher *earliest_rewrites(void) {
       POLY_RULE(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy"), earliest_copy_same_device),
       POLY_RULE(poly_upat_op(POLY_OP_COPY, NULL, 0, "copy"), earliest_copy_reshape),
       POLY_RULE(poly_upat_op(POLY_OP_STORE, NULL, 0, "store"), earliest_store_reshape),
-      POLY_RULE(poly_upat_op(POLY_OP_STORE, NULL, 0, "store"), earliest_fix_store_hazard),
       POLY_RULE(poly_upat_op(POLY_OP_AFTER, NULL, 0, "after"), earliest_dedup_store),
       POLY_RULE(poly_upat_op(POLY_OP_AFTER, NULL, 0, "after"), earliest_remove_nested_store),
       POLY_RULE(poly_upat_op(POLY_OP_STORE, NULL, 0, "store"), earliest_store_bitcast),
@@ -2367,6 +2315,78 @@ static int poly_limit_bufs_max_for_device(PolyUOp *device) {
   return 0;
 }
 
+/* Upstream f0abe5fa7 uses the same stage() for argument limits and aliased
+ * stores. Snapshot the value with fresh WEAK ranges, retaining DEVICE axes. */
+static PolyUOp *limit_bufs_stage(PolyCtx *ctx, PolyUOp *s, PolyUOp *device, int64_t *next_range) {
+  PolyUOp *orig_rngs[POLY_MAX_DIMS];
+  int n_rngs = poly_uop_ranges(ctx, s, orig_rngs, POLY_MAX_DIMS);
+  /* Unlike a flattened END, this STAGE introduces one shape axis per
+   * range. Reject the existing rank limit rather than truncating it. */
+  if (n_rngs < 0) return NULL;
+  PolyUOp *end_rngs[POLY_MAX_DIMS];
+  for (int d = 0; d < n_rngs; d++) {
+    PolyUOp *r = orig_rngs[d];
+    if (poly_range_axis_type(r->arg) == POLY_AXIS_DEVICE) {
+      end_rngs[d] = r;
+      continue;
+    }
+    /* Python's itertools.count is unbounded; C range IDs are int64.
+     * Do not wrap the counter or publish a partial replacement. */
+    if (*next_range == INT64_MAX) return NULL;
+    end_rngs[d] = poly_uop_tagged_arg(
+        ctx, r->op, r->dtype, r->src, r->n_src, poly_arg_range((*next_range)++, POLY_AXIS_WEAK),
+        r->tag, r->tag_arg
+    );
+    if (!end_rngs[d]) return NULL;
+  }
+
+  PolyUOp *sub_s = s;
+  if (n_rngs && poly_uop_substitute_many(ctx, &s, 1, orig_rngs, end_rngs, n_rngs, &sub_s) != 0)
+    return NULL;
+  PolyUOp *buf_src[POLY_MAX_DIMS + 1];
+  buf_src[0] = sub_s;
+  for (int d = 0; d < n_rngs; d++)
+    buf_src[1 + d] = end_rngs[d];
+  PolyUOp *bufferize = poly_uop(
+      ctx, POLY_OP_STAGE, s->dtype, buf_src, n_rngs + 1,
+      poly_bufferize_opts_for_device(device, POLY_ADDR_GLOBAL, false)
+  );
+  if (!bufferize) return NULL;
+
+  PolyUOp *idx_src[POLY_MAX_DIMS + 1];
+  idx_src[0] = bufferize;
+  for (int d = 0; d < n_rngs; d++)
+    idx_src[1 + d] = orig_rngs[d];
+  PolyUOp *result = poly_uop(ctx, POLY_OP_INDEX, s->dtype, idx_src, n_rngs + 1, poly_arg_none());
+  return result;
+}
+
+static bool store_hazard_gate(PolyUOp *u) {
+  return u->op != POLY_OP_STAGE && u->op != POLY_OP_AFTER;
+}
+
+/* Return -1 on failure: an incomplete alias check must not admit a store. */
+static int indexed_store_hazard(PolyCtx *ctx, PolyUOp *dst, PolyUOp *src) {
+  PolyUOp *buffer = poly_uop_buf_uop(ctx, dst);
+  PolyUOp *index = poly_uop_get_idx(ctx, dst->src[1]);
+  if (!buffer || !index) return -1;
+  int n = 0;
+  PolyUOp **topo = poly_uop_toposort_ex_alloc(ctx, src, &n, store_hazard_gate, false);
+  if (!topo) return -1;
+  int hazard = 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_INDEX || u->n_src < 2 || poly_uop_buf_uop(ctx, u) != buffer) continue;
+    PolyUOp *read_index = poly_uop_get_idx(ctx, u->src[1]);
+    if (!read_index || read_index != index) {
+      hazard = read_index ? 1 : -1;
+      break;
+    }
+  }
+  poly_uop_toposort_free(topo);
+  return hazard;
+}
+
 /* Current Tinygrad schedule/rangeify.py:pm_limit_bufs. */
 static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
@@ -2397,14 +2417,15 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
 
   for (int t = 0; t < n_topo; t++) {
     PolyUOp *u = topo[t];
+    const int n_src = u->n_src;
 
     bool src_changed = false;
     PolyUOp *ns_buf[POLY_MAX_DIMS + 4];
-    PolyUOp **ns = ((uint32_t)u->n_src > (uint32_t)(sizeof ns_buf / sizeof *ns_buf))
-                       ? limit_bufs_realloc(NULL, u->n_src * sizeof(PolyUOp *))
+    PolyUOp **ns = ((uint32_t)n_src > (uint32_t)(sizeof ns_buf / sizeof *ns_buf))
+                       ? limit_bufs_realloc(NULL, n_src * sizeof(PolyUOp *))
                        : ns_buf;
     if (!ns) goto fail;
-    for (int i = 0; i < u->n_src; i++) {
+    for (int i = 0; i < n_src; i++) {
       PolyUOp *m = rmap_get(rmap, u->src[i]);
       ns[i] = m ? m : u->src[i];
       if (ns[i] != u->src[i]) src_changed = true;
@@ -2429,53 +2450,13 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
 
       if (buf_count > max_bufs - 1) {
         bool any_wrapped = false;
-        for (int i = 0; i < u->n_src; i++) {
+        for (int i = 0; i < n_src; i++) {
           PolyUOp *s = ns[i];
           if (!poly_opset_has(POLY_GROUP_ELEMENTWISE, s->op)) continue;
           PolyUOp *source_device = poly_bufferize_device_hint(ctx, s, device_memo);
           if (!source_device) continue;
 
-          PolyUOp *orig_rngs[POLY_MAX_DIMS];
-          int n_rngs = poly_uop_ranges(ctx, s, orig_rngs, POLY_MAX_DIMS);
-          /* Unlike a flattened END, this STAGE introduces one shape axis per
-           * range. Reject the existing rank limit rather than truncating it. */
-          if (n_rngs < 0) goto fail_node;
-          PolyUOp *end_rngs[POLY_MAX_DIMS];
-          for (int d = 0; d < n_rngs; d++) {
-            PolyUOp *r = orig_rngs[d];
-            if (poly_range_axis_type(r->arg) == POLY_AXIS_DEVICE) {
-              end_rngs[d] = r;
-              continue;
-            }
-            /* Python's itertools.count is unbounded; C range IDs are int64.
-             * Do not wrap the counter or publish a partial replacement. */
-            if (next_range == INT64_MAX) goto fail_node;
-            end_rngs[d] = poly_uop_tagged_arg(
-                ctx, r->op, r->dtype, r->src, r->n_src,
-                poly_arg_range(next_range++, POLY_AXIS_WEAK), r->tag, r->tag_arg
-            );
-            if (!end_rngs[d]) goto fail_node;
-          }
-
-          PolyUOp *sub_s = s;
-          if (n_rngs &&
-              poly_uop_substitute_many(ctx, &s, 1, orig_rngs, end_rngs, n_rngs, &sub_s) != 0)
-            goto fail_node;
-          PolyUOp *buf_src[POLY_MAX_DIMS + 1];
-          buf_src[0] = sub_s;
-          for (int d = 0; d < n_rngs; d++)
-            buf_src[1 + d] = end_rngs[d];
-          PolyUOp *bufferize = poly_uop(
-              ctx, POLY_OP_STAGE, s->dtype, buf_src, n_rngs + 1,
-              poly_bufferize_opts_for_device(source_device, POLY_ADDR_GLOBAL, false)
-          );
-          if (!bufferize) goto fail_node;
-
-          PolyUOp *idx_src[POLY_MAX_DIMS + 1];
-          idx_src[0] = bufferize;
-          for (int d = 0; d < n_rngs; d++)
-            idx_src[1 + d] = orig_rngs[d];
-          ns[i] = poly_uop(ctx, POLY_OP_INDEX, s->dtype, idx_src, n_rngs + 1, poly_arg_none());
+          ns[i] = limit_bufs_stage(ctx, s, source_device, &next_range);
           if (!ns[i]) goto fail_node;
           any_wrapped = true;
         }
@@ -2484,6 +2465,19 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyUOp *sink) {
           result = poly_uop_replace_src(ctx, u, ns);
           if (!result) goto fail_node;
         }
+      }
+    }
+
+    if (u->op == POLY_OP_STORE && n_src == 2 && ns[0]->op == POLY_OP_INDEX && ns[0]->n_src >= 2) {
+      int hazard = indexed_store_hazard(ctx, ns[0], ns[1]);
+      if (hazard < 0) goto fail_node;
+      if (hazard) {
+        PolyUOp *device = poly_bufferize_device_hint(ctx, ns[1], device_memo);
+        if (!device) goto fail_node;
+        ns[1] = limit_bufs_stage(ctx, ns[1], device, &next_range);
+        if (!ns[1]) goto fail_node;
+        result = poly_uop_replace_src(ctx, u, ns);
+        if (!result) goto fail_node;
       }
     }
 

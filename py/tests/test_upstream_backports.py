@@ -6,6 +6,24 @@ from polygrad import Runtime, Tensor, Variable
 from polygrad.dtype import dtypes
 
 
+@pytest.mark.parametrize('case', ['reverse', 'row', 'roll'])
+def test_indexed_self_assignment_hazards(case):
+    # f0abe5fa7 checks actual read/write indices after rangeification.
+    if case == 'reverse':
+        x = Tensor([0, 1, 2]).realize()
+        x[::-1] = x
+        expected = [2, 1, 0]
+    elif case == 'row':
+        x = Tensor([[0, 1], [2, 3], [4, 5]]).realize()
+        x += x[0]
+        expected = [[0, 2], [2, 4], [4, 6]]
+    else:
+        x = Tensor([[0, 1], [2, 3]]).realize()
+        x.assign(x.roll(1, 0))
+        expected = [[2, 3], [0, 1]]
+    np.testing.assert_array_equal(x.numpy(), expected)
+
+
 @pytest.mark.parametrize('name,program', [
     ('elu', lambda x: (x > 0).where(x, 1.0 * ((x - x.relu()).exp() - 1))),
     ('celu', lambda x: 1.0 * (x / 1.0).elu()),

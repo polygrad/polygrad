@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-10-26",
-  "basis": "Fresh Clang 14 scan of 101 translation units: the same 91 reviewed diagnostics. All moved diagnostics retain byte-identical 61-line source neighborhoods and existing invariants; the immutable UOp constructor is unchanged. No new warnings. Evidence: temp/upstream-backports-20261026/analyzer and refresh-analyzer-review.py.",
+  "basis": "Fresh Clang 14 scan of 101 translation units: 90 existing reviewed diagnostics. Capturing the immutable source count in poly_limit_bufs removes one prior uninitialized-source false positive. All remaining diagnostic statements and ownership invariants are unchanged; no new diagnostics. Evidence: temp/upstream-followups-20261026/analyzer, analyzer-rangeify-current.log, analyzer-rangeify-count.log and refresh-analyzer-review.py.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -241,7 +241,7 @@
       "src/placer.c": "e46b0630d799b2cc8045d8df258035237df090f411145739e3a3341d37c09f2b",
       "src/placer.h": "0373c9d5ab0d05e9ee8468f725e467773e421e6a3b9deea4d0a9070691bf72bf",
       "src/polygrad.h": "54e6533ac6a4a3e0ebf6c82bac2968d419ffaf7b18c8d3948fa223028cd0d864",
-      "src/renderer/cstyle.c": "7f431faeb528727a1d36a6dbbd7698d00fd85ae00e345b1e4b7c53e64c4b83bb",
+      "src/renderer/cstyle.c": "30747171418ac68ca83b1d863ef5b4a4b392a4460c32ba312d2f137ccb4c8a36",
       "src/renderer/cstyle.h": "4fee3a31354594c99b6873ec14a000bad3fdf69feac46cae84718588531dbb89",
       "src/renderer/cuda.c": "abf19557abe53252ce3002deb41eecd2ae9f434697979c2f4c931e8c9651b6d1",
       "src/renderer/isa/x86.c": "2c73c03e674e3d4860882e85f1675cfa54a0553354a66b02698a1ad9aa37e714",
@@ -268,7 +268,7 @@
       "src/schedule/memory.h": "fd9779aa0caafa33b1d59e1dbd492d9568e6f9a8ff74fe99a9af768ce314e66f",
       "src/schedule/multi.c": "4d60221cf622bb6df8c9c0c3851b646e2c546032183c55b7581aabc24c5f9680",
       "src/schedule/multi.h": "a903365a97e9ef424ca693743ff7f75af75744a3bd6ddf30feafc0710f419990",
-      "src/schedule/rangeify.c": "f4b9630468cc383277d77d4c1afca20e99fdbb487eab50f41a4b9f743e39d042",
+      "src/schedule/rangeify.c": "d1320b106f16839e9ed94db4dffa10016b0c25440b19316bff9c62c8671d5e44",
       "src/schedule/rangeify.h": "cd3e948d9f0c12b5c1704cd5f2c34c5dae7724def3195f5fd6d789b4a3b2ccf6",
       "src/schedule/schedule.c": "a62bc253b1d75111875554ba86a2bd7e9221d3c6b65472f6b399ed8b405f384d",
       "src/schedule/schedule.h": "6ceae7ada76713f3c9344e8b8a95b16d23aa703b8fc3a8439d1f886aa6033c91",
@@ -862,7 +862,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1363,
+      "line": 1383,
       "column": 26,
       "message": "Access to field 'dtype' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -871,7 +871,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1497,
+      "line": 1517,
       "column": 28,
       "message": "Access to field 'op' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -961,7 +961,7 @@
     },
     {
       "path": "src/schedule/rangeify.c",
-      "line": 1166,
+      "line": 1124,
       "column": 24,
       "message": "The left operand of '%' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -970,19 +970,10 @@
     },
     {
       "path": "src/schedule/rangeify.c",
-      "line": 1278,
+      "line": 1236,
       "column": 23,
       "message": "Access to field 'n_src' results in a dereference of a null pointer (loaded from variable 'u')",
       "checker": "core.NullDereference",
-      "disposition": "false_positive",
-      "rationale": "Initialized static dimensions, valid topo nodes and identical source initialization/consumption bounds."
-    },
-    {
-      "path": "src/schedule/rangeify.c",
-      "line": 2433,
-      "column": 11,
-      "message": "Assigned value is garbage or undefined",
-      "checker": "core.uninitialized.Assign",
       "disposition": "false_positive",
       "rationale": "Initialized static dimensions, valid topo nodes and identical source initialization/consumption bounds."
     },

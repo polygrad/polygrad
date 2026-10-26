@@ -25,6 +25,55 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-042",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "fbdf00b6c8b78814d2923d33d79a8253f6955f7c"
+      ],
+      "status": "approved",
+      "stages": [
+        "codegen",
+        "renderer-source"
+      ],
+      "area": "Upstream CPU vector memory alignment",
+      "tinygrad": "The v0.14 Clang renderer assumes vector-width alignment, but offset buffer views promise only scalar alignment. A vector copy can fault.",
+      "polygrad": "CPU C vector memory accesses use scalar-aligned typedefs. Register vector types, arithmetic and all other renderers stay unchanged.",
+      "rationale": "Backport the CPU memory alignment contract. Clang ignores aligned on an inline cast type, so the emitted pointer type must name an aligned typedef.",
+      "approval": "User 2026-10-26 authorized the bounded CPU alignment and post-rangeify store-hazard followups after reproduction.",
+      "evidence": [
+        "src/renderer/cstyle.c:render_memory_ctype",
+        "test/test_codegen.c:vector_memory_scalar_alignment",
+        "temp/upstream-followups-20261026/report.txt"
+      ],
+      "close_when": "The pin includes fbdf00b6c8b78814d2923d33d79a8253f6955f7c and the scoped graph/render and runtime regressions pass. No allowance for unrelated scheduling or arithmetic changes."
+    },
+    {
+      "id": "PG-DIV-043",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "f0abe5fa732e6e6afbad199692c0eb93ed6e8ce2"
+      ],
+      "status": "approved",
+      "stages": [
+        "rangeify",
+        "mutation"
+      ],
+      "area": "Upstream indexed self-assignment hazards",
+      "tinygrad": "The v0.14 view-operation hazard check misses reversed writes, broadcast self-add and rolled self-assignment.",
+      "polygrad": "Check buffer identity and ungated scalar indices after rangeification. Stage the RHS when it reads the destination buffer through a different index, stopping at STAGE and AFTER. Reuse the argument-limit staging helper and remove the earlier view heuristic.",
+      "rationale": "Match upstream hazard detection without a new scheduler, eager-copy policy or mutation owner. Same-index reads and independent buffers remain unstaged.",
+      "approval": "User 2026-10-26 authorized the bounded CPU alignment and post-rangeify store-hazard followups after reproduction.",
+      "evidence": [
+        "src/schedule/rangeify.c:indexed_store_hazard",
+        "src/schedule/rangeify.c:limit_bufs_stage",
+        "test/test_rangeify.c:indexed_store_hazard_stages_only_aliasing_reads",
+        "py/tests/test_upstream_backports.py:test_indexed_self_assignment_hazards",
+        "js/test/test_tensor.js",
+        "temp/upstream-followups-20261026/report.txt"
+      ],
+      "close_when": "The pin includes f0abe5fa732e6e6afbad199692c0eb93ed6e8ce2 and the scoped graph/render and runtime regressions pass. No allowance for unrelated scheduling or arithmetic changes."
+    },
+    {
       "id": "PG-DIV-040",
       "kind": "upstream_backport",
       "upstream_commits": [

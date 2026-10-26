@@ -115,6 +115,18 @@ async function runTensorTests(pg, createRuntime) {
     }
   }))
 
+  await test('upstream backports: indexed self-assignment hazards', isolatedRuntime(async rt => {
+    const x = await new rt.Tensor([0, 1, 2], {dtype: 'int32'}).realize()
+    x.setitem({step: -1}, x)
+    assertClose(await x.toArray(), [2, 1, 0], 0)
+    const y = await new rt.Tensor([[0, 1], [2, 3], [4, 5]], {dtype: 'int32'}).realize()
+    y.assign(y.add(y.getitem(0)))
+    assertClose(await y.toArray(), [0, 2, 2, 4, 4, 6], 0)
+    const z = await new rt.Tensor([[0, 1], [2, 3]], {dtype: 'int32'}).realize()
+    z.assign(z.roll(1, 0))
+    assertClose(await z.toArray(), [2, 3, 0, 1], 0)
+  }))
+
   await test('upstream backports: partial-store gradients', isolatedRuntime(async rt => {
     const x = new rt.Tensor([1, 2, 3, 4], {dtype: 'float32'})
     const y = x.clone(), value = new rt.Tensor([7, 8], {dtype: 'float32'})
