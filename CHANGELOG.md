@@ -2,6 +2,16 @@
 
 ## 0.7.2 (Unreleased)
 
+- Backport fixes for narrow unsigned arithmetic, singleton strided assignment,
+  lazy-view writes and partial-store gradients. Correct reversed, broadcast and
+  rolled self-assignments; some overlapping updates now require an extra copy.
+- Use scalar alignment for CPU vector loads and stores to support offset views.
+- Emit more compact WebGPU shaders following pinned tinygrad, with bounded
+  expression depth for browser compilers. Fix unsigned constants, symbolic
+  bitcasts and shape-dependent operation estimates.
+- Reject GPU schedules with duplicate shared-memory writers, including unsafe
+  candidates encountered during BEAM search.
+
 - Fix large-input `atan`, near-zero `log1p`/`expm1`, and broadcast Boolean
   reductions. Add `log_erfcx` and `ndtri_exp` with gradients for tail computations.
 - Marshal borrowed C strings between Wasm extension and core heaps.
