@@ -5824,7 +5824,7 @@ TEST(codegen, renderer_float_final_matchers_match_current_topology) {
   ASSERT_NOT_NULL(ctx);
 
   /* Tinygrad 2026-08-22/a9069c177a9d renderer/cstyle.py:276-281,440-444,
-   * 522-529: Clang has 10 rows, CUDA 4 FP8 rows, and HIP 7 class rows. */
+   * 522-529: the float rows remain unchanged; upstream 51f657643 adds one narrow-uint row. */
 
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(2.0));
@@ -5956,9 +5956,9 @@ TEST(codegen, renderer_float_final_matchers_match_current_topology) {
   ASSERT_INT_EQ(poly_uop_max_numel(ctx, fp8_wmma_rewritten->src[0]), 1);
   ASSERT_TRUE(fp8_wmma_rewritten->src[2] == fp8_acc);
 
-  ASSERT_INT_EQ(poly_pm_rule_count(poly_clang_renderer_extra_matcher()), 10);
-  ASSERT_INT_EQ(poly_pm_rule_count(poly_cuda_renderer_extra_matcher()), 4);
-  ASSERT_INT_EQ(poly_pm_rule_count(poly_hip_renderer_extra_matcher()), 7);
+  ASSERT_INT_EQ(poly_pm_rule_count(poly_clang_renderer_extra_matcher()), 11);
+  ASSERT_INT_EQ(poly_pm_rule_count(poly_cuda_renderer_extra_matcher()), 5);
+  ASSERT_INT_EQ(poly_pm_rule_count(poly_hip_renderer_extra_matcher()), 8);
   ASSERT_INT_EQ(poly_pm_rule_count(poly_pm_manual_bf16_cast()), 2);
 
   poly_ctx_destroy(ctx);
@@ -7824,6 +7824,59 @@ TEST(codegen, render_wgsl_where) {
   free(src);
   free(lin);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, wgsl_unsigned_negative_constant_wraps_before_rendering) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *p = program_param(ctx, POLY_UINT32, 1, 0);
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, POLY_UINT32, p, poly_uop_const_int(ctx, 0), poly_arg_none());
+  PolyUOp *constant =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(-INT64_C(2147483649)));
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, constant, poly_arg_none());
+  PolyUOp *ops[] = {p, index->src[1], index, constant, store};
+  char *source = poly_render_wgsl(ctx, ops, 5, "uint_constant");
+  bool correct = source && strstr(source, "2147483647u") && !strstr(source, "-2147483649");
+  free(source);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(correct);
+  PASS();
+}
+
+TEST(codegen, renderer_narrow_unsigned_arithmetic_is_explicit) {
+  const PolyDType types[] = {POLY_UINT8, POLY_UINT16};
+  const PolyOps ops[] = {POLY_OP_ADD, POLY_OP_SUB, POLY_OP_MUL,
+                         POLY_OP_NEG, POLY_OP_SHL, POLY_OP_MULACC};
+  PolyPatternMatcher *matchers[] = {
+      poly_clang_renderer_extra_matcher(), poly_cuda_renderer_extra_matcher(),
+      poly_hip_renderer_extra_matcher(), poly_pm_wgsl_extra()};
+  bool correct = true;
+  for (int m = 0; m < 4; m++)
+    for (int t = 0; t < 2; t++)
+      for (int i = 0; i < 6; i++) {
+        PolyCtx *ctx = poly_ctx_new();
+        PolyUOp *src[3];
+        for (int j = 0; j < 3; j++)
+          src[j] = poly_uop1(
+              ctx, POLY_OP_LOAD, types[t],
+              poly_uop2(
+                  ctx, POLY_OP_INDEX, types[t], program_param(ctx, types[t], 1, j),
+                  poly_uop_const_int(ctx, 0), poly_arg_none()
+              ),
+              poly_arg_none()
+          );
+        int n = ops[i] == POLY_OP_NEG ? 1 : ops[i] == POLY_OP_MULACC ? 3 : 2;
+        PolyUOp *u = poly_uop(ctx, ops[i], types[t], src, n, poly_arg_none());
+        PolyUOp *r = poly_graph_rewrite(ctx, u, matchers[m]);
+        correct &= r && r->op == POLY_OP_CAST && poly_dtype_eq(r->dtype, types[t]) &&
+                   r->src[0]->op == ops[i] && poly_dtype_eq(r->src[0]->dtype, POLY_UINT32);
+        if (r && r->op == POLY_OP_CAST)
+          for (int j = 0; j < n; j++)
+            correct &= poly_dtype_eq(r->src[0]->src[j]->dtype, POLY_UINT32);
+        poly_ctx_destroy(ctx);
+      }
+  ASSERT_TRUE(correct);
   PASS();
 }
 

@@ -1757,8 +1757,12 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
   ASSERT_PTR_EQ(outs[1], param);
   ASSERT_EQ(poly_tensor_uop_logical(momentum)->op, POLY_OP_AFTER);
   ASSERT_EQ(poly_tensor_uop_physical(momentum)->op, POLY_OP_AFTER);
-  ASSERT_EQ(poly_tensor_uop_logical(param)->op, POLY_OP_AFTER);
-  ASSERT_EQ(poly_tensor_uop_physical(param)->op, POLY_OP_AFTER);
+  /* The parameter views a held pending initializer. The upstream lazy-view
+   * fix gives that initializer storage and preserves the parameter reshape. */
+  ASSERT_EQ(poly_tensor_uop_logical(param)->op, POLY_OP_RESHAPE);
+  ASSERT_EQ(poly_tensor_uop_physical(param)->op, POLY_OP_RESHAPE);
+  ASSERT_EQ(poly_tensor_uop_logical(param)->src[0]->op, POLY_OP_AFTER);
+  ASSERT_EQ(poly_tensor_uop_physical(param)->src[0]->op, POLY_OP_AFTER);
   ASSERT_PTR_NEQ(poly_tensor_uop_logical(momentum), poly_tensor_uop_physical(momentum));
   ASSERT_PTR_NEQ(poly_tensor_uop_logical(param), poly_tensor_uop_physical(param));
   ASSERT_TRUE(
@@ -1781,7 +1785,8 @@ TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) 
   ASSERT_NOT_NULL(linear);
   ASSERT_NOT_NULL(resolved[0]);
   ASSERT_NOT_NULL(resolved[1]);
-  ASSERT_INT_EQ(linear->n_src, 5);
+  /* One extra initialization gives the held parameter view independent storage. */
+  ASSERT_INT_EQ(linear->n_src, 6);
 
   const PolyUOp *m_buf = poly_uop_get_buffer_identity(resolved[0]);
   ASSERT_NOT_NULL(m_buf);

@@ -110,6 +110,8 @@ def test_half_max_gradient_many_ties():
     ((6, 6), (slice(1, 5, 2), slice(0, 5, 3)), 1.),
     ((6, 6), (slice(5, 1, -2), slice(5, 0, -3)), 1.),
     ((6, 6), (slice(None), slice(0, 6, 2)), 1.),
+    ((3, 3), (slice(0, 2, 2), slice(0, 3, 3)), 1.),
+    ((4,), slice(2, 0, -4), 1.),
 ])
 @pytest.mark.parametrize('realize', [False, True])
 def test_strided_assignment_updates_base(realize, shape, index, value):
@@ -234,3 +236,79 @@ def test_selu_default_constants_match_reference():
     x = Tensor([-1., 1.], dtype=dtypes.float64)
     alpha, gamma = 1.6732632423543772, 1.0507009873554805
     np.testing.assert_allclose(x.selu().numpy(), [gamma * alpha * np.expm1(-1), gamma], rtol=1e-12)
+
+
+@pytest.mark.parametrize('dtype', [dtypes.uint8, dtypes.uint16])
+@pytest.mark.parametrize('count', [1, 4, 257])
+def test_narrow_unsigned_intermediates_wrap(dtype, count):
+    # Upstream 51f657643: a later shift/comparison must see the narrow result.
+    mask = dtype.max
+    values = np.resize(np.array([mask, 0, 1, 3, mask // 2, mask - 1], dtype=np.uint64), count)
+    x = Tensor(values.astype(np.uint8 if dtype == dtypes.uint8 else np.uint16)).realize()
+    cases = [((x + 1) >> 4, ((values + 1) & mask) >> 4),
+             ((x - 4) >> 4, ((values - 4) & mask) >> 4),
+             ((x * 2) >> 4, ((values * 2) & mask) >> 4),
+             ((-x) >> 4, ((-values) & mask) >> 4),
+             ((x << 4) >> 4, ((values << 4) & mask) >> 4),
+             ((x * x) >> 4, ((values * values) & mask) >> 4),
+             ((x + 1) < 1, ((values + 1) & mask) < 1)]
+    for actual, expected in cases:
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+@pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
+def test_lazy_sum_between_view_writes(logical):
+    with Runtime(logical=logical) as rt:
+        t = rt.Tensor.zeros(6).contiguous().realize()
+        s0 = t.sum()
+        old_root = s0.uop.raw
+        t[:3].assign(1.)
+        assert s0.uop.raw == old_root
+        s1 = t.sum()
+        t[3:].assign(2.)
+        s2 = t.sum()
+        assert [s0.item(), s1.item(), s2.item()] == [0., 3., 9.]
+
+
+@pytest.mark.parametrize('kind', ['alu', 'reduce', 'cast', 'contiguous', 'detach'])
+def test_assign_into_unrealized_view(kind):
+    a = Tensor([[1, 2], [3, 4]]).realize()
+    if kind == 'alu': c = a + 1
+    elif kind == 'reduce': c = a.sum(axis=0).reshape(1, 2)
+    elif kind == 'cast': c = a.float()
+    elif kind == 'contiguous': c = a.T.contiguous()
+    else: c = (a + 1).detach()
+    expected = {'alu': [[2, 99], [4, 99]], 'reduce': [[4, 99]],
+                'cast': [[1, 99], [3, 99]], 'contiguous': [[1, 99], [2, 99]],
+                'detach': [[2, 99], [4, 99]]}[kind]
+    c[:, 1:2].assign(Tensor.full((len(expected), 1), 99, dtype=c.dtype))
+    np.testing.assert_array_equal(c.numpy(), expected)
+    np.testing.assert_array_equal(a.numpy(), [[1, 2], [3, 4]])
+
+
+def test_assign_reading_pending_lazy_write():
+    a, b = Tensor([1., 1.]).realize() + 0, Tensor([2., 2.]).realize() + 0
+    b[:1].assign(b[:1] + a[:1] * 0 + 1)
+    a[:1].assign(a[:1] - b[:1])
+    assert a.tolist() == [-2., 1.]
+    assert b.tolist() == [3., 2.]
+
+
+@pytest.mark.parametrize('mode,expected', [
+    ('slice', [[0, 0, 0], [1, 1, 1]]),
+    ('reshape', [[1, 1, 0], [0, 0, 0]]),
+    ('permute', [[1, 0, 0], [1, 0, 0]]),
+    ('flip', [[1, 1, 1], [0, 0, 0]]),
+])
+def test_partial_store_gradients(mode, expected):
+    # Upstream f07260ea1: only the written region loses its original gradient.
+    x = Tensor([[1., 2., 3.], [4., 5., 6.]])
+    y = x.clone()
+    view = {'slice': lambda t: t[:1], 'reshape': lambda t: t.reshape(3, 2)[1:],
+            'permute': lambda t: t.permute(1, 0)[1:],
+            'flip': lambda t: t.flip((0, 1))[:1]}[mode](y)
+    value = Tensor.full(view.shape, 7.)
+    view.assign(value)
+    gx, gv = y.sum().gradient(x, value)
+    np.testing.assert_array_equal(gx.numpy(), expected)
+    np.testing.assert_array_equal(gv.numpy(), np.ones(value.shape))

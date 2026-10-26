@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-10-26",
-  "basis": "Fresh Clang 14 scan of all 101 translation units: 91 diagnostics. Three schedule diagnostics moved within byte-identical helpers. Two WGSL diagnostics share a trace requiring a NULL CAST operand, which the UOp constructor rejects before interning. All other diagnostics and rationales are unchanged. Evidence: temp/wgsl-parity-completion-20261026/analyzer-before-review, wgsl-analyzer-traces.txt and complete-analyzer-review.py.",
+  "basis": "Fresh Clang 14 scan of 101 translation units: the same 91 reviewed diagnostics. All moved diagnostics retain byte-identical 61-line source neighborhoods and existing invariants; the immutable UOp constructor is unchanged. No new warnings. Evidence: temp/upstream-backports-20261026/analyzer and refresh-analyzer-review.py.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -191,7 +191,7 @@
       "src/mixin/creation.h": "299cd8b3afda624f0f2ca4903c9ab2dce44f4fccc82492f9a726b23241b10663",
       "src/mixin/elementwise.c": "e9f524a7380527f118ea934abb22653d5cbfd18a3f3e163614fede0d44313229",
       "src/mixin/elementwise.h": "556b7e7c14345e9830279913f93d144792be8b3809255c7060fbbac4255ba28e",
-      "src/mixin/gradient.c": "48bb4ded1f64e95d6bbf1fac2de4d335d61f4c2e62f328a542293626d212f488",
+      "src/mixin/gradient.c": "5bd7e09243649d0a1ded962af91bcaefa30c27d33d0c95dae3fc96bad0128efb",
       "src/mixin/gradient.h": "c1ff565e972de34db070db5da801c6504619d7892d1c3362ef6ad1af527839b4",
       "src/mixin/movement.c": "09a469d27db9a02c3bae19d65d24e8ff2edb76c83a8ac7add8b6ac1b0958f289",
       "src/mixin/movement.h": "d7a7fa3901989530abb7750d9f6c78060679b0103383423ee29106846a54b4c8",
@@ -241,14 +241,14 @@
       "src/placer.c": "e46b0630d799b2cc8045d8df258035237df090f411145739e3a3341d37c09f2b",
       "src/placer.h": "0373c9d5ab0d05e9ee8468f725e467773e421e6a3b9deea4d0a9070691bf72bf",
       "src/polygrad.h": "54e6533ac6a4a3e0ebf6c82bac2968d419ffaf7b18c8d3948fa223028cd0d864",
-      "src/renderer/cstyle.c": "4de9bc69d22e84e3441f614ebf7f19bac07d5ebfda0f3d722d9807e24ddaa7ab",
-      "src/renderer/cstyle.h": "c762df598a9178f3cdbe0c93cad084e05c3a4bbac4861969910cbdb4267a0ec2",
+      "src/renderer/cstyle.c": "7f431faeb528727a1d36a6dbbd7698d00fd85ae00e345b1e4b7c53e64c4b83bb",
+      "src/renderer/cstyle.h": "4fee3a31354594c99b6873ec14a000bad3fdf69feac46cae84718588531dbb89",
       "src/renderer/cuda.c": "abf19557abe53252ce3002deb41eecd2ae9f434697979c2f4c931e8c9651b6d1",
       "src/renderer/isa/x86.c": "2c73c03e674e3d4860882e85f1675cfa54a0553354a66b02698a1ad9aa37e714",
       "src/renderer/isa/x86.h": "4c7466b0e5a4e6ffeb7541235978f2e636236fd4fc47dc28d91055cad318f969",
       "src/renderer/renderer.h": "f6256e571860037212dc145f32f36a2340e8e57f7b8cbedde78d446988e27386",
       "src/renderer/wasm.c": "1e9c153bac2490cd2b65c32dec503a6b1618509103d03fd1f43f5f148074a696",
-      "src/renderer/wgsl.c": "ee2e79be231d23b07f6416840044bc2f437b0d832e5aab47bc13604ef4f51663",
+      "src/renderer/wgsl.c": "a5c9a538774083e1b8fc1e5cc655ccd656c6d6795907ee1815f4528618a4c777",
       "src/runtime/graph/cuda.h": "86c4c21518996e21505c2e42c6e1e547a03c73958e6b4ec8298a4c6123b54020",
       "src/runtime/support/memory.c": "640fb8043a74a50bf4bbf0f815aa38779d655f8b0158f0bd17bf90cd5fbf79ba",
       "src/runtime/support/memory.h": "e38f9c0dfe8102ecf8e8e91e65b6cce7e9a713f2034b122e27b53816c6de3d9f",
@@ -274,7 +274,7 @@
       "src/schedule/schedule.h": "6ceae7ada76713f3c9344e8b8a95b16d23aa703b8fc3a8439d1f886aa6033c91",
       "src/selftest.c": "960a68364b81f58911325c2321368b428c5d71daa472f3815f7cfdd1958d0121",
       "src/shape.c": "277d687eb5f52df1f81abb5a76abbd132e2d3ad004573164c00bdfa98b9efccd",
-      "src/tensor.c": "05c33a1d083ac9d3244c36ae92d1b341614d6d18de44758496a2a1cbde75297f",
+      "src/tensor.c": "3ccd888b652ab7af5093fb2951ed99c42fe7dc056a5977a948681ad25b4ca6ba",
       "src/tensor.h": "6cd8a1b1a6610bd029364e84251ffdbe3968ff63127e4183f941c47bd338178d",
       "src/tokenizer.c": "2b18165506d890db7b165fd8dcfa886b18b15392ea18fd705149af6e07284a3e",
       "src/tokenizer.h": "7ae11464cc9bc94b3b3c0387db7b376cfbaaa432f2cda475c53627211beee408",
@@ -286,7 +286,7 @@
       "src/uop/ops.h": "c6652bcd77c0b03b55d3b2f3d1af8391b229d1d41e838fcb8996352dc7c67752",
       "src/uop/spec.c": "f66ac640bf97bfd35fc893aa39337f6324b860fc362600cea34844df74f41af5",
       "src/uop/spec.h": "4e0dca455ae088d88eee951c4bc847f85ca1f690d9cd3ca6fbe072e30300f5bd",
-      "src/uop/symbolic.c": "7ba740ab9db9e29f3e0b905f52f06bbd81b5ddf9ff5910abd8621e5961df7ec8",
+      "src/uop/symbolic.c": "80aa19a89a513cb2c9131206eeef9687b61f90f3f86ad66febcc933bfb3793a9",
       "src/uop/symbolic.h": "4892d316ec0618044fd341c86143013cccfb988dfb33c32f4986253d82f90b33",
       "src/uop/upat.c": "e4fc32beeb355d7e5faa522a8e488c8dbf19074dc0305936f81af5f30d5ffd70",
       "src/uop/upat.h": "3d85feb7c49d6894a59e4afff12248e765e01f45e35cf567ccfb3f7f0682d2ba",
@@ -862,7 +862,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1331,
+      "line": 1363,
       "column": 26,
       "message": "Access to field 'dtype' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -871,7 +871,7 @@
     },
     {
       "path": "src/renderer/cstyle.c",
-      "line": 1465,
+      "line": 1497,
       "column": 28,
       "message": "Access to field 'op' results in a dereference of a null pointer",
       "checker": "core.NullDereference",
@@ -1006,7 +1006,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 9488,
+      "line": 9547,
       "column": 7,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1015,7 +1015,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 9580,
+      "line": 9639,
       "column": 16,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1024,7 +1024,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 9958,
+      "line": 10017,
       "column": 16,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -1033,7 +1033,7 @@
     },
     {
       "path": "src/tensor.c",
-      "line": 10190,
+      "line": 10249,
       "column": 22,
       "message": "The left operand of '>' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -1042,7 +1042,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 4677,
+      "line": 4695,
       "column": 38,
       "message": "Array access (from variable 'b_parts') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1051,7 +1051,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 4681,
+      "line": 4699,
       "column": 24,
       "message": "Array access (from variable 'b_parts') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1060,7 +1060,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 5525,
+      "line": 5543,
       "column": 19,
       "message": "Array access (from variable 'src') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1069,7 +1069,7 @@
     },
     {
       "path": "src/uop/symbolic.c",
-      "line": 5527,
+      "line": 5545,
       "column": 17,
       "message": "Array access (from variable 'src') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1114,7 +1114,7 @@
     },
     {
       "path": "src/renderer/wgsl.c",
-      "line": 896,
+      "line": 890,
       "column": 26,
       "message": "Access to field 'dtype' results in a dereference of a null pointer",
       "checker": "core.NullDereference",

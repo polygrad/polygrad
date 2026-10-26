@@ -2872,7 +2872,7 @@ TEST(realize, tensor_assign_realized_contiguous_cache_view_retargets_both_roots)
   ASSERT_PTR_EQ(view->uop_logical->src[0], cache->uop_logical);
   ASSERT_INT_EQ(view->uop_physical->op, POLY_OP_SHRINK);
   ASSERT_PTR_EQ(view->uop_physical->src[0], cache->uop_physical);
-  ASSERT_INT_EQ(count_root_ops(ctx, cache->uop_physical, POLY_OP_AFTER), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, cache->uop_physical, POLY_OP_AFTER), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, cache->uop_physical, POLY_OP_STORE), 1);
 
   PolyTensor *view_out = NULL;

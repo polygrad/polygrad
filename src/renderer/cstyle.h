@@ -11,6 +11,7 @@ PolyPatternMatcher *poly_clang_renderer_extra_matcher(void);
 PolyPatternMatcher *poly_cuda_renderer_extra_matcher(void);
 PolyPatternMatcher *poly_hip_renderer_extra_matcher(void);
 PolyPatternMatcher *poly_pm_manual_bf16_cast(void);
+PolyPatternMatcher *poly_pm_narrow_uint(void);
 bool poly_wmma_name(const PolyUOp *uop, char *out, size_t out_size);
 bool poly_render_param_name(PolyCtx *ctx, PolyUOp *uop, char *out, size_t out_size);
 /* Remove one balanced outer pair; caller owns the returned expression. */

@@ -25,6 +25,100 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-040",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "d2ce31d8fb0cf96d1057225edc9addb5c72d7585",
+        "51f657643270b985eef382647db680fa865698a2",
+        "928d228da2cf129c64b6a1e6b35e44e6070c0eab",
+        "53f48f0bfa1f9d4d0c96e013ae9ca650331ac39a"
+      ],
+      "status": "approved",
+      "stages": [
+        "symbolic",
+        "codegen",
+        "wgsl"
+      ],
+      "area": "Upstream unsigned constants, bounds and narrow arithmetic",
+      "tinygrad": "The v0.14 pin can emit out-of-range signed WGSL literals for negative unsigned constants, preserve impossible unsigned intervals, move addition across unsigned comparisons, and lose uint8/uint16 wrap through C promotion.",
+      "polygrad": "Wrap unsigned WGSL literals before rendering. Port wrapped unsigned bounds and the signed-only comparison rewrite. In the C, CUDA, HIP and WGSL renderer matchers, widen ADD/SUB/MUL/NEG/SHL/MULACC operands to uint32 and cast each result back to its original uint8/uint16 dtype. Preserve signed bounds and approved WGSL truncation.",
+      "rationale": "An intermediate wrap must be visible to subsequent shifts and comparisons. The symbolic fixes are prerequisites for the renderer fix, not a new arithmetic policy.",
+      "approval": "User 2026-10-26 requested investigation, probes, measurement, port and tests of WGSL unsigned constants and narrow unsigned arithmetic.",
+      "evidence": [
+        "src/uop/symbolic.c",
+        "src/renderer/cstyle.c:poly_pm_narrow_uint",
+        "src/renderer/wgsl.c",
+        "test/test_codegen.c",
+        "test/test_sym.c",
+        "py/tests/test_upstream_backports.py",
+        "js/test/test_tensor.js",
+        "temp/upstream-backports-20261026/report.txt"
+      ],
+      "close_when": "The pin contains these four commits and the unsigned render, graph and runtime regressions pass. No allowance for signed overflow or unrelated symbolic rewrites."
+    },
+    {
+      "id": "PG-DIV-041",
+      "kind": "upstream_backport",
+      "upstream_commits": [
+        "f9d3f00ff6b2a5530ab486f6d2fe065877d306e4",
+        "42ff8242e68f25c8ee2c99bc455a00bca753c9da",
+        "eb148233a2e5dd28c0da53e798ab5c532274c428",
+        "f07260ea15154da8ca843b188322b23c7e34b61d"
+      ],
+      "status": "approved",
+      "stages": [
+        "tensor",
+        "mutation",
+        "autograd"
+      ],
+      "area": "Upstream singleton strides and lazy-view assignment ownership",
+      "tinygrad": "The pin skips unstriding a singleton write, drops writes into views of pending computations, and retargets earlier computed readers when assigning through a view.",
+      "polygrad": "Unstride singleton dimensions too. Follow upstream deepest-owned-view selection, clone pending partial-write storage, substitute only the destination, and publish writes only to live aliases of the original storage base. Port ordering-only and partial-store gradients for these graphs. Preserve the pin's full-value assignment, paired logical/physical roots and C ownership.",
+      "rationale": "Earlier lazy reads must keep their value version, while live views see the pending write. No new executor or storage owner is introduced.",
+      "approval": "User 2026-10-26 requested investigation, probes, measurement, port and tests of singleton strided assignment and lazy-view mutation handling.",
+      "evidence": [
+        "src/tensor.c",
+        "src/mixin/gradient.c",
+        "test/test_tensor.c",
+        "py/tests/test_upstream_backports.py",
+        "js/test/test_tensor.js",
+        "temp/upstream-backports-20261026/report.txt",
+        "temp/upstream-backports-20261026/review-assignment-graphs.py",
+        "temp/upstream-backports-20261026/upstream-assignment-graphs.json"
+      ],
+      "close_when": "The pin contains these changes and assignment graph, ownership, gradient and runtime regressions pass. The other hunks of f9d3f00ff are outside this approval.",
+      "graph_pairs": {
+        "chained_assignment_buffer_v": {
+          "tinygrad": "a0bcc99e46b5faeedfe8acc386bc3cc7d01cb115fe551ed75e45bbca35c51cff",
+          "polygrad": "c707965f493e050aa27126438f0186ff70987e5c580c7aee799a3164a88eb0e0"
+        },
+        "chained_assignment_buffer_w": {
+          "tinygrad": "f6ed78fe9b1eadec57fa11667b58e3548419590ba03265d9d61972bd6ca7f130",
+          "polygrad": "719b0c37dc8464bffe7d1942f8ec23c255f25fe3d40860858174cc580e608e60"
+        },
+        "chained_assignment_buffer_z": {
+          "tinygrad": "0d95458e3ac2a9392195a57920d30cc00ec5c7ff0cee1e10e83b8f2d18dc9463",
+          "polygrad": "0111e1ac060ed16775996832bddcf72a42c2234aec0d3f6e0bc1241cb01629d2"
+        },
+        "chained_assignment_copy_v": {
+          "tinygrad": "5aa26b9cfaac76b5d4283ab04dfac1ec948ee847d75ea858e6850251441f9abb",
+          "polygrad": "3d9298132cbb7b768014a5a9d5ee9f19d7cda8401742d4dea0b67952cf513ac4"
+        },
+        "chained_assignment_copy_w": {
+          "tinygrad": "0df522b42f99303c3a32a4683d7d02606094167648fd45f53160557a7747bfda",
+          "polygrad": "4e121144394ca156b6c77a39d84d46711fc521472f0c43c2a4ff9ef3b769d43d"
+        },
+        "chained_assignment_copy_z": {
+          "tinygrad": "fec7be4ad3009dac728e51debf3f5b13c60b2e880746c305133217809b2fe88a",
+          "polygrad": "942aa4b5a70f1069305ef13fa68f66d894f02a650df988a5385b852a164adc59"
+        },
+        "view_assign": {
+          "tinygrad": "01f5b89ad9e9a98018e98da486882f4e09da7566a4d81fc43325dfd56e23a6da",
+          "polygrad": "40ed54e93cc90012156d5a880d57d093d09293d4a44330f639a8fd7aa5659110"
+        }
+      }
+    },
+    {
       "id": "PG-DIV-039",
       "status": "approved",
       "stages": [

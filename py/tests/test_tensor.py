@@ -4129,15 +4129,9 @@ class TestIndexedOwners:
     @pytest.mark.parametrize('device', ['cpu', 'interp'])
     @pytest.mark.parametrize('logical', ['always', 'until_realize', 'never'])
     @pytest.mark.parametrize('dtype', [dtypes.float32, dtypes.int32])
-    @pytest.mark.parametrize('order,expected', [
-        ('wvz', {'w': [16], 'v': [16, 22], 'z': [16, 22, 3, 4]}),
-        ('wzv', {'w': [16], 'v': [16, 22], 'z': [16, 22, 3, 4]}),
-        ('vwz', {'w': [16], 'v': [11, 22], 'z': [16, 22, 3, 4]}),
-        ('vzw', {'w': [16], 'v': [11, 22], 'z': [11, 22, 3, 4]}),
-        ('zwv', {'w': [16], 'v': [16, 22], 'z': [1, 2, 3, 4]}),
-        ('zvw', {'w': [16], 'v': [11, 22], 'z': [1, 2, 3, 4]}),
-    ])
-    def test_chained_assignment_read_order(self, device, logical, dtype, order, expected):
+    @pytest.mark.parametrize('order', ['wvz', 'wzv', 'vwz', 'vzw', 'zwv', 'zvw'])
+    def test_chained_assignment_read_order(self, device, logical, dtype, order):
+        expected = {"w": [16], "v": [16, 22], "z": [16, 22, 3, 4]}
         with Runtime(device=device, logical=logical) as rt:
             z, x = rt.Tensor([1, 2, 3, 4], dtype=dtype), rt.Tensor([10, 20], dtype=dtype)
             v = z[:2]
@@ -4179,16 +4173,17 @@ class TestIndexedOwners:
         with Runtime(device=device, logical=logical) as rt:
             z, x = rt.Tensor([1., 2., 3., 4.]).realize(), rt.Tensor([10., 20.])
             z[:2] += x
-            # Pinned backward cannot differentiate the pending AFTER. Once the
-            # write is realized, z is a buffer leaf and x is no longer reachable.
-            if not forward_first:
-                with pytest.raises(RuntimeError, match='poly_uop_grad_many failed'):
-                    z.sum().backward()
-                return
-            np.testing.assert_array_equal(z.numpy(), [11, 22, 3, 4])
+            # Upstream partial-store gradients preserve the pending write.
+            # Once realized, z is a leaf and x is no longer reachable.
+            if forward_first:
+                np.testing.assert_array_equal(z.numpy(), [11, 22, 3, 4])
             z.sum().backward()
             np.testing.assert_array_equal(z.grad.numpy(), np.ones(4))
-            assert x.grad is None
+            if forward_first:
+                assert x.grad is None
+            else:
+                np.testing.assert_array_equal(x.grad.numpy(), [1, 1])
+                np.testing.assert_array_equal(z.numpy(), [11, 22, 3, 4])
 
     @pytest.mark.parametrize('mode', ['plain', 'nested', 'reshape'])
     def test_realize_typed_storage_view_keeps_original_root(self, mode):
@@ -4400,8 +4395,8 @@ class TestPointwiseOwners:
         end = Tensor([10, 250], dtype='uint8')
         # Tensor weight takes the pin's int8-difference fixed-point path.
         np.testing.assert_array_equal(start.lerp(end, Tensor([0.5, 0.5])).numpy(), [2, 2])
-        # Pinned X86's narrowing scalar NOOP differs from the C renderer cast.
-        expected = [258, 130] if start.device == 'X86' else [130, 130]
+        # Upstream unsigned arithmetic wraps the uint8 difference before casting.
+        expected = [258, 130]
         np.testing.assert_array_equal(start.lerp(end, 0.5).numpy(), expected)
 
     @pytest.mark.parametrize('reduction', ['none', 'sum', 'mean'])

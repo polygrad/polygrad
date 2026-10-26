@@ -360,6 +360,35 @@ static PolyUOp *cast_via_float(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
   return poly_uop1(ctx, POLY_OP_CAST, root->dtype, f32, poly_arg_none());
 }
 
+/* Upstream 51f657643: C integer promotions and WGSL's u32 arithmetic
+ * must not erase uint8/uint16 overflow between operations. */
+static PolyUOp *narrow_uint_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
+  (void)bindings;
+  PolyUOp *src[3];
+  if (u->n_src < 1 || u->n_src > 3) return NULL;
+  for (int i = 0; i < u->n_src; i++) {
+    src[i] = poly_uop_cast(ctx, u->src[i], POLY_UINT32);
+    if (!src[i]) return NULL;
+  }
+  PolyUOp *wide = poly_uop(ctx, u->op, POLY_UINT32, src, u->n_src, u->arg);
+  return wide ? poly_uop_cast(ctx, wide, u->dtype) : NULL;
+}
+
+PolyPatternMatcher *poly_pm_narrow_uint(void) {
+  static _Thread_local PolyPatternMatcher *pm = NULL;
+  if (pm) return pm;
+  PolyOpSet ops = {{0, 0}};
+  const PolyOps list[] = {POLY_OP_ADD, POLY_OP_SUB, POLY_OP_MUL,
+                          POLY_OP_NEG, POLY_OP_SHL, POLY_OP_MULACC};
+  for (size_t i = 0; i < sizeof(list) / sizeof(list[0]); i++)
+    ops = poly_opset_add(ops, list[i]);
+  const PolyDType types[] = {POLY_UINT8, POLY_UINT16};
+  PolyNamedRule rule =
+      POLY_RULE(poly_upat_set_dtype(poly_upat_ops(ops, NULL, 0, "x"), types, 2), narrow_uint_alu);
+  pm = poly_pm_thread_cache(poly_pm_new_named(&rule, 1));
+  return pm;
+}
+
 static _Thread_local PolyPatternMatcher *g_clang_renderer_extra = NULL;
 
 PolyPatternMatcher *poly_clang_renderer_extra_matcher(void) {
@@ -394,7 +423,8 @@ PolyPatternMatcher *poly_clang_renderer_extra_matcher(void) {
   poly_pm_destroy(casts);
   poly_pm_destroy(non_native);
   poly_pm_destroy(with_non_native);
-  g_clang_renderer_extra = poly_pm_thread_cache(complete);
+  g_clang_renderer_extra = poly_pm_thread_cache(poly_pm_concat(poly_pm_narrow_uint(), complete));
+  poly_pm_destroy(complete);
   return g_clang_renderer_extra;
 }
 
@@ -449,7 +479,8 @@ PolyPatternMatcher *poly_cuda_renderer_extra_matcher(void) {
   PolyPatternMatcher *complete = poly_pm_concat(non_native, casts);
   poly_pm_destroy(non_native);
   poly_pm_destroy(casts);
-  g_cuda_renderer_extra = poly_pm_thread_cache(complete);
+  g_cuda_renderer_extra = poly_pm_thread_cache(poly_pm_concat(poly_pm_narrow_uint(), complete));
+  poly_pm_destroy(complete);
   return g_cuda_renderer_extra;
 }
 
@@ -475,7 +506,8 @@ PolyPatternMatcher *poly_hip_renderer_extra_matcher(void) {
   PolyPatternMatcher *complete = poly_pm_concat(non_native, hip);
   poly_pm_destroy(non_native);
   poly_pm_destroy(hip);
-  g_hip_renderer_extra = poly_pm_thread_cache(complete);
+  g_hip_renderer_extra = poly_pm_thread_cache(poly_pm_concat(poly_pm_narrow_uint(), complete));
+  poly_pm_destroy(complete);
   return g_hip_renderer_extra;
 }
 

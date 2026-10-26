@@ -2031,12 +2031,15 @@ TEST(tensor, slice_iadd_keeps_same_owner_roots) {
   PolyTensor *sum = view ? poly_tensor_alu2(ctx, POLY_OP_ADD, view, x) : NULL;
   bool valid = sum && poly_tensor_assign(ctx, view, sum);
   if (valid) {
-    valid &= view->uop_physical->op == POLY_OP_AFTER && view->uop_logical->op == POLY_OP_AFTER;
-    valid &= view->uop_physical->src[0]->op == POLY_OP_SHRINK &&
-             view->uop_logical->src[0]->op == POLY_OP_SHRINK;
+    valid &= view->uop_physical->op == POLY_OP_SHRINK && view->uop_logical->op == POLY_OP_SHRINK;
+    valid &= view->uop_physical->src[0] == base->uop_physical &&
+             view->uop_logical->src[0] == base->uop_logical;
+    valid &= base->uop_physical->op == POLY_OP_AFTER && base->uop_logical->op == POLY_OP_AFTER;
+    valid &= base->uop_physical->src[1]->op == POLY_OP_STORE &&
+             base->uop_logical->src[1]->op == POLY_OP_STORE;
     valid &= poly_tensor_setitem(ctx, base, kind, start, size, step, index, 1, view) == 0;
-    valid &= !poly_uop_op_in_backward_slice_with_self(ctx, base->uop_physical, POLY_OP_STORE);
-    valid &= !poly_uop_op_in_backward_slice_with_self(ctx, base->uop_logical, POLY_OP_STORE);
+    valid &= poly_uop_op_in_backward_slice_with_self(ctx, base->uop_physical, POLY_OP_STORE);
+    valid &= poly_uop_op_in_backward_slice_with_self(ctx, base->uop_logical, POLY_OP_STORE);
   }
   poly_ctx_destroy(ctx);
   ASSERT_TRUE(valid);
@@ -2104,9 +2107,9 @@ TEST(tensor, chained_assignment_requires_buffer_identity) {
       PolyTensor *w = poly_tensor_shrink(ctx, v, (int64_t[][2]){{0, 1}}, 1);
       PolyTensor *five = poly_tensor_const_like_float(ctx, w, 5.0);
       valid &= w && five && poly_tensor_assign(ctx, w, poly_tensor_alu2(ctx, POLY_OP_ADD, w, five));
-      /* AFTER(SHRINK(COPY)) is not storage; AFTER(BUFFER) is. Only the latter
-       * retargets other live owners when the nested view is assigned. */
-      valid &= copied ? v->uop_physical == before : v->uop_physical != before;
+      /* A pending creation copy gains storage on its first partial write.
+       * Both cases now advance every alias on the second write. */
+      valid &= v->uop_physical != before;
       poly_ctx_destroy(ctx);
     }
   }
@@ -2132,6 +2135,37 @@ static PolyTensor *build_logical_policy_view_assign_oracle(
     return NULL;
   PolyTensor *view = poly_tensor_shrink(ctx, base, bounds, 1);
   return view && poly_tensor_assign(ctx, view, update) ? base : NULL;
+}
+
+TEST(tensor, view_assign_preserves_earlier_computed_roots) {
+  const PolyLogicalPolicy policies[] = {
+      POLY_LOGICAL_NEVER, POLY_LOGICAL_ALWAYS, POLY_LOGICAL_UNTIL_REALIZE};
+  bool correct = true;
+  for (int mode = 0; mode < 3; mode++) {
+    PolyCtx *ctx = poly_ctx_new();
+    poly_ctx_set_logical_policy(ctx, policies[mode]);
+    PolyTensor *t = poly_tensor_empty(ctx, POLY_FLOAT32, (int64_t[]){6}, 1, POLY_DEVICE_CPU);
+    float zeros[6] = {0};
+    correct &= t && poly_buffer_write(ctx, t->uop_physical, zeros, sizeof(zeros)) == 0;
+    PolyTensor *s0 = poly_tensor_sum(ctx, t, (int64_t[]){0}, 1, false);
+    PolyUOp *physical_before = s0->uop_physical, *logical_before = s0->uop_logical;
+    PolyTensor *head = poly_tensor_shrink(ctx, t, (int64_t[][2]){{0, 3}}, 1);
+    correct &= poly_tensor_assign(ctx, head, poly_tensor_const_like_float(ctx, head, 1)) != NULL;
+    correct &= s0->uop_physical == physical_before && s0->uop_logical == logical_before;
+    PolyTensor *s1 = poly_tensor_sum(ctx, t, (int64_t[]){0}, 1, false);
+    PolyTensor *tail = poly_tensor_shrink(ctx, t, (int64_t[][2]){{3, 6}}, 1);
+    correct &= poly_tensor_assign(ctx, tail, poly_tensor_const_like_float(ctx, tail, 2)) != NULL;
+    PolyTensor *s2 = poly_tensor_sum(ctx, t, (int64_t[]){0}, 1, false);
+    const float expected[] = {0, 3, 9};
+    PolyTensor *sums[] = {s0, s1, s2};
+    for (int j = 0; j < 3; j++) {
+      float value = -1;
+      correct &= read_tensor_f32(ctx, sums[j], &value, 1) == 0 && value == expected[j];
+    }
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(correct);
+  PASS();
 }
 
 TEST(tensor, logical_never_view_assign_retargets_only_physical_graph) {

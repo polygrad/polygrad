@@ -710,19 +710,57 @@ static PolyMap *compute_gradient(
     case POLY_OP_BITCAST:
       break;
 
-    /* tinygrad AFTER gradients keep the value edge separate from the effect.
-     * For an opaque CALL, the shared core routes ctx directly to data while
-     * the language frontend invokes the registered custom gradient callback
-     * for the CALL edge. For clone/assign, AFTER routes through STORE and
-     * STORE routes through the stored value. */
+    /* AFTER separates the value from its effects. A partial write sends the
+     * view gradient to the stored value and zeros only that region in dest.
+     * Upstream eb148233a2 / f07260ea1; CALL callbacks remain frontend-owned. */
     case POLY_OP_AFTER:
       if (u->n_src == 2 && u->src[1]->op == POLY_OP_CALL) {
         GRAD_ADD(u->src[0], g);
         break;
       }
-      if (u->n_src == 2 && u->src[1]->op == POLY_OP_STORE) {
-        GRAD_ADD(u->src[1], g);
-        break;
+      if (u->n_src == 2 && u->src[1]->op == POLY_OP_STORE && u->src[1]->n_src == 2) {
+        PolyUOp *dest = u->src[0], *store = u->src[1], *view = store->src[0];
+        if (poly_uop_buf_uop(ctx, view) != poly_uop_buf_uop(ctx, dest)) {
+          GRAD_ADD(dest, g);
+          break;
+        }
+        if (view == dest) {
+          GRAD_ADD(store, g);
+          break;
+        }
+        int n = 0;
+        PolyUOp *base = view;
+        while (base != dest && base->n_src &&
+               (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK ||
+                base->op == POLY_OP_PERMUTE || base->op == POLY_OP_FLIP)) {
+          n++;
+          base = base->src[0];
+        }
+        if (base == dest) {
+          PolyUOp **path = malloc((size_t)n * sizeof(*path));
+          if (!path) GRAD_REVERSE_FAIL();
+          base = view;
+          for (int j = 0; j < n; j++, base = base->src[0])
+            path[j] = base;
+          PolyUOp *gv = g;
+          for (int j = n - 1; gv && j >= 0; j--) {
+            PolyUOp *src[3] = {gv};
+            if (path[j]->n_src > 3) {
+              gv = NULL;
+              break;
+            }
+            for (int k = 1; k < path[j]->n_src; k++)
+              src[k] = path[j]->src[k];
+            gv = poly_uop_replace_src(ctx, path[j], src);
+          }
+          free(path);
+          PolyUOp *mask = NULL, *seed = gv ? const_like(ctx, gv, 1) : NULL;
+          if (!seed || poly_uop_grad_many(ctx, view, seed, &dest, 1, &mask) != 0)
+            GRAD_REVERSE_FAIL();
+          GRAD_ADD(dest, poly_uop_where(ctx, cast_to(ctx, mask, POLY_BOOL), zeros_like(ctx, g), g));
+          GRAD_ADD(store, gv);
+          break;
+        }
       }
       fprintf(stderr, "polygrad: autograd: missing gradient rule for AFTER effect\n");
       GRAD_REVERSE_FAIL();

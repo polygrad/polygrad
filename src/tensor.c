@@ -333,39 +333,34 @@ static bool tensor_holds_root(PolyCtx *ctx, PolyUOp *root, bool logical) {
   return false;
 }
 
-static PolyUOp *tensor_assign_view_anchor(PolyCtx *ctx, PolyUOp *u, bool logical) {
-  if (!u || !tensor_assign_anchor_op(u->op)) return NULL;
+/* Upstream storage_base strips views and pending writes, not computations. */
+static PolyUOp *tensor_storage_base(PolyUOp *u) {
+  while (u && u->n_src &&
+         (tensor_assign_anchor_op(u->op) || u->op == POLY_OP_AFTER || u->op == POLY_OP_UNSHARD))
+    u = u->src[0];
+  return u;
+}
 
-  /* Retarget the deepest buffer identity held by a Tensor (upstream #18641).
-   * The retained logical twin is not collapsed by
-   * realization, so its explicit CONTIGUOUS provenance node is the matching
-   * materialization occurrence after the physical twin becomes BUFFER.  Stop
-   * at that existing Polygrad boundary, or at AFTER when chaining a pending
-   * view write; the physical graph never takes this CONTIGUOUS-only branch. */
+static bool tensor_assign_has_view_owner(PolyCtx *ctx, PolyUOp *u) {
+  while (u && u->n_src && tensor_assign_anchor_op(u->op)) {
+    u = u->src[0];
+    if (tensor_holds_root(ctx, u, false)) return true;
+  }
+  return false;
+}
+
+static PolyUOp *tensor_assign_view_anchor(PolyCtx *ctx, PolyUOp *u, bool logical) {
   PolyUOp *cur = u, *anchor = NULL;
   while (cur) {
-    /* Upstream #18641 selects the deepest identity owned by a live Tensor,
-     * not an incidental reshape manufactured while constructing the view. */
     if (poly_uop_has_buffer_identity(cur) && (cur == u || tensor_holds_root(ctx, cur, logical)))
       anchor = cur;
-    if (logical && (cur->op == POLY_OP_AFTER || cur->op == POLY_OP_CONTIGUOUS))
-      return cur != u ? cur : NULL;
-    if (cur->op == POLY_OP_AFTER) {
-      /* UOp.has_buffer_identity(after_ok=True): a pending write is not
-       * storage merely because it is AFTER. AFTER(SHRINK(COPY)) must take
-       * the simple-assign branch, without retargeting other live wrappers. */
-      PolyUOp *identity = cur;
-      while (identity->n_src > 0 &&
-             (identity->op == POLY_OP_AFTER || identity->op == POLY_OP_RESHAPE ||
-              identity->op == POLY_OP_UNSHARD || identity->op == POLY_OP_MSELECT))
-        identity = identity->src[0];
-      return cur != u && (identity->op == POLY_OP_BUFFER || identity->op == POLY_OP_PARAM) ? cur
-                                                                                           : NULL;
-    }
+    /* A retained portable CONTIGUOUS is the twin of physical storage after
+     * realization. Do not walk into the initializer when retargeting it. */
+    if (logical && (cur->op == POLY_OP_AFTER || cur->op == POLY_OP_CONTIGUOUS)) return cur;
     if (!tensor_assign_anchor_op(cur->op) || cur->n_src < 1) break;
     cur = cur->src[0];
   }
-  return anchor && anchor != u ? anchor : NULL;
+  return anchor ? anchor : cur;
 }
 
 static PolyUOp *tensor_substitute_once(
@@ -409,6 +404,7 @@ static int tensor_retarget_view_assign_roots(
     PolyUOp *logical_to,
     PolyUOp *physical_from,
     PolyUOp *physical_to,
+    PolyUOp *assigned_to,
     PolyDevice device
 ) {
   if (!ctx || !physical_from || !physical_to || (!!logical_from != !!logical_to)) return -1;
@@ -430,11 +426,11 @@ static int tensor_retarget_view_assign_roots(
 
     /* View-assign replacements are intentionally self-containing
      * (BUFFER -> AFTER(BUFFER, STORE(...))). Do not recurse into the
-     * replacement itself, matching tinygrad's `_apply_map_to_tensors`
-     * substitution in Tensor.assign (2026-08-22/a9069c177a9d,
-     * tensor.py:456-460). The physical map is mandatory; target-local NEVER
+     * replacement itself. Upstream 42ff8242e limits publication to aliases of
+     * the assigned storage; pre-existing computations retain their old roots.
+     * The physical map is mandatory; target-local NEVER
      * deliberately supplies no logical map. */
-    if (!t->uop_physical) continue;
+    if (!t->uop_physical || tensor_storage_base(t->uop_physical) != assigned_to) continue;
     PolyUOp *new_logical = t->uop_logical;
     if (new_logical && logical_from)
       new_logical =
@@ -2155,6 +2151,41 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
   return poly_tensor_assign_after(ctx, target, logical_after, physical_after);
 }
 
+/* Clone a pending assignment value with the existing empty/STORE primitives.
+ * One Tensor owns both new roots until publication, including failure paths. */
+static PolyTensor *tensor_assign_clone(
+    PolyCtx *ctx,
+    PolyTensor *owner,
+    PolyUOp *logical,
+    PolyUOp *physical
+) {
+  int ndim = poly_uop_ndim(ctx, physical);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  PolyUOp *dims[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    dims[i] = poly_uop_shape_dim(ctx, physical, i);
+  PolyUOp *device = poly_uop_device_uop_cached(ctx, physical, NULL);
+  if (!device) device = poly_device_uop(ctx, owner->device);
+  PolyTensor *inputs[] = {owner};
+  PolyTensor *out = tensor_empty_uop_result(
+      ctx, poly_dtype_strong(physical->dtype), dims, ndim, device, inputs, 1
+  );
+  if (!out) return NULL;
+  PolyUOp *p =
+      poly_uop_after(ctx, out->uop_physical, poly_uop_store_val(ctx, out->uop_physical, physical));
+  PolyUOp *l = logical
+                   ? poly_uop_after(
+                         ctx, out->uop_logical, poly_uop_store_val(ctx, out->uop_logical, logical)
+                     )
+                   : NULL;
+  if (!p || (logical && !l) ||
+      poly_tensor_replace_roots(ctx, out, l, p, POLY_TENSOR_VALUE, out->device) != 0) {
+    poly_tensor_release(out);
+    return NULL;
+  }
+  return out;
+}
+
 /* Tensor.assign's publication is shared with nn.optim.Optimizer.schedule_step.
  * A view write must advance live aliases at its storage anchor, not merely
  * replace the selected wrapper with AFTER(view, STORE(view, value)). */
@@ -2167,41 +2198,69 @@ PolyTensor *poly_tensor_assign_after(
   if (!tensor_roots_owned_by_ctx(ctx, target) || !poly_ctx_owns_ptr(ctx, physical_after) ||
       (logical_after && !poly_ctx_owns_ptr(ctx, logical_after)) ||
       physical_after->op != POLY_OP_AFTER || physical_after->n_src != 2 ||
-      physical_after->src[0] != target->uop_physical)
+      physical_after->src[0] != target->uop_physical ||
+      physical_after->src[1]->op != POLY_OP_STORE || physical_after->src[1]->n_src != 2)
     return NULL;
   bool build_logical = logical_after != NULL;
   PolyUOp *target_physical = target->uop_physical, *target_logical = target->uop_logical;
-  if (build_logical && (logical_after->op != POLY_OP_AFTER || logical_after->n_src != 2 ||
-                        logical_after->src[0] != target_logical))
+  if (build_logical &&
+      (logical_after->op != POLY_OP_AFTER || logical_after->n_src != 2 ||
+       logical_after->src[0] != target_logical || logical_after->src[1]->op != POLY_OP_STORE ||
+       logical_after->src[1]->n_src != 2))
     return NULL;
   if (tensor_capture_record(ctx) != 0) return NULL;
+  PolyUOp *assigned_to = tensor_storage_base(target_physical);
+  /* Keep the pin's full-value assignment and portable state identity. The
+   * backport only materializes pending values when a live ancestor is viewed. */
+  if (!poly_uop_has_buffer_identity(assigned_to) &&
+      !tensor_assign_has_view_owner(ctx, target_physical))
+    return poly_tensor_replace_roots(
+               ctx, target, logical_after, physical_after, target->role, target->device
+           ) == 0
+               ? target
+               : NULL;
   PolyUOp *physical_view_anchor = tensor_assign_view_anchor(ctx, target_physical, false);
   PolyUOp *logical_view_anchor =
       build_logical ? tensor_assign_view_anchor(ctx, target_logical, true) : NULL;
-  /* Tensor.assign's branch is determined by the eager physical graph. A
-   * creation COPY is not storage even when its portable twin is a BUFFER;
-   * logical retention must not turn that simple assign into a view write. */
-  if (physical_view_anchor) {
-    if (build_logical && !logical_view_anchor) return NULL;
-    PolyUOp *physical_anchor_src[2] = {physical_view_anchor, physical_after};
-    PolyUOp *physical_assigned_anchor = poly_uop(
-        ctx, POLY_OP_AFTER, physical_view_anchor->dtype, physical_anchor_src, 2, poly_arg_none()
-    );
-    if (!physical_assigned_anchor) return NULL;
+  if (physical_view_anchor != target_physical) {
+    if (!physical_view_anchor || (build_logical && !logical_view_anchor)) return NULL;
+    PolyUOp *p = physical_view_anchor, *l = logical_view_anchor;
+    PolyUOp *identity = p;
+    while (identity->op == POLY_OP_AFTER && identity->n_src)
+      identity = identity->src[0];
+    PolyTensor *copy = NULL;
+    if (!poly_uop_has_buffer_identity(identity)) {
+      copy = tensor_assign_clone(ctx, target, l, p);
+      if (!copy) return NULL;
+      p = copy->uop_physical;
+      l = copy->uop_logical;
+    }
+    /* Substitute only the destination view. The RHS can read pending writes
+     * to another value and must retain their original dependencies. */
+    PolyMap *memo = poly_map_new(16);
+    if (!memo) {
+      poly_tensor_release(copy);
+      return NULL;
+    }
+    PolyUOp *view = tensor_substitute_once(ctx, target_physical, physical_view_anchor, p, memo);
+    PolyUOp *store = view ? poly_uop_store_val(ctx, view, physical_after->src[1]->src[1]) : NULL;
+    PolyUOp *physical_assigned_anchor = store ? poly_uop_after(ctx, p, store) : NULL;
     PolyUOp *logical_assigned_anchor = NULL;
     if (build_logical) {
-      PolyUOp *logical_anchor_src[2] = {logical_view_anchor, logical_after};
-      logical_assigned_anchor = poly_uop(
-          ctx, POLY_OP_AFTER, logical_view_anchor->dtype, logical_anchor_src, 2, poly_arg_none()
-      );
-      if (!logical_assigned_anchor) return NULL;
+      poly_map_clear(memo);
+      view = tensor_substitute_once(ctx, target_logical, logical_view_anchor, l, memo);
+      store = view ? poly_uop_store_val(ctx, view, logical_after->src[1]->src[1]) : NULL;
+      logical_assigned_anchor = store ? poly_uop_after(ctx, l, store) : NULL;
     }
-    if (tensor_retarget_view_assign_roots(
-            ctx, logical_view_anchor, logical_assigned_anchor, physical_view_anchor,
-            physical_assigned_anchor, target->device
-        ) != 0)
-      return NULL;
-    return target;
+    poly_map_destroy(memo);
+    int rc = physical_assigned_anchor && (!build_logical || logical_assigned_anchor)
+                 ? tensor_retarget_view_assign_roots(
+                       ctx, logical_view_anchor, logical_assigned_anchor, physical_view_anchor,
+                       physical_assigned_anchor, assigned_to, target->device
+                   )
+                 : -1;
+    poly_tensor_release(copy);
+    return rc == 0 ? target : NULL;
   }
 
   /* Polygrad keeps portable provenance and placed execution as separate roots.
@@ -4330,7 +4389,7 @@ static PolyUOp *getitem_root(
   for (int i = 0; vb && i < ndim; i++) {
     int64_t shape[POLY_MAX_DIMS];
     if (tensor_static_shape(ctx, vb, shape) != ndim) return NULL;
-    if (stride[i] != 1 && shape[i] > 1) {
+    if (stride[i] != 1) {
       if (ndim + 1 > POLY_MAX_DIMS || shape[i] > INT64_MAX / stride[i]) return NULL;
       vb = poly_unsqueeze_axis(ctx, vb, i + 1);
       int64_t pad[POLY_MAX_DIMS][2] = {{0}};

@@ -277,6 +277,14 @@ static int64_t dtype_max(PolyDType dt) {
   return INT64_MAX / 2;
 }
 
+/* Upstream 928d228da: an unsigned interval is only valid before wrapping.
+ * Signed and weak integers retain the pin's mathematical interval rules. */
+static void minmax_wrapped(PolyUOp *u, int64_t lo, int64_t hi, int64_t *vmin, int64_t *vmax) {
+  bool wrapped = poly_dtype_is_unsigned(u->dtype) && (lo < 0 || hi > dtype_max(u->dtype));
+  *vmin = wrapped ? dtype_min(u->dtype) : lo;
+  *vmax = wrapped ? dtype_max(u->dtype) : hi;
+}
+
 static int64_t min4(int64_t a, int64_t b, int64_t c, int64_t d) {
   int64_t x = a < b ? a : b;
   int64_t y = c < d ? c : d;
@@ -437,11 +445,8 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
 
     if (u->op == POLY_OP_ADD) {
       int64_t lo, hi;
-      /* Pinned tinygrad/uop/ops.py:858-861 tracks mathematical integer
-       * intervals with Python ints; it does not clamp to the storage dtype. */
       if (i64_add_ok(a0, b0, &lo) && i64_add_ok(a1, b1, &hi)) {
-        *vmin = lo;
-        *vmax = hi;
+        minmax_wrapped(u, lo, hi, vmin, vmax);
         return true;
       }
       /* overflow: fall through */
@@ -449,8 +454,7 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     if (u->op == POLY_OP_SUB) {
       int64_t lo, hi;
       if (i64_sub_ok(a0, b1, &lo) && i64_sub_ok(a1, b0, &hi)) {
-        *vmin = lo;
-        *vmax = hi;
+        minmax_wrapped(u, lo, hi, vmin, vmax);
         return true;
       }
       /* overflow: fall through */
@@ -460,8 +464,7 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
       if (i64_mul_ok(a0, b0, &v0) && i64_mul_ok(a0, b1, &v1) && i64_mul_ok(a1, b0, &v2) &&
           i64_mul_ok(a1, b1, &v3)) {
         int64_t lo = min4(v0, v1, v2, v3), hi = max4(v0, v1, v2, v3);
-        *vmin = lo;
-        *vmax = hi;
+        minmax_wrapped(u, lo, hi, vmin, vmax);
         return true;
       }
       /* overflow: fall through */
@@ -571,8 +574,7 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
       int64_t v0, v1;
       if (i64_shl_ok(a0, b0, &v0) && i64_shl_ok(a1, b0, &v1)) {
         int64_t lo = i64_min(v0, v1), hi = i64_max(v0, v1);
-        *vmin = lo;
-        *vmax = hi;
+        minmax_wrapped(u, lo, hi, vmin, vmax);
         return true;
       }
       /* overflow or negative lhs: fall through */
@@ -584,8 +586,7 @@ static bool poly_uop_minmax_node(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_
     }
     if (u->op == POLY_OP_XOR && b0 == b1 && b0 == -1) {
       /* ~x: bitwise not */
-      *vmin = ~a1;
-      *vmax = ~a0;
+      minmax_wrapped(u, ~a1, ~a0, vmin, vmax);
       return true;
     }
     if (u->op == POLY_OP_AND && poly_dtype_is_int(u->dtype) && b0 == b1 && b0 >= 0) {
@@ -1937,6 +1938,22 @@ static bool exact_int_range_node(PolyUOp *u, PolyMap *memo, ExactIntRange *out) 
         poly_int_free(&one);
       }
       if (ok) {
+        bool wrapping_op =
+            u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
+            u->op == POLY_OP_SHL ||
+            (u->op == POLY_OP_XOR && exact_int_is_i64(&b->lo, -1) && exact_int_is_i64(&b->hi, -1));
+        if (wrapping_op && poly_dtype_is_unsigned(u->dtype)) {
+          ExactIntRange limits = {0};
+          bool bounded = exact_int_range_dtype(&limits, u->dtype);
+          bool wrapped =
+              bounded && (poly_int_cmp(&lo, &limits.lo) < 0 || poly_int_cmp(&hi, &limits.hi) > 0);
+          exact_int_range_free(&limits);
+          if (!bounded || wrapped) {
+            poly_int_free(&lo);
+            poly_int_free(&hi);
+            return bounded && exact_int_range_dtype(out, u->dtype);
+          }
+        }
         bool taken = exact_int_range_take(out, &lo, &hi);
         poly_int_free(&lo);
         poly_int_free(&hi);
@@ -3380,7 +3397,8 @@ static PolyUOp *rule_cmplt_add_const_bound(PolyCtx *ctx, PolyUOp *root, const Po
   PolyUOp *x = poly_bind(b, "x");
   PolyUOp *c0 = poly_bind(b, "c0");
   PolyUOp *c1 = poly_bind(b, "c1");
-  if (!x || !c0 || !c1) return NULL;
+  /* Upstream 53f48f0bf: moving an add across < is invalid under unsigned wrap. */
+  if (!x || !c0 || !c1 || poly_dtype_is_unsigned(x->dtype)) return NULL;
 
   PolyArg operands[2] = {c1->arg, c0->arg};
   PolyArg folded;

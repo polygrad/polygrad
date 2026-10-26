@@ -3211,10 +3211,9 @@ TEST(sym, minmax_sub_int64_overflow_falls_back_to_dtype) {
   PASS();
 }
 
-/* Pinned tinygrad/uop/ops.py:858-865 tracks mathematical integer endpoints
- * even when they exceed a narrow storage dtype. Runtime ALU still wraps at
- * the backend boundary; min/max is a symbolic proof surface, not emulation. */
-TEST(sym, minmax_narrow_integer_uses_mathematical_bounds_like_tinygrad) {
+/* Upstream 928d228da wraps unsigned intervals conservatively. Signed bounds
+ * retain the pin's mathematical semantics; this is not a signed-overflow fix. */
+TEST(sym, minmax_unsigned_wrap_keeps_signed_mathematical_bounds) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *u8 = Variable(ctx, "u8", 250, 251, POLY_UINT8);
@@ -3222,14 +3221,13 @@ TEST(sym, minmax_narrow_integer_uses_mathematical_bounds_like_tinygrad) {
       ctx, POLY_OP_ADD, POLY_UINT8, u8, poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(10)),
       poly_arg_none()
   );
-  check_mm(ctx, u8_add, 260, 261, "uint8 mathematical add");
+  check_mm(ctx, u8_add, 0, 255, "uint8 wrapping add");
   PolyUOp *u8_cmp = poly_uop2(
       ctx, POLY_OP_CMPLT, POLY_BOOL, u8_add,
       poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(5)), poly_arg_none()
   );
   PolyUOp *u8_cmp_simplified = poly_graph_rewrite(ctx, u8_cmp, poly_symbolic());
-  ASSERT_INT_EQ(u8_cmp_simplified->op, POLY_OP_CONST);
-  ASSERT_FALSE(u8_cmp_simplified->arg.b);
+  ASSERT_INT_EQ(u8_cmp_simplified->op, POLY_OP_CMPLT);
 
   PolyUOp *i8 = Variable(ctx, "i8", 120, 121, POLY_INT8);
   PolyUOp *i8_add = poly_uop2(
@@ -3249,7 +3247,7 @@ TEST(sym, minmax_narrow_integer_uses_mathematical_bounds_like_tinygrad) {
       ctx, POLY_OP_SUB, POLY_UINT8, Variable(ctx, "u8s", 0, 1, POLY_UINT8),
       poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(2)), poly_arg_none()
   );
-  check_mm(ctx, u8_sub, -2, -1, "uint8 mathematical sub");
+  check_mm(ctx, u8_sub, 0, 255, "uint8 wrapping sub");
 
   PolyUOp *i8_mul = poly_uop2(
       ctx, POLY_OP_MUL, POLY_INT8, Variable(ctx, "i8m", 64, 65, POLY_INT8),
@@ -3261,7 +3259,7 @@ TEST(sym, minmax_narrow_integer_uses_mathematical_bounds_like_tinygrad) {
       ctx, POLY_OP_SHL, POLY_UINT8, Variable(ctx, "u8l", 128, 129, POLY_UINT8),
       poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(1)), poly_arg_none()
   );
-  check_mm(ctx, u8_shl, 256, 258, "uint8 mathematical shl");
+  check_mm(ctx, u8_shl, 0, 255, "uint8 wrapping shl");
 
   PolyArg u8_add_args[2] = {poly_arg_int(250), poly_arg_int(10)};
   PolyArg i8_add_args[2] = {poly_arg_int(120), poly_arg_int(10)};

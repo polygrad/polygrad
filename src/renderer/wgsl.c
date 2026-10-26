@@ -411,15 +411,9 @@ static char *wgsl_render_const_literal(PolyUOp *c, PolyDType dtype) {
   } else if (poly_dtype_is_bool(scalar)) {
     snprintf(val, sizeof(val), "%s", c->arg.b ? "true" : "false");
   } else if (poly_dtype_is_unsigned(scalar)) {
-    bool negative = c->arg.kind == POLY_ARG_BIGINT ? c->arg.bigint.sign < 0 : c->arg.i < 0;
-    if (negative) {
-      char *decimal = poly_arg_integer_to_decimal(c->arg);
-      if (!decimal) return NULL;
-      snprintf(val, sizeof(val), "bitcast<u32>(%s)", decimal);
-      free(decimal);
-    } else {
-      snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
-    }
+    /* Upstream d2ce31d8f: wrap before spelling the literal. A negative
+     * weak integer may be outside WGSL's i32 literal range. */
+    snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(c->arg));
   } else {
     snprintf(val, sizeof(val), "%d", (int32_t)poly_arg_integer_to_u64_mod(c->arg));
   }
@@ -1152,8 +1146,9 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
       {poly_upat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu},
   };
 
-  g_pm_wgsl_extra =
-      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
+  PolyPatternMatcher *wgsl = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_wgsl_extra = poly_pm_thread_cache(poly_pm_concat(poly_pm_narrow_uint(), wgsl));
+  poly_pm_destroy(wgsl);
   return g_pm_wgsl_extra;
 }
 

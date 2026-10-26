@@ -115,6 +115,62 @@ async function runTensorTests(pg, createRuntime) {
     }
   }))
 
+  await test('upstream backports: partial-store gradients', isolatedRuntime(async rt => {
+    const x = new rt.Tensor([1, 2, 3, 4], {dtype: 'float32'})
+    const y = x.clone(), value = new rt.Tensor([7, 8], {dtype: 'float32'})
+    y.getitem({start: 0, stop: 2}).assign(value)
+    const [gx, gv] = y.sum().gradient(x, value)
+    assertClose(await gx.toArray(), [0, 0, 1, 1], 0)
+    assertClose(await gv.toArray(), [1, 1], 0)
+  }))
+
+  await test('upstream backports: unsigned constants and intermediate wrap', isolatedRuntime(async rt => {
+    const x = await new rt.Tensor([0xffffffff, 0, 0x80000000], {dtype: 'uint32'}).realize()
+    assertClose(await x.sub(0x80000001).toArray(), [0x7ffffffe, 0x7fffffff, 0xffffffff], 0)
+    for (const [dtype, mask] of [['uint8', 255], ['uint16', 65535]]) {
+      const values = Array.from({length: 17}, (_, i) => [mask, 0, 1, 3, mask >>> 1, mask - 1][i % 6])
+      const a = await new rt.Tensor(values, {dtype}).realize()
+      for (const [out, fn] of [[a.add(1).rshift(4), v => ((v + 1) & mask) >>> 4],
+        [a.sub(4).rshift(4), v => ((v - 4) & mask) >>> 4],
+        [a.mul(a).rshift(4), v => ((v * v) & mask) >>> 4],
+        [a.neg().rshift(4), v => ((-v) & mask) >>> 4],
+        [a.lshift(4).rshift(4), v => ((v << 4) & mask) >>> 4],
+        [a.add(1).lt(1), v => ((v + 1) & mask) < 1 ? 1 : 0]])
+        assertClose(await out.toArray(), values.map(fn), 0)
+    }
+  }))
+
+  await test('upstream backports: singleton strided writes', isolatedRuntime(async rt => {
+    for (const realized of [false, true]) {
+      const a = rt.Tensor.zeros(3, 3).contiguous(), b = rt.Tensor.zeros(4).contiguous()
+      if (realized) { await a.realize(); await b.realize() }
+      a.setitem([{start: 0, stop: 2, step: 2}, {start: 0, stop: 3, step: 3}], 1)
+      b.setitem({start: 2, stop: 0, step: -4}, 1)
+      assertClose(await a.toArray(), [1, 0, 0, 0, 0, 0, 0, 0, 0], 0)
+      assertClose(await b.toArray(), [0, 0, 1, 0], 0)
+    }
+  }))
+
+  await test('upstream backports: lazy reads keep their write version', isolatedRuntime(async rt => {
+    for (const logical of ['always', 'until_realize', 'never']) {
+      const t = await new rt.Tensor([0, 0, 0, 0, 0, 0], {dtype: 'float32', logical}).realize()
+      const s0 = t.sum()
+      t.getitem({stop: 3}).assign(1)
+      const s1 = t.sum()
+      t.getitem({start: 3}).assign(2)
+      const s2 = t.sum()
+      assertClose(await s0.toArray(), [0], 0)
+      assertClose(await s1.toArray(), [3], 0)
+      assertClose(await s2.toArray(), [9], 0)
+    }
+    const a = (await new rt.Tensor([1, 1], {dtype: 'float32'}).realize()).add(0)
+    const b = (await new rt.Tensor([2, 2], {dtype: 'float32'}).realize()).add(0)
+    b.getitem({stop: 1}).assign(b.getitem({stop: 1}).add(a.getitem({stop: 1}).mul(0)).add(1))
+    a.getitem({stop: 1}).assign(a.getitem({stop: 1}).sub(b.getitem({stop: 1})))
+    assertClose(await a.toArray(), [-2, 1], 0)
+    assertClose(await b.toArray(), [3, 2], 0)
+  }))
+
   await test('upstream backports: infinities and padded constants', isolatedRuntime(async runtime => {
     const Tensor = runtime.Tensor
     const x = new Tensor([-Infinity, -Infinity, 0])
@@ -3786,10 +3842,7 @@ async function runTensorTests(pg, createRuntime) {
   })
 
   for (const mode of ['plain', 'reshape', 'shrink', 'aligned-shrink', 'detach', 'nested', 'repeated']) {
-    const unsupportedOffset = mode === 'shrink' && pg.device === 'webgpu'
-    const name = unsupportedOffset ? 'bitcast view assign rejects unsupported WebGPU offset' :
-      `bitcast view assign matches current tinygrad: ${mode}`
-    await test(name, async () => {
+    await test(`bitcast view assign matches current tinygrad: ${mode}`, async () => {
       const initial = mode === 'aligned-shrink' ? Array(64).fill(1).concat([2, 3, 4]) : [1, 2, 3, 4]
       const a = new Tensor(initial, { dtype: 'float32' })
       await a.realize()
@@ -3812,17 +3865,9 @@ async function runTensorTests(pg, createRuntime) {
         view = view.bitcast('int32')
         values = new Int32Array(values.buffer)
       }
-      const originalStorage = a.uop
       view.assign(new Tensor(values).reshape(view.shape))
-      if (unsupportedOffset) {
-        // Release scope: pinned WebGPU has no allocator _offset implementation.
-        // PG supports aligned views only; rejection is not execution parity.
-        let error
-        try { await view.realize() } catch (e) { error = e }
-        assert(error && /poly_realize_tensors failed/.test(error.message), 'unaligned view must reject')
-        assertClose(await new Tensor(originalStorage).toArray(), initial, 0)
-        return
-      }
+      // The upstream partial STORE writes through the full buffer's index.
+      // Even the four-byte offset needs no unaligned WebGPU binding.
       await view.realize()
       assertClose(await a.toArray(), expected, 0)
       if (mode === 'repeated') {
@@ -6635,10 +6680,9 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await new Tensor([2, -3]).lerp(new Tensor([0, 1]), 0.25).toArray(), [1.5, -2])
     const a = new Tensor([250, 10], {dtype: 'uint8'}), b = new Tensor([10, 250], {dtype: 'uint8'})
     assertClose(await a.lerp(b, new Tensor([0.5, 0.5])).toArray(), [2, 2])
-    // PythonProgram truncates the uint8 subtraction before widening; native
-    // C instead promotes the subtraction. WGSL follows typed UOps (PG-DIV-008).
-    // A Wasm runtime may expose the public CPU alias; it still executes Wasm.
-    assertClose(await a.lerp(b, 0.5).toArray(), pg.core === 'wasm' || ['interp', 'webgpu', 'x86'].includes(pg.device) ? [258, 130] : [130, 130])
+    // Upstream narrow-uint rules wrap the subtraction before float conversion.
+    // All backends now agree; C's former implicit promotion returned 130.
+    assertClose(await a.lerp(b, 0.5).toArray(), [258, 130])
   })
 
   await test('pointwise owners: narrow integer casts survive widening', async () => {
@@ -6814,14 +6858,8 @@ async function runTensorTests(pg, createRuntime) {
   })
 
   await test('chained assignment: Tinygrad read-order semantics', async () => {
-    const cases = [
-      ['wvz', {w: [16], v: [16, 22], z: [16, 22, 3, 4]}],
-      ['wzv', {w: [16], z: [16, 22, 3, 4], v: [16, 22]}],
-      ['vwz', {v: [11, 22], w: [16], z: [16, 22, 3, 4]}],
-      ['vzw', {v: [11, 22], z: [11, 22, 3, 4], w: [16]}],
-      ['zwv', {z: [1, 2, 3, 4], w: [16], v: [16, 22]}],
-      ['zvw', {z: [1, 2, 3, 4], v: [11, 22], w: [16]}]
-    ]
+    const cases = ['wvz', 'wzv', 'vwz', 'vzw', 'zwv', 'zvw'].map(order =>
+      [order, {w: [16], v: [16, 22], z: [16, 22, 3, 4]}])
     for (const logical of ['always', 'until_realize', 'never']) {
       for (const dtype of ['float32', 'int32']) for (const [order, expected] of cases) {
         const z = new Tensor([1, 2, 3, 4], {dtype, logical})
