@@ -505,18 +505,54 @@ static char *render_alu_wgsl(
   }
 }
 
+/* Takes ownership of expr. The linearizer determines declaration scope; only
+ * pinned single-use expressions may be deferred to their consumer. */
+static void wgsl_render_value(
+    PolyCtx *ctx,
+    WgslStrMap *names,
+    WgslStrBuf *body,
+    PolyUOp *u,
+    char *expr,
+    bool inline_expr,
+    const char *prefix,
+    int *counter,
+    int depth
+) {
+  /* PG-DIV-039: Chrome limits WGSL expression depth to 512. Count syntax
+   * punctuation, not just parentheses: associative inlining can flatten a DAG
+   * into a long left-associated chain. Leave room for the consuming operation
+   * and its other operands. Materialization preserves every operation/order. */
+  if (expr && inline_expr) {
+    int syntax = 0;
+    for (const char *c = expr; *c; c++) {
+      if (strchr("()[]+-*/%&|^!~<>=,", *c) && ++syntax > 128) {
+        inline_expr = false;
+        break;
+      }
+    }
+  }
+  if (!expr || inline_expr) {
+    wsm_set(names, u, expr);
+    return;
+  }
+  char name[32];
+  snprintf(name, sizeof(name), "%s%d", prefix, (*counter)++);
+  wsm_set(names, u, strdup(name));
+  for (int d = 0; d < depth; d++)
+    wsb_puts(body, "  ");
+  if (u->op == POLY_OP_STACK && poly_uop_max_numel(ctx, u) > 1)
+    wsb_printf(body, "var %s = %s;\n", name, expr);
+  else
+    wsb_printf(body, "var %s: %s = %s;\n", name, wgsl_type_name(u->dtype), expr);
+  free(expr);
+}
+
 /* WGSL Renderer */
 
 /* Pinned WGSLRenderer.string_rewrite and render_kernel, with C string storage. */
 char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name) {
   WgslStrBuf body;
   wsb_init(&body);
-
-  /* Function-scope declarations buffer (WGSL has block scoping, so
-   * variables used across loop boundaries must be declared at function scope).
-   * Mirrors CStyleLanguage's function-scope declaration list. */
-  WgslStrBuf decls;
-  wsb_init(&decls);
 
   WgslStrMap names;
   wsm_init(&names, n);
@@ -529,6 +565,10 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
   WgslBinding *bindings = NULL;
   int n_bindings = 0;
   int cap_bindings = 0;
+  /* Pinned CStyleLanguage._render counts edges, including repeated sources. */
+  int *child_count = poly_render_child_counts(uops, n);
+  if (!child_count) goto fail;
+  bool expand_ssa = poly_getenv_flag("EXPAND_SSA");
 
   /* prefix counters */
   int c_val = 0, c_alu = 0, c_cast = 0;
@@ -611,16 +651,6 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         wsb_printf(&body, "var %s: i32 = i32(gindex.%c);\n", sname, dim_char);
       }
 
-      /* Bounds check for global indices only.
-       * Local threads must all run (barrier requires it). */
-      if (sname[0] != 'l') {
-        char *bound = wsm_get(&names, u->src[0]);
-        if (bound) {
-          for (int d = 0; d < depth; d++)
-            wsb_puts(&body, "  ");
-          wsb_printf(&body, "if (%s >= %s) { return; }\n", sname, bound);
-        }
-      }
       continue;
     }
 
@@ -713,7 +743,9 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
       int64_t reg_size = wgsl_packed_size(ctx, u);
       const char *base_tn = wgsl_buffer_type_name(ctx, u);
-      wsb_printf(&decls, "  var %s: array<%s,%lld>;\n", name, base_tn, (long long)reg_size);
+      for (int d = 0; d < depth; d++)
+        wsb_puts(&body, "  ");
+      wsb_printf(&body, "var %s: array<%s,%lld>;\n", name, base_tn, (long long)reg_size);
       continue;
     }
 
@@ -733,10 +765,6 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
     /* --- LOAD: read from array --------------------------------------- */
     if (u->op == POLY_OP_LOAD) {
-      char name[32];
-      snprintf(name, sizeof(name), "val%d", c_val++);
-      wsm_set(&names, u, strdup(name));
-
       char *bidx = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
       PolyUOp *idx_uop = poly_as_index(u->src[0]);
@@ -747,10 +775,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         if (!packed_load) goto fail;
         load_expr = packed_load;
       }
-      for (int d = 0; d < depth; d++)
-        wsb_puts(&body, "  ");
-
-      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
+      char *expr;
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(u->src[2]->dtype))
@@ -781,7 +806,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         }
         char *gate_s = wsm_get(&names, gate_uop);
         char *alt_s = wsm_get(&names, alt_uop);
-        wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, load_expr, gate_s);
+        expr = poly_strfmt("select(%s, %s, %s)", alt_s, load_expr, gate_s);
       } else if (gate_uop) {
         int64_t u_lanes = poly_uop_max_numel(ctx, u);
         int64_t gate_lanes = gate_uop ? poly_uop_max_numel(ctx, gate_uop) : 1;
@@ -798,11 +823,15 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
           }
         }
         char *gate_s = wsm_get(&names, gate_uop);
-        wsb_printf(&body, "%s = select(%s(0), %s, %s);\n", name, tn, load_expr, gate_s);
+        expr = poly_strfmt("select(%s(0), %s, %s)", tn, load_expr, gate_s);
       } else {
-        wsb_printf(&body, "%s = %s;\n", name, load_expr);
+        expr = strdup(load_expr);
       }
       free(packed_load);
+      PolyAddrSpace space;
+      bool inline_load =
+          child_count[i] == 1 && poly_uop_addrspace(u->src[0], &space) && space == POLY_ADDR_REG;
+      wgsl_render_value(ctx, &names, &body, u, expr, inline_load, "val", &c_val, depth);
       continue;
     }
 
@@ -824,7 +853,10 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
           wsb_printf(&vexpr, "%s%s", j > 0 ? "," : "", s);
         }
         wsb_puts(&vexpr, ")");
-        wsm_set(&names, u, vexpr.buf);
+        wgsl_render_value(
+            ctx, &names, &body, u, vexpr.buf, child_count[i] == 1 && !expand_ssa, "cast", &c_cast,
+            depth
+        );
       } else {
         wsm_set(&names, u, strdup("0"));
       }
@@ -858,10 +890,6 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
         wsm_set(&names, u, literal);
         continue;
       }
-      char name[32];
-      snprintf(name, sizeof(name), "cast%d", c_cast++);
-      wsm_set(&names, u, strdup(name));
-
       char *src_s = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
       PolyDType dst_s = u->dtype;
@@ -898,16 +926,16 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
       }
 
       if (!expr) goto fail;
-      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
-      for (int d = 0; d < depth; d++)
-        wsb_puts(&body, "  ");
-      wsb_printf(&body, "%s = ", name);
-      if (u->op == POLY_OP_CAST)
-        wgsl_emit_typed_expr(&body, u->dtype, expr);
-      else
-        wsb_puts(&body, expr);
-      free(expr);
-      wsb_puts(&body, ";\n");
+      if (u->op == POLY_OP_CAST && poly_dtype_is_int(u->dtype) && u->dtype.bitsize < 32) {
+        WgslStrBuf typed;
+        wsb_init(&typed);
+        wgsl_emit_typed_expr(&typed, u->dtype, expr);
+        free(expr);
+        expr = typed.buf;
+      }
+      bool inline_cast = (u->op != POLY_OP_CAST || poly_uop_max_numel(ctx, u) == 1) &&
+                         child_count[i] == 1 && !expand_ssa;
+      wgsl_render_value(ctx, &names, &body, u, expr, inline_cast, "cast", &c_cast, depth);
       continue;
     }
 
@@ -923,24 +951,35 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
     /* --- ALU ops: arithmetic expressions ----------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      const char *s0 = (u->n_src > 0) ? wsm_get(&names, u->src[0]) : "";
-      const char *s1 = (u->n_src > 1) ? wsm_get(&names, u->src[1]) : "";
-      const char *s2 = (u->n_src > 2) ? wsm_get(&names, u->src[2]) : "";
-      char *expr = render_alu_wgsl(u->op, u->dtype, s0, s1, s2);
+      const char *sources[3] = {"", "", ""};
+      char *stripped[3] = {0};
+      for (int j = 0; j < u->n_src && j < 3; j++) {
+        sources[j] = wsm_get(&names, u->src[j]);
+        /* PG-DIV-008 wraps narrow ALU in truncation, so its outer operator
+         * is no longer the original associative ALU. Preserve those parentheses. */
+        if (u->src[j]->op == u->op &&
+            !(poly_dtype_is_int(u->src[j]->dtype) && u->src[j]->dtype.bitsize < 32) &&
+            (u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
+             u->op == POLY_OP_OR || u->op == POLY_OP_AND)) {
+          stripped[j] = poly_render_strip_parens(sources[j]);
+          if (stripped[j]) sources[j] = stripped[j];
+        }
+      }
+      char *expr = render_alu_wgsl(u->op, u->dtype, sources[0], sources[1], sources[2]);
+      for (int j = 0; j < 3; j++)
+        free(stripped[j]);
       if (!expr) goto fail;
-
-      char name[32];
-      snprintf(name, sizeof(name), "alu%d", c_alu++);
-      wsm_set(&names, u, strdup(name));
-
-      const char *tn = wgsl_type_name(u->dtype);
-      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
-      for (int d = 0; d < depth; d++)
-        wsb_puts(&body, "  ");
-      wsb_printf(&body, "%s = ", name);
-      wgsl_emit_typed_expr(&body, u->dtype, expr);
-      free(expr);
-      wsb_puts(&body, ";\n");
+      if (poly_dtype_is_int(u->dtype) && u->dtype.bitsize < 32) {
+        WgslStrBuf typed;
+        wsb_init(&typed);
+        wgsl_emit_typed_expr(&typed, u->dtype, expr);
+        free(expr);
+        expr = typed.buf;
+      }
+      wgsl_render_value(
+          ctx, &names, &body, u, expr, u->op != POLY_OP_WHERE && child_count[i] == 1 && !expand_ssa,
+          "alu", &c_alu, depth
+      );
       continue;
     }
   }
@@ -992,14 +1031,12 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
   wsb_puts(&out, "@builtin(workgroup_id) gindex: vec3<u32>,");
   wsb_puts(&out, "@builtin(local_invocation_id) lindex: vec3<u32>) {\n");
-  /* Function-scope declarations first, then body (WGSL block scoping). */
-  wsb_puts(&out, decls.buf);
   wsb_puts(&out, body.buf);
   wsb_puts(&out, "}\n");
 
   /* cleanup */
   wgsl_bindings_free(bindings, n_bindings);
-  free(decls.buf);
+  free(child_count);
   free(body.buf);
   wsm_destroy(&names);
 
@@ -1007,7 +1044,7 @@ char *poly_render_wgsl(PolyCtx *ctx, PolyUOp **uops, int n, const char *fn_name)
 
 fail:
   wgsl_bindings_free(bindings, n_bindings);
-  free(decls.buf);
+  free(child_count);
   free(body.buf);
   wsm_destroy(&names);
   return NULL;
@@ -1025,6 +1062,12 @@ static PolyUOp *rule_wgsl_shift_u32(PolyCtx *ctx, PolyUOp *u, const PolyBindings
   if (poly_dtype_eq(amount->dtype, POLY_UINT32)) return NULL;
   /* Cast shift amount to u32 */
   PolyUOp *cast_amount = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, amount, poly_arg_none());
+  if (u->op == POLY_OP_SHL) {
+    /* Pinned wgsl_matcher shifts unsigned bits, then restores the value dtype. */
+    PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, u->src[0], poly_arg_none());
+    PolyUOp *shift = poly_uop2(ctx, u->op, POLY_UINT32, bits, cast_amount, u->arg);
+    return poly_uop1(ctx, POLY_OP_BITCAST, u->dtype, shift, poly_arg_none());
+  }
   return poly_uop2(ctx, u->op, u->dtype, u->src[0], cast_amount, u->arg);
 }
 

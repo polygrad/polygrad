@@ -295,21 +295,14 @@ static PolyUOp *estimate_binary(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b
   return poly_uop2(ctx, op, POLY_INT64, a, b, poly_arg_none());
 }
 
+/* Like Estimates.from_uops, retain symbolic arithmetic. Conservative vmin/vmax
+ * (notably BITCAST's full dtype range) cannot prove an actual count invalid.
+ * poly_estimates_infer checks bound values and signed-64 arithmetic overflow. */
 static PolyUOp *estimate_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t a_min = 0, a_max = 0, b_min = 0, b_max = 0, max_sum = 0;
-  if (!ctx || !a || !b) return NULL;
-  poly_uop_minmax(ctx, a, &a_min, &a_max);
-  poly_uop_minmax(ctx, b, &b_min, &b_max);
-  if (a_min < 0 || b_min < 0 || __builtin_add_overflow(a_max, b_max, &max_sum)) return NULL;
   return estimate_binary(ctx, POLY_OP_ADD, a, b);
 }
 
 static PolyUOp *estimate_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t a_min = 0, a_max = 0, b_min = 0, b_max = 0, max_product = 0;
-  if (!ctx || !a || !b) return NULL;
-  poly_uop_minmax(ctx, a, &a_min, &a_max);
-  poly_uop_minmax(ctx, b, &b_min, &b_max);
-  if (a_min < 0 || b_min < 0 || __builtin_mul_overflow(a_max, b_max, &max_product)) return NULL;
   return estimate_binary(ctx, POLY_OP_MUL, a, b);
 }
 
@@ -1074,14 +1067,33 @@ static bool poly_eval_launch_expr(
       value = poly_arg_int(0);
     } else if (schedule_is_alu_var(node)) {
       ok = poly_lookup_var_value(node, bindings, n_bindings, &value);
-    } else if (node->op == POLY_OP_CAST) {
+    } else if (node->op == POLY_OP_CAST || node->op == POLY_OP_BITCAST) {
       PolyArg *operand =
           node->n_src >= 1
               ? poly_map_get(memo, poly_ptr_hash(node->src[0]), node->src[0], poly_ptr_eq)
               : NULL;
       if (!operand)
         ok = false;
-      else
+      else if (node->op == POLY_OP_BITCAST) {
+        PolyDType from = node->src[0]->dtype;
+        /* renderer_infer uses dtype.bitcast/struct.pack, not host numeric
+         * conversion. Unlike constant folding, reject out-of-range inputs. */
+        if (poly_dtype_is_int(from)) {
+          int64_t input = 0;
+          ok = poly_arg_integer_to_i64(*operand, &input);
+          if (ok && poly_dtype_is_unsigned(from))
+            ok = input >= 0 &&
+                 (from.bitsize == 64 || (uint64_t)input < (UINT64_C(1) << from.bitsize));
+          else if (ok && from.bitsize > 0 && from.bitsize < 64)
+            ok = input >= -(INT64_C(1) << (from.bitsize - 1)) &&
+                 input < (INT64_C(1) << (from.bitsize - 1));
+        }
+        if (ok) ok = poly_exec_bitcast_const(from, node->dtype, *operand, &value);
+        /* The launch evaluator's integer domain is signed 64-bit, including
+         * intermediates. Do not treat an unsigned top bit as a negative value. */
+        if (ok && poly_dtype_is_unsigned(node->dtype) && value.kind == POLY_ARG_INT && value.i < 0)
+          ok = false;
+      } else
         /* Pinned tinygrad ops.py:1021-1035 evaluates symbolic CAST through
          * renderer_infer host conversion, without narrowing to dtype width. */
         value = poly_exec_alu(POLY_OP_CAST, node->dtype, operand, 1, false);

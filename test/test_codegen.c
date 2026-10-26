@@ -5002,6 +5002,153 @@ TEST(codegen, wgsl_self_compare_uses_nan_bits_like_pinned) {
   PASS();
 }
 
+TEST(codegen, wgsl_bounds_inline_expression_complexity) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_test_program_param(ctx, POLY_INT32, 1, 0);
+  PolyUOp *out = poly_test_program_param(ctx, POLY_INT32, 1, 1);
+  PolyUOp *zero = poly_uop_const_int(ctx, 0);
+  PolyUOp *x =
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, poly_uop_index(ctx, in, &zero, 1), poly_arg_none());
+  bool ok = true;
+  /* Flattened associative expressions and deeply nested unary expressions
+   * both exhausted Chrome's WGSL parser under unrestricted single-use inlining. */
+  for (int unary = 0; unary < 2; unary++) {
+    PolyUOp *value = unary ? x : NULL;
+    for (int i = 0; i < 1024; i++) {
+      if (unary)
+        value = poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, value, poly_arg_none());
+      else {
+        PolyUOp *eq = poly_uop2(
+            ctx, POLY_OP_CMPEQ, POLY_BOOL, x, poly_uop_const(ctx, poly_arg_int(i), POLY_INT32),
+            poly_arg_none()
+        );
+        value = value ? poly_uop2(ctx, POLY_OP_OR, POLY_BOOL, value, eq, poly_arg_none()) : eq;
+      }
+    }
+    if (!unary)
+      value = poly_uop3(
+          ctx, POLY_OP_WHERE, POLY_INT32, value, poly_uop_const(ctx, poly_arg_int(1), POLY_INT32),
+          poly_uop_const(ctx, poly_arg_int(0), POLY_INT32), poly_arg_none()
+      );
+    PolyUOp *store = poly_uop2(
+        ctx, POLY_OP_STORE, POLY_VOID, poly_uop_index(ctx, out, &zero, 1), value, poly_arg_none()
+    );
+    int count = 0;
+    PolyUOp **linear = poly_uop_toposort_alloc(ctx, store, &count);
+    char *source = poly_render_wgsl(ctx, linear, count, "bounded_expression");
+    ok &= source != NULL;
+    int syntax = 0, temporaries = 0;
+    for (const char *c = source; c && *c; c++) {
+      if (*c == '\n') {
+        ok &= syntax < 512;
+        syntax = 0;
+      } else if (strchr("()[]+-*/%&|^!~<>=,", *c))
+        syntax++;
+      if (strncmp(c, "var alu", 7) == 0) temporaries++;
+    }
+    ok &= temporaries > 1;
+    free(source);
+    poly_uop_toposort_free(linear);
+  }
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, wgsl_pinned_expression_emission) {
+  VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
+  int n = 0;
+  PolyUOp **lin = poly_test_full_rewrite_and_linearize(k.ctx, k.sink, &n);
+  char *saved = getenv("EXPAND_SSA") ? strdup(getenv("EXPAND_SSA")) : NULL;
+  unsetenv("EXPAND_SSA");
+  char *compact = poly_render_wgsl(k.ctx, lin, n, "compact");
+  setenv("EXPAND_SSA", "1", 1);
+  char *expanded = poly_render_wgsl(k.ctx, lin, n, "expanded");
+  if (saved)
+    setenv("EXPAND_SSA", saved, 1);
+  else
+    unsetenv("EXPAND_SSA");
+  free(saved);
+  /* Pinned CStyleLanguage._render: keep global loads, inline one-use ADD,
+   * and declare at the UOp's position inside the loop, not at function entry. */
+  bool ok = compact && expanded && !strstr(compact, "var alu") &&
+            strstr(expanded, "var alu0: f32 = (val0+val1);") &&
+            strstr(compact, "data2_10[Lidx0] = (val0+val1);");
+  const char *loop = compact ? strstr(compact, "for (") : NULL;
+  const char *load = compact ? strstr(compact, "var val0: f32 = ") : NULL;
+  ok &= loop && load && loop < load;
+  float a[10], b[10], out[10] = {0};
+  for (int i = 0; i < 10; i++) {
+    a[i] = (float)i - 5;
+    b[i] = (float)i * .25f;
+  }
+  void *args[] = {a, b, out};
+  ok &= poly_interp_eval(k.ctx, lin, n, args, 3) == 0;
+  for (int i = 0; i < 10; i++)
+    ok &= out[i] == a[i] + b[i];
+  free(compact);
+  free(expanded);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, wgsl_register_load_use_counts) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_WEAKINT, poly_arg_int(1));
+  PolyParamArg reg_arg = {.slot = 0, .addrspace = POLY_ADDR_REG};
+  PolyUOp *reg = poly_uop1(ctx, POLY_OP_BUFFER, POLY_FLOAT32, size, poly_arg_param(&reg_arg));
+  PolyUOp *out = program_param(ctx, POLY_FLOAT32, 1, 0);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, reg, zero, poly_arg_none());
+  PolyUOp *init = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, one, poly_arg_none());
+  PolyUOp *ready = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, reg, init, poly_arg_none());
+  PolyUOp *read_idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, ready, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, read_idx, poly_arg_none());
+  PolyUOp *twice = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, load, poly_arg_none());
+  PolyUOp *write = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, twice, poly_arg_none());
+  PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, out, zero, poly_arg_none());
+  PolyUOp *save = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, load, poly_arg_none());
+  PolyUOp *lin[] = {size,  reg,      out,  zero,  one,   idx, init,
+                    ready, read_idx, load, twice, write, dst, save};
+  int n = sizeof(lin) / sizeof(*lin);
+  char *source = poly_render_wgsl(ctx, lin, n, "reg_uses");
+  /* Three source edges must keep the old register value before its write. */
+  bool ok = source && strstr(source, "var val0: f32 = r0[0];") &&
+            strstr(source, "r0[0] = (val0+val0);") && strstr(source, "data0_1[0] = val0;");
+  float result = 0;
+  void *args[] = {&result};
+  ok &= poly_interp_eval(ctx, lin, n, args, 1) == 0 && result == 1;
+  free(source);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
+TEST(codegen, wgsl_left_shift_matches_pinned_bitcasts) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = program_param(ctx, POLY_INT32, 1, 0);
+  PolyUOp *amount = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *cast_amount = poly_uop_cast(ctx, amount, POLY_UINT32);
+  PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, x, poly_arg_none());
+  PolyUOp *shift = poly_uop2(ctx, POLY_OP_SHL, POLY_UINT32, bits, cast_amount, poly_arg_none());
+  PolyUOp *expected = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT32, shift, poly_arg_none());
+  PolyUOp *raw = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, x, amount, poly_arg_none());
+  bool ok = poly_graph_rewrite(ctx, raw, poly_pm_wgsl_extra()) == expected;
+  /* The pin leaves an already-u32 count alone and keeps signed right shift. */
+  PolyUOp *ready = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, x, cast_amount, poly_arg_none());
+  ok &= poly_graph_rewrite(ctx, ready, poly_pm_wgsl_extra()) == ready;
+  PolyUOp *right = poly_uop2(ctx, POLY_OP_SHR, POLY_INT32, x, amount, poly_arg_none());
+  PolyUOp *right_expected =
+      poly_uop2(ctx, POLY_OP_SHR, POLY_INT32, x, cast_amount, poly_arg_none());
+  ok &= poly_graph_rewrite(ctx, right, poly_pm_wgsl_extra()) == right_expected;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(codegen, render_wgsl_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
   int n;
@@ -5038,7 +5185,8 @@ TEST(codegen, render_wgsl_vecadd) {
   /* variable declarations with WGSL types */
   ASSERT_NOT_NULL(strstr(src, "var val0: f32"));
   ASSERT_NOT_NULL(strstr(src, "var val1: f32"));
-  ASSERT_NOT_NULL(strstr(src, "var alu0: f32"));
+  ASSERT_TRUE(strstr(src, "var alu0: f32") == NULL);
+  ASSERT_NOT_NULL(strstr(src, "data2_10[Lidx0] = (val0+val1);"));
 
   /* no C-style wrapper */
   ASSERT_TRUE(strstr(src, "_call") == NULL);
@@ -5064,7 +5212,10 @@ TEST(codegen, render_wgsl_vecmul) {
   ASSERT_NOT_NULL(strstr(src, "data2_8[alu0] ="));
   ASSERT_NOT_NULL(strstr(src, "data2_8[alu1] ="));
   ASSERT_NOT_NULL(strstr(src, "data2_8[alu2] ="));
-  ASSERT_NOT_NULL(strstr(src, "data2_8[alu3] ="));
+  int stores = 0;
+  for (const char *p = src; (p = strstr(p, "data2_8[")); p++)
+    stores++;
+  ASSERT_INT_EQ(stores, 4); /* The one-use base index now renders inline. */
   ASSERT_NOT_NULL(strstr(src, "*")); /* multiply operator */
   ASSERT_TRUE(strstr(src, "for (var ridx0") == NULL);
   ASSERT_TRUE(strstr(src, "vec4<f32>") == NULL);
@@ -7102,6 +7253,37 @@ TEST(codegen, c_vector_store_requires_destination_type) {
   PASS();
 }
 
+TEST(codegen, wgsl_narrow_inline_preserves_truncation_parentheses) {
+  bool ok = true;
+  PolyDType types[] = {POLY_INT8, POLY_UINT8, POLY_INT16, POLY_UINT16};
+  const char *suffix[] = {" >> 24u)+", " & 255u)+", " >> 16u)+", " & 65535u)+"};
+  for (int k = 0; k < 4; k++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyParamArg arg = {.slot = 1, .addrspace = POLY_ADDR_ALU};
+    PolyUOp *x = poly_uop0(ctx, POLY_OP_PARAM, types[k], poly_arg_param(&arg));
+    PolyUOp *out = program_param(ctx, POLY_INT32, 1, 0);
+    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, types[k], poly_arg_int(1));
+    PolyUOp *first = poly_uop2(ctx, POLY_OP_ADD, types[k], x, one, poly_arg_none());
+    PolyUOp *next = poly_uop2(ctx, POLY_OP_ADD, types[k], first, one, poly_arg_none());
+    PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, next, poly_arg_none());
+    PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, POLY_INT32, out, zero, poly_arg_none());
+    PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, wide, poly_arg_none());
+    PolyUOp *ops[] = {x, out, zero, one, first, next, wide, idx, store};
+    int n = sizeof(ops) / sizeof(*ops);
+    char *source = poly_render_wgsl(ctx, ops, n, "nested_narrow");
+    ok &= source && strstr(source, suffix[k]);
+    int64_t input = k < 2 ? (k == 0 ? 126 : 255) : (k == 2 ? 32766 : 65535);
+    int32_t result = 0, expected[] = {-128, 1, -32768, 1};
+    void *args[] = {&result, &input};
+    ok &= poly_interp_eval(ctx, ops, n, args, 2) == 0 && result == expected[k];
+    free(source);
+    poly_ctx_destroy(ctx);
+  }
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(codegen, wgsl_narrow_cast_and_alu_results) {
   /* PG-DIV-008: WGSL's i32/u32 registers must preserve the UOp's 8/16-bit
    * value before a later widening. Pinned PythonProgram truncates here;
@@ -7756,9 +7938,9 @@ TEST(codegen, render_wgsl_bool_storage_is_packed_like_tinygrad) {
 
   ASSERT_NOT_NULL(strstr(src, "data0_3: array<atomic<u32>>"));
   ASSERT_TRUE(strstr(src, "array<bool>") == NULL);
-  ASSERT_NOT_NULL(strstr(src, "var alu0: bool"));
+  ASSERT_TRUE(strstr(src, "var alu0: bool") == NULL);
   ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data0_3[(Lidx0/4)]"));
-  ASSERT_NOT_NULL(strstr(src, "select(0u, 1u, alu0)"));
+  ASSERT_NOT_NULL(strstr(src, "select(0u, 1u, (val0==val1))"));
 
   free(src);
   free(lin);
@@ -7918,6 +8100,8 @@ TEST(codegen, render_wgsl_reduce) {
   ASSERT_NOT_NULL(strstr(src, "for (var Ridx0: i32 = 0;"));
   /* accumulator store (not array write) */
   ASSERT_NOT_NULL(strstr(src, "r0[0] = "));
+  /* Pinned one-use REG LOAD stays at its consumer, including EXPAND_SSA. */
+  ASSERT_NOT_NULL(strstr(src, "r0[0] = (r0[0]+val0);"));
   /* output buffer store */
   ASSERT_NOT_NULL(strstr(src, "data1_1[0]"));
 

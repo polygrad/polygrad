@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-10-25",
-  "basis": "Fresh Clang 14 scan of all 101 translation units: 89 diagnostics unchanged except two codegen.c warnings moving from lines 3788/3791 to 3796/3799. The complete merge_reduce_ends helper and all following code are byte-identical. Existing count/fill and ownership rationales remain applicable. Evidence: temp/webgpu-rejection-fix-20261025/analyzer-before-review and complete-analyzer-review.py.",
+  "reviewed_on": "2026-10-26",
+  "basis": "Fresh Clang 14 scan of all 101 translation units: 91 diagnostics. Three schedule diagnostics moved within byte-identical helpers. Two WGSL diagnostics share a trace requiring a NULL CAST operand, which the UOp constructor rejects before interning. All other diagnostics and rationales are unchanged. Evidence: temp/wgsl-parity-completion-20261026/analyzer-before-review, wgsl-analyzer-traces.txt and complete-analyzer-review.py.",
   "context": {
     "sources": [
       "src/alu.c",
@@ -152,7 +152,7 @@
       "src/engine/jit.h": "2d425001350ea0faecd3b418887b381c5cfdc6ae6ad26e80b61525f05022f949",
       "src/engine/realize.c": "ddfdec3708ac0e973f19974d1f14704b9a137916762526f4bd13507ed92e4970",
       "src/engine/realize.h": "0efb03179b956db6da7005b5ef2094237cacd641837d2bf4b86a36d5e06366c1",
-      "src/engine/schedule.c": "e548724b03d56b367988a80b70c80caec035eec309866eca921a218f43da4487",
+      "src/engine/schedule.c": "4b360b0159d74c97b25af5f88e8f76de6dbdea4ce22bd00cb85ec1a94c5e143b",
       "src/engine/schedule.h": "52a5f6c559f1ec883d53f8b660a16559b73885c8a1277cabc4b12f4c6166e611",
       "src/frontend.c": "0838527dcd349ab306d611fd2f6f84e1073bf420654e70d1f7386d1bb99e1d33",
       "src/frontend.h": "2a0e6dc4c0e4c386ed8d7dbd5e339894fe190922def225ce88ddce00b74cb96f",
@@ -248,7 +248,7 @@
       "src/renderer/isa/x86.h": "4c7466b0e5a4e6ffeb7541235978f2e636236fd4fc47dc28d91055cad318f969",
       "src/renderer/renderer.h": "f6256e571860037212dc145f32f36a2340e8e57f7b8cbedde78d446988e27386",
       "src/renderer/wasm.c": "1e9c153bac2490cd2b65c32dec503a6b1618509103d03fd1f43f5f148074a696",
-      "src/renderer/wgsl.c": "f0f738217d1c1eec75563e1773c988efd79640cf598b84b970d76576f9a0265a",
+      "src/renderer/wgsl.c": "ee2e79be231d23b07f6416840044bc2f437b0d832e5aab47bc13604ef4f51663",
       "src/runtime/graph/cuda.h": "86c4c21518996e21505c2e42c6e1e547a03c73958e6b4ec8298a4c6123b54020",
       "src/runtime/support/memory.c": "640fb8043a74a50bf4bbf0f815aa38779d655f8b0158f0bd17bf90cd5fbf79ba",
       "src/runtime/support/memory.h": "e38f9c0dfe8102ecf8e8e91e65b6cce7e9a713f2034b122e27b53816c6de3d9f",
@@ -448,7 +448,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 738,
+      "line": 731,
       "column": 36,
       "message": "The left operand of '==' is a garbage value",
       "checker": "core.UndefinedBinaryOperatorResult",
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 770,
+      "line": 763,
       "column": 5,
       "message": "Assigned value is garbage or undefined",
       "checker": "core.uninitialized.Assign",
@@ -466,7 +466,7 @@
     },
     {
       "path": "src/engine/schedule.c",
-      "line": 4602,
+      "line": 4614,
       "column": 28,
       "message": "Array access (via field 'items') results in a null pointer dereference",
       "checker": "core.NullDereference",
@@ -1102,6 +1102,24 @@
       "checker": "core.NonNullParamChecker",
       "disposition": "false_positive",
       "rationale": "Validated nonnegative counts and checked concat sizing; both copies cover exactly the initialized rule arrays. Warning functions unchanged except scoped raw-operation renames."
+    },
+    {
+      "path": "src/renderer/wgsl.c",
+      "line": 117,
+      "column": 89,
+      "message": "Access to field 'op' results in a dereference of a null pointer (loaded from variable 'key')",
+      "checker": "core.NullDereference",
+      "disposition": "false_positive",
+      "rationale": "The full trace assumes CAST has n_src == 1 but src[0] == NULL. The immutable UOp constructor rejects every NULL source (uop/ops.c:1414-1416) and requires exactly one CAST/BITCAST source (1429-1433). WGSL receives these constructed UOps. The nullable branch is infeasible for a valid graph; both warnings share it. Evidence: temp/wgsl-parity-completion-20261026/wgsl-analyzer-traces.txt."
+    },
+    {
+      "path": "src/renderer/wgsl.c",
+      "line": 896,
+      "column": 26,
+      "message": "Access to field 'dtype' results in a dereference of a null pointer",
+      "checker": "core.NullDereference",
+      "disposition": "false_positive",
+      "rationale": "The full trace assumes CAST has n_src == 1 but src[0] == NULL. The immutable UOp constructor rejects every NULL source (uop/ops.c:1414-1416) and requires exactly one CAST/BITCAST source (1429-1433). WGSL receives these constructed UOps. The nullable branch is infeasible for a valid graph; both warnings share it. Evidence: temp/wgsl-parity-completion-20261026/wgsl-analyzer-traces.txt."
     }
   ]
 }

@@ -498,6 +498,73 @@ TEST(schedule_runtime, execution_owner_launch_admission) {
   PASS();
 }
 
+TEST(schedule_runtime, symbolic_bitcast_launch_and_estimates) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *n = poly_uop_variable(ctx, "n", poly_arg_int(1), poly_arg_int(16), POLY_INT32, 1, true);
+  PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, n, poly_arg_none());
+  PolyUOp *one = poly_uop_const(ctx, poly_arg_int(1), POLY_UINT32);
+  PolyUOp *shift = poly_uop2(ctx, POLY_OP_SHL, POLY_UINT32, bits, one, poly_arg_none());
+  PolyUOp *bound = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT32, shift, poly_arg_none());
+  PolyVarBinding binding = {.var = n, .value = 3};
+  int calls = 0;
+  PolyRunner runner = {
+      .handle = &calls, .execute = execution_owner_probe, .grid = {1, 1, 1}, .block = {1, 1, 1}};
+  runner.grid_exprs[0] = bound;
+  bool ok = poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, &binding, 1, 1, INFINITY, 0) == 1;
+  ok &= calls == 1 && runner.grid[0] == 6;
+  /* Estimates.from_uops retains symbolic bounds even when BITCAST's vmin
+   * conservatively spans negative values. Actual bindings decide the size. */
+  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, n, n, poly_arg_none());
+  PolyUOp *uops[] = {special, add};
+  PolyEstimates built = {0};
+  uint64_t built_ops = 0, built_lds = 0, built_mem = 0;
+  ok &= poly_estimates_from_uops(ctx, uops, 2, false, &built) == 0;
+  ok &= poly_estimates_infer(&built, &binding, 1, &built_ops, &built_lds, &built_mem) == 0;
+  ok &= built_ops == 6 && built_lds == 0 && built_mem == 0;
+  /* Moving validation to bound evaluation must not admit overflow or a
+   * negative estimate. Neither becomes a wrapped positive work count. */
+  const int64_t invalid_sizes[] = {-1, INT64_MAX};
+  for (size_t i = 0; i < sizeof(invalid_sizes) / sizeof(*invalid_sizes); i++) {
+    PolyUOp *size = poly_uop_const(ctx, poly_arg_int(invalid_sizes[i]), POLY_INT64);
+    PolyUOp *count = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT64, size, poly_arg_str("gidx0"));
+    PolyUOp *alu = poly_uop3(ctx, POLY_OP_MULACC, POLY_INT32, n, n, n, poly_arg_none());
+    PolyUOp *invalid[] = {count, alu};
+    ok &= poly_estimates_from_uops(ctx, invalid, 2, false, &built) == 0;
+    ok &= poly_estimates_infer(&built, &binding, 1, &built_ops, &built_lds, &built_mem) == -1;
+  }
+  /* sym_infer uses storage reinterpretation, not a numeric cast. */
+  const struct {
+    PolyDType from, to;
+    PolyArg input;
+    uint64_t expected;
+  } cases[] = {
+      {POLY_INT32, POLY_UINT32, poly_arg_int(-1), UINT32_MAX},
+      {POLY_INT8, POLY_UINT8, poly_arg_int(-1), UINT8_MAX},
+      {POLY_FLOAT32, POLY_INT32, poly_arg_float(3), UINT64_C(1077936128)},
+      {POLY_INT32, POLY_FLOAT32, poly_arg_int(1077936128), 3},
+      {POLY_FLOAT16, POLY_UINT16, poly_arg_float(1), 15360},
+      {POLY_INT64, POLY_UINT64, poly_arg_int(INT64_MAX), INT64_MAX}};
+  for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+    PolyUOp *x = poly_uop_const(ctx, cases[i].input, cases[i].from);
+    PolyUOp *cast = poly_uop1(ctx, POLY_OP_BITCAST, cases[i].to, x, poly_arg_none());
+    PolyEstimates estimates = {.ops = cast, .lds = bound, .mem = one};
+    uint64_t ops = 0, lds = 0, mem = 0;
+    ok &= poly_estimates_infer(&estimates, &binding, 1, &ops, &lds, &mem) == 0;
+    ok &= ops == cases[i].expected && lds == 6 && mem == 1;
+  }
+  /* Host CAST does not narrow. BITCAST must reject an out-of-range storage
+   * value as Python struct.pack does, rather than silently wrapping it. */
+  PolyUOp *wide = poly_uop_const(ctx, poly_arg_int(257), POLY_INT32);
+  PolyUOp *narrow = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT8, wide, poly_arg_none());
+  runner.grid_exprs[0] = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT8, narrow, poly_arg_none());
+  ok &= isinf(poly_time_call(&runner, POLY_DEVICE_INTERP, NULL, 0, NULL, 0, 1, INFINITY, 0));
+  ok &= calls == 1 && runner.grid[0] == 6;
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(ok);
+  PASS();
+}
+
 TEST(schedule_runtime, fixed_launch_preparation_preserves_program) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *ptr = poly_test_program_param(ctx, POLY_FLOAT32, 8, 0);

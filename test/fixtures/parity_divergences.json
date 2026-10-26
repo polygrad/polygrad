@@ -25,6 +25,26 @@
   },
   "entries": [
     {
+      "id": "PG-DIV-039",
+      "status": "approved",
+      "stages": [
+        "wgsl"
+      ],
+      "area": "Bound single-use WGSL expression inlining for parser capacity",
+      "tinygrad": "Pinned 6f87158d and upstream c10034fc2 inline eligible single-use expressions without a WGSL complexity bound. A 1024-term Boolean OR chain exceeds Chrome 155 expression depth 512 in both.",
+      "polygrad": "Use pinned inlining and declaration placement, but materialize an eligible expression at its existing linearized position when its emitted syntax punctuation count exceeds 128. Count operators as well as delimiters because associative formatting can flatten a DAG into a long parser chain. Other backends, graph structure, arithmetic and execution order are unchanged.",
+      "rationale": "The full browser ONNX computed-scatter fixture reaches this parser limit. A render-local temporary bounds expression growth without disabling normal inlining or changing the optimizer.",
+      "approval": "User instructed proceed with fixes, measure, then evaluate pinned and latest Tinygrad on 2026-10-26 after the reported stop requiring bounded WGSL inlining and symbolic BITCAST evaluation.",
+      "evidence": [
+        "src/renderer/wgsl.c:wgsl_render_value",
+        "test/test_codegen.c:wgsl_bounds_inline_expression_complexity",
+        "js/test/test_tensor.js",
+        "temp/wgsl-render-parity-20261025/report.txt",
+        "temp/wgsl-parity-completion-20261026/report.txt"
+      ],
+      "close_when": "The reference bounds WGSL expressions sufficiently for the browser parser. Recheck long associative and unary chains, computed scatter, ordinary shader identity and browser values before removing this exception."
+    },
+    {
       "id": "PG-DIV-038",
       "status": "approved",
       "stages": [

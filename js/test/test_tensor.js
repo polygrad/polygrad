@@ -4290,6 +4290,29 @@ async function runTensorTests(pg, createRuntime) {
     assertClose(await a.dot(b).toArray(), [19, 22, 43, 50])
   })
 
+  await test('signed int32 shifts preserve bits and sign', async () => {
+    const values = [-2147483648, -1073741825, -1, 0, 1, 1073741824, 2147483647]
+    const x = new Tensor(values, { dtype: 'int32' })
+    for (const amount of [1, 7, 31]) {
+      assertClose(await x.lshift(amount).toArray(), values.map(v => v << amount), 0)
+      assertClose(await x.rshift(amount).toArray(), values.map(v => v >> amount), 0)
+    }
+  })
+
+  await testIf(['interp', 'wasm', 'webgpu'].includes(pg.device), 'nested narrow arithmetic preserves intermediate truncation', async () => {
+    // PG-DIV-008 preserves narrow register values; native C integer promotion is separate.
+    for (const [dtype, input, expected] of [
+      ['int8', [126, -128, -2], [-128, -126, 0]],
+      ['uint8', [255, 127, 0], [1, 129, 2]],
+      ['int16', [32766, -32768, -2], [-32768, -32766, 0]],
+      ['uint16', [65535, 32767, 0], [1, 32769, 2]],
+    ]) {
+      const x = new Tensor(input, { dtype })
+      const one = new Tensor([1, 1, 1], { dtype })
+      assertClose(await x.add(one).add(one).cast('int32').toArray(), expected, 0)
+    }
+  })
+
   await test('integer dot restores output dtype after wide accumulation', async () => {
     for (const dtype of ['int8', 'uint8', 'int16', 'uint16']) {
       const a = new Tensor([[100, 100, 100]], { dtype })
