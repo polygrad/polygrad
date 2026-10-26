@@ -57,6 +57,10 @@ diagnostic was about 23% slower after removing the old renderer shortcut.
 That comparison used the previous shortcut-enabled build, not a universal
 cross-machine speed guarantee. Token-call timing remains inconclusive.
 
+WebGPU calls with host readback can be slower than 0.7.1: batched MLP was
+about 2x slower in matched Chrome runs, while Qwen FFN was faster. This remains
+a workload- and browser-dependent performance limitation.
+
 - Forward Node's environment to the Wasm core and expose browser compiler
   settings through JavaScript `create({env})` and `createAsync({env})`.
 
