@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.2 (Unreleased)
+## 0.7.2 (2026-10-27)
 
 - Backport fixes for narrow unsigned arithmetic, singleton strided assignment,
   lazy-view writes and partial-store gradients. Correct reversed, broadcast and
