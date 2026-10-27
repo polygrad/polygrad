@@ -33,10 +33,6 @@
 - Fix HIP initialization, FP16 intrinsic selection, transfers and launch limits;
   HIP remains excluded from this release's acceptance matrix.
 
-Known limit: large FP32 reductions can have position-dependent rounding error.
-Qualify energy differences for probabilistic inference; use FP64 where supported
-when the FP32 error budget is insufficient.
-
 - Package headers and `python -m polygrad.sdk` for building C graph authors
   without a checkout. Separate construction compatibility from the core ABI,
   while preserving existing authors and rejecting missing required imports.
@@ -151,6 +147,10 @@ when the FP32 error budget is insufficient.
 
 - Load supported PyTorch ZIP state dictionaries through `Model.from_hf`.
   Prefer safetensors, fail on missing shards, and support pinned download revisions.
+
+Known limit: large FP32 reductions can have position-dependent rounding error.
+Qualify energy differences for probabilistic inference; use FP64 where supported
+when the FP32 error budget is insufficient.
 
 ## 0.7.1 (2026-10-08)
 

@@ -148,6 +148,9 @@ Probability math uses shared C implementations: `x.erf()`, `x.erfc()`,
 derivatives at domain endpoints and poles are not defined.
 Use `x.log_ndtr()` for the standard Normal log-CDF and `(-x).log_ndtr()`
 for its log survival probability; taking `log()` of a CDF can lose the tails.
+`x.ndtri_exp()` inverts the log-CDF directly from log probabilities at most zero,
+without exponentiating them. `x.log_erfcx()` computes the log scaled complementary
+error function without forming its exponential factor.
 
 ### NumPy And Data Updates
 
@@ -270,11 +273,12 @@ supports fixed-shape state and explicit entrypoint writes; see the
   execution. Without a loss, capture uses the current `TRAINING` value;
   changing it later does not recapture the graph.
 - Inside an author function, `child.forward(x=x)` with Tensor inputs inlines
-  an existing Model. Fixed Python loops share its weights; slicing and sampling
-  can stay in the combined graph. Import children before capture, on the same
-  runtime/device. Inference capture supports static value entrypoints and explicit
-  state inputs/outputs; internal writes, integer controls and input checks are
-  rejected. The parent owns one weight copy, independent of later child writes or disposal;
+  an existing Model. Repeated calls within one capture reuse the same weight
+  snapshot; slicing and sampling stay in the combined graph. Import children
+  before capture, on the same runtime/device. Inference capture supports static
+  value entrypoints and explicit state inputs/outputs; internal writes, integer
+  controls and input checks are rejected. The parent owns one weight copy,
+  independent of later child writes or disposal;
   both copies occupy memory until the child is disposed.
 - Set the seed before construction. BatchNorm/RNG updates affect Model-owned
   state. Authoring Tensor roots and training mode are restored even on failure;
@@ -359,6 +363,14 @@ for partial updates.
 To resume training, reapply the optimizer configuration after loading.
 See [export products](https://github.com/polygrad/polygrad#export-products)
 for graph, program and weight exports and version compatibility.
+
+### Application metadata
+
+`model.set_metadata('owner', value)` and `model.get_metadata('owner')` store and
+read detached application JSON; `None` removes the key. `transformer`, `polygrad`
+and `polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
+round-trip exactly; encode integers outside its exact range as strings. Metadata
+survives bundles, not raw IR. Application edits do not invalidate execution caches.
 
 ### ONNX Import
 
@@ -486,7 +498,7 @@ processing and multimodal position IDs remain the caller's responsibility.
 Use the checkpoint's `generation_config.json` for stopping tokens; nested text
 configuration defaults can differ.
 
-[Late token embeddings](examples/late_embeddings.py) composes a backbone, a
+[Late token embeddings](https://github.com/polygrad/polygrad/blob/main/py/examples/late_embeddings.py) composes a backbone, a
 checkpoint projection and normalization through the public Model API, with a
 document-only token mask. The same recipe supports Perplexity's late-embedding
 checkpoint; use its original tokenizer, prompts and skip-token IDs. The importer
@@ -863,12 +875,6 @@ Tensor `stack` import accepts an array of borrowed Tensor handles and returns
 one owned Tensor; its array transport follows the existing `cat` contract.
 `poly_uop_dtype_id` is also available to authors as a scalar query. Dtype IDs
 remain part of the extension ABI; the string-name query is native-only.
-
-`model.set_metadata('owner', value)` and `model.get_metadata('owner')` store and
-read detached application JSON; `None` removes the key. `transformer`, `polygrad`
-and `polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
-round-trip exactly; encode integers outside its exact range as strings. Metadata survives bundles,
-not raw IR, and application edits do not invalidate execution caches.
 
 For a runnable example from the checkout root, first run
 `make build/extension/author.so`. The supplied `test/extension_fixture.c`

@@ -158,6 +158,10 @@ Probability math uses shared C implementations: `x.erf()`, `x.erfc()`,
 derivatives at domain endpoints and poles are not defined.
 Use `x.logNdtr()` for the standard Normal log-CDF and `x.neg().logNdtr()`
 for its log survival probability; taking `log()` of a CDF can lose the tails.
+`x.ndtriExp()` inverts the log-CDF directly from log probabilities at most zero,
+without exponentiating them. `x.logErfcx()` computes the log scaled complementary
+error function without forming its exponential factor. Snake-case aliases
+`log_ndtr`, `ndtri_exp` and `log_erfcx` are also available.
 
 ### Reading And Updating Data
 
@@ -293,8 +297,9 @@ entrypoint writes through the shared
   `Tensor.training`; changing it later does not recapture the graph.
 - On WebGPU, construct with `await pg.Model.fromCallableAsync(author, options)`.
 - Inside the synchronous author, `child.forward({x})` with Tensor inputs inlines
-  an existing Model. Fixed JS loops share its weights, and subsequent slicing
-  or sampling stays in the combined graph. Import children first; on WebGPU,
+  an existing Model. Repeated calls within one capture reuse the same weight
+  snapshot; subsequent slicing or sampling stays in the combined graph.
+  Import children first; on WebGPU,
   `await child.placeAsync('WEBGPU')` before capture. Children must share the
   runtime/device. Inference capture supports static value entrypoints and explicit
   state inputs/outputs; internal state writes, integer controls and input checks are
@@ -385,6 +390,14 @@ Loading via `Model.load` / `Model.fromBundle` is synchronous; execution uses
 
 See [export products](https://github.com/polygrad/polygrad#export-products)
 for portable bundles, bound programs and weights, including JavaScript methods.
+
+### Application metadata
+
+`model.setMetadata('owner', value)` and `model.getMetadata('owner')` write/read
+detached application JSON; `null` removes the key. `transformer`, `polygrad` and
+`polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
+round-trip exactly; encode integers outside its exact range as strings. Metadata
+survives bundles, not raw IR. Application edits do not invalidate execution caches.
 
 ### ONNX Import
 
@@ -502,7 +515,7 @@ processing and multimodal position IDs remain the caller's responsibility.
 Use the checkpoint's `generation_config.json` for stopping tokens; nested text
 configuration defaults can differ.
 
-[Late token embeddings](examples/late_embeddings.js) composes a backbone, a
+[Late token embeddings](https://github.com/polygrad/polygrad/blob/main/js/examples/late_embeddings.js) composes a backbone, a
 checkpoint projection and normalization through the public Model API, with a
 document-only token mask. The same recipe supports Perplexity's late-embedding
 checkpoint; use its original tokenizer, prompts and skip-token IDs. The importer
@@ -1099,12 +1112,6 @@ through the resolver, without frontend callbacks in their evaluation loop.
 Native-only pointer/record imports reject on Wasm before instantiation. Browser
 execution still uses its asynchronous frontend contract. Public record layouts
 and ownership are part of the extension ABI; callers serialize the context.
-
-`model.setMetadata('owner', value)` and `model.getMetadata('owner')` write/read
-detached application JSON; `null` removes the key. `transformer`, `polygrad` and
-`polygrad.*` are reserved. Embedded NULs are rejected. Finite binary64 numbers
-round-trip exactly; encode integers outside its exact range as strings. Bundles preserve metadata, raw IR does
-not, and application edits do not invalidate execution caches.
 
 ## Troubleshooting
 

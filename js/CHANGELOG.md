@@ -47,15 +47,6 @@
 - Fix HIP initialization, FP16 intrinsic selection, transfers and launch limits;
   HIP remains excluded from this release's acceptance matrix.
 
-Known limits: large FP32 reductions remain sensitive to accumulation order,
-including on WebGPU. Explicit `kernels: false` Qwen batch was about 23% slower
-in a matched diagnostic against the previous renderer-shortcut build; this is
-not a universal timing estimate. Token-call timing remains inconclusive.
-
-WebGPU calls with host readback can be slower than 0.7.1: batched MLP was
-about 2x slower in matched Chrome runs, while Qwen FFN was faster. This remains
-a workload- and browser-dependent performance limitation.
-
 - Forward Node's environment to the Wasm core and accept compiler settings through
   `create({env})` and `createAsync({env})` in browsers and Node Wasm. Synchronous
   runtimes share startup settings; async modules initialize independently.
@@ -188,6 +179,15 @@ a workload- and browser-dependent performance limitation.
 
 - `Model.fromHF` accepts supported PyTorch ZIP state dictionaries as weight bytes
   on Node and Wasm, without executing Python code.
+
+Known limits: large FP32 reductions remain sensitive to accumulation order,
+including on WebGPU. Explicit `kernels: false` Qwen batch was about 23% slower
+in a matched diagnostic against the previous renderer-shortcut build; this is
+not a universal timing estimate. Token-call timing remains inconclusive.
+
+WebGPU calls with host readback can be slower than 0.7.1: batched MLP was
+about 2x slower in matched Chrome runs, while Qwen FFN was faster. This remains
+a workload- and browser-dependent performance limitation.
 
 ## 0.7.1 (2026-10-08)
 

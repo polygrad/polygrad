@@ -12,8 +12,9 @@ proof check, not a replacement for sanitizer-backed libFuzzer or structural
 tinygrad parity probes.
 
 Fixed-width mode is deliberately stricter than the pinned symbolic interval
-rules: its uint8_add_wrap_cmp case also disagrees with Tinygrad v0.14.0.
-Keep that failure visible; it is not a Polygrad-only parity finding.
+rules. Polygrad's unsigned-arithmetic backport fixes uint8_add_wrap_cmp;
+int8_add_wrap_cmp still fails here and in Tinygrad v0.14.0.
+Keep the signed-overflow failure visible.
 """
 
 from __future__ import annotations

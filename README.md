@@ -8,6 +8,18 @@ the C API directly.
 - [Python guide](py/README.md): installation, Tensor/NumPy usage, training, Models and JIT.
 - [JavaScript guide](js/README.md): Node, browser/WebGPU, typed arrays, training and Models.
 
+## Contents
+
+- [Install](#install)
+- [Tensor quickstart](#quickstart-tensors) and [Model quickstart](#quickstart-models)
+- [Devices and runtimes](#devices-and-runtimes)
+- [Current limits](#current-limits)
+- [Supported models](#supported-models) and [configuration](#configuration-driven-models)
+- [Settings](#settings), [placement](#logical-graphs-and-placement) and [ownership](#runtime-ownership)
+- [Tinygrad compatibility](#tinygrad-relationship)
+- [C embedding](#embedding-the-c-core)
+- [Building](#building-from-source) and [tests](#tests)
+
 ## Install
 
 Python:
@@ -62,15 +74,6 @@ import { Tensor } from 'polygrad'
 const y = new Tensor([1, 2, 3]).mul(2).add(1)
 console.log(y.toArray())
 ```
-
-Probability graphs can use `Tensor.log_ndtr()` for the log standard Normal CDF
-and `Tensor.ndtri_exp()` for its inverse. The inverse accepts log probabilities
-up to zero, preserving tails that would underflow if exponentiated first.
-JavaScript provides `logNdtr()` and `ndtriExp()` (with snake-case aliases); C
-provides `poly_tensor_log_ndtr` and `poly_tensor_ndtri_exp`.
-`Tensor.log_erfcx()` (`logErfcx()` in JavaScript, `poly_tensor_log_erfcx` in C)
-computes the log scaled complementary error function without forming its
-exponential factor. This supports stable differences between Normal tail logs.
 
 Polygrad follows tinygrad's graph-based execution model:
 
@@ -178,6 +181,9 @@ See [Python runtimes](py/README.md#devices-and-runtimes),
   or Node. Validate divisors supplied by users.
 - Structured linear algebra uses portable Tensor compositions, not vendor
   BLAS/LAPACK kernels.
+- Bounds-based symbolic simplification can produce incorrect results when
+  signed-integer arithmetic overflows. Strict wraparound semantics are not
+  fully supported in those rewrites.
 
 See [compatibility](#tinygrad-relationship) for backend and API gaps, and the
 [Python](py/README.md#troubleshooting) or [JS](js/README.md#troubleshooting)
@@ -187,6 +193,7 @@ troubleshooting sections for installation and runtime errors.
 
 ### Guides By Topic
 
+- Tensor math: [Python](py/README.md#math-and-indexing), [JavaScript](js/README.md#math-and-indexing), [C declarations](src/tensor.h).
 - JIT: [Python](py/README.md#jit-and-compile), [JavaScript](js/README.md#jit-and-compile).
 - Custom kernels: [Python](py/README.md#custom-kernels), [JavaScript](js/README.md#custom-kernels).
 - Package integration: [Python](py/README.md#package-integration), [JavaScript](js/README.md#package-integration).
@@ -277,7 +284,7 @@ GPT-2 preset using the same builder and checkpoint names. Config fields can
 override defaults. Like GPT-2, it requires weights before execution or export;
 HF DistilGPT-2 checkpoints still declare `model_type: "gpt2"` and load normally.
 
-The initial component catalogue is deliberately bounded:
+Supported components:
 
 | Component | Configuration |
 | --- | --- |
@@ -556,7 +563,10 @@ Device strings passed directly to Tensor/Runtime retain their existing rules.
 verbosity. `BEAM` and `NOOPT` retain their Tinygrad names; explicit setters
 override their initial environment values. Native runtimes share compiler
 policy; each Wasm module owns its policy. Node initializes Wasm compiler
-settings once per module. Browsers use runtime properties, not process env.
+settings once per module. Browsers accept an explicit `env` string map through
+`create({env})` or `createAsync({env})`; Node Wasm accepts the same map as
+overrides. See the [JavaScript environment rules](js/README.md#devices-and-runtimes)
+for module sharing and startup timing.
 
 `POLY_LIB` is Python's explicit native-library path; an invalid Python path
 fails without falling back to another installation. Node loads its packaged
@@ -934,9 +944,10 @@ gates unrun. This target never publishes packages.
 New warnings, stale reviews, compiler errors and incomplete scans fail.
 
 `test-symbolic-z3-supported` checks general integers and division.
-The separate `test-symbolic-z3-fixed` still fails `uint8_add_wrap_cmp` in both
-Polygrad and pinned Tinygrad: the interval fold returns false while uint8
-`((250 + 10) % 256) < 5` is true. `test-symbolic-z3` runs all modes.
+`test-symbolic-z3-fixed` additionally checks strict fixed-width overflow semantics;
+it remains a diagnostic outside release acceptance. See
+[release scope](test/fixtures/release_scope.json) for the outstanding case.
+`test-symbolic-z3` runs all modes.
 
 ### Model and package checks
 

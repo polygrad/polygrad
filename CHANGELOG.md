@@ -50,17 +50,6 @@
   HIP remains outside this release's acceptance matrix; these fixes do not
   establish complete backend qualification.
 
-Known limits: large FP32 reductions remain sensitive to accumulation order;
-validate energy differences for probabilistic inference or use FP64 where
-supported. Disabling Wasm kernels can reduce performance: a matched Qwen batch
-diagnostic was about 23% slower after removing the old renderer shortcut.
-That comparison used the previous shortcut-enabled build, not a universal
-cross-machine speed guarantee. Token-call timing remains inconclusive.
-
-WebGPU calls with host readback can be slower than 0.7.1: batched MLP was
-about 2x slower in matched Chrome runs, while Qwen FFN was faster. This remains
-a workload- and browser-dependent performance limitation.
-
 - Forward Node's environment to the Wasm core and expose browser compiler
   settings through JavaScript `create({env})` and `createAsync({env})`.
 
@@ -239,6 +228,17 @@ a workload- and browser-dependent performance limitation.
   and resource limits; support all existing decoded scalar dtypes.
 - Python HF loading prefers safetensors, supports `.bin` shard indexes, rejects
   missing shards and accepts pinned download revisions without downloading both formats.
+
+Known limits: large FP32 reductions remain sensitive to accumulation order;
+validate energy differences for probabilistic inference or use FP64 where
+supported. Disabling Wasm kernels can reduce performance: a matched Qwen batch
+diagnostic was about 23% slower after removing the old renderer shortcut.
+That comparison used the previous shortcut-enabled build, not a universal
+cross-machine speed guarantee. Token-call timing remains inconclusive.
+
+WebGPU calls with host readback can be slower than 0.7.1: batched MLP was
+about 2x slower in matched Chrome runs, while Qwen FFN was faster. This remains
+a workload- and browser-dependent performance limitation.
 
 ## 0.7.1 (2026-10-08)
 
