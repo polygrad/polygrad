@@ -858,6 +858,41 @@ def step_record_findings(
     return findings
 
 
+def approved_schedule_difference(
+    tinygrad: dict[str, Any], polygrad: dict[str, Any],
+    config: dict[str, str], phase: str,
+) -> str | None:
+    # PG-DIV-043 stages Tensor._next_counter's two uint32 words before updating
+    # them for randperm. Pin + f0abe5fa7 alone reproduces these exact counters:
+    # one extra eager launch, 8 bytes read + 8 written. CUDA graph replay hides
+    # the launch in an existing batch, but still counts its memory traffic.
+    # This is an exact workload allowance, not a general +1-kernel tolerance.
+    if config not in (SEMANTIC_CONFIG, TIMING_CONFIG):
+        return None
+    if phase == "eager":
+        expected = (189, 749818116, 75322305825)
+        extra_kernels = 1
+    elif config == TIMING_CONFIG and phase in TIMING_PHASES[1:]:
+        expected = (5, 749220508, 75316208777)
+        extra_kernels = 0
+    else:
+        return None
+    names = ("kernel_count", "global_mem", "global_ops")
+    if tuple(tinygrad.get(name) for name in names) != expected or \
+       tuple(polygrad.get(name) for name in names) != (
+           expected[0] + extra_kernels, expected[1] + 16, expected[2]
+       ):
+        return None
+    registry = json.loads((ROOT / "test/fixtures/parity_divergences.json").read_text())
+    if registry["reference"]["commit"] != "6f87158d77f66a36d5f8bbe915170b24e2acabe8":
+        return None
+    for row in registry["entries"]:
+        if row["id"] == "PG-DIV-043" and row["status"] == "approved" and \
+           row.get("upstream_commits") == ["f0abe5fa732e6e6afbad199692c0eb93ed6e8ce2"]:
+            return row["id"]
+    return None
+
+
 def compare_results(
     tinygrad: dict[str, Any],
     polygrad: dict[str, Any],
@@ -929,7 +964,10 @@ def compare_results(
         step_detail.append(record)
 
     kernel_equal = tinygrad["counters"]["kernel_count"] == polygrad["counters"]["kernel_count"]
-    if not kernel_equal:
+    schedule_difference = approved_schedule_difference(
+        tinygrad["counters"], polygrad["counters"], config, "eager"
+    )
+    if not kernel_equal and schedule_difference is None:
         findings.append(
             "counters.kernel_count: "
             f"{tinygrad['counters']['kernel_count']} != {polygrad['counters']['kernel_count']}"
@@ -956,6 +994,7 @@ def compare_results(
         "final_state": final,
         "steps": step_detail,
         "counters": counter_detail,
+        "approved_schedule_difference": schedule_difference,
     }
 
 
@@ -1413,6 +1452,10 @@ def compare_timing_results(
             "polygrad": pg_run,
             "polygrad_over_tinygrad": pg_run / tg_run if tg_run > 0 else None,
         }
+        schedule_difference = approved_schedule_difference(
+            tg_window["counters"], pg_window["counters"], config, tg_window["phase"]
+        )
+        record["approved_schedule_difference"] = schedule_difference
         for name in ("kernel_count", "global_mem"):
             a = tg_window["counters"].get(name)
             b = pg_window["counters"].get(name)
@@ -1420,7 +1463,7 @@ def compare_timing_results(
             record.setdefault("counters", {})[name] = {
                 "tinygrad": a, "polygrad": b, "equal": equal,
             }
-            if not equal:
+            if not equal and schedule_difference is None:
                 findings.append(f"steps[{index}].counter.{name}: {a} != {b}")
         for name in ("global_ops", "mem_used", "time_sum_s"):
             a = tg_window["counters"].get(name)

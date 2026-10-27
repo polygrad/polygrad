@@ -61,7 +61,7 @@
       "area": "Upstream indexed self-assignment hazards",
       "tinygrad": "The v0.14 view-operation hazard check misses reversed writes, broadcast self-add and rolled self-assignment.",
       "polygrad": "Check buffer identity and ungated scalar indices after rangeification. Stage the RHS when it reads the destination buffer through a different index, stopping at STAGE and AFTER. Reuse the argument-limit staging helper and remove the earlier view heuristic.",
-      "rationale": "Match upstream hazard detection without a new scheduler, eager-copy policy or mutation owner. Same-index reads and independent buffers remain unstaged.",
+      "rationale": "Match upstream hazard detection without a new scheduler, eager-copy policy or mutation owner. Same-index reads and independent buffers remain unstaged. In the fixed HLB CUDA workload, the two-word RNG counter update adds one eager kernel and 16 bytes of memory traffic. Captured replay includes the copy in an existing batch. Pin plus only f0abe5fa7 reproduces these exact differences; the HLB gate admits only the recorded counter tuples, preserving numerical and replay checks.",
       "approval": "User 2026-10-26 authorized the bounded CPU alignment and post-rangeify store-hazard followups after reproduction.",
       "evidence": [
         "src/schedule/rangeify.c:indexed_store_hazard",
@@ -69,7 +69,10 @@
         "test/test_rangeify.c:indexed_store_hazard_stages_only_aliasing_reads",
         "py/tests/test_upstream_backports.py:test_indexed_self_assignment_hazards",
         "js/test/test_tensor.js",
-        "temp/upstream-followups-20261026/report.txt"
+        "temp/upstream-followups-20261026/report.txt",
+        "bench/bench_hlb_cifar.py:approved_schedule_difference",
+        "py/tests/test_hlb_benchmark.py:test_indexed_store_backport_counter_difference_is_scoped",
+        "temp/hlb-release-20261027/report.txt"
       ],
       "close_when": "The pin includes f0abe5fa732e6e6afbad199692c0eb93ed6e8ce2 and the scoped graph/render and runtime regressions pass. No allowance for unrelated scheduling or arithmetic changes."
     },

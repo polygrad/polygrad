@@ -279,6 +279,80 @@ def test_instrumented_one_call_run_is_not_benchmark_ready():
     assert any("no proved eager/capture/replay" in finding for finding in readiness["findings"])
 
 
+@pytest.mark.parametrize("mode", ["semantic", "timing"])
+def test_indexed_store_backport_counter_difference_is_scoped(tmp_path, monkeypatch, mode):
+    import copy
+
+    # Counters from the pinned workload, with and without f0abe5fa7 alone.
+    eager = {"kernel_count": 189, "global_mem": 749818116, "global_ops": 75322305825}
+    replay = {"kernel_count": 5, "global_mem": 749220508, "global_ops": 75316208777}
+    config = hlb.SEMANTIC_CONFIG if mode == "semantic" else hlb.TIMING_CONFIG
+    tinygrad = timing_result()
+    tinygrad.update({
+        "config": config, "dataset": {}, "initial_state": {}, "state_order": [],
+        "permutations": [], "forward": None, "final_state": {},
+        "counters": {**eager, "mem_used": 0},
+    })
+    tinygrad["jit"].append({"name": "eval_step", "cnt": 0})
+    for window in tinygrad["timing_windows"]:
+        window["counters"].update(eager if window["step"] == 0 else replay)
+    if mode == "semantic":
+        tinygrad["steps"] = tinygrad["steps"][:1]
+    polygrad = copy.deepcopy(tinygrad)
+    polygrad["counters"].update(kernel_count=190, global_mem=749818132)
+    for window in polygrad["timing_windows"]:
+        window["counters"]["global_mem"] += 16
+        if window["step"] == 0:
+            window["counters"]["kernel_count"] += 1
+
+    for engine in ("tinygrad", "polygrad"):
+        root = tmp_path / engine
+        root.mkdir()
+        for name in ("initial_state", "forward", "final_state"):
+            np.savez(root / f"{name}.npz", weight=np.asarray([1.0], dtype=np.float32))
+    monkeypatch.setattr(hlb, "semantic_evidence_findings", lambda *_: [])
+    monkeypatch.setattr(hlb, "provenance_findings", lambda *_: ([], {}))
+    monkeypatch.setattr(hlb, "shared_initial_state_findings", lambda *_: ([], {}))
+    monkeypatch.setattr(hlb, "state_schema_findings", lambda *_: [])
+    manifest = {"shared_initial_state": {"path": str(tmp_path / "state.npz")}}
+    compare = hlb.compare_results if mode == "semantic" else hlb.compare_timing_results
+
+    def check(subject, selected_config=config):
+        return compare(tinygrad, subject, manifest, tmp_path, 1e-5, 1e-5, selected_config)
+
+    result = check(polygrad)
+    assert not result["findings"], result["findings"]
+    records = [result] if mode == "semantic" else result["steps"]
+    assert all(record["approved_schedule_difference"] == "PG-DIV-043" for record in records)
+    # The raw inequality must remain visible; approval is not numeric equality.
+    assert not records[0]["counters"]["kernel_count"]["equal"]
+
+    for field in ("kernel_count", "global_mem", "global_ops"):
+        changed = copy.deepcopy(polygrad)
+        counters = changed["counters"] if mode == "semantic" else changed["timing_windows"][0]["counters"]
+        counters[field] += 1
+        assert check(changed)["findings"], field
+    assert check(polygrad, {**config, "BS": "64"})["findings"]
+    if mode == "timing":
+        changed = copy.deepcopy(polygrad)
+        changed["timing_windows"][2]["counters"]["kernel_count"] += 1
+        assert check(changed)["findings"]
+    else:
+        changed = copy.deepcopy(polygrad)
+        changed["steps"][0]["loss"] += 1.0
+        assert check(changed)["findings"]
+
+    registry = json.loads((hlb.ROOT / "test/fixtures/parity_divergences.json").read_text())
+    policy_path = tmp_path / "test/fixtures/parity_divergences.json"
+    policy_path.parent.mkdir(parents=True)
+    for row in registry["entries"]:
+        if row["id"] == "PG-DIV-043":
+            row["status"] = "open_debt"
+    policy_path.write_text(json.dumps(registry))
+    monkeypatch.setattr(hlb, "ROOT", tmp_path)
+    assert check(polygrad)["findings"]
+
+
 def timing_result():
     steps = []
     windows = []
